@@ -1,0 +1,195 @@
+use crate::config::Config;
+use gtk::{gdk, graphene, gsk, pango, prelude::*};
+use kit::palette::Rgb;
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+#[derive(Hash, PartialEq, Eq)]
+struct Key {
+    widget: usize,
+    text: String,
+    px: u32,
+    face: (u8, i32),
+    width: i32,
+    align: u8,
+}
+
+thread_local! {
+    static LAYOUTS: RefCell<HashMap<Key, pango::Layout>> = RefCell::new(HashMap::new());
+}
+
+fn face_key(face: Face) -> (u8, i32) {
+    match face {
+        Face::Text(w) => (0, w),
+        Face::Number(w) => (1, w),
+        Face::Icon(f) => (2, f as i32),
+    }
+}
+
+fn cached(widget: &impl IsA<gtk::Widget>, cfg: &Config, text: &str, px: f64, face: Face, width: i32, align: pango::Alignment) -> pango::Layout {
+    let key = Key {
+        widget: widget.as_ref().as_ptr() as usize,
+        text: text.to_string(),
+        px: (px * 64.0) as u32,
+        face: face_key(face),
+        width,
+        align: match align {
+            pango::Alignment::Left => 0,
+            pango::Alignment::Center => 1,
+            _ => 2,
+        },
+    };
+    if let Some(l) = LAYOUTS.with(|c| c.borrow().get(&key).cloned()) {
+        return l;
+    }
+    let l = layout(widget, cfg, text, px, face);
+    if width > 0 {
+        l.set_width(width * pango::SCALE);
+        l.set_ellipsize(pango::EllipsizeMode::End);
+        l.set_single_paragraph_mode(true);
+        l.set_alignment(align);
+    }
+    LAYOUTS.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= 768 {
+            c.clear();
+        }
+        c.insert(key, l.clone());
+    });
+    l
+}
+
+pub fn forget(widget: &impl IsA<gtk::Widget>) {
+    let id = widget.as_ref().as_ptr() as usize;
+    LAYOUTS.with(|c| c.borrow_mut().retain(|k, _| k.widget != id));
+}
+
+pub fn shaped(widget: &impl IsA<gtk::Widget>, cfg: &Config, text: &str, px: f64, face: Face) -> pango::Layout {
+    cached(widget, cfg, text, px, face, 0, pango::Alignment::Left)
+}
+
+#[derive(Clone, Copy)]
+pub enum Face {
+    Text(i32),
+    Number(i32),
+    Icon(bool),
+}
+
+fn weight(w: i32) -> pango::Weight {
+    if w >= 550 {
+        pango::Weight::Semibold
+    } else if w >= 480 {
+        pango::Weight::Medium
+    } else {
+        pango::Weight::Normal
+    }
+}
+
+pub fn layout(widget: &impl IsA<gtk::Widget>, cfg: &Config, text: &str, px: f64, face: Face) -> pango::Layout {
+    let l = widget.as_ref().create_pango_layout(Some(text));
+    let mut fd = pango::FontDescription::new();
+    fd.set_absolute_size(px * pango::SCALE as f64);
+    match face {
+        Face::Text(w) => {
+            fd.set_family(&cfg.font);
+            fd.set_variations(Some(&format!("wght={w}")));
+            fd.set_weight(weight(w));
+        }
+        Face::Number(w) => {
+            fd.set_family(&cfg.numbers);
+            fd.set_variations(Some(&format!("wght={w}")));
+            fd.set_weight(weight(w));
+        }
+        Face::Icon(fill) => {
+            fd.set_family(&cfg.icon_font);
+            fd.set_variations(Some(&format!("FILL={},wght=400,opsz={}", fill as i32, px.clamp(20.0, 48.0))));
+        }
+    }
+    l.set_font_description(Some(&fd));
+    if matches!(face, Face::Number(_)) {
+        let attrs = pango::AttrList::new();
+        attrs.insert(pango::AttrFontFeatures::new("tnum 1"));
+        l.set_attributes(Some(&attrs));
+    }
+    l
+}
+
+pub fn width(widget: &impl IsA<gtk::Widget>, cfg: &Config, text: &str, px: f64, face: Face) -> f64 {
+    shaped(widget, cfg, text, px, face).pixel_extents().1.width() as f64
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn text(s: &gtk::Snapshot, widget: &impl IsA<gtk::Widget>, cfg: &Config, text: &str, px: f64, face: Face, color: Rgb, x: f64, mid: f64, width: f64, align: pango::Alignment) {
+    if width <= 4.0 || text.is_empty() {
+        return;
+    }
+    let l = cached(widget, cfg, text, px, face, width.round().max(1.0) as i32, align);
+    let h = l.pixel_extents().1.height() as f64;
+    s.save();
+    s.translate(&graphene::Point::new(x.round() as f32, (mid - h / 2.0).round() as f32));
+    s.append_layout(&l, &color.rgba());
+    s.restore();
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn icon(s: &gtk::Snapshot, widget: &impl IsA<gtk::Widget>, cfg: &Config, name: &str, px: f64, fill: bool, color: Rgb, cx: f64, mid: f64) {
+    let l = shaped(widget, cfg, name, px, Face::Icon(fill));
+    let (ink, _) = l.pixel_extents();
+    s.save();
+    s.translate(&graphene::Point::new(
+        (cx - ink.x() as f64 - ink.width() as f64 / 2.0).round() as f32,
+        (mid - ink.y() as f64 - ink.height() as f64 / 2.0).round() as f32,
+    ));
+    s.append_layout(&l, &color.rgba());
+    s.restore();
+}
+
+pub fn css(c: Rgb) -> String {
+    format!("rgba({},{},{},{:.3})", (c.r * 255.0).round(), (c.g * 255.0).round(), (c.b * 255.0).round(), c.a)
+}
+
+pub fn slab(s: &gtk::Snapshot, parts: &kit::shape::Parts, color: Rgb) {
+    let (body, coves) = parts;
+    s.push_rounded_clip(body);
+    s.append_color(&color.rgba(), body.bounds());
+    s.pop();
+    if let Some(c) = coves {
+        s.append_fill(c, gsk::FillRule::Winding, &color.rgba());
+    }
+}
+
+pub fn round(x: f64, y: f64, w: f64, h: f64, r: f64) -> gsk::RoundedRect {
+    gsk::RoundedRect::from_rect(graphene::Rect::new(x as f32, y as f32, w as f32, h as f32), r as f32)
+}
+
+pub fn fill(s: &gtk::Snapshot, shape: &gsk::RoundedRect, color: Rgb) {
+    s.push_rounded_clip(shape);
+    s.append_color(&color.rgba(), shape.bounds());
+    s.pop();
+}
+
+pub fn app_icon(apps: &crate::apps::Apps, app_id: &str, px: i32, scale: i32) -> Option<gdk::Paintable> {
+    let display = gdk::Display::default()?;
+    let theme = gtk::IconTheme::for_display(&display);
+    let gicon = apps.find(app_id).and_then(|i| apps.list().get(i)?.icon.clone());
+    let paintable = match gicon {
+        Some(g) => theme.lookup_by_gicon(&g, px, scale, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty()),
+        None if !app_id.is_empty() && theme.has_icon(app_id) => theme.lookup_icon(app_id, &[], px, scale, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty()),
+        None => return None,
+    };
+    Some(paintable.upcast())
+}
+
+pub fn paintable(s: &gtk::Snapshot, p: &gdk::Paintable, x: f64, y: f64, size: f64) {
+    s.save();
+    s.translate(&graphene::Point::new(x as f32, y as f32));
+    p.snapshot(s, size, size);
+    s.restore();
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn monogram(s: &gtk::Snapshot, widget: &impl IsA<gtk::Widget>, cfg: &Config, name: &str, x: f64, y: f64, size: f64, back: Rgb, ink: Rgb) {
+    fill(s, &round(x, y, size, size, size * 0.26), back);
+    let letter: String = name.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().collect()).unwrap_or_else(|| "·".into());
+    text(s, widget, cfg, &letter, (size * 0.45).round(), Face::Text(650), ink, x, y + size / 2.0, size, pango::Alignment::Center);
+}

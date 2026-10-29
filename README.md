@@ -1,0 +1,99 @@
+# digit
+
+A calm, fast desktop shell for Wayland, written in Rust and GTK 4. It runs on
+**niri**, **Hyprland** and **MangoWC**.
+
+- **Notch / Dynamic Island / Bar**: clock, music, calls, live activities, notifications with actions
+- **Menu bar**: distro menu, the focused app's File/Edit/View menus, tray icons, status, date; clear or frosted
+- **Dock** with magnification, badges and auto-hide
+- **Spotlight** (Alt+Space): apps, windows, files, math, clipboard, web and in-app search
+- **Control Center**: Wi-Fi, Bluetooth, Do Not Disturb, Night Light, power modes, volume, device batteries, system monitor, weather
+- **Lock screen and idle**: PAM checked in a separate process, dim before screen-off, lock before sleep
+- **Session menu**, polkit agent, notification server, wallpaper picker with generated colors
+- **Settings, Store, Files, screenshots and screen recording** as companion apps
+- Desktop clock, Night Light, rounded screen corners, microphone guard for idle voice apps
+
+## Install
+
+```bash
+git clone https://github.com/altugcetin/astrobabaninammehizmeti.git digit
+cd digit
+./install.sh
+```
+
+The installer:
+
+1. detects your distribution (openSUSE Tumbleweed/Slowroll, Fedora (current release), Arch Linux and
+   Arch-based systems such as CachyOS, EndeavourOS, Manjaro and Garuda),
+2. detects the compositor you are running or have installed; if there is none it asks
+   which one to install (niri, Hyprland or MangoWC),
+3. installs build and runtime packages with your package manager (it asks first),
+4. builds digit and installs the programs to `~/.local/bin`,
+5. installs the fonts (Readex Pro, Rubik, Material Symbols Rounded) to `~/.local/share/fonts/digit`,
+6. adds digit's shortcuts and autostart to your compositor config, with backups
+   (`*.bak-<date>`) and, for niri, validation before anything is changed.
+
+Options:
+
+```text
+./install.sh --wm niri      force a compositor (niri | hyprland | mango)
+./install.sh --yes          take the defaults without asking
+./install.sh --no-deps      skip system packages
+./install.sh --dry-run      only show what would happen
+./install.sh --uninstall    remove digit (your ~/.config/digit stays)
+```
+
+Requirements the installer checks: Rust 1.97+ (it falls back to rustup when the
+distribution's Rust is older), GTK 4.18+, gtk4-layer-shell 1.2+.
+
+## Shortcuts
+
+| Keys | Action |
+| --- | --- |
+| Super+Space | Open the notch |
+| Alt+Space | Spotlight |
+| Alt+C | Control Center |
+| Alt+V | Clipboard history |
+| Alt+Tab | Switch windows |
+| Super+Tab | Workspaces |
+| Super+W | Wallpapers |
+| Alt+, | Settings |
+| Super+L | Lock |
+| Super+Shift+E | Sleep, restart, shut down, log out |
+| Print | Screenshot an area |
+| Super+E | Files |
+
+## Configuration
+
+Everything is in Settings (Alt+,). The file behind it is `~/.config/digit/config.toml`
+and changes apply live. The command line talks to the running shell:
+
+```bash
+digitctl key notch
+digit msg lock preview
+digit theme --scheme content ~/Pictures/wallpaper.jpg
+```
+
+## Security
+
+Settings never runs as root; package work goes through PackageKit and polkit. The lock
+screen checks passwords with PAM in a separate short-lived process and wipes the buffer.
+See [docs/security.md](docs/security.md).
+
+If the lock screen ever fails while locked, switch to another TTY (Ctrl+Alt+F2), log in
+and run `WAYLAND_DISPLAY=wayland-1 swaylock`; it takes over the lock so you can unlock.
+
+---
+
+## Türkçe hızlı kurulum
+
+```bash
+git clone https://github.com/altugcetin/astrobabaninammehizmeti.git digit
+cd digit
+./install.sh
+```
+
+Kurulum dağıtımınızı (openSUSE, Fedora, Arch, CachyOS ve diğer Arch tabanlılar) ve
+kullandığınız kompozitörü (niri, Hyprland, MangoWC) kendisi bulur. Hiçbiri yoksa hangisini
+kurmak istediğinizi sorar. Paketleri kurmadan önce onay ister, yapılandırmanızın yedeğini
+alır ve digit'i `~/.local/bin` altına kurar. Kaldırmak için `./install.sh --uninstall`.

@@ -1,0 +1,19 @@
+[package]
+name = "digit-settings"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "digit-settings"
+path = "src/main.rs"
+
+[dependencies]
+kit = { path = "../kit" }
+futures-util = "0.3.34"
+gio-unix = "0.22"
+gtk = { version = "0.11.5", package = "gtk4", features = ["v4_18"] }
+libc = "0.2"
+serde_json = "1"
+serde = "1"
+toml = "1.1.8"
+zbus = "5.19"
