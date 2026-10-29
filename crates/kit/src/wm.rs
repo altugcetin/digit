@@ -9,7 +9,6 @@ use std::time::Duration;
 pub enum Wm {
     Niri,
     Hyprland,
-    Mango,
     Other,
 }
 
@@ -18,8 +17,6 @@ pub fn which() -> Wm {
         Wm::Niri
     } else if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
         Wm::Hyprland
-    } else if std::env::var_os("MANGO_INSTANCE_SIGNATURE").is_some() {
-        Wm::Mango
     } else {
         Wm::Other
     }
@@ -29,7 +26,6 @@ pub fn name() -> &'static str {
     match which() {
         Wm::Niri => "niri",
         Wm::Hyprland => "Hyprland",
-        Wm::Mango => "MangoWC",
         Wm::Other => "Wayland",
     }
 }
@@ -109,19 +105,6 @@ fn hypr_json(command: &str) -> Option<Value> {
     serde_json::from_str(&hypr(&format!("j/{command}"))?).ok()
 }
 
-pub fn mango_socket() -> Option<PathBuf> {
-    std::env::var_os("MANGO_INSTANCE_SIGNATURE").map(PathBuf::from).filter(|p| p.is_absolute())
-}
-
-pub fn mango(command: &str) -> Option<Value> {
-    let mut stream = UnixStream::connect(mango_socket()?).ok()?;
-    stream.set_read_timeout(Some(Duration::from_millis(800))).ok()?;
-    stream.write_all(format!("{command}\n").as_bytes()).ok()?;
-    let mut line = String::new();
-    BufReader::new(stream.take(8 << 20)).read_line(&mut line).ok()?;
-    serde_json::from_str(&line).ok()
-}
-
 fn niri(body: Value) -> Option<Value> {
     let path = std::env::var_os("NIRI_SOCKET")?;
     let mut stream = UnixStream::connect(path).ok()?;
@@ -166,12 +149,6 @@ pub fn outputs() -> Vec<Output> {
             .iter()
             .map(|m| Output { name: text(m, "name"), x: m.get("x").and_then(Value::as_f64).unwrap_or(0.0), y: m.get("y").and_then(Value::as_f64).unwrap_or(0.0), focused: m.get("focused").and_then(Value::as_bool).unwrap_or(false) })
             .collect(),
-        Wm::Mango => mango("get all-monitors")
-            .and_then(|v| v.get("monitors").and_then(Value::as_array).cloned())
-            .unwrap_or_default()
-            .iter()
-            .map(|m| Output { name: text(m, "name"), x: m.get("x").and_then(Value::as_f64).unwrap_or(0.0), y: m.get("y").and_then(Value::as_f64).unwrap_or(0.0), focused: m.get("active").and_then(Value::as_bool).unwrap_or(false) })
-            .collect(),
         Wm::Other => Vec::new(),
     }
 }
@@ -181,10 +158,6 @@ pub fn focused_output() -> Option<String> {
         Wm::Niri => niri(json!("FocusedOutput"))?.get("FocusedOutput")?.get("name")?.as_str().map(str::to_string),
         _ => outputs().into_iter().find(|o| o.focused).map(|o| o.name),
     }
-}
-
-fn mango_space(output_index: usize, tag: u64) -> u64 {
-    (output_index as u64 + 1) * 1000 + tag
 }
 
 pub fn windows() -> Vec<Win> {
@@ -236,33 +209,6 @@ pub fn windows() -> Vec<Win> {
                 })
                 .collect()
         }
-        Wm::Mango => {
-            let names: Vec<String> = outputs().into_iter().map(|o| o.name).collect();
-            mango("get all-clients")
-                .and_then(|v| v.get("clients").and_then(Value::as_array).cloned())
-                .unwrap_or_default()
-                .iter()
-                .filter(|c| !c.get("is_minimized").and_then(Value::as_bool).unwrap_or(false))
-                .filter_map(|c| {
-                    let output = text(c, "monitor");
-                    let tag = c.get("tags").and_then(Value::as_array).and_then(|t| t.first()).and_then(Value::as_u64).unwrap_or(0);
-                    let at = |k: &str| c.get(k).and_then(Value::as_f64).unwrap_or(0.0);
-                    let focused = c.get("is_focused").and_then(Value::as_bool).unwrap_or(false);
-                    Some(Win {
-                        id: c.get("id")?.as_u64()?,
-                        title: text(c, "title"),
-                        app_id: text(c, "appid"),
-                        focused,
-                        space: names.iter().position(|n| *n == output).map(|i| mango_space(i, tag)).unwrap_or(0),
-                        floating: c.get("is_floating").and_then(Value::as_bool).unwrap_or(false),
-                        stamp: u64::from(focused),
-                        rect: Some((at("x"), at("y"), at("width"), at("height"))),
-                        pid: c.get("pid").and_then(Value::as_u64).map(|p| p as u32),
-                        output,
-                    })
-                })
-                .collect()
-        }
         Wm::Other => Vec::new(),
     };
     out.sort_by(|a, b| b.stamp.cmp(&a.stamp));
@@ -302,31 +248,6 @@ pub fn workspaces() -> Vec<Ws> {
                 })
                 .collect()
         }
-        Wm::Mango => {
-            let monitors = outputs();
-            mango("get all-tags")
-                .and_then(|v| v.get("all_tags").and_then(Value::as_array).cloned())
-                .unwrap_or_default()
-                .iter()
-                .flat_map(|entry| {
-                    let output = text(entry, "monitor");
-                    let i = monitors.iter().position(|m| m.name == output).unwrap_or(0);
-                    let focused_out = monitors.get(i).is_some_and(|m| m.focused);
-                    entry
-                        .get("tags")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default()
-                        .iter()
-                        .filter_map(|t| {
-                            let idx = t.get("index")?.as_u64()?;
-                            let active = t.get("is_active").and_then(Value::as_bool).unwrap_or(false);
-                            Some(Ws { id: mango_space(i, idx), idx, output: output.clone(), active, focused: active && focused_out, filled: t.get("client_count").and_then(Value::as_u64).unwrap_or(0) > 0 })
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect()
-        }
         Wm::Other => Vec::new(),
     };
     out.sort_by(|a, b| a.output.cmp(&b.output).then(a.idx.cmp(&b.idx)));
@@ -341,7 +262,6 @@ pub fn focus(id: u64) -> bool {
     match which() {
         Wm::Niri => niri(json!({ "Action": { "FocusWindow": { "id": id } } })).is_some(),
         Wm::Hyprland => hypr_dispatch(&format!("focuswindow address:0x{id:x}"), &format!("hl.dsp.focus({{ window = \"address:0x{id:x}\" }})")),
-        Wm::Mango => mango(&format!("dispatch focus_by_id client,{id}")).is_some_and(|r| r.get("success").is_some()),
         Wm::Other => false,
     }
 }
@@ -350,7 +270,6 @@ pub fn close(id: u64) -> bool {
     match which() {
         Wm::Niri => niri(json!({ "Action": { "CloseWindow": { "id": id } } })).is_some(),
         Wm::Hyprland => hypr_dispatch(&format!("closewindow address:0x{id:x}"), &format!("hl.dsp.window.close({{ window = \"address:0x{id:x}\" }})")),
-        Wm::Mango => mango(&format!("dispatch killclient client,{id}")).is_some_and(|r| r.get("success").is_some()),
         Wm::Other => false,
     }
 }
@@ -359,13 +278,6 @@ pub fn focus_space(id: u64) -> bool {
     match which() {
         Wm::Niri => niri(json!({ "Action": { "FocusWorkspace": { "reference": { "Id": id } } } })).is_some(),
         Wm::Hyprland => hypr_dispatch(&format!("workspace {id}"), &format!("hl.dsp.focus({{ workspace = {id} }})")),
-        Wm::Mango => {
-            let (monitor, tag) = ((id / 1000).saturating_sub(1) as usize, id % 1000);
-            if let Some(o) = outputs().get(monitor).filter(|o| !o.focused) {
-                mango(&format!("dispatch focusmon,{}", o.name));
-            }
-            mango(&format!("dispatch view,{tag}")).is_some_and(|r| r.get("success").is_some())
-        }
         Wm::Other => false,
     }
 }
@@ -386,7 +298,6 @@ pub fn minimize(app_id: &str) -> bool {
             &format!("movetoworkspacesilent special:minimized,address:0x{:x}", me.id),
             &format!("hl.dsp.window.move({{ workspace = \"special:minimized\", follow = false, window = \"address:0x{:x}\" }})", me.id),
         ),
-        Wm::Mango => mango(&format!("dispatch minimized client,{}", me.id)).is_some_and(|r| r.get("success").is_some()),
         Wm::Other => false,
     }
 }
@@ -396,7 +307,6 @@ pub fn version() -> Option<String> {
     match which() {
         Wm::Niri => run(&["niri", "--version"]),
         Wm::Hyprland => hypr_json("version").and_then(|v| v.get("tag").and_then(Value::as_str).map(|t| format!("Hyprland {t}"))),
-        Wm::Mango => mango("get version").map(|v| v.get("version").and_then(Value::as_str).map(|s| format!("MangoWC {s}")).unwrap_or_else(|| format!("MangoWC {v}"))),
         Wm::Other => None,
     }
 }
@@ -436,16 +346,6 @@ pub fn window_act(id: u64, act: WinAct) -> bool {
             };
             hypr_dispatch(&legacy, &lua)
         }
-        Wm::Mango => {
-            let f = match act {
-                WinAct::Fullscreen => "togglefullscreen",
-                WinAct::Maximize => "togglemaximizescreen",
-                WinAct::Float => "togglefloating",
-                WinAct::Center => "centerwin",
-                WinAct::NextOutput => "tagmon,right",
-            };
-            mango(&format!("dispatch {f} client,{id}")).is_some_and(|r| r.get("success").is_some())
-        }
         Wm::Other => false,
     }
 }
@@ -454,7 +354,6 @@ pub fn quit() -> bool {
     match which() {
         Wm::Niri => niri(json!({ "Action": { "Quit": { "skip_confirmation": true } } })).is_some(),
         Wm::Hyprland => hypr_dispatch("exit", "hl.dsp.exit()"),
-        Wm::Mango => mango("dispatch quit").is_some(),
         Wm::Other => false,
     }
 }
@@ -463,7 +362,6 @@ pub fn screens(on: bool) -> bool {
     match which() {
         Wm::Niri => niri(json!({ "Action": if on { json!({ "PowerOnMonitors": {} }) } else { json!({ "PowerOffMonitors": {} }) } })).is_some(),
         Wm::Hyprland => if on { hypr_dispatch("dpms on", "hl.dsp.dpms({ action = \"on\" })") } else { hypr_dispatch("dpms off", "hl.dsp.dpms({ action = \"off\" })") },
-        Wm::Mango => mango(if on { "dispatch enable_monitor" } else { "dispatch disable_monitor" }).is_some(),
         Wm::Other => false,
     }
 }

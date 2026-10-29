@@ -135,7 +135,11 @@ impl Side {
             self.header("Bookmarks", &mut targets);
             for (f, label) in marks {
                 let icon = if f.is_native() { "folder" } else { "folder_shared" };
-                self.row(icon, &label, None, &mut targets, Target::File(f));
+                let at = self.list.observe_children().n_items();
+                self.row(icon, &label, None, &mut targets, Target::File(f.clone()));
+                if let Some(row) = self.list.row_at_index(at as i32) {
+                    removable(&row, &f);
+                }
             }
         }
         self.header("Devices", &mut targets);
@@ -261,6 +265,34 @@ impl Side {
         }
         self.marking.set(false);
     }
+}
+
+fn removable(row: &gtk::ListBoxRow, file: &gio::File) {
+    let Some(line) = row.child().and_then(|c| c.downcast::<gtk::Box>().ok()) else { return };
+    let x = kit::app::control("close", "");
+    x.add_css_class("place-remove");
+    x.set_tooltip_text(Some("Remove from Sidebar"));
+    let f = file.clone();
+    x.connect_clicked(move |_| crate::side::toggle_bookmark(&f));
+    line.append(&x);
+    let click = gtk::GestureClick::new();
+    click.set_button(3);
+    let (f, r) = (file.clone(), row.clone());
+    click.connect_pressed(move |g, _, x, y| {
+        g.set_state(gtk::EventSequenceState::Claimed);
+        let (open, gone) = (f.clone(), f.clone());
+        crate::popup::show(
+            &r,
+            x,
+            y,
+            vec![
+                crate::popup::run("tab", "Open in New Tab", move || crate::new_tab(&open)),
+                crate::popup::Item::Sep,
+                crate::popup::run("bookmark_remove", "Remove from Sidebar", move || crate::side::toggle_bookmark(&gone)),
+            ],
+        );
+    });
+    row.add_controller(click);
 }
 
 fn connect() {

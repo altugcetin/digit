@@ -491,31 +491,12 @@ impl Control {
             s.fade.after(1.0, now, 60, 220, motion::STANDARD);
             s.window.set_keyboard_mode(KeyboardMode::Exclusive);
             if s.scrim.is_none() {
-                let scrim = gtk::Window::new();
-                scrim.init_layer_shell();
-                scrim.set_layer(Layer::Top);
-                scrim.set_namespace(Some("digit-scrim"));
-                for e in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
-                    scrim.set_anchor(e, true);
-                }
-                scrim.set_exclusive_zone(-1);
-                scrim.set_keyboard_mode(KeyboardMode::None);
-                scrim.set_monitor(monitor.as_ref());
-                scrim.add_css_class("digit");
-                let paint = crate::paint::Paint::new(-1, -1);
-                paint.present();
-                let click = gtk::GestureClick::new();
-                click.set_button(0);
                 let weak = Rc::downgrade(&self.0);
-                click.connect_pressed(move |_, _, _, _| {
+                s.scrim = Some(crate::paint::scrim(monitor.as_ref(), move || {
                     if let Some(s) = weak.upgrade() {
-                        glib::idle_add_local_once(move || Control(s).close());
+                        Control(s).close();
                     }
-                });
-                paint.add_controller(click);
-                scrim.set_child(Some(&paint));
-                scrim.present();
-                s.scrim = Some(scrim);
+                }));
             }
         }
         self.resize();

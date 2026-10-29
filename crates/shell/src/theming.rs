@@ -136,7 +136,7 @@ pub fn write(t: &Theme) {
     }
 }
 
-pub fn take() {
+pub fn take(qt: bool) {
     for dir in gtk_dirs().into_iter().filter(|d| d.is_dir()) {
         let file = dir.join("gtk.css");
         let text = std::fs::read_to_string(&file).unwrap_or_default();
@@ -144,6 +144,10 @@ pub fn take() {
             let joined = if text.is_empty() || text.ends_with('\n') { format!("{text}{IMPORT}\n") } else { format!("{text}\n{IMPORT}\n") };
             write_if_changed(&file, &joined);
         }
+    }
+    if !qt {
+        give_back_qt();
+        return;
     }
     let conf = qt_conf();
     let Ok(text) = std::fs::read_to_string(&conf) else { return };
@@ -170,6 +174,10 @@ pub fn give_back() {
             write_if_changed(&file, &format!("{joined}\n"));
         }
     }
+    give_back_qt();
+}
+
+fn give_back_qt() {
     let Ok(original) = std::fs::read_to_string(saved_qt_path()) else { return };
     let conf = qt_conf();
     if let Ok(text) = std::fs::read_to_string(&conf) {

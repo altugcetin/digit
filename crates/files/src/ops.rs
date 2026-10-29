@@ -657,16 +657,64 @@ pub fn paste(dest: gio::File) {
     });
 }
 
-pub fn dialog(title: &str, detail: &str) -> (gtk::Window, gtk::Box, gtk::Box) {
-    let w = gtk::Window::new();
-    w.set_modal(true);
-    w.set_transient_for(crate::window().as_ref());
-    w.set_decorated(false);
-    w.set_resizable(false);
-    w.add_css_class("digit-dialog");
+type Ask = Rc<dyn Fn(&Sheet) -> glib::Propagation>;
+
+#[derive(Clone)]
+pub struct Sheet {
+    root: gtk::Box,
+    shown: Rc<std::cell::Cell<bool>>,
+    asks: Rc<RefCell<Vec<Ask>>>,
+}
+
+impl Sheet {
+    pub fn present(&self) {
+        if self.shown.replace(true) {
+            return;
+        }
+        crate::overlay_add(&self.root);
+        let root = self.root.clone();
+        glib::idle_add_local_once(move || {
+            root.child_focus(gtk::DirectionType::TabForward);
+        });
+    }
+
+    pub fn close(&self) {
+        if !self.shown.get() {
+            return;
+        }
+        let asks: Vec<Ask> = self.asks.borrow().clone();
+        for ask in asks {
+            if ask(self) == glib::Propagation::Stop {
+                return;
+            }
+        }
+        self.shown.set(false);
+        crate::overlay_remove(&self.root);
+    }
+
+    pub fn is_shown(&self) -> bool {
+        self.shown.get()
+    }
+
+    pub fn connect_close_request(&self, f: impl Fn(&Sheet) -> glib::Propagation + 'static) {
+        self.asks.borrow_mut().push(Rc::new(f));
+    }
+}
+
+pub fn dialog(title: &str, detail: &str) -> (Sheet, gtk::Box, gtk::Box) {
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.add_css_class("sheet-backdrop");
+    root.set_hexpand(true);
+    root.set_vexpand(true);
     let card = gtk::Box::new(gtk::Orientation::Vertical, 12);
     card.add_css_class("dialog");
     card.set_size_request(420, -1);
+    card.set_halign(gtk::Align::Center);
+    card.set_valign(gtk::Align::Center);
+    card.set_margin_start(24);
+    card.set_margin_end(24);
+    card.set_margin_top(24);
+    card.set_margin_bottom(24);
     card.append(&kit::ui::text(title, "name big"));
     if !detail.is_empty() {
         let d = kit::ui::text(detail, "sub");
@@ -680,18 +728,19 @@ pub fn dialog(title: &str, detail: &str) -> (gtk::Window, gtk::Box, gtk::Box) {
     buttons.set_halign(gtk::Align::End);
     buttons.set_margin_top(6);
     card.append(&buttons);
-    w.set_child(Some(&card));
+    root.append(&card);
+    let sheet = Sheet { root: root.clone(), shown: Rc::new(std::cell::Cell::new(false)), asks: Rc::new(RefCell::new(Vec::new())) };
     let keys = gtk::EventControllerKey::new();
-    let ww = w.clone();
+    let me = sheet.clone();
     keys.connect_key_pressed(move |_, k, _, _| {
         if k == gdk::Key::Escape {
-            ww.close();
+            me.close();
             return glib::Propagation::Stop;
         }
         glib::Propagation::Proceed
     });
-    w.add_controller(keys);
-    (w, body, buttons)
+    root.add_controller(keys);
+    (sheet, body, buttons)
 }
 
 fn conflict(question: &str, done: impl Fn(Answer, bool) + 'static) {
@@ -720,7 +769,7 @@ fn conflict(question: &str, done: impl Fn(Answer, bool) + 'static) {
     w.present();
 }
 
-pub fn ask_name(title: &str, initial: &str, action: &str, select_stem: bool, extra: Option<gtk::Widget>, done: impl Fn(String, &gtk::Window) -> bool + 'static) {
+pub fn ask_name(title: &str, initial: &str, action: &str, select_stem: bool, extra: Option<gtk::Widget>, done: impl Fn(String, &Sheet) -> bool + 'static) {
     let (w, body, buttons) = dialog(title, "");
     let entry = gtk::Entry::new();
     entry.add_css_class("search");

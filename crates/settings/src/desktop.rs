@@ -268,11 +268,8 @@ pub fn build() -> gtk::Widget {
     body.append(&ui::heading("Windows"));
     let win = ui::card();
     let wm = kit::wm::which();
-    if wm != kit::wm::Wm::Niri {
-        let (file, text, include) = match wm {
-            kit::wm::Wm::Hyprland => (glib::user_config_dir().join("hypr").join("digit.conf"), include_str!("../../../data/hypr/digit.conf"), Some((glib::user_config_dir().join("hypr").join("hyprland.conf"), "source = ~/.config/hypr/digit.conf"))),
-            _ => (glib::user_config_dir().join("mango").join("digit.conf"), include_str!("../../../data/mango/digit.conf"), Some((glib::user_config_dir().join("mango").join("config.conf"), "source=~/.config/mango/digit.conf"))),
-        };
+    if wm == kit::wm::Wm::Hyprland {
+        let (file, text, include) = (glib::user_config_dir().join("hypr").join("digit.conf"), include_str!("../../../data/hypr/digit.conf"), Some((glib::user_config_dir().join("hypr").join("hyprland.conf"), "source = ~/.config/hypr/digit.conf")));
         let installed = file.exists();
         let (row, end) = ui::row(Some("keyboard"), &format!("{} shortcuts", kit::wm::name()), &format!("Writes {} with digit's keys and starts digit with the session", file.display()));
         let b = ui::button(if installed { "Reinstall" } else { "Install" }, "accent");

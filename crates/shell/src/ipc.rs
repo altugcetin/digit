@@ -49,6 +49,8 @@ async fn focused_output() -> Option<String> {
     gio::spawn_blocking(kit::wm::focused_output).await.ok().flatten()
 }
 
+const HELP: &str = "open | close | toggle | tray | note <words> | dnd [on|off|toggle|status] | night [on|off|toggle|status] | awake [on|off|toggle|status] | volume [up|down|mute|<0-150>] | mic | brightness up|down | lock [preview] | session | control | spaces | clipboard | settings | launcher [text] | menu <logo|app|window|N|traymenu N> | dock show|hide|toggle | layout <name> | wallpaper <image> | demo <peek> | status | key <action>";
+
 async fn handle(app: &Rc<App>, words: &[String]) -> String {
     let verb = words.first().map(String::as_str).unwrap_or("");
     match verb {
@@ -128,9 +130,10 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
                 "unplugged" => Peek::Device { name: "AirPods Pro".into(), icon: "headphones", battery: None, on: false },
                 "output" => Peek::Output { name: "AirPods Pro".into(), icon: "headphones" },
                 "dnd" => Peek::Mode { icon: "do_not_disturb_on", label: "Do not disturb", on: true },
+                "spaces" => Peek::Spaces { idx: 2 },
                 "keyboard" => Peek::Osd { icon: "keyboard", text: "Turkish".into(), level: None },
                 "brightness" => Peek::Osd { icon: "light_mode", text: "Brightness".into(), level: Some(0.6) },
-                _ => return "demo battery | gadget | device | unplugged | output | dnd | keyboard | brightness".into(),
+                _ => return "demo battery | gadget | device | unplugged | output | dnd | keyboard | brightness | spaces".into(),
             };
             app.request(peek);
             "ok".into()
@@ -226,6 +229,85 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
             crate::retheme(app);
             "ok".into()
         }
-        _ => "open | close | toggle | note <words> | wallpaper <image>".into(),
+        "dnd" | "night" | "awake" => {
+            let current = match verb {
+                "dnd" => app.dnd.get(),
+                "night" => crate::night::active(app),
+                _ => app.awake.borrow().as_ref().is_some_and(|a| a.on()),
+            };
+            let want = match words.get(1).map(String::as_str).unwrap_or("toggle") {
+                "on" => true,
+                "off" => false,
+                "toggle" => !current,
+                "status" => return if current { "on".into() } else { "off".into() },
+                _ => return format!("{verb} on | off | toggle | status"),
+            };
+            match verb {
+                "dnd" => {
+                    app.set_dnd(want);
+                    app.request(Peek::Mode { icon: "do_not_disturb_on", label: "Do not disturb", on: want });
+                }
+                "night" => {
+                    crate::night::force(app, want);
+                    app.request(Peek::Mode { icon: "nightlight", label: "Night Light", on: want });
+                }
+                _ => {
+                    let surface = app.notches.borrow().first().and_then(|n| n.surface());
+                    if let Some(a) = app.awake.borrow().as_ref() {
+                        a.set(surface.as_ref(), want);
+                    }
+                    app.request(Peek::Mode { icon: "coffee", label: "Keep awake", on: want });
+                }
+            }
+            app.changed();
+            if want { "on".into() } else { "off".into() }
+        }
+        "volume" => match words.get(1).map(String::as_str) {
+            Some("up") => Box::pin(handle(app, &["key".to_string(), "volume-up".to_string()])).await,
+            Some("down") => Box::pin(handle(app, &["key".to_string(), "volume-down".to_string()])).await,
+            Some("mute") => Box::pin(handle(app, &["key".to_string(), "mute".to_string()])).await,
+            Some(n) if n.trim_end_matches('%').parse::<f64>().is_ok() => {
+                let level = (n.trim_end_matches('%').parse::<f64>().unwrap_or(0.0) / 100.0).clamp(0.0, 1.5);
+                let muted = app.volume.get().map(|v| v.1).unwrap_or(false);
+                app.volume.set(Some((level, muted)));
+                crate::audio::ask(crate::audio::Ask::Level(level));
+                app.request(Peek::Volume { level, muted });
+                "ok".into()
+            }
+            None => match app.volume.get() {
+                Some((level, muted)) => format!("{}%{}", (level * 100.0).round(), if muted { " muted" } else { "" }),
+                None => "unknown".into(),
+            },
+            _ => "volume up | down | mute | <0-150>".into(),
+        },
+        "mic" => Box::pin(handle(app, &["key".to_string(), "mic-mute".to_string()])).await,
+        "brightness" => match words.get(1).map(String::as_str) {
+            Some("up") => if crate::brightness::step(app, "brightness-up") { "ok".into() } else { "no backlight".into() },
+            Some("down") => if crate::brightness::step(app, "brightness-down") { "ok".into() } else { "no backlight".into() },
+            _ => "brightness up | down".into(),
+        },
+        "control" | "spaces" | "session" | "clipboard" | "settings" => Box::pin(handle(app, &["key".to_string(), verb.to_string()])).await,
+        "status" => {
+            let (level, muted) = app.volume.get().unwrap_or((0.0, false));
+            let call = app.call.borrow().as_ref().map(|c| c.who.clone());
+            let lights = app.lights.borrow().clone();
+            serde_json::json!({
+                "dnd": app.dnd.get(),
+                "night_light": crate::night::active(app),
+                "keep_awake": app.awake.borrow().as_ref().is_some_and(|a| a.on()),
+                "volume": (level * 100.0).round(),
+                "muted": muted,
+                "mic_muted": app.mic_muted.get(),
+                "call": call,
+                "microphone": lights.mic,
+                "camera": lights.camera,
+                "screen_sharing": lights.screen > 0,
+                "locked": crate::lock::active(),
+                "compositor": kit::wm::name(),
+            })
+            .to_string()
+        }
+        "help" => HELP.into(),
+        _ => HELP.into(),
     }
 }

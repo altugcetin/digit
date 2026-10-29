@@ -95,7 +95,8 @@ enum Act {
     Spawn(Vec<String>),
 }
 
-const PAGES: [(&str, &str, &str, &str, &str); 6] = [
+const PAGES: [(&str, &str, &str, &str, &str); 7] = [
+    ("displays", "Displays", "Settings", "monitor", "display displays monitor monitors screen resolution refresh rate hz scale rotation arrange"),
     ("welcome", "Welcome tour", "Set up Digit", "waving_hand", "welcome tour onboarding setup start intro getting started wizard"),
     ("overview", "About this computer", "System overview", "info", "about system computer hardware memory disk processor gpu overview"),
     ("updates", "Software updates", "Settings", "system_update_alt", "update updates upgrade security patch packages"),
@@ -173,6 +174,7 @@ struct State {
     icons: HashMap<String, gtk::IconPaintable>,
     region: (i32, i32, i32, i32),
     ticking: bool,
+    scrim: Option<gtk::Window>,
     providers: Vec<providers::Provider>,
     scopes: Vec<providers::Scope>,
     found: Vec<providers::Found>,
@@ -369,6 +371,7 @@ impl Launcher {
             icons: HashMap::new(),
             region: (0, 0, 0, 0),
             ticking: false,
+            scrim: None,
             providers: Vec::new(),
             scopes: Vec::new(),
             found: Vec::new(),
@@ -478,17 +481,6 @@ impl Launcher {
             glib::Propagation::Stop
         });
         canvas.add_controller(wheel);
-        let weak = Rc::downgrade(&self.0);
-        window.connect_is_active_notify(move |w| {
-            if !w.is_active() {
-                if let Some(s) = weak.upgrade() {
-                    let Ok(open) = s.try_borrow().map(|s| s.open) else { return };
-                    if open {
-                        Launcher(s).close();
-                    }
-                }
-            }
-        });
     }
 
     pub fn toggle(&self) {
@@ -520,13 +512,22 @@ impl Launcher {
                     s.window.set_monitor(monitor.as_ref());
                 }
             }
+            if s.scrim.is_none() {
+                let monitor = s.window.monitor();
+                let weak = Rc::downgrade(&self.0);
+                s.scrim = Some(crate::paint::scrim(monitor.as_ref(), move || {
+                    if let Some(s) = weak.upgrade() {
+                        Launcher(s).close();
+                    }
+                }));
+            }
             s.windows = windows;
             s.open = true;
             s.mode = Mode::All;
             let now = glib::monotonic_time();
             s.fade.go(1.0, now, 240, motion::STANDARD);
             s.rise.go(1.0, now, 560, SETTLE);
-            s.window.set_keyboard_mode(KeyboardMode::OnDemand);
+            s.window.set_keyboard_mode(KeyboardMode::Exclusive);
         }
         self.style();
         let (window, field) = {
@@ -551,6 +552,9 @@ impl Launcher {
             s.fade.go(0.0, now, 200, motion::STANDARD);
             s.rise.go(0.0, now, 240, LEAVE);
             s.window.set_keyboard_mode(KeyboardMode::None);
+            if let Some(scrim) = s.scrim.take() {
+                scrim.destroy();
+            }
         }
         self.kick();
     }

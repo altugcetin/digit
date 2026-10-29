@@ -35,7 +35,7 @@ usage() {
 digit installer
 
   ./install.sh                  detect everything and install
-  ./install.sh --wm niri        force a compositor (niri | hyprland | mango)
+  ./install.sh --wm niri        force a compositor (niri | hyprland)
   ./install.sh --yes            do not ask, take the defaults
   ./install.sh --no-deps        skip system packages
   ./install.sh --dry-run        show what would happen
@@ -129,24 +129,21 @@ has_pkg() {
 running_wm() {
     if [ -n "${NIRI_SOCKET:-}" ]; then echo niri; return; fi
     if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then echo hyprland; return; fi
-    if [ -n "${MANGO_INSTANCE_SIGNATURE:-}" ]; then echo mango; return; fi
     case "${XDG_CURRENT_DESKTOP:-}" in
         *niri*) echo niri ;;
         *Hyprland*|*hyprland*) echo hyprland ;;
-        *mango*|*Mango*) echo mango ;;
     esac
 }
 
 installed_wms() {
     command -v niri >/dev/null 2>&1 && echo niri
     { command -v Hyprland || command -v hyprland; } >/dev/null 2>&1 && echo hyprland
-    command -v mango >/dev/null 2>&1 && echo mango
     true
 }
 
 pick_wm() {
     if [ -n "$WM" ]; then
-        case $WM in niri|hyprland|mango) ;; *) die "--wm must be niri, hyprland or mango" ;; esac
+        case $WM in niri|hyprland) ;; *) die "--wm must be niri or hyprland" ;; esac
         return
     fi
     local now
@@ -164,7 +161,7 @@ pick_wm() {
         choose "Several compositors are installed. Which one should digit use?" "${found[@]}"
         WM=$REPLY
     else
-        choose "No supported compositor found. Which one should be installed?" "niri (recommended)" "hyprland" "mango"
+        choose "No supported compositor found. Which one should be installed?" "niri (recommended)" "hyprland"
         WM=${REPLY%% *}
     fi
 }
@@ -173,7 +170,6 @@ install_wm() {
     case $WM in
         niri) command -v niri >/dev/null 2>&1 && return 0 ;;
         hyprland) { command -v Hyprland || command -v hyprland; } >/dev/null 2>&1 && return 0 ;;
-        mango) command -v mango >/dev/null 2>&1 && return 0 ;;
     esac
     bold "Installing $WM"
     case "$FAMILY:$WM" in
@@ -184,17 +180,6 @@ install_wm() {
         fedora:hyprland)
             has_pkg hyprland || run sudo dnf copr enable -y solopasha/hyprland
             install_pkgs hyprland ;;
-        arch:mango)
-            if has_pkg mangowc; then
-                install_pkgs mangowc
-            elif command -v paru >/dev/null 2>&1; then
-                run paru -S --needed --noconfirm mangowc-git
-            elif command -v yay >/dev/null 2>&1; then
-                run yay -S --needed --noconfirm mangowc-git
-            else
-                die "MangoWC comes from the AUR (mangowc-git). Install paru or yay, or build it from https://github.com/DreamMaoMao/mangowc, then run this again."
-            fi ;;
-        *:mango) die "MangoWC is not packaged for $NAME_SHOWN. Build it from https://github.com/DreamMaoMao/mangowc, then run this again." ;;
     esac
 }
 
@@ -386,8 +371,6 @@ hook() {
             if command -v Hyprland >/dev/null 2>&1 && Hyprland --help 2>&1 | grep -q verify-config && ! $DRY; then
                 Hyprland --verify-config -c "$CONF/hypr/hyprland.conf" >/dev/null 2>&1 || warn "Hyprland reports problems in hyprland.conf; check it with: Hyprland --verify-config"
             fi ;;
-        mango)
-            hook_conf "$CONF/mango" "$CONF/mango/config.conf" "$ROOT/data/mango/digit.conf" "source=$CONF/mango/digit.conf" /etc/mango/config.conf ;;
     esac
 }
 
@@ -424,10 +407,6 @@ uninstall() {
     if [ -f "$CONF/hypr/hyprland.conf" ]; then
         run sed -i "\#source = $CONF/hypr/digit.conf#d" "$CONF/hypr/hyprland.conf"
         run rm -f "$CONF/hypr/digit.conf"
-    fi
-    if [ -f "$CONF/mango/config.conf" ]; then
-        run sed -i "\#source=$CONF/mango/digit.conf#d" "$CONF/mango/config.conf"
-        run rm -f "$CONF/mango/digit.conf"
     fi
     info "Done. Your settings in ~/.config/digit and the fonts were kept."
 }

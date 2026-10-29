@@ -1,7 +1,7 @@
 # digit
 
 A calm, fast desktop shell for Wayland, written in Rust and GTK 4. It runs on
-**niri**, **Hyprland** and **MangoWC**.
+**niri** and **Hyprland**.
 
 - **Notch / Dynamic Island / Bar**: clock, music, calls, live activities, notifications with actions
 - **Menu bar**: distro menu, the focused app's File/Edit/View menus, tray icons, status, date; clear or frosted
@@ -26,7 +26,7 @@ The installer:
 1. detects your distribution (openSUSE Tumbleweed/Slowroll, Fedora (current release), Arch Linux and
    Arch-based systems such as CachyOS, EndeavourOS, Manjaro and Garuda),
 2. detects the compositor you are running or have installed; if there is none it asks
-   which one to install (niri, Hyprland or MangoWC),
+   which one to install (niri or Hyprland),
 3. installs build and runtime packages with your package manager (it asks first),
 4. builds digit and installs the programs to `~/.local/bin`,
 5. installs the fonts (Readex Pro, Rubik, Material Symbols Rounded) to `~/.local/share/fonts/digit`,
@@ -38,7 +38,7 @@ The installer:
 Options:
 
 ```text
-./install.sh --wm niri      force a compositor (niri | hyprland | mango)
+./install.sh --wm niri      force a compositor (niri | hyprland)
 ./install.sh --yes          take the defaults without asking
 ./install.sh --no-deps      skip system packages
 ./install.sh --dry-run      only show what would happen
@@ -68,11 +68,20 @@ distribution's Rust is older), GTK 4.18+, gtk4-layer-shell 1.2+.
 ## Configuration
 
 Everything is in Settings (Alt+,). The file behind it is `~/.config/digit/config.toml`
-and changes apply live. The command line talks to the running shell:
+and changes apply live. Qt apps keep their own qt6ct colors unless you set
+`qt_theme = true` there.
+
+The command line talks to the running shell (`digit msg help` lists everything):
 
 ```bash
-digitctl key notch
-digit msg lock preview
+digit msg dnd toggle
+digit msg night on
+digit msg awake status
+digit msg volume 40
+digit msg mic
+digit msg brightness up
+digit msg lock
+digit msg status
 digit theme --scheme content ~/Pictures/wallpaper.jpg
 ```
 
@@ -100,6 +109,6 @@ cd digit
 ```
 
 Kurulum dağıtımınızı (openSUSE, Fedora, Arch, CachyOS ve diğer Arch tabanlılar) ve
-kullandığınız kompozitörü (niri, Hyprland, MangoWC) kendisi bulur. Hiçbiri yoksa hangisini
+kullandığınız kompozitörü (niri veya Hyprland) kendisi bulur. Hiçbiri yoksa hangisini
 kurmak istediğinizi sorar. Paketleri kurmadan önce onay ister, yapılandırmanızın yedeğini
 alır ve digit'i `~/.local/bin` altına kurar. Kaldırmak için `./install.sh --uninstall`.
