@@ -389,10 +389,13 @@ pub fn send(files: Vec<gio::File>) {
     close.connect_clicked(move |_| ww.close());
     buttons.append(&close);
     w.present();
-    let weak = w.downgrade();
+    let held = w.clone();
     glib::spawn_future_local(async move {
         let (local, kde) = (gio::spawn_blocking(kit::send::discover).await.unwrap_or_default(), kit::send::kde().await);
-        let Some(w) = weak.upgrade() else { return };
+        let w = held;
+        if !w.is_shown() {
+            return;
+        }
         list.remove(&searching);
         let peers: Vec<kit::send::Peer> = kde.into_iter().chain(local).collect();
         if peers.is_empty() {

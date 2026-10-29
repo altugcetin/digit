@@ -5,8 +5,8 @@ use std::os::unix::fs::MetadataExt;
 use std::rc::Rc;
 use std::time::Duration;
 
-const KEEP: [&str; 18] = [
-    "xwayland-satellite", "xwayland", "niri", "hyprland", "mango", "sway", "systemd", "dbus-daemon", "dbus-broker", "pipewire", "pipewire-pulse", "wireplumber", "digit", "noctalia", "qs", "quickshell", "flatpak", "bwrap",
+const KEEP: [&str; 17] = [
+    "xwayland-satellite", "xwayland", "niri", "hyprland", "sway", "systemd", "dbus-daemon", "dbus-broker", "pipewire", "pipewire-pulse", "wireplumber", "digit", "noctalia", "qs", "quickshell", "flatpak", "bwrap",
 ];
 
 const GENERIC: [&str; 26] = [

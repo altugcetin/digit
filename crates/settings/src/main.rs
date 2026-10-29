@@ -1,5 +1,7 @@
 mod apps;
+mod defaults;
 mod desktop;
+mod displays;
 mod drivers;
 mod flatpak;
 mod fw;
@@ -17,10 +19,11 @@ mod welcome;
 use gtk::{gio, glib, prelude::*};
 use std::cell::RefCell;
 
-const PAGES: [(&str, &str, &str); 5] = [
+const PAGES: [(&str, &str, &str); 6] = [
     ("overview", "Overview", "computer"),
     ("updates", "Updates", "system_update_alt"),
     ("apps", "Apps", "apps"),
+    ("displays", "Displays", "monitor"),
     ("drivers", "Drivers", "memory"),
     ("desktop", "Desktop", "palette"),
 ];
@@ -39,6 +42,7 @@ fn build_page(name: &str) -> gtk::Widget {
     match name {
         "updates" => updates::build(),
         "apps" => apps::build(),
+        "displays" => displays::build(),
         "drivers" => drivers::build(),
         "desktop" => desktop::build(),
         _ => overview::build(),

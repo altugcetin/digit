@@ -1574,6 +1574,10 @@ impl View {
                 let (l0, l1, _, _) = self.wings(&self.head, now);
                 Some((((l0 + l1) / 2.0 - total / 2.0).round(), total))
             }
+            Head::Peek(Peek::Spaces { .. }) => {
+                let (l0, l1, _, _) = self.wings(&self.head, now);
+                Some((((l0 + l1) / 2.0 - total / 2.0).round(), total))
+            }
             Head::Peek(_) | Head::Call => None,
         }
     }
@@ -1780,7 +1784,7 @@ impl View {
             let (_, _, _, r1) = self.wings(&self.head, now);
             let mid = self.header() / 2.0;
             let x = (r1 - crate::bars::W as f64).round() as i32;
-            let y = (mid + self.lift(now) - crate::bars::H as f64 / 2.0).round() as i32;
+            let y = (mid + self.body_lift(now) - crate::bars::H as f64 / 2.0).round() as i32;
             if self.bars.margin_start() != x {
                 self.bars.set_margin_start(x);
             }
@@ -1819,6 +1823,11 @@ impl View {
         Self::lift_at(self.float.value(now), self.menu.value(now) * (1.0 - self.widen.value(now)))
     }
 
+    fn body_lift(&self, now: i64) -> f64 {
+        let open = (self.depth.value(now).max(0.0) / 24.0).clamp(0.0, 1.0);
+        Self::lift_at(self.float.value(now), self.menu.value(now) * (1.0 - self.widen.value(now)) * (1.0 - open))
+    }
+
     fn lift_at(float: f64, bar: f64) -> f64 {
         let bar = bar.clamp(0.0, 1.0);
         (crate::app::LIFT + (crate::app::MENU_LIFT - crate::app::LIFT) * bar) * float.clamp(0.0, 1.0)
@@ -1837,7 +1846,8 @@ impl View {
         let w = self.w.value(now).max(self.w.target()) + 12.0;
         let lift = Self::lift_at(self.float.value(now).max(self.float.target()), self.menu.value(now).max(self.menu.target()) * (1.0 - self.widen.target()));
         let band = self.band(now).max(self.header() + 2.0 * lift * self.menu.target() * (1.0 - self.widen.target())).ceil() as i32;
-        let h = self.header() + lift + self.depth.value(now).max(self.depth.target());
+        let body = crate::app::LIFT * self.float.value(now).max(self.float.target()).clamp(0.0, 1.0);
+        let h = self.header() + lift.max(body) + self.depth.value(now).max(self.depth.target());
         let mut rect = ((CX - w / 2.0).floor() as i32 + self.off(), 0, w.ceil() as i32, h.ceil() as i32);
         if self.dropping {
             rect = (0, 0, self.span.max(WIDTH as i32), (self.header() + ROOM) as i32);
@@ -1895,7 +1905,7 @@ impl View {
         let f = self.float.value(now).clamp(0.0, 1.0);
         let off = self.off();
         let mut rects = if self.frosted() {
-            shape::rows(CX, self.lift(now), self.w.value(now), depth, self.r.value(now), 6.0 * (1.0 - f), 0.0).into_iter().map(|(x, y, w, h)| (x + off, y, w, h)).collect()
+            shape::rows(CX, self.body_lift(now), self.w.value(now), depth, self.r.value(now), 6.0 * (1.0 - f), 0.0).into_iter().map(|(x, y, w, h)| (x + off, y, w, h)).collect()
         } else {
             Vec::new()
         };
@@ -1937,7 +1947,7 @@ impl View {
         let header = self.header();
         let width = self.w.value(now);
         let sheet = self.depth.value(now).max(0.0);
-        let lift = self.lift(now);
+        let lift = self.body_lift(now);
         let f = self.float.value(now).clamp(0.0, 1.0);
         let wide = self.widen.value(now).clamp(0.0, 1.0);
         let (top, depth) = match self.app.dock() {
@@ -2239,6 +2249,10 @@ impl View {
                     self.text(s, &label, 14.0, POINT, Rgb::new(1.0, 1.0, 1.0), r.x, r.y + r.h / 2.0, r.w, pango::Alignment::Center);
                 }
             }
+            Head::Peek(Peek::Spaces { idx }) => {
+                self.draw_spaces(s, now, mid);
+                self.text(s, &format!("Desktop {idx}"), 14.0, POINT, pal.ink_main, r0 - 40.0, mid, right + 40.0, end);
+            }
             Head::Peek(Peek::Osd { icon, text, level }) => {
                 self.icon(s, icon, 18.0, false, pal.ink_main, l0 + 9.0, mid);
                 match level {
@@ -2475,11 +2489,22 @@ impl View {
         s.push_rounded_clip(&gsk::RoundedRect::from_rect(dot, 4.0));
         s.append_color(&GREEN.alpha(pulse).rgba(), &dot);
         s.pop();
-        self.text(s, "On a call", 13.0, REST, GREEN, LEFT + 96.0, top + 16.0, MEDIA_W - 96.0, start);
-        self.text(s, &who, 17.0, Face::Text(620), pal.ink_main, LEFT + 82.0, top + 38.0, MEDIA_W - 82.0, start);
         let t = ((now - since).max(0) / 1_000_000) as u64;
         let clock = if t >= 3600 { format!("{}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60) } else { format!("{}:{:02}", t / 60, t % 60) };
-        self.text(s, &clock, 15.0, Face::Number(560), pal.ink_meta, LEFT + 82.0, top + 60.0, MEDIA_W - 82.0, start);
+        let place = self.app.call_place.borrow().clone();
+        match place {
+            Some((channel, server)) => {
+                self.text(s, &format!("On a call · {who}"), 13.0, REST, GREEN, LEFT + 96.0, top + 16.0, MEDIA_W - 96.0, start);
+                self.text(s, &channel, 17.0, Face::Text(620), pal.ink_main, LEFT + 82.0, top + 38.0, MEDIA_W - 82.0, start);
+                let sub = if server.is_empty() { clock.clone() } else { format!("{server} · {clock}") };
+                self.text(s, &sub, 14.0, Face::Text(480), pal.ink_meta, LEFT + 82.0, top + 60.0, MEDIA_W - 82.0, start);
+            }
+            None => {
+                self.text(s, "On a call", 13.0, REST, GREEN, LEFT + 96.0, top + 16.0, MEDIA_W - 96.0, start);
+                self.text(s, &who, 17.0, Face::Text(620), pal.ink_main, LEFT + 82.0, top + 38.0, MEDIA_W - 82.0, start);
+                self.text(s, &clock, 15.0, Face::Number(560), pal.ink_meta, LEFT + 82.0, top + 60.0, MEDIA_W - 82.0, start);
+            }
+        }
         let muted = self.app.mic_muted.get().unwrap_or(false);
         let (mute, open) = self.call_buttons();
         for (i, (r, icon, label, tint)) in [(mute, if muted { "mic_off" } else { "mic" }, if muted { "Unmute" } else { "Mute" }, if muted { RED } else { pal.ink_main }), (open, "open_in_new", "Show", pal.ink_main)].into_iter().enumerate() {
@@ -2864,7 +2889,7 @@ impl Default for Canvas {
 }
 
 fn lifted(v: &Rc<RefCell<View>>, y: f64) -> f64 {
-    y - v.try_borrow().map(|v| v.lift(App::now())).unwrap_or(0.0)
+    y - v.try_borrow().map(|v| v.body_lift(App::now())).unwrap_or(0.0)
 }
 
 fn legible(tint: Rgb, pal: &kit::palette::Palette) -> Rgb {

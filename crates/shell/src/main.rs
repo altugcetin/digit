@@ -178,7 +178,7 @@ fn run() {
     if app.cfg.polkit {
         polkit::start(&app);
     }
-    theming::take();
+    theming::take(app.cfg.qt_theme);
     if app.cfg.wallpaper && !app.wallpapers.is_empty() {
         app.wallpapers.when_ready(|| hooks::spawn("start"));
     } else {

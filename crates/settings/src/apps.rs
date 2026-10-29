@@ -48,7 +48,9 @@ fn collect(flatpaks: &[flatpak::App]) -> Vec<Entry> {
 }
 
 pub fn build() -> gtk::Widget {
-    let (scroll, body) = ui::page("Apps", "Remove apps you no longer need. System packages are checked first and protected system components can't be removed.");
+    let (scroll, body) = ui::page("Apps", "Choose which apps open your links and files, and remove apps you no longer need. Protected system components can't be removed.");
+    crate::defaults::section(&body);
+    body.append(&ui::heading("Installed apps"));
     let search = gtk::SearchEntry::new();
     search.add_css_class("search");
     search.set_placeholder_text(Some("Search apps"));

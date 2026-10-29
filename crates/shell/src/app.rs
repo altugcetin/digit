@@ -17,6 +17,7 @@ pub enum Peek {
     Note { text: String },
     Mode { icon: &'static str, label: &'static str, on: bool },
     Osd { icon: &'static str, text: String, level: Option<f64> },
+    Spaces { idx: u64 },
     Privacy { light: crate::privacy::Light, who: String },
 }
 
@@ -33,7 +34,7 @@ impl Peek {
     }
 
     fn stale(&self) -> bool {
-        matches!(self, Peek::Volume { .. } | Peek::Mode { .. } | Peek::Osd { .. })
+        matches!(self, Peek::Volume { .. } | Peek::Mode { .. } | Peek::Osd { .. } | Peek::Spaces { .. })
     }
 
     fn waits(&self) -> bool {
@@ -49,6 +50,7 @@ impl Peek {
             Peek::Note { .. } => 65,
             Peek::Mode { .. } => 70,
             Peek::Osd { .. } => 76,
+            Peek::Spaces { .. } => 58,
             Peek::Privacy { .. } => 74,
             Peek::Battery { .. } => 90,
             Peek::Device { .. } => 72,
@@ -66,6 +68,7 @@ impl Peek {
             Peek::Note { .. } => 4000,
             Peek::Mode { .. } => 1600,
             Peek::Osd { .. } => 1400,
+            Peek::Spaces { .. } => 1100,
             Peek::Privacy { .. } => 2600,
             Peek::Battery { .. } => 4200,
             Peek::Device { .. } => 2600,
@@ -82,6 +85,7 @@ impl Peek {
             Peek::Mode { .. } => 96.0,
             Peek::Osd { level: Some(_), .. } => 108.0,
             Peek::Osd { .. } => 120.0,
+            Peek::Spaces { .. } => 112.0,
             Peek::Privacy { .. } => 150.0,
             Peek::Battery { device: Some(_), .. } => 150.0,
             Peek::Battery { .. } => 132.0,
@@ -178,6 +182,33 @@ pub struct Call {
     pub since: i64,
 }
 
+pub fn discord_place(title: &str) -> Option<(String, String)> {
+    let mut t = title.trim();
+    if t.starts_with('(') {
+        if let Some(i) = t.find(") ") {
+            if t[1..i].chars().all(|c| c.is_ascii_digit() || c == '•') {
+                t = &t[i + 2..];
+            }
+        }
+    }
+    for tail in [" - Discord", " — Discord", " - Vesktop", " — Vesktop", " - Legcord", " - Equibop"] {
+        if let Some(rest) = t.strip_suffix(tail) {
+            t = rest;
+            break;
+        }
+    }
+    let mut parts: Vec<&str> = t.split(" | ").map(str::trim).filter(|p| !p.is_empty()).collect();
+    if parts.first().is_some_and(|p| matches!(*p, "Discord" | "Vesktop")) {
+        parts.remove(0);
+    }
+    let clean = |s: &str| s.chars().filter(|c| !c.is_control()).take(48).collect::<String>();
+    match parts.as_slice() {
+        [channel, server, ..] => Some((clean(channel), clean(server))),
+        [one] if !matches!(*one, "Discord" | "Vesktop" | "Friends" | "Home") => Some((clean(one), String::new())),
+        _ => None,
+    }
+}
+
 pub const LIFT: f64 = 7.0;
 pub const MENU_LIFT: f64 = 4.0;
 
@@ -196,6 +227,7 @@ pub struct App {
     pub gadgets: RefCell<Vec<crate::devices::Gadget>>,
     pub sni: RefCell<Vec<crate::sni::Item>>,
     pub weather: RefCell<Option<crate::weather::Weather>>,
+    pub call_place: RefCell<Option<(String, String)>>,
     pub running: RefCell<Vec<crate::compositor::Running>>,
     pub prefs: RefCell<crate::config::Prefs>,
     roles: Cell<Roles>,
@@ -245,6 +277,7 @@ impl App {
             gadgets: RefCell::new(Vec::new()),
             sni: RefCell::new(Vec::new()),
             weather: RefCell::new(None),
+            call_place: RefCell::new(None),
             running: RefCell::new(Vec::new()),
             prefs: RefCell::new(prefs),
             roles: Cell::new(Roles::default()),
@@ -455,19 +488,53 @@ impl App {
         *self.call.borrow_mut() = next;
         let wants = self.media.borrow().wings(Self::now()) || live;
         spectrum::want(self, wants);
+        if !live {
+            *self.call_place.borrow_mut() = None;
+        }
         if live && !self.ticking_call.replace(true) {
             let weak = Rc::downgrade(self);
+            let beat = Cell::new(0u32);
+            self.find_place();
             glib::timeout_add_local(Duration::from_millis(1000), move || {
                 let Some(app) = weak.upgrade() else { return glib::ControlFlow::Break };
                 if app.call.borrow().is_none() {
                     app.ticking_call.set(false);
                     return glib::ControlFlow::Break;
                 }
+                beat.set(beat.get() + 1);
+                if beat.get() % 4 == 0 {
+                    app.find_place();
+                }
                 app.redraw();
                 glib::ControlFlow::Continue
             });
         }
         self.changed();
+    }
+
+    fn find_place(self: &Rc<Self>) {
+        let Some(who) = self.call.borrow().as_ref().map(|c| c.who.to_lowercase()) else { return };
+        if !["discord", "vesktop", "legcord", "equibop", "webcord", "armcord"].iter().any(|k| who.contains(k)) {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let found = gtk::gio::spawn_blocking(|| {
+                kit::wm::windows().into_iter().find(|w| {
+                    let id = w.app_id.to_lowercase();
+                    ["discord", "vesktop", "legcord", "equibop", "webcord", "armcord"].iter().any(|k| id.contains(k))
+                }).map(|w| w.title)
+            })
+            .await
+            .ok()
+            .flatten();
+            let Some(app) = weak.upgrade() else { return };
+            let place = found.as_deref().and_then(discord_place);
+            if *app.call_place.borrow() != place {
+                *app.call_place.borrow_mut() = place;
+                app.redraw();
+            }
+        });
     }
 
     pub fn apply_prefs(self: &Rc<Self>, next: crate::config::Prefs) {
@@ -543,11 +610,18 @@ impl App {
         }
     }
 
-    pub fn set_spaces(&self, spaces: Vec<crate::compositor::Space>) {
+    pub fn set_spaces(self: &Rc<Self>, spaces: Vec<crate::compositor::Space>) {
         if *self.spaces.borrow() == spaces {
             return;
         }
+        let was = self.spaces.borrow().iter().find(|s| s.focused).map(|s| s.id);
+        let now = spaces.iter().find(|s| s.focused).map(|s| (s.id, s.idx));
         *self.spaces.borrow_mut() = spaces;
+        if let (Some(before), Some((id, idx))) = (was, now) {
+            if before != id && self.call.borrow().is_some() {
+                self.request(Peek::Spaces { idx });
+            }
+        }
         self.changed();
         crate::dock::settle_all();
         crate::spaces::changed(self);

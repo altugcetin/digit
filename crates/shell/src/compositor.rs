@@ -123,9 +123,6 @@ pub fn overview() {
         kit::wm::Wm::Niri => {
             niri(json!({ "Action": { "ToggleOverview": {} } }));
         }
-        kit::wm::Wm::Mango => {
-            kit::wm::mango("dispatch toggleoverview");
-        }
         _ => {}
     }
 }
@@ -371,28 +368,6 @@ fn hypr_events(tx: async_channel::Sender<Feed>) {
     }
 }
 
-fn mango_events(tx: async_channel::Sender<Feed>, what: &'static str) {
-    let mut wait = 1;
-    loop {
-        if let Some(mut stream) = kit::wm::mango_socket().and_then(|p| UnixStream::connect(p).ok()) {
-            if writeln!(stream, "watch {what}").is_ok() {
-                wait = 1;
-                let mut last = (Vec::new(), Vec::new());
-                for line in BufReader::new(stream).lines() {
-                    if line.is_err() || !snapshot(&tx, &mut last) {
-                        break;
-                    }
-                }
-            }
-        }
-        if tx.is_closed() {
-            return;
-        }
-        std::thread::sleep(Duration::from_secs(wait));
-        wait = (wait * 2).min(30);
-    }
-}
-
 pub fn watch(app: &std::rc::Rc<crate::app::App>) {
     let (tx, rx) = async_channel::bounded::<Feed>(16);
     match kit::wm::which() {
@@ -401,11 +376,6 @@ pub fn watch(app: &std::rc::Rc<crate::app::App>) {
         }
         kit::wm::Wm::Hyprland => {
             let _ = std::thread::Builder::new().name("digit-hypr".into()).stack_size(128 * 1024).spawn(move || hypr_events(tx));
-        }
-        kit::wm::Wm::Mango => {
-            let more = tx.clone();
-            let _ = std::thread::Builder::new().name("digit-mango".into()).stack_size(128 * 1024).spawn(move || mango_events(tx, "all-clients"));
-            let _ = std::thread::Builder::new().name("digit-mango-tags".into()).stack_size(128 * 1024).spawn(move || mango_events(more, "all-tags"));
         }
         kit::wm::Wm::Other => return,
     }

@@ -3,6 +3,7 @@ mod info;
 mod look;
 mod ops;
 mod pane;
+mod popup;
 mod side;
 mod thumbs;
 mod tools;
@@ -468,6 +469,12 @@ fn actions(window: &gtk::ApplicationWindow) {
     action(window, "up", || active().inspect(|p| p.up()).map(|_| ()).unwrap_or(()));
     action(window, "home", || go(&gio::File::for_path(glib::home_dir())));
     action(window, "new-tab", || new_tab(&active().map(|p| p.location()).unwrap_or_else(|| gio::File::for_path(glib::home_dir()))));
+    action(window, "new-window", || {
+        let here = active().map(|p| p.location()).unwrap_or_else(|| gio::File::for_path(glib::home_dir()));
+        let exe = std::path::PathBuf::from("/proc/self/exe");
+        let arg = here.path().map(|p| p.into_os_string()).unwrap_or_else(|| here.uri().to_string().into());
+        let _ = gio::Subprocess::newv(&[exe.as_os_str(), arg.as_os_str()], gio::SubprocessFlags::NONE);
+    });
     action(window, "close-tab", || {
         if let Some(t) = tab() {
             close_tab(&t.paned);
@@ -751,7 +758,8 @@ fn accels(app: &gtk::Application) {
         ("win.forward", &["<Alt>Right"]),
         ("win.up", &["<Alt>Up"]),
         ("win.home", &["<Alt>Home"]),
-        ("win.new-tab", &["<Control>t", "<Control>n"]),
+        ("win.new-tab", &["<Control>t"]),
+        ("win.new-window", &["<Control>n"]),
         ("win.close-tab", &["<Control>w"]),
         ("win.split", &["F3"]),
         ("win.info", &["<Control>i", "F9"]),
@@ -785,125 +793,96 @@ fn accels(app: &gtk::Application) {
 }
 
 pub fn menu(p: &Rc<Pane>, at: Option<(f64, f64)>, items: bool) {
-    let m = gio::Menu::new();
+    use popup::{act, act_with, danger, sub, Item};
+    let mut m: Vec<Item> = Vec::new();
     let trash = ops::pane_of_trash(p);
     let picked = p.selected();
     if items && !picked.is_empty() {
-        let s = gio::Menu::new();
         if trash {
-            s.append(Some("Restore"), Some("win.restore"));
-            s.append(Some("Delete Permanently"), Some("win.delete"));
-            m.append_section(None, &s);
+            m.push(act("restore_from_trash", "Restore", "win.restore"));
+            m.push(danger("delete_forever", "Delete Permanently", "win.delete"));
         } else {
-            s.append(Some("Open"), Some("win.open"));
+            m.push(act("open_in_new", "Open", "win.open"));
             if picked.iter().any(|i| !pane::is_dir(i)) {
-                s.append(Some("Open With…"), Some("win.open-with"));
+                m.push(act("apps", "Open With…", "win.open-with"));
             }
             if picked.iter().any(pane::is_dir) {
-                s.append(Some("Open in New Tab"), Some("win.open-tab"));
+                m.push(act("tab", "Open in New Tab", "win.open-tab"));
             }
-            s.append(Some("Quick Look"), Some("win.look"));
-            m.append_section(None, &s);
-            let e = gio::Menu::new();
-            e.append(Some("Cut"), Some("win.cut"));
-            e.append(Some("Copy"), Some("win.copy"));
+            m.push(act("visibility", "Quick Look", "win.look"));
+            m.push(Item::Sep);
+            m.push(act("content_cut", "Cut", "win.cut"));
+            m.push(act("content_copy", "Copy", "win.copy"));
             if picked.len() == 1 && pane::is_dir(&picked[0]) {
-                e.append(Some("Paste Into Folder"), Some("win.paste-into"));
+                m.push(act("content_paste_go", "Paste Into Folder", "win.paste-into"));
             }
-            e.append(Some("Copy Path"), Some("win.copy-path"));
+            m.push(act("link", "Copy Path", "win.copy-path"));
             if picked.iter().any(|i| !pane::is_dir(i)) {
-                e.append(Some("Send to Device…"), Some("win.send"));
+                m.push(act("share", "Send to Device…", "win.send"));
             }
             if other().is_some() {
-                e.append(Some("Copy to Other Pane"), Some("win.copy-other"));
-                e.append(Some("Move to Other Pane"), Some("win.move-other"));
+                m.push(act("file_copy", "Copy to Other Pane", "win.copy-other"));
+                m.push(act("drive_file_move", "Move to Other Pane", "win.move-other"));
             }
-            m.append_section(None, &e);
-            let r = gio::Menu::new();
-            r.append(Some(if picked.len() > 1 { "Rename Items…" } else { "Rename…" }), Some("win.rename"));
-            r.append(Some("Duplicate"), Some("win.duplicate"));
-            r.append(Some("Compress…"), Some("win.compress"));
+            m.push(Item::Sep);
+            m.push(act("edit", if picked.len() > 1 { "Rename Items…" } else { "Rename…" }, "win.rename"));
+            m.push(act("library_add", "Duplicate", "win.duplicate"));
+            m.push(act("folder_zip", "Compress…", "win.compress"));
             let conv = tools::targets(&picked);
             if !conv.is_empty() {
-                let cm = gio::Menu::new();
-                for (label, ext) in conv {
-                    let item = gio::MenuItem::new(Some(label), None);
-                    item.set_action_and_target_value(Some("win.convert"), Some(&ext.to_variant()));
-                    cm.append_item(&item);
-                }
-                r.append_submenu(Some("Convert To"), &cm);
+                let items = conv.into_iter().map(|(label, ext)| act_with("transform", label, "win.convert", ext.to_variant())).collect();
+                m.push(sub("transform", "Convert To", items));
             }
             if tools::shrinkable(&picked) {
-                r.append(Some("Make Smaller"), Some("win.shrink"));
+                m.push(act("compress", "Make Smaller", "win.shrink"));
             }
             if picked.iter().all(|i| tools::family(i) == tools::Family::Image) {
-                r.append(Some("Remove Background"), Some("win.cutout"));
+                m.push(act("auto_fix_high", "Remove Background", "win.cutout"));
             }
             if picked.iter().any(ops::archive) {
-                r.append(Some("Extract Here"), Some("win.extract"));
+                m.push(act("unarchive", "Extract Here", "win.extract"));
             }
             if picked.len() == 1 && pane::is_dir(&picked[0]) {
-                r.append(Some("Add to Sidebar"), Some("win.bookmark"));
-                r.append(Some("Open Terminal Here"), Some("win.terminal"));
+                m.push(act("bookmark_add", "Add to Sidebar", "win.bookmark"));
+                m.push(act("terminal", "Open Terminal Here", "win.terminal"));
             }
-            m.append_section(None, &r);
-            let d = gio::Menu::new();
-            d.append(Some("Move to Trash"), Some("win.trash"));
-            d.append(Some("Get Info"), Some("win.info"));
-            m.append_section(None, &d);
+            m.push(Item::Sep);
+            m.push(danger("delete", "Move to Trash", "win.trash"));
+            m.push(act("info", "Get Info", "win.info"));
         }
     } else if trash {
-        let s = gio::Menu::new();
-        s.append(Some("Empty Trash"), Some("win.empty-trash"));
-        s.append(Some("Select All"), Some("win.select-all"));
-        m.append_section(None, &s);
+        m.push(danger("delete_sweep", "Empty Trash", "win.empty-trash"));
+        m.push(act("select_all", "Select All", "win.select-all"));
     } else {
-        let s = gio::Menu::new();
-        s.append(Some("New Folder…"), Some("win.new-folder"));
-        let nf = gio::Menu::new();
-        nf.append_item(&gio::MenuItem::new(Some("Empty File"), Some("win.new-file::")));
+        m.push(act("create_new_folder", "New Folder…", "win.new-folder"));
+        let mut files = vec![act_with("note_add", "Empty File", "win.new-file", "".to_variant())];
         for t in ops::templates() {
             let label = t.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let item = gio::MenuItem::new(Some(&label), None);
-            item.set_action_and_target_value(Some("win.new-file"), Some(&t.to_string_lossy().to_variant()));
-            nf.append_item(&item);
+            files.push(act_with("description", &label, "win.new-file", t.to_string_lossy().to_variant()));
         }
-        s.append_submenu(Some("New File"), &nf);
-        s.append(Some("Paste"), Some("win.paste"));
-        s.append(Some("Select All"), Some("win.select-all"));
-        m.append_section(None, &s);
-        let v = gio::Menu::new();
-        v.append(Some("Open Terminal Here"), Some("win.terminal"));
-        v.append(Some("Add to Sidebar"), Some("win.bookmark"));
-        v.append(Some("Show Hidden Files"), Some("win.hidden"));
-        let sort = gio::Menu::new();
-        for (label, key) in [("Name", "name"), ("Name, Z to A", "name-desc"), ("Size", "size"), ("Modified", "modified"), ("Kind", "kind")] {
-            let item = gio::MenuItem::new(Some(label), None);
-            item.set_action_and_target_value(Some("win.sort"), Some(&key.to_variant()));
-            sort.append_item(&item);
-        }
-        v.append_submenu(Some("Sort By"), &sort);
-        m.append_section(None, &v);
-        let i = gio::Menu::new();
-        i.append(Some("Get Info"), Some("win.info"));
-        m.append_section(None, &i);
+        m.push(sub("note_add", "New File", files));
+        m.push(act("content_paste", "Paste", "win.paste"));
+        m.push(act("select_all", "Select All", "win.select-all"));
+        m.push(Item::Sep);
+        m.push(act("terminal", "Open Terminal Here", "win.terminal"));
+        m.push(act("bookmark_add", "Add to Sidebar", "win.bookmark"));
+        m.push(act("visibility", "Show Hidden Files", "win.hidden"));
+        let sorts = [("Name", "name"), ("Name, Z to A", "name-desc"), ("Size", "size"), ("Modified", "modified"), ("Kind", "kind")]
+            .into_iter()
+            .map(|(label, key)| act_with("sort", label, "win.sort", key.to_variant()))
+            .collect();
+        m.push(sub("sort", "Sort By", sorts));
+        m.push(Item::Sep);
+        m.push(act("info", "Get Info", "win.info"));
     }
-    let pop = gtk::PopoverMenu::from_model(Some(&m));
-    pop.set_parent(&p.root);
-    pop.set_has_arrow(false);
-    pop.set_halign(gtk::Align::Start);
     let (x, y) = at.unwrap_or((p.root.width() as f64 / 2.0, 80.0));
-    pop.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-    pop.connect_closed(|pop| {
-        let pop = pop.clone();
-        glib::idle_add_local_once(move || pop.unparent());
-    });
-    pop.popup();
+    popup::show(&p.root, x, y, m);
 }
 
 fn app_menu() -> gio::Menu {
     let m = gio::Menu::new();
     let a = gio::Menu::new();
+    a.append(Some("New Window"), Some("win.new-window"));
     a.append(Some("New Tab"), Some("win.new-tab"));
     a.append(Some("Split View"), Some("win.split"));
     a.append(Some("Info Panel"), Some("win.info"));
@@ -1173,7 +1152,23 @@ gridview.grid > child:focus-visible .thumbbox {{ box-shadow: inset 0 0 0 1.5px a
 label.fname {{ font-size: 13px; padding: 1px 7px; border-radius: 7px; }}
 gridview.grid > child:selected label.fname {{ background: {accent}; color: {on_accent}; }}
 columnview.list > header > button {{ background: transparent; border: none; box-shadow: none; color: {meta}; font-size: 12px; font-weight: 600; padding: 6px 10px; }}
-columnview.list > listview > row {{ border-radius: 10px; margin: 0 6px; }}
+columnview.list > listview > row {{ border-radius: 10px; margin: 1px 6px; }}
+popover.pm > contents {{ padding: 5px; border-radius: 14px; background: @d_pop; box-shadow: 0 10px 30px rgba(0,0,0,0.35), 0 0 0 1px alpha({main}, 0.07); }}
+button.pm-row {{ min-height: 30px; padding: 0 10px 0 8px; border-radius: 8px; border: none; box-shadow: none; background: transparent; color: {main}; }}
+button.pm-row {{ outline: none; }}
+button.pm-row:hover, button.pm-row:focus-visible {{ background: alpha({main}, 0.08); outline: none; box-shadow: none; }}
+button.pm-row:active {{ background: alpha({accent}, 0.25); }}
+button.pm-row:disabled {{ opacity: 0.4; }}
+button.pm-row .pm-glyph {{ font-size: 17px; color: {meta}; min-width: 20px; }}
+button.pm-row .pm-label {{ font-size: 13.5px; }}
+button.pm-row .pm-accel {{ font-size: 12px; color: {meta}; margin-left: 20px; }}
+button.pm-row .pm-trail {{ font-size: 17px; color: {meta}; margin-left: 8px; }}
+button.pm-row.pm-danger .pm-label, button.pm-row.pm-danger .pm-glyph {{ color: #ff6b6b; }}
+button.pm-row.pm-back .pm-label {{ font-weight: 600; }}
+separator.pm-sep {{ margin: 4px 8px; background: alpha({main}, 0.08); min-height: 1px; }}
+.sheet-backdrop {{ background: rgba(0,0,0,0.42); }}
+.place-remove {{ opacity: 0; min-width: 22px; min-height: 22px; padding: 0; }}
+list.places row:hover .place-remove {{ opacity: 1; }}
 columnview.list > listview > row:hover {{ background: alpha({main}, 0.05); }}
 columnview.list > listview > row:selected, columnview.list > listview > row:active {{ background: alpha({accent}, 0.22); color: {main}; }}
 columnview.list > listview > row > cell {{ padding: 5px 10px; }}
@@ -1461,7 +1456,7 @@ fn main() -> glib::ExitCode {
         return glib::ExitCode::SUCCESS;
     }
     kit::app::lean("DIGIT_FILES_RENDERER");
-    let app = gtk::Application::new(Some(APP_ID), gio::ApplicationFlags::HANDLES_COMMAND_LINE);
+    let app = gtk::Application::new(Some(APP_ID), gio::ApplicationFlags::HANDLES_COMMAND_LINE | gio::ApplicationFlags::NON_UNIQUE);
     app.connect_startup(|app| {
         gtk::Window::set_default_icon_name(APP_ID);
         install();

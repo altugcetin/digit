@@ -613,6 +613,19 @@ impl Pane {
                 if p.key(key, mods) { glib::Propagation::Stop } else { glib::Propagation::Proceed }
             });
             w.add_controller(keys);
+            let look = gtk::EventControllerKey::new();
+            look.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let me = self.weak();
+            look.connect_key_pressed(move |_, key, _, mods| {
+                let Some(p) = me.upgrade() else { return glib::Propagation::Proceed };
+                let plain = !mods.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK | gdk::ModifierType::SHIFT_MASK);
+                if key == gdk::Key::space && plain && p.typed.borrow().0.is_empty() {
+                    crate::look::toggle();
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            });
+            w.add_controller(look);
             let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY | gdk::DragAction::MOVE);
             let me = self.weak();
             drop.connect_drop(move |t, value, _, _| {
