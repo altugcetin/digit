@@ -421,12 +421,22 @@ pub fn open(app: &gtk::Application) {
     }
     window.add_controller(keys);
     let drag = gtk::GestureDrag::new();
+    let grab: std::rc::Rc<std::cell::Cell<Option<(f64, f64)>>> = std::rc::Rc::new(std::cell::Cell::new(None));
     {
-        let window = window.clone();
-        drag.connect_drag_begin(move |g, x, y| {
-            if y > 60.0 {
+        let (grab, root2) = (grab.clone(), root.clone());
+        drag.connect_drag_begin(move |_, x, y| {
+            let on_button = root2.pick(x, y, gtk::PickFlags::DEFAULT).is_some_and(|w| w.is::<gtk::Button>() || w.ancestor(gtk::Button::static_type()).is_some());
+            grab.set((y <= 60.0 && !on_button).then_some((x, y)));
+        });
+    }
+    {
+        let (grab, window) = (grab.clone(), window.clone());
+        drag.connect_drag_update(move |g, dx, dy| {
+            let Some((x, y)) = grab.get() else { return };
+            if dx.hypot(dy) < 4.0 {
                 return;
             }
+            grab.set(None);
             if let (Some(surface), Some(device)) = (window.surface().and_then(|s| s.downcast::<gtk::gdk::Toplevel>().ok()), g.device()) {
                 surface.begin_move(&device, g.current_button() as i32, x, y, g.current_event_time());
             }

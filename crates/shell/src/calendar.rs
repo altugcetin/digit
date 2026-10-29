@@ -56,8 +56,12 @@ pub fn name(day: &Day) -> String {
 }
 
 pub fn on(day: &Day) -> Vec<Event> {
-    let end = glib::DateTime::from_unix_local(day.start).ok().and_then(|d| d.add_days(1).ok()).map_or(day.start + 86_400, |d| d.to_unix());
-    let mut list: Vec<Event> = EVENTS.with(|e| e.borrow().iter().filter(|ev| ev.start < end && ev.end > day.start).cloned().collect());
+    at(day.start)
+}
+
+pub fn at(start: i64) -> Vec<Event> {
+    let end = glib::DateTime::from_unix_local(start).ok().and_then(|d| d.add_days(1).ok()).map_or(start + 86_400, |d| d.to_unix());
+    let mut list: Vec<Event> = EVENTS.with(|e| e.borrow().iter().filter(|ev| ev.start < end && ev.end > start).cloned().collect());
     list.sort_by_key(|e| (!e.all_day, e.start));
     list
 }

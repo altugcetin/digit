@@ -76,6 +76,10 @@ pub fn then(f: impl FnOnce() + 'static) {
     NEXT.with(|n| *n.borrow_mut() = Some(Box::new(f)));
 }
 
+pub fn take_then() -> Option<Box<dyn FnOnce()>> {
+    NEXT.with(|n| n.borrow_mut().take())
+}
+
 pub fn settle() {
     if let Some(h) = NEXT.with(|n| n.borrow_mut().take()) {
         h();
@@ -184,6 +188,7 @@ impl Menu {
 
 pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, x: f64, y: f64, title: &str, rows: Vec<Row>) {
     close();
+    crate::datepop::close();
     let hook = NEXT.with(|n| n.borrow_mut().take());
     if rows.is_empty() {
         if let Some(h) = hook {

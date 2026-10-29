@@ -12,287 +12,7 @@ pub struct Profile {
     pub settings: Option<&'static str>,
 }
 
-const EDIT: &[Item] = &[
-    ("Undo", "ctrl+z"),
-    ("Redo", "ctrl+shift+z"),
-    SEP,
-    ("Cut", "ctrl+x"),
-    ("Copy", "ctrl+c"),
-    ("Paste", "ctrl+v"),
-    ("Select All", "ctrl+a"),
-    SEP,
-    ("Find…", "ctrl+f"),
-];
-
-const ZOOM: &[Item] = &[("Zoom In", "ctrl+equal"), ("Zoom Out", "ctrl+minus"), ("Actual Size", "ctrl+0")];
-
-const GENERIC: Profile = Profile {
-    menus: &[
-        ("File", &[("New", "ctrl+n"), ("Open…", "ctrl+o"), SEP, ("Save", "ctrl+s"), ("Save As…", "ctrl+shift+s"), SEP, ("Print…", "ctrl+p"), SEP, ("Close", "ctrl+w")]),
-        ("Edit", EDIT),
-        ("View", ZOOM),
-    ],
-    settings: None,
-};
-
-const NONE: Profile = Profile { menus: &[], settings: None };
-
-const FIREFOX: Profile = Profile {
-    menus: &[
-        ("File", &[("New Tab", "ctrl+t"), ("New Window", "ctrl+n"), ("New Private Window", "ctrl+shift+p"), SEP, ("Open File…", "ctrl+o"), ("Save Page As…", "ctrl+s"), SEP, ("Print…", "ctrl+p"), SEP, ("Close Tab", "ctrl+w"), ("Reopen Closed Tab", "ctrl+shift+t")]),
-        ("Edit", &[("Undo", "ctrl+z"), ("Redo", "ctrl+shift+z"), SEP, ("Cut", "ctrl+x"), ("Copy", "ctrl+c"), ("Paste", "ctrl+v"), ("Select All", "ctrl+a"), SEP, ("Find in Page…", "ctrl+f"), ("Find Again", "ctrl+g")]),
-        ("View", &[("Reload", "ctrl+r"), ("Reload Without Cache", "ctrl+shift+r"), SEP, ("Zoom In", "ctrl+equal"), ("Zoom Out", "ctrl+minus"), ("Actual Size", "ctrl+0"), SEP, ("Full Screen", "F11"), ("Developer Tools", "ctrl+shift+i")]),
-        ("History", &[("Back", "alt+Left"), ("Forward", "alt+Right"), ("Home", "alt+Home"), SEP, ("Show All History", "ctrl+shift+h"), SEP, ("Bookmark This Page", "ctrl+d"), ("Manage Bookmarks", "ctrl+shift+o"), ("Downloads", "ctrl+shift+y")]),
-    ],
-    settings: None,
-};
-
-const CHROMIUM: Profile = Profile {
-    menus: &[
-        ("File", &[("New Tab", "ctrl+t"), ("New Window", "ctrl+n"), ("New Incognito Window", "ctrl+shift+n"), SEP, ("Open File…", "ctrl+o"), ("Save Page As…", "ctrl+s"), SEP, ("Print…", "ctrl+p"), SEP, ("Close Tab", "ctrl+w"), ("Reopen Closed Tab", "ctrl+shift+t")]),
-        ("Edit", &[("Undo", "ctrl+z"), ("Redo", "ctrl+shift+z"), SEP, ("Cut", "ctrl+x"), ("Copy", "ctrl+c"), ("Paste", "ctrl+v"), ("Select All", "ctrl+a"), SEP, ("Find in Page…", "ctrl+f"), ("Find Again", "ctrl+g")]),
-        ("View", &[("Reload", "ctrl+r"), ("Reload Without Cache", "ctrl+shift+r"), SEP, ("Zoom In", "ctrl+equal"), ("Zoom Out", "ctrl+minus"), ("Actual Size", "ctrl+0"), SEP, ("Full Screen", "F11"), ("Developer Tools", "ctrl+shift+i")]),
-        ("History", &[("Back", "alt+Left"), ("Forward", "alt+Right"), ("Home", "alt+Home"), SEP, ("Show Full History", "ctrl+h"), SEP, ("Bookmark This Tab", "ctrl+d"), ("Bookmark Manager", "ctrl+shift+o"), ("Downloads", "ctrl+j")]),
-    ],
-    settings: None,
-};
-
-const VSCODE: Profile = Profile {
-    menus: &[
-        ("File", &[("New File", "ctrl+n"), ("New Window", "ctrl+shift+n"), SEP, ("Open File…", "ctrl+o"), ("Open Folder…", "ctrl+k ctrl+o"), ("Open Recent…", "ctrl+r"), SEP, ("Save", "ctrl+s"), ("Save As…", "ctrl+shift+s"), ("Save All", "ctrl+k s"), SEP, ("Close Editor", "ctrl+w"), ("Close Folder", "ctrl+k f")]),
-        ("Edit", &[("Undo", "ctrl+z"), ("Redo", "ctrl+y"), SEP, ("Cut", "ctrl+x"), ("Copy", "ctrl+c"), ("Paste", "ctrl+v"), SEP, ("Find", "ctrl+f"), ("Replace", "ctrl+h"), ("Find in Files", "ctrl+shift+f"), ("Replace in Files", "ctrl+shift+h"), SEP, ("Toggle Line Comment", "ctrl+slash")]),
-        ("View", &[("Command Palette…", "ctrl+shift+p"), SEP, ("Explorer", "ctrl+shift+e"), ("Search", "ctrl+shift+f"), ("Source Control", "ctrl+shift+g"), ("Extensions", "ctrl+shift+x"), SEP, ("Toggle Sidebar", "ctrl+b"), ("Terminal", "ctrl+grave"), SEP, ("Zoom In", "ctrl+equal"), ("Zoom Out", "ctrl+minus"), SEP, ("Full Screen", "F11")]),
-        ("Go", &[("Go to File…", "ctrl+p"), ("Go to Symbol…", "ctrl+shift+o"), ("Go to Line…", "ctrl+g"), ("Go to Definition", "F12"), SEP, ("Back", "ctrl+alt+minus"), ("Forward", "ctrl+shift+minus"), SEP, ("Start Debugging", "F5"), ("Run Without Debugging", "ctrl+F5")]),
-    ],
-    settings: Some("ctrl+comma"),
-};
-
-const ZED: Profile = Profile {
-    menus: &[
-        ("File", &[("New File", "ctrl+n"), ("New Window", "ctrl+shift+n"), SEP, ("Open…", "ctrl+o"), ("Open Recent…", "ctrl+alt+o"), SEP, ("Save", "ctrl+s"), ("Save As…", "ctrl+shift+s"), SEP, ("Close Tab", "ctrl+w")]),
-        ("Edit", &[("Undo", "ctrl+z"), ("Redo", "ctrl+shift+z"), SEP, ("Cut", "ctrl+x"), ("Copy", "ctrl+c"), ("Paste", "ctrl+v"), SEP, ("Find", "ctrl+f"), ("Replace", "ctrl+h"), ("Find in Project", "ctrl+shift+f"), SEP, ("Toggle Comment", "ctrl+slash")]),
-        ("View", &[("Command Palette…", "ctrl+shift+p"), SEP, ("Project Panel", "ctrl+shift+e"), ("Terminal", "ctrl+grave"), ("Toggle Left Dock", "ctrl+b"), SEP, ("Zoom In", "ctrl+equal"), ("Zoom Out", "ctrl+minus"), ("Reset Zoom", "ctrl+0")]),
-        ("Go", &[("Go to File…", "ctrl+p"), ("Go to Symbol…", "ctrl+shift+o"), ("Go to Line…", "ctrl+g"), ("Go to Definition", "F12"), SEP, ("Back", "ctrl+alt+minus"), ("Forward", "ctrl+shift+minus")]),
-    ],
-    settings: Some("ctrl+comma"),
-};
-
-const SUBLIME: Profile = Profile {
-    menus: &[
-        ("File", &[("New File", "ctrl+n"), ("New Window", "ctrl+shift+n"), SEP, ("Open File…", "ctrl+o"), SEP, ("Save", "ctrl+s"), ("Save As…", "ctrl+shift+s"), SEP, ("Close File", "ctrl+w")]),
-        ("Edit", &[("Undo", "ctrl+z"), ("Redo", "ctrl+y"), SEP, ("Cut", "ctrl+x"), ("Copy", "ctrl+c"), ("Paste", "ctrl+v"), SEP, ("Find…", "ctrl+f"), ("Replace…", "ctrl+h"), ("Find in Files…", "ctrl+shift+f"), SEP, ("Toggle Comment", "ctrl+slash")]),
-        ("View", &[("Command Palette…", "ctrl+shift+p"), ("Side Bar", "ctrl+k ctrl+b"), ("Console", "ctrl+grave"), SEP, ("Full Screen", "F11")]),
-        ("Goto", &[("Goto Anything…", "ctrl+p"), ("Goto Symbol…", "ctrl+r"), ("Goto Line…", "ctrl+g"), ("Goto Definition", "F12")]),
-    ],
-    settings: None,
-};
-
-const JETBRAINS: Profile = Profile {
-    menus: &[
-        ("File", &[("Settings…", "ctrl+alt+s"), SEP, ("Save All", "ctrl+s"), ("Reload from Disk", "ctrl+alt+y"), SEP, ("Recent Files…", "ctrl+e"), ("Recent Locations…", "ctrl+shift+e")]),
-        ("Edit", &[("Undo", "ctrl+z"), ("Redo", "ctrl+shift+z"), SEP, ("Cut", "ctrl+x"), ("Copy", "ctrl+c"), ("Paste", "ctrl+v"), SEP, ("Find…", "ctrl+f"), ("Replace…", "ctrl+r"), ("Find in Files…", "ctrl+shift+f"), ("Replace in Files…", "ctrl+shift+r"), SEP, ("Comment Line", "ctrl+slash"), ("Reformat Code", "ctrl+alt+l")]),
-        ("View", &[("Find Action…", "ctrl+shift+a"), ("Search Everywhere", "Shift_L Shift_L"), SEP, ("Project", "alt+1"), ("Commit", "alt+0"), ("Terminal", "alt+F12")]),
-        ("Navigate", &[("Class…", "ctrl+n"), ("File…", "ctrl+shift+n"), ("Symbol…", "ctrl+alt+shift+n"), ("Line…", "ctrl+g"), ("Declaration", "ctrl+b"), SEP, ("Back", "ctrl+alt+Left"), ("Forward", "ctrl+alt+Right")]),
-        ("Run", &[("Run", "shift+F10"), ("Debug", "shift+F9"), SEP, ("Build Project", "ctrl+F9"), ("Stop", "ctrl+F2")]),
-    ],
-    settings: Some("ctrl+alt+s"),
-};
-
-const TERM_VIEW: &[Item] = &[("Bigger Text", "ctrl+equal"), ("Smaller Text", "ctrl+minus"), ("Default Size", "ctrl+0")];
-
-const TERMINAL: Profile = Profile {
-    menus: &[
-        ("Shell", &[("New Tab", "ctrl+shift+t"), ("New Window", "ctrl+shift+n"), SEP, ("Close Tab", "ctrl+shift+w")]),
-        ("Edit", &[("Copy", "ctrl+shift+c"), ("Paste", "ctrl+shift+v"), SEP, ("Find…", "ctrl+shift+f")]),
-        ("View", TERM_VIEW),
-    ],
-    settings: None,
-};
-
-const GHOSTTY: Profile = Profile {
-    menus: &[
-        ("Shell", &[("New Tab", "ctrl+shift+t"), ("New Window", "ctrl+shift+n"), SEP, ("Split Right", "ctrl+shift+o"), ("Split Down", "ctrl+shift+e"), SEP, ("Close", "ctrl+shift+w")]),
-        ("Edit", &[("Copy", "ctrl+shift+c"), ("Paste", "ctrl+shift+v"), ("Select All", "ctrl+shift+a")]),
-        ("View", TERM_VIEW),
-    ],
-    settings: Some("ctrl+comma"),
-};
-
-const KITTY: Profile = Profile {
-    menus: &[
-        ("Shell", &[("New Tab", "ctrl+shift+t"), ("New Window", "ctrl+shift+n"), ("New Split", "ctrl+shift+Return"), SEP, ("Close Tab", "ctrl+shift+q")]),
-        ("Edit", &[("Copy", "ctrl+shift+c"), ("Paste", "ctrl+shift+v"), SEP, ("Browse Scrollback", "ctrl+shift+h")]),
-        ("View", &[("Bigger Text", "ctrl+shift+equal"), ("Smaller Text", "ctrl+shift+minus"), ("Default Size", "ctrl+shift+BackSpace")]),
-    ],
-    settings: Some("ctrl+shift+F2"),
-};
-
-const ALACRITTY: Profile = Profile {
-    menus: &[
-        ("Shell", &[("New Window", "ctrl+shift+n")]),
-        ("Edit", &[("Copy", "ctrl+shift+c"), ("Paste", "ctrl+shift+v"), SEP, ("Find…", "ctrl+shift+f")]),
-        ("View", TERM_VIEW),
-    ],
-    settings: None,
-};
-
-const FOOT: Profile = Profile {
-    menus: &[
-        ("Shell", &[("New Window", "ctrl+shift+n")]),
-        ("Edit", &[("Copy", "ctrl+shift+c"), ("Paste", "ctrl+shift+v"), SEP, ("Find…", "ctrl+shift+r")]),
-        ("View", TERM_VIEW),
-    ],
-    settings: None,
-};
-
-const FILES: Profile = Profile {
-    menus: &[
-        ("File", &[("New Window", "ctrl+n"), ("New Tab", "ctrl+t"), ("New Folder", "ctrl+shift+n"), SEP, ("Close", "ctrl+w")]),
-        ("Edit", &[("Undo", "ctrl+z"), ("Redo", "ctrl+shift+z"), SEP, ("Cut", "ctrl+x"), ("Copy", "ctrl+c"), ("Paste", "ctrl+v"), ("Select All", "ctrl+a"), SEP, ("Rename…", "F2"), ("Move to Trash", "Delete"), SEP, ("Find…", "ctrl+f")]),
-        ("View", &[("Show Hidden Files", "ctrl+h"), SEP, ("Zoom In", "ctrl+equal"), ("Zoom Out", "ctrl+minus"), ("Reset Zoom", "ctrl+0"), SEP, ("Reload", "F5")]),
-        ("Go", &[("Back", "alt+Left"), ("Forward", "alt+Right"), ("Enclosing Folder", "alt+Up"), ("Home", "alt+Home"), SEP, ("Go to Location…", "ctrl+l")]),
-    ],
-    settings: None,
-};
-
-const DOLPHIN: Profile = Profile {
-    menus: &[
-        ("File", &[("New Window", "ctrl+n"), ("New Tab", "ctrl+t"), ("New Folder", "F10"), SEP, ("Close Tab", "ctrl+w")]),
-        ("Edit", &[("Undo", "ctrl+z"), SEP, ("Cut", "ctrl+x"), ("Copy", "ctrl+c"), ("Paste", "ctrl+v"), ("Select All", "ctrl+a"), SEP, ("Rename…", "F2"), ("Move to Trash", "Delete"), SEP, ("Find…", "ctrl+f")]),
-        ("View", &[("Show Hidden Files", "ctrl+h"), ("Split View", "F3"), ("Terminal", "F4"), SEP, ("Zoom In", "ctrl+equal"), ("Zoom Out", "ctrl+minus"), SEP, ("Reload", "F5")]),
-        ("Go", &[("Back", "alt+Left"), ("Forward", "alt+Right"), ("Up", "alt+Up"), ("Home", "alt+Home"), SEP, ("Edit Location…", "ctrl+l")]),
-    ],
-    settings: Some("ctrl+shift+comma"),
-};
-
-const DIGIT_FILES: Profile = Profile {
-    menus: &[
-        ("File", &[("New Tab", "ctrl+t"), ("New Folder", "ctrl+shift+n"), ("Open", "ctrl+o"), SEP, ("Open in Terminal", "F4"), SEP, ("Close Tab", "ctrl+w")]),
-        ("Edit", &[("Undo", "ctrl+z"), SEP, ("Cut", "ctrl+x"), ("Copy", "ctrl+c"), ("Paste", "ctrl+v"), ("Copy Path", "ctrl+shift+c"), SEP, ("Rename…", "F2"), ("Move to Trash", "Delete"), SEP, ("Find…", "ctrl+f")]),
-        ("View", &[("Grid", "ctrl+1"), ("List", "ctrl+2"), SEP, ("Sidebar", "ctrl+b"), ("Info", "ctrl+i"), ("Split", "F3"), ("Hidden Files", "ctrl+h"), SEP, ("Zoom In", "ctrl+equal"), ("Zoom Out", "ctrl+minus"), SEP, ("Reload", "F5")]),
-        ("Go", &[("Back", "alt+Left"), ("Forward", "alt+Right"), ("Enclosing Folder", "alt+Up"), ("Home", "alt+Home"), SEP, ("Go to Location…", "ctrl+l"), ("Bookmark", "ctrl+d")]),
-    ],
-    settings: None,
-};
-
-const DISCORD: Profile = Profile {
-    menus: &[
-        ("Edit", &[("Undo", "ctrl+z"), ("Redo", "ctrl+shift+z"), SEP, ("Cut", "ctrl+x"), ("Copy", "ctrl+c"), ("Paste", "ctrl+v"), ("Select All", "ctrl+a")]),
-        ("Chat", &[("Quick Switcher…", "ctrl+k"), ("Search", "ctrl+f"), SEP, ("Mark Channel Read", "Escape"), ("Upload File…", "ctrl+shift+u"), SEP, ("Pinned Messages", "ctrl+p"), ("Inbox", "ctrl+i")]),
-        ("Voice", &[("Toggle Mute", "ctrl+shift+m"), ("Toggle Deafen", "ctrl+shift+d")]),
-        ("View", ZOOM),
-    ],
-    settings: Some("ctrl+comma"),
-};
-
-const CHAT: Profile = Profile {
-    menus: &[("Edit", EDIT), ("View", ZOOM)],
-    settings: Some("ctrl+comma"),
-};
-
-const OFFICE: Profile = Profile {
-    menus: &[
-        ("File", &[("New", "ctrl+n"), ("Open…", "ctrl+o"), SEP, ("Save", "ctrl+s"), ("Save As…", "ctrl+shift+s"), SEP, ("Print…", "ctrl+p"), SEP, ("Close", "ctrl+w")]),
-        ("Edit", &[("Undo", "ctrl+z"), ("Redo", "ctrl+y"), SEP, ("Cut", "ctrl+x"), ("Copy", "ctrl+c"), ("Paste", "ctrl+v"), ("Paste Special…", "ctrl+shift+v"), ("Select All", "ctrl+a"), SEP, ("Find & Replace…", "ctrl+h")]),
-        ("View", &[("Sidebar", "ctrl+F5"), ("Full Screen", "ctrl+shift+j")]),
-        ("Format", &[("Bold", "ctrl+b"), ("Italic", "ctrl+i"), ("Underline", "ctrl+u"), SEP, ("Align Left", "ctrl+l"), ("Center", "ctrl+e"), ("Align Right", "ctrl+r"), ("Justify", "ctrl+j"), SEP, ("Clear Formatting", "ctrl+m")]),
-    ],
-    settings: None,
-};
-
-const MPV: Profile = Profile {
-    menus: &[
-        ("Playback", &[("Play / Pause", "space"), SEP, ("Back 5 Seconds", "Left"), ("Forward 5 Seconds", "Right"), SEP, ("Volume Up", "0"), ("Volume Down", "9"), ("Mute", "m"), SEP, ("Screenshot", "s")]),
-        ("View", &[("Full Screen", "f"), ("Show Progress", "o"), ("Cycle Subtitles", "j")]),
-    ],
-    settings: None,
-};
-
-const VLC: Profile = Profile {
-    menus: &[
-        ("Media", &[("Open File…", "ctrl+o"), ("Open Folder…", "ctrl+f"), ("Open Network Stream…", "ctrl+n")]),
-        ("Playback", &[("Play / Pause", "space"), ("Stop", "s"), SEP, ("Jump Back", "alt+Left"), ("Jump Forward", "alt+Right"), SEP, ("Volume Up", "ctrl+Up"), ("Volume Down", "ctrl+Down"), ("Mute", "m")]),
-        ("View", &[("Full Screen", "f"), ("Playlist", "ctrl+l")]),
-    ],
-    settings: Some("ctrl+p"),
-};
-
-const SPOTIFY: Profile = Profile {
-    menus: &[
-        ("Playback", &[("Play / Pause", "space"), ("Next", "ctrl+Right"), ("Previous", "ctrl+Left"), SEP, ("Volume Up", "ctrl+Up"), ("Volume Down", "ctrl+Down"), SEP, ("Shuffle", "ctrl+s"), ("Repeat", "ctrl+r")]),
-        ("View", ZOOM),
-    ],
-    settings: None,
-};
-
-pub fn profile(app_id: &str) -> &'static Profile {
-    let id = app_id.to_ascii_lowercase();
-    let has = |keys: &[&str]| keys.iter().any(|k| id.contains(k));
-    if id.is_empty() || has(&["steam", "gamescope", "dev.digit.settings", "dev.digit.store", "dev.digit.snap", "dev.digit.rec"]) {
-        return &NONE;
-    }
-    if id == "dev.digit.files" {
-        return &DIGIT_FILES;
-    }
-    if id == "zen" || has(&["firefox", "librewolf", "zen-browser", "zen_browser", "floorp", "waterfox", "mullvad", "torbrowser", "tor-browser"]) {
-        return &FIREFOX;
-    }
-    if has(&["chrom", "brave", "vivaldi", "microsoft-edge", "helium", "thorium", "opera", "epiphany"]) {
-        return &CHROMIUM;
-    }
-    if has(&["jetbrains", "android-studio"]) {
-        return &JETBRAINS;
-    }
-    if has(&["zed"]) {
-        return &ZED;
-    }
-    if has(&["sublime"]) {
-        return &SUBLIME;
-    }
-    if id == "code" || has(&["code-oss", "code-url", "vscod", "codium", "cursor", "windsurf", "visualstudio", "positron"]) {
-        return &VSCODE;
-    }
-    if has(&["kitty"]) {
-        return &KITTY;
-    }
-    if has(&["ghostty"]) {
-        return &GHOSTTY;
-    }
-    if has(&["alacritty"]) {
-        return &ALACRITTY;
-    }
-    if id == "foot" || id == "footclient" {
-        return &FOOT;
-    }
-    if has(&["wezterm", "konsole", "gnome-terminal", "ptyxis", "org.gnome.console", "kgx", "tilix", "xfce4-terminal", "blackbox", "terminator", "terminal"]) {
-        return &TERMINAL;
-    }
-    if has(&["dolphin"]) {
-        return &DOLPHIN;
-    }
-    if has(&["nautilus", "nemo", "thunar", "caja", "pcmanfm", "spacefm", "files"]) {
-        return &FILES;
-    }
-    if has(&["discord", "vesktop", "legcord", "armcord", "webcord", "equibop"]) {
-        return &DISCORD;
-    }
-    if has(&["slack", "telegram", "signal", "element", "fractal", "whatsapp", "teams"]) {
-        return &CHAT;
-    }
-    if has(&["libreoffice", "soffice", "onlyoffice", "abiword", "calligra"]) {
-        return &OFFICE;
-    }
-    if id == "mpv" || has(&["io.mpv"]) {
-        return &MPV;
-    }
-    if has(&["vlc"]) {
-        return &VLC;
-    }
-    if has(&["spotify"]) {
-        return &SPOTIFY;
-    }
-    &GENERIC
-}
+pub use crate::menus::profile;
 
 pub fn titles(app_id: &str) -> Vec<&'static str> {
     profile(app_id).menus.iter().map(|(t, _)| *t).collect()
@@ -315,6 +35,26 @@ fn key_name(k: &str) -> String {
         "BackSpace" => "Backspace".into(),
         "space" => "Space".into(),
         "Shift_L" => "Shift".into(),
+        "plus" => "+".into(),
+        "period" => ".".into(),
+        "backslash" => "\\".into(),
+        "bracketleft" => "[".into(),
+        "bracketright" => "]".into(),
+        "parenleft" => "(".into(),
+        "parenright" => ")".into(),
+        "apostrophe" => "'".into(),
+        "quotedbl" => "\"".into(),
+        "percent" => "%".into(),
+        "asterisk" => "*".into(),
+        "asciicircum" => "^".into(),
+        "less" => "<".into(),
+        "greater" => ">".into(),
+        "numbersign" => "#".into(),
+        "question" => "?".into(),
+        "Page_Up" => "PgUp".into(),
+        "Page_Down" => "PgDn".into(),
+        "Insert" => "Ins".into(),
+        k if k.chars().count() == 1 && k.chars().all(|c| c.is_ascii_uppercase()) => format!("Shift+{k}"),
         k if k.chars().count() == 1 => k.to_uppercase(),
         k => k.into(),
     }

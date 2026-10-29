@@ -528,6 +528,10 @@ impl Notch {
                         crate::menubar::window_menu(&app, monitor, left, below);
                         false
                     }
+                    Zone::Date => {
+                        crate::datepop::show(&app, monitor, target.zone_end(zone).unwrap_or(left), below);
+                        false
+                    }
                     Zone::Tray(i) => {
                         match button {
                             3 => crate::sni::menu(&app, i as usize, monitor, left, below),
@@ -563,7 +567,7 @@ impl Notch {
                 }
                 let zone = hover.zone_at(x, y);
                 hover.hover(zone);
-                if menu_zone(zone) && hover.held().is_some() && hover.held() != zone && crate::popmenu::is_open() {
+                if menu_zone(zone) && hover.held().is_some() && hover.held() != zone && (crate::popmenu::is_open() || crate::datepop::is_open()) {
                     if let Some(z) = zone {
                         slide(z, 1);
                     }
@@ -578,7 +582,7 @@ impl Notch {
             let was = pressed.clone();
             let target = st.clone();
             click.connect_pressed(move |_, _, _, _| {
-                was.set(if crate::popmenu::is_open() { target.held() } else { None });
+                was.set(if crate::popmenu::is_open() || crate::datepop::is_open() { target.held() } else { None });
             });
             let weak = Rc::downgrade(&self.0);
             let target = st.clone();
@@ -590,16 +594,13 @@ impl Notch {
                 let button = g.current_button();
                 if zone.is_some() && zone == pressed.take() {
                     crate::popmenu::close();
+                    crate::datepop::close();
                     target.hold(None);
                     return;
                 }
                 match zone {
-                    Some(z) if menu_zone(Some(z)) || matches!(z, Zone::Tray(_)) => open_menu(z, button),
+                    Some(z) if menu_zone(Some(z)) || matches!(z, Zone::Tray(_) | Zone::Date) => open_menu(z, button),
                     Some(Zone::Status) => crate::control::toggle(&app),
-                    Some(Zone::Date) => {
-                        let open = notch.is_open();
-                        notch.set_open(!open);
-                    }
                     _ => {}
                 }
             });

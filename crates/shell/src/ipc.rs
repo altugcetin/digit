@@ -49,7 +49,7 @@ async fn focused_output() -> Option<String> {
     gio::spawn_blocking(kit::wm::focused_output).await.ok().flatten()
 }
 
-const HELP: &str = "open | close | toggle | tray | note <words> | dnd [on|off|toggle|status] | night [on|off|toggle|status] | awake [on|off|toggle|status] | volume [up|down|mute|<0-150>] | mic | brightness up|down | lock [preview] | session | control | spaces | clipboard | settings | launcher [text] | menu <logo|app|window|N|traymenu N> | dock show|hide|toggle | layout <name> | wallpaper <image> | demo <peek> | status | key <action>";
+const HELP: &str = "open | close | toggle | tray | note <words> | dnd [on|off|toggle|status] | night [on|off|toggle|status] | awake [on|off|toggle|status] | volume [up|down|mute|<0-150>] | mic | brightness up|down | lock [preview] | session | control | spaces | clipboard | settings | launcher [text] | menu <logo|app|window|date|N|traymenu N> | dock show|hide|toggle | layout <name> | wallpaper <image> | demo <peek> | status | key <action>";
 
 async fn handle(app: &Rc<App>, words: &[String]) -> String {
     let verb = words.first().map(String::as_str).unwrap_or("");
@@ -99,9 +99,11 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
             let zone = match words.get(1).map(String::as_str).unwrap_or("") {
                 "close" => {
                     crate::popmenu::close();
+                    crate::datepop::close();
                     return "ok".into();
                 }
                 "logo" => Zone::Logo,
+                "date" | "calendar" => Zone::Date,
                 "app" => Zone::App,
                 "window" => Zone::Win,
                 n if n.starts_with("traymenu") => match n[8..].parse::<u8>() {
@@ -110,7 +112,7 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
                 },
                 n => match n.parse::<u8>() {
                     Ok(i) => Zone::Menu(i),
-                    Err(_) => return "menu logo | app | window | <index> | traymenu<index> | close".into(),
+                    Err(_) => return "menu logo | app | window | date | <index> | traymenu<index> | close".into(),
                 },
             };
             let button = if matches!(zone, Zone::Tray(_)) { 3 } else { 1 };
