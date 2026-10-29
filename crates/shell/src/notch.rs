@@ -174,7 +174,7 @@ struct View {
     was: Vec<char>,
     roll: Vec<Option<i64>>,
     region: (i32, i32, i32, i32),
-    effect: Option<blur::Effect>,
+    effect: Option<(blur::Effect, wayland_client::backend::ObjectId)>,
     pal: std::cell::Cell<kit::palette::Palette>,
     frost: Vec<(i32, i32, i32, i32)>,
     ticking: bool,
@@ -581,6 +581,16 @@ impl Notch {
                 Notch(v).kick();
             }
         });
+        let weak = Rc::downgrade(&self.0);
+        self.0.borrow().window.connect_unmap(move |_| {
+            let Some(v) = weak.upgrade() else { return };
+            let Ok(mut v) = v.try_borrow_mut() else { return };
+            let app = v.app.clone();
+            if let (Some((effect, _)), Some(blur)) = (v.effect.take(), app.blur.as_ref()) {
+                blur.detach(effect);
+            }
+            v.frost.clear();
+        });
     }
 
     pub fn output(&self) -> String {
@@ -601,6 +611,10 @@ impl Notch {
         }
         if let Some(corner) = self.0.borrow_mut().corner.take() {
             corner.destroy();
+        }
+        let effect = self.0.borrow_mut().effect.take();
+        if let (Some((effect, _)), Some(blur)) = (effect, app.blur.as_ref()) {
+            blur.detach(effect);
         }
         window.destroy();
     }
@@ -1827,11 +1841,18 @@ impl View {
             return;
         }
         let Some(blur) = self.app.blur.as_ref() else { return };
+        let Some(surface) = self.window.surface() else { return };
+        let Some(current) = blur::Blur::surface_id(&surface) else { return };
+        if self.effect.as_ref().is_some_and(|(_, id)| *id != current) {
+            if let Some((old, _)) = self.effect.take() {
+                blur.detach(old);
+            }
+            self.frost.clear();
+        }
         if self.effect.is_none() {
-            let Some(surface) = self.window.surface() else { return };
             self.effect = blur.attach(&surface);
         }
-        let Some(effect) = self.effect.as_ref() else { return };
+        let Some((effect, _)) = self.effect.as_ref() else { return };
         let depth = self.header() + self.depth.value(now).max(0.0);
         let f = self.float.value(now).clamp(0.0, 1.0);
         let off = self.off();
