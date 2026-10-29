@@ -165,6 +165,7 @@ struct State {
     region: (i32, i32, i32, i32),
     ticking: bool,
     polling: bool,
+    scrim: Option<gtk::Window>,
     power: Option<Power>,
     stats: Option<crate::sysmon::Stats>,
     sampler: crate::sysmon::Sampler,
@@ -173,6 +174,48 @@ struct State {
 
 #[derive(Clone)]
 pub struct Control(Rc<RefCell<State>>);
+
+pub fn show_on(app: &Rc<App>, output: Option<String>) {
+    let existing = app.control.borrow().clone();
+    let control = existing.unwrap_or_else(|| {
+        let c = Control::new(app);
+        *app.control.borrow_mut() = Some(c.clone());
+        c
+    });
+    if !control.0.borrow().open {
+        control.open_on(output);
+    }
+}
+
+pub fn corner(app: &Rc<App>, monitor: &gdk::Monitor) -> gtk::Window {
+    let window = gtk::Window::new();
+    window.init_layer_shell();
+    window.set_layer(Layer::Overlay);
+    window.set_namespace(Some("digit-corner"));
+    window.set_anchor(Edge::Bottom, true);
+    window.set_anchor(Edge::Right, true);
+    window.set_exclusive_zone(-1);
+    window.set_keyboard_mode(KeyboardMode::None);
+    window.set_monitor(Some(monitor));
+    window.add_css_class("digit");
+    window.set_default_size(2, 2);
+    let paint = crate::paint::Paint::new(2, 2);
+    paint.present();
+    window.set_child(Some(&paint));
+    let motion = gtk::EventControllerMotion::new();
+    let weak = Rc::downgrade(app);
+    let output = monitor.connector().map(|c| c.to_string());
+    motion.connect_enter(move |_, _, _| {
+        if let Some(app) = weak.upgrade() {
+            if app.prefs.borrow().control_corner {
+                show_on(&app, output.clone());
+            }
+        }
+    });
+    paint.add_controller(motion);
+    window.present();
+    window
+}
 
 pub fn toggle(app: &Rc<App>) {
     let existing = app.control.borrow().clone();
@@ -293,6 +336,7 @@ impl Control {
             region: (0, 0, 0, 0),
             ticking: false,
             polling: false,
+            scrim: None,
             power: None,
             stats: None,
             sampler: crate::sysmon::Sampler::default(),
@@ -312,7 +356,7 @@ impl Control {
         let keys = gtk::EventControllerKey::new();
         let weak = Rc::downgrade(&self.0);
         keys.connect_key_pressed(move |_, key, _, _| {
-            if key == gdk::Key::Escape {
+            if matches!(key, gdk::Key::Escape | gdk::Key::space) {
                 if let Some(s) = weak.upgrade() {
                     Control(s).close();
                 }
@@ -423,7 +467,10 @@ impl Control {
     }
 
     fn open(&self) {
-        let output = compositor::focused_output();
+        self.open_on(compositor::focused_output());
+    }
+
+    fn open_on(&self, output: Option<String>) {
         {
             let mut s = self.0.borrow_mut();
             let display = gdk::Display::default();
@@ -442,7 +489,34 @@ impl Control {
             let now = glib::monotonic_time();
             s.rise.go(1.0, now, 460, motion::DEFAULT_SPATIAL);
             s.fade.after(1.0, now, 120, 220, motion::STANDARD);
-            s.window.set_keyboard_mode(KeyboardMode::OnDemand);
+            s.window.set_keyboard_mode(KeyboardMode::Exclusive);
+            if s.scrim.is_none() {
+                let scrim = gtk::Window::new();
+                scrim.init_layer_shell();
+                scrim.set_layer(Layer::Top);
+                scrim.set_namespace(Some("digit-scrim"));
+                for e in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+                    scrim.set_anchor(e, true);
+                }
+                scrim.set_exclusive_zone(-1);
+                scrim.set_keyboard_mode(KeyboardMode::None);
+                scrim.set_monitor(monitor.as_ref());
+                scrim.add_css_class("digit");
+                let paint = crate::paint::Paint::new(-1, -1);
+                paint.present();
+                let click = gtk::GestureClick::new();
+                click.set_button(0);
+                let weak = Rc::downgrade(&self.0);
+                click.connect_pressed(move |_, _, _, _| {
+                    if let Some(s) = weak.upgrade() {
+                        glib::idle_add_local_once(move || Control(s).close());
+                    }
+                });
+                paint.add_controller(click);
+                scrim.set_child(Some(&paint));
+                scrim.present();
+                s.scrim = Some(scrim);
+            }
         }
         self.resize();
         let window = self.0.borrow().window.clone();
@@ -522,6 +596,9 @@ impl Control {
             s.rise.go(0.0, now, 240, motion::Curve::new(0.3, 0.0, 0.8, 0.15));
             s.fade.go(0.0, now, 100, motion::FAST_EFFECTS);
             s.window.set_keyboard_mode(KeyboardMode::None);
+            if let Some(scrim) = s.scrim.take() {
+                scrim.destroy();
+            }
         }
         self.kick();
     }

@@ -194,6 +194,7 @@ struct View {
     spot: Tween,
     spots: usize,
     corner: Option<gtk::Window>,
+    control_corner: Option<gtk::Window>,
     tab: Tab,
     day: i32,
     tab_fade: Tween,
@@ -295,7 +296,8 @@ impl Notch {
             hush: Tween::still(1.0),
             spot: Tween::still(0.0),
             spots: 0,
-            corner: Some(crate::spaces::corner(app, monitor)),
+            corner: None,
+            control_corner: None,
             tab: Tab::Nook,
             day: 0,
             tab_fade: Tween::still(1.0),
@@ -316,6 +318,11 @@ impl Notch {
         let notch = Notch(view);
         notch.wire();
         window.present();
+        {
+            let mut v = notch.0.borrow_mut();
+            v.corner = Some(crate::spaces::corner(app, monitor));
+            v.control_corner = Some(crate::control::corner(app, monitor));
+        }
         notch.refresh();
         notch
     }
@@ -358,6 +365,11 @@ impl Notch {
         canvas.add_controller(scroll);
         let target = gtk::DropTarget::new(glib::Type::INVALID, gdk::DragAction::COPY);
         target.set_types(&[gdk::FileList::static_type(), gdk::Texture::static_type(), String::static_type()]);
+        let host: gtk::Widget = self.0.borrow().window.child().unwrap_or_else(|| canvas.clone().upcast());
+        let to_canvas = {
+            let (host, canvas) = (host.clone(), canvas.clone());
+            move |x: f64, y: f64| host.compute_point(&canvas, &graphene::Point::new(x as f32, y as f32)).map(|p| (p.x() as f64, p.y() as f64)).unwrap_or((x, y))
+        };
         let weak = Rc::downgrade(&self.0);
         target.connect_enter(move |_, _, _| {
             if let Some(v) = weak.upgrade() {
@@ -366,8 +378,10 @@ impl Notch {
             gdk::DragAction::COPY
         });
         let weak = Rc::downgrade(&self.0);
+        let map = to_canvas.clone();
         target.connect_motion(move |_, x, y| {
             if let Some(v) = weak.upgrade() {
+                let (x, y) = map(x, y);
                 let y = lifted(&v, y);
                 Notch(v).drag_motion(x, y);
             }
@@ -380,8 +394,10 @@ impl Notch {
             }
         });
         let weak = Rc::downgrade(&self.0);
+        let map = to_canvas.clone();
         target.connect_drop(move |_, value, x, y| {
             let Some(v) = weak.upgrade() else { return false };
+            let (x, y) = map(x, y);
             let paths: Vec<std::path::PathBuf> = if let Ok(list) = value.get::<gdk::FileList>() {
                 list.files().iter().filter_map(|f| f.path()).collect()
             } else if let Ok(texture) = value.get::<gdk::Texture>() {
@@ -394,7 +410,7 @@ impl Notch {
             let y = lifted(&v, y);
             Notch(v).dropped(paths, x, y)
         });
-        canvas.add_controller(target);
+        host.add_controller(target);
         let source = gtk::DragSource::new();
         source.set_actions(gdk::DragAction::COPY);
         let weak = Rc::downgrade(&self.0);
@@ -530,7 +546,20 @@ impl Notch {
             let motion = gtk::EventControllerMotion::new();
             let hover = st.clone();
             let slide = open_menu.clone();
+            let cornered = Rc::new(Cell::new(false));
+            let weak = Rc::downgrade(&self.0);
             motion.connect_motion(move |_, x, y| {
+                let edge = x <= 1.5 && y <= 1.5 && hover.width() as f64 >= hover.root().map(|r| r.width() as f64).unwrap_or(0.0) - 1.0;
+                if edge && !cornered.replace(true) {
+                    if let Some(v) = weak.upgrade() {
+                        let (app, output) = { let v = v.borrow(); (v.app.clone(), v.output.clone()) };
+                        if app.prefs.borrow().hot_corner {
+                            crate::spaces::toggle(&app, Some(output));
+                        }
+                    }
+                } else if !edge {
+                    cornered.set(false);
+                }
                 let zone = hover.zone_at(x, y);
                 hover.hover(zone);
                 if menu_zone(zone) && hover.held().is_some() && hover.held() != zone && crate::popmenu::is_open() {
@@ -611,6 +640,9 @@ impl Notch {
         }
         if let Some(corner) = self.0.borrow_mut().corner.take() {
             corner.destroy();
+        }
+        if let Some(c) = self.0.borrow_mut().control_corner.take() {
+            c.destroy();
         }
         let effect = self.0.borrow_mut().effect.take();
         if let (Some((effect, _)), Some(blur)) = (effect, app.blur.as_ref()) {
@@ -912,6 +944,7 @@ impl Notch {
         }
         let app = self.0.borrow().app.clone();
         crate::share::scan(&app);
+        self.kick();
     }
 
     fn drag_motion(&self, x: f64, y: f64) {
@@ -934,6 +967,7 @@ impl Notch {
             v.landing = None;
             v.canvas.queue_draw();
         }
+        self.kick();
         let weak = Rc::downgrade(&self.0);
         glib::timeout_add_local_once(Duration::from_millis(500), move || {
             if let Some(v) = weak.upgrade() {
@@ -1803,7 +1837,10 @@ impl View {
         let lift = Self::lift_at(self.float.value(now).max(self.float.target()), self.menu.value(now).max(self.menu.target()) * (1.0 - self.widen.target()));
         let band = self.band(now).max(self.header() + 2.0 * lift * self.menu.target() * (1.0 - self.widen.target())).ceil() as i32;
         let h = self.header() + lift + self.depth.value(now).max(self.depth.target());
-        let rect = ((CX - w / 2.0).floor() as i32 + self.off(), 0, w.ceil() as i32, h.ceil() as i32);
+        let mut rect = ((CX - w / 2.0).floor() as i32 + self.off(), 0, w.ceil() as i32, h.ceil() as i32);
+        if self.dropping {
+            rect = (0, 0, self.span.max(WIDTH as i32), (self.header() + ROOM) as i32);
+        }
         if rect == self.region {
             return;
         }

@@ -173,6 +173,10 @@ fn finish(app: &gtk::Application, shot: capture::Shot, r: windows::Rect) {
 }
 
 fn main() -> glib::ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("--register") {
+        install();
+        return glib::ExitCode::SUCCESS;
+    }
     kit::app::lean("DIGIT_SNAP_RENDERER");
     let app = gtk::Application::new(Some(APP_ID), gio::ApplicationFlags::HANDLES_COMMAND_LINE);
     app.connect_startup(|_| {

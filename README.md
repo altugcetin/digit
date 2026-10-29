@@ -30,6 +30,8 @@ The installer:
 3. installs build and runtime packages with your package manager (it asks first),
 4. builds digit and installs the programs to `~/.local/bin`,
 5. installs the fonts (Readex Pro, Rubik, Material Symbols Rounded) to `~/.local/share/fonts/digit`,
+   adds Settings, Store, Files, Screenshot and Recorder to your app list and sets up Flathub
+   for Digit Store,
 6. adds digit's shortcuts and autostart to your compositor config, with backups
    (`*.bak-<date>`) and, for niri, validation before anything is changed.
 

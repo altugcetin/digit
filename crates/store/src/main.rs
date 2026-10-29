@@ -533,9 +533,27 @@ fn build(app: &gtk::Application) -> Rc<Store> {
 }
 
 fn load(store: &Rc<Store>) {
+    load_with(store, true);
+}
+
+async fn set_up_flathub() {
+    let add: Vec<String> = ["remote-add", "--user", "--if-not-exists", "flathub", "https://dl.flathub.org/repo/flathub.flatpakrepo"].iter().map(|s| s.to_string()).collect();
+    let _ = flatpak::command(&add).await;
+    let fetch: Vec<String> = ["update", "--user", "--appstream", "--noninteractive", "flathub"].iter().map(|s| s.to_string()).collect();
+    let _ = flatpak::command(&fetch).await;
+}
+
+fn load_with(store: &Rc<Store>, retry: bool) {
     let me = store.clone();
     glib::spawn_future_local(async move {
         let (catalog, installed, updates) = futures(&me).await;
+        if catalog.is_none() && retry && glib::find_program_in_path("flatpak").is_some() {
+            me.note("Setting up Flathub for the first time…", false);
+            set_up_flathub().await;
+            me.note("", false);
+            load_with(&me, false);
+            return;
+        }
         match catalog {
             Some(c) => {
                 *me.catalog.borrow_mut() = Some(Rc::new(c));
@@ -546,7 +564,8 @@ fn load(store: &Rc<Store>) {
                 *me.current.borrow_mut() = Page::Loading;
                 me.open(page);
             }
-            None => me.open(Page::Problem("Flathub's app catalogue isn't on this computer yet. Run “flatpak update --appstream” once, then open the store again.".into())),
+            None if glib::find_program_in_path("flatpak").is_none() => me.open(Page::Problem("Digit Store gets apps from Flathub and needs Flatpak. Install the “flatpak” package with your package manager, then open the store again.".into())),
+            None => me.open(Page::Problem("Flathub's app catalogue could not be downloaded. Check your internet connection, run “flatpak update --appstream” once, then open the store again.".into())),
         }
         glib::timeout_add_local_once(std::time::Duration::from_secs(2), || unsafe {
             libc::malloc_trim(0);
@@ -616,6 +635,10 @@ fn collections(store: &Rc<Store>) {
 }
 
 fn main() -> glib::ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("--register") {
+        install_files();
+        return glib::ExitCode::SUCCESS;
+    }
     let renderer = std::env::var("DIGIT_STORE_RENDERER").ok().filter(|r| matches!(r.as_str(), "cairo" | "gl" | "ngl" | "vulkan")).unwrap_or_else(|| "cairo".into());
     unsafe {
         std::env::set_var("GSK_RENDERER", renderer);
