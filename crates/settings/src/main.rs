@@ -332,6 +332,10 @@ fn present(app: &gtk::Application, page: Option<&str>) {
 }
 
 fn main() -> glib::ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("--register") {
+        install();
+        return glib::ExitCode::SUCCESS;
+    }
     let renderer = std::env::var("DIGIT_SETTINGS_RENDERER").ok().filter(|r| matches!(r.as_str(), "cairo" | "gl" | "ngl" | "vulkan")).unwrap_or_else(|| "cairo".into());
     unsafe {
         std::env::set_var("GSK_RENDERER", renderer);

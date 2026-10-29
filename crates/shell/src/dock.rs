@@ -234,7 +234,29 @@ fn trigger(app: &Rc<App>, monitor: &gdk::Monitor, side: Side) -> gtk::Window {
     let output = monitor.connector().map(|c| c.to_string()).unwrap_or_default();
     let weak = Rc::downgrade(app);
     let flag = inside.clone();
-    motion.connect_enter(move |_, _, _| {
+    let probe = w.clone();
+    let corner_app = weak.clone();
+    let corner_out = output.clone();
+    let check = move |x: f64| {
+        let far = probe.width() as f64 - 3.0;
+        if side == Side::Bottom && x >= far {
+            if let Some(app) = corner_app.upgrade() {
+                if app.prefs.borrow().control_corner {
+                    crate::control::show_on(&app, Some(corner_out.clone()));
+                    return true;
+                }
+            }
+        }
+        false
+    };
+    let near = check.clone();
+    motion.connect_motion(move |_, x, _| {
+        near(x);
+    });
+    motion.connect_enter(move |_, x, _| {
+        if check(x) {
+            return;
+        }
         let generation = flag.get() + 1;
         flag.set(generation);
         let (weak, flag, output) = (weak.clone(), flag.clone(), output.clone());

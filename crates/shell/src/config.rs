@@ -62,6 +62,7 @@ pub struct Config {
     pub screen_corners: f64,
     pub tray: bool,
     pub mic_guard: bool,
+    pub control_corner: bool,
 }
 
 impl Default for Config {
@@ -117,6 +118,7 @@ impl Default for Config {
             screen_corners: 0.0,
             tray: true,
             mic_guard: true,
+            control_corner: true,
         }
     }
 }
@@ -160,6 +162,7 @@ pub struct Prefs {
     pub screen_corners: f64,
     pub tray: bool,
     pub mic_guard: bool,
+    pub control_corner: bool,
 }
 
 impl From<&Config> for Prefs {
@@ -200,6 +203,7 @@ impl From<&Config> for Prefs {
             screen_corners: c.screen_corners,
             tray: c.tray,
             mic_guard: c.mic_guard,
+            control_corner: c.control_corner,
         }
     }
 }

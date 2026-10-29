@@ -203,13 +203,13 @@ deps() {
     case $FAMILY in
         suse)
             build=(gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel wayland-devel)
-            run_pkgs=(wtype curl upower polkit) ;;
+            run_pkgs=(wtype curl upower polkit flatpak) ;;
         fedora)
             build=(gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel wayland-devel)
-            run_pkgs=(wtype curl upower polkit) ;;
+            run_pkgs=(wtype curl upower polkit flatpak) ;;
         arch)
             build=(base-devel pkgconf gtk4 gtk4-layer-shell wayland)
-            run_pkgs=(wtype curl upower polkit) ;;
+            run_pkgs=(wtype curl upower polkit flatpak) ;;
     esac
     bold "System packages"
     info "${build[*]} ${run_pkgs[*]}"
@@ -273,6 +273,18 @@ build() {
     for a in "${APPS[@]}"; do
         run install -m 755 "$ROOT/target/release/$a" "$BIN/$a"
     done
+    for a in digit-settings digit-store digit-files digit-snap digit-rec; do
+        run "$BIN/$a" --register >/dev/null 2>&1 || true
+    done
+}
+
+flathub() {
+    command -v flatpak >/dev/null 2>&1 || { warn "Flatpak is missing, so Digit Store cannot install apps yet."; return 0; }
+    if flatpak remotes --columns=name 2>/dev/null | grep -qx flathub; then
+        return 0
+    fi
+    bold "Flathub for Digit Store"
+    run flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo || warn "Could not add Flathub; Digit Store will try again when it opens."
 }
 
 fetch() {
@@ -402,6 +414,9 @@ uninstall() {
     done
     local f="$DATA/dbus-1/services/org.freedesktop.Notifications.service"
     grep -qs "$BIN/digit" "$f" && run rm -f "$f"
+    for f in Settings Store Files Snap Rec; do
+        run rm -f "$DATA/applications/dev.digit.$f.desktop" "$DATA/icons/hicolor/scalable/apps/dev.digit.$f.svg"
+    done
     if [ -f "$CONF/niri/config.kdl" ]; then
         run sed -i '/include optional=true "digit.kdl"/d' "$CONF/niri/config.kdl"
         run rm -f "$CONF/niri/digit.kdl"
@@ -432,6 +447,7 @@ main() {
     rust
     libs
     build
+    flathub
     fonts
     hook
     notifications

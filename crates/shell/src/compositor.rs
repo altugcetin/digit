@@ -410,11 +410,28 @@ pub fn watch(app: &std::rc::Rc<crate::app::App>) {
         kit::wm::Wm::Other => return,
     }
     let weak = std::rc::Rc::downgrade(app);
+    let quiet = std::rc::Rc::new(std::cell::Cell::new(0u64));
     gtk::glib::spawn_future_local(async move {
         while let Ok(feed) = rx.recv().await {
             let Some(app) = weak.upgrade() else { break };
             match feed {
-                Feed::Casts(n) => app.set_lights(|l| l.screen = n),
+                Feed::Casts(n) if n > 0 => {
+                    quiet.set(quiet.get() + 1);
+                    app.set_lights(|l| l.screen = n);
+                }
+                Feed::Casts(_) => {
+                    let generation = quiet.get() + 1;
+                    quiet.set(generation);
+                    let (later, quiet) = (std::rc::Rc::downgrade(&app), quiet.clone());
+                    gtk::glib::timeout_add_local_once(Duration::from_secs(3), move || {
+                        if quiet.get() != generation {
+                            return;
+                        }
+                        if let Some(app) = later.upgrade() {
+                            app.set_lights(|l| l.screen = 0);
+                        }
+                    });
+                }
                 Feed::Spaces(spaces) => app.set_spaces(spaces),
                 Feed::Windows(list) => app.set_running(list),
                 Feed::Opened(w) => crate::free::opened(&app, w),
