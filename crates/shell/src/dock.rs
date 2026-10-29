@@ -122,6 +122,8 @@ struct State {
     art: HashMap<String, gdk::Texture>,
     items: Vec<Item>,
     pins: Vec<String>,
+    /// Order of the running, unpinned apps after the user rearranged them.
+    order: Vec<String>,
     icons: HashMap<String, Option<gdk::Paintable>>,
     slide: HashMap<String, Tween>,
     appear: HashMap<String, Tween>,
@@ -510,6 +512,7 @@ fn build(app: &Rc<App>, geo: Geo, monitor: Option<&gdk::Monitor>, output: String
         menu: false,
         ticking: false,
         region: None,
+        order: Vec::new(),
         reserved: -1,
         triggers: Vec::new(),
         edge: None,
@@ -644,6 +647,8 @@ fn rebuild(st: &Shared) {
             None => {}
         }
     }
+    let pinned = items.iter().filter(|i| i.pinned).count();
+    items[pinned..].sort_by_key(|it| s.order.iter().position(|k| *k == it.key).unwrap_or(usize::MAX));
     for it in items.iter_mut() {
         it.badge = badges.get(&it.name).copied().unwrap_or(0);
     }
@@ -863,23 +868,31 @@ fn drag_to(st: &Shared, x: f64, y: f64) {
         }
         let key = s.drag.as_ref().map(|d| d.key.clone()).unwrap_or_default();
         let now = glib::monotonic_time();
-        let pinned = s.items.iter().filter(|i| i.pinned).count();
         let target = s.index_at(p.0, now).or_else(|| {
             let l = s.layout(now);
             let first = l.first().map_or(0.0, |f| f.0);
             Some(if p.0 < first { 0 } else { l.len().saturating_sub(1) })
         });
-        let from = s.pins.iter().position(|k| *k == key);
-        match (target, from) {
-            (Some(t), Some(f)) if t != f && t < pinned => {
-                let k = s.pins.remove(f);
-                let at = t.min(s.pins.len());
-                s.pins.insert(at, k);
-                true
-            }
-            (Some(t), None) if t < pinned => {
-                let at = t.min(s.pins.len());
-                s.pins.insert(at, key);
+        let mut order: Vec<String> = s.items.iter().map(|i| i.key.clone()).collect();
+        match (target, order.iter().position(|k| *k == key)) {
+            (Some(t), Some(c)) if t != c => {
+                let k = order.remove(c);
+                let t = t.min(order.len());
+                order.insert(t, k);
+                // Landing among the other pinned apps pins it, among the unpinned ones unpins it, and on the border keeps it as it was.
+                let others = s.items.iter().filter(|i| i.pinned && i.key != key).count();
+                let item = s.items.iter().find(|i| i.key == key);
+                let was = item.is_some_and(|i| i.pinned);
+                let pin = match t.cmp(&others) {
+                    std::cmp::Ordering::Less => true,
+                    std::cmp::Ordering::Greater => was && item.is_some_and(|i| i.windows.is_empty()),
+                    std::cmp::Ordering::Equal => was,
+                };
+                let pinned = |k: &String| if *k == key { pin } else { s.items.iter().any(|i| i.key == *k && i.pinned) };
+                let stale: Vec<String> = s.pins.iter().filter(|k| !order.contains(k)).cloned().collect();
+                let pins: Vec<String> = order.iter().filter(|k| pinned(k)).cloned().chain(stale).collect();
+                s.order = order.iter().filter(|k| !pinned(k)).cloned().collect();
+                s.pins = pins;
                 true
             }
             _ => false,
