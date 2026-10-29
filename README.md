@@ -83,6 +83,10 @@ See [docs/security.md](docs/security.md).
 If the lock screen ever fails while locked, switch to another TTY (Ctrl+Alt+F2), log in
 and run `WAYLAND_DISPLAY=wayland-1 swaylock`; it takes over the lock so you can unlock.
 
+## License
+
+[MIT License](LICENSE). Fonts and crates keep their own licenses.
+
 ---
 
 ## Türkçe hızlı kurulum
