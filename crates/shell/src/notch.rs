@@ -363,7 +363,8 @@ impl Notch {
             }
         });
         canvas.add_controller(scroll);
-        let target = gtk::DropTarget::new(glib::Type::INVALID, gdk::DragAction::COPY);
+        // Hyprland offers MOVE as the only action before any negotiation; files are still only read.
+        let target = gtk::DropTarget::new(glib::Type::INVALID, gdk::DragAction::COPY | gdk::DragAction::MOVE);
         target.set_types(&[gdk::FileList::static_type(), gdk::Texture::static_type(), String::static_type()]);
         let host: gtk::Widget = self.0.borrow().window.child().unwrap_or_else(|| canvas.clone().upcast());
         let to_canvas = {

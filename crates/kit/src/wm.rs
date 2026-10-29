@@ -2,6 +2,7 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -88,6 +89,20 @@ pub fn hypr_dir() -> Option<PathBuf> {
 
 pub fn hypr(command: &str) -> Option<String> {
     exchange(hypr_dir()?.join(".socket.sock"), command, Duration::from_millis(800))
+}
+
+static HYPR_LUA: AtomicBool = AtomicBool::new(false);
+
+/// Hyprland with a Lua config reads `dispatch X` as `hl.dispatch(X)`, so each command carries both spellings.
+fn hypr_dispatch(legacy: &str, lua: &str) -> bool {
+    let ok = |r: Option<String>| r.is_some_and(|r| r.trim() == "ok");
+    if !HYPR_LUA.load(Ordering::Relaxed) {
+        match hypr(&format!("dispatch {legacy}")) {
+            Some(r) if r.contains("hl.dispatch") => HYPR_LUA.store(true, Ordering::Relaxed),
+            r => return ok(r),
+        }
+    }
+    ok(hypr(&format!("dispatch {lua}")))
 }
 
 fn hypr_json(command: &str) -> Option<Value> {
@@ -325,7 +340,7 @@ pub fn focused_window() -> Option<Win> {
 pub fn focus(id: u64) -> bool {
     match which() {
         Wm::Niri => niri(json!({ "Action": { "FocusWindow": { "id": id } } })).is_some(),
-        Wm::Hyprland => hypr(&format!("dispatch focuswindow address:0x{id:x}")).is_some_and(|r| r.trim() == "ok"),
+        Wm::Hyprland => hypr_dispatch(&format!("focuswindow address:0x{id:x}"), &format!("hl.dsp.focus({{ window = \"address:0x{id:x}\" }})")),
         Wm::Mango => mango(&format!("dispatch focus_by_id client,{id}")).is_some_and(|r| r.get("success").is_some()),
         Wm::Other => false,
     }
@@ -334,7 +349,7 @@ pub fn focus(id: u64) -> bool {
 pub fn close(id: u64) -> bool {
     match which() {
         Wm::Niri => niri(json!({ "Action": { "CloseWindow": { "id": id } } })).is_some(),
-        Wm::Hyprland => hypr(&format!("dispatch closewindow address:0x{id:x}")).is_some_and(|r| r.trim() == "ok"),
+        Wm::Hyprland => hypr_dispatch(&format!("closewindow address:0x{id:x}"), &format!("hl.dsp.window.close({{ window = \"address:0x{id:x}\" }})")),
         Wm::Mango => mango(&format!("dispatch killclient client,{id}")).is_some_and(|r| r.get("success").is_some()),
         Wm::Other => false,
     }
@@ -343,7 +358,7 @@ pub fn close(id: u64) -> bool {
 pub fn focus_space(id: u64) -> bool {
     match which() {
         Wm::Niri => niri(json!({ "Action": { "FocusWorkspace": { "reference": { "Id": id } } } })).is_some(),
-        Wm::Hyprland => hypr(&format!("dispatch workspace {id}")).is_some_and(|r| r.trim() == "ok"),
+        Wm::Hyprland => hypr_dispatch(&format!("workspace {id}"), &format!("hl.dsp.focus({{ workspace = {id} }})")),
         Wm::Mango => {
             let (monitor, tag) = ((id / 1000).saturating_sub(1) as usize, id % 1000);
             if let Some(o) = outputs().get(monitor).filter(|o| !o.focused) {
@@ -367,7 +382,10 @@ pub fn minimize(app_id: &str) -> bool {
                 _ => false,
             }
         }
-        Wm::Hyprland => hypr(&format!("dispatch movetoworkspacesilent special:minimized,address:0x{:x}", me.id)).is_some_and(|r| r.trim() == "ok"),
+        Wm::Hyprland => hypr_dispatch(
+            &format!("movetoworkspacesilent special:minimized,address:0x{:x}", me.id),
+            &format!("hl.dsp.window.move({{ workspace = \"special:minimized\", follow = false, window = \"address:0x{:x}\" }})", me.id),
+        ),
         Wm::Mango => mango(&format!("dispatch minimized client,{}", me.id)).is_some_and(|r| r.get("success").is_some()),
         Wm::Other => false,
     }
@@ -408,15 +426,15 @@ pub fn window_act(id: u64, act: WinAct) -> bool {
         }
         Wm::Hyprland => {
             let addr = format!("address:0x{id:x}");
-            let _ = hypr(&format!("dispatch focuswindow {addr}"));
-            let cmd = match act {
-                WinAct::Fullscreen => "dispatch fullscreen 0".to_string(),
-                WinAct::Maximize => "dispatch fullscreen 1".to_string(),
-                WinAct::Float => format!("dispatch togglefloating {addr}"),
-                WinAct::Center => "dispatch centerwindow".to_string(),
-                WinAct::NextOutput => "dispatch movewindow mon:+1".to_string(),
+            let _ = hypr_dispatch(&format!("focuswindow {addr}"), &format!("hl.dsp.focus({{ window = \"{addr}\" }})"));
+            let (legacy, lua) = match act {
+                WinAct::Fullscreen => ("fullscreen 0".to_string(), format!("hl.dsp.window.fullscreen({{ mode = \"fullscreen\", window = \"{addr}\" }})")),
+                WinAct::Maximize => ("fullscreen 1".to_string(), format!("hl.dsp.window.fullscreen({{ mode = \"maximized\", window = \"{addr}\" }})")),
+                WinAct::Float => (format!("togglefloating {addr}"), format!("hl.dsp.window.float({{ window = \"{addr}\" }})")),
+                WinAct::Center => ("centerwindow".to_string(), format!("hl.dsp.window.center({{ window = \"{addr}\" }})")),
+                WinAct::NextOutput => ("movewindow mon:+1".to_string(), format!("hl.dsp.window.move({{ monitor = \"+1\", window = \"{addr}\" }})")),
             };
-            hypr(&cmd).is_some_and(|r| r.trim() == "ok")
+            hypr_dispatch(&legacy, &lua)
         }
         Wm::Mango => {
             let f = match act {
@@ -435,7 +453,7 @@ pub fn window_act(id: u64, act: WinAct) -> bool {
 pub fn quit() -> bool {
     match which() {
         Wm::Niri => niri(json!({ "Action": { "Quit": { "skip_confirmation": true } } })).is_some(),
-        Wm::Hyprland => hypr("dispatch exit").is_some(),
+        Wm::Hyprland => hypr_dispatch("exit", "hl.dsp.exit()"),
         Wm::Mango => mango("dispatch quit").is_some(),
         Wm::Other => false,
     }
@@ -444,7 +462,7 @@ pub fn quit() -> bool {
 pub fn screens(on: bool) -> bool {
     match which() {
         Wm::Niri => niri(json!({ "Action": if on { json!({ "PowerOnMonitors": {} }) } else { json!({ "PowerOffMonitors": {} }) } })).is_some(),
-        Wm::Hyprland => hypr(if on { "dispatch dpms on" } else { "dispatch dpms off" }).is_some(),
+        Wm::Hyprland => if on { hypr_dispatch("dpms on", "hl.dsp.dpms({ action = \"on\" })") } else { hypr_dispatch("dpms off", "hl.dsp.dpms({ action = \"off\" })") },
         Wm::Mango => mango(if on { "dispatch enable_monitor" } else { "dispatch disable_monitor" }).is_some(),
         Wm::Other => false,
     }
