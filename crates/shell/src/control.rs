@@ -487,8 +487,8 @@ impl Control {
             s.open = true;
             s.scroll = 0.0;
             let now = glib::monotonic_time();
-            s.rise.go(1.0, now, 460, motion::DEFAULT_SPATIAL);
-            s.fade.after(1.0, now, 120, 220, motion::STANDARD);
+            s.rise.go(1.0, now, 420, motion::Curve::new(0.16, 1.0, 0.3, 1.0));
+            s.fade.after(1.0, now, 60, 220, motion::STANDARD);
             s.window.set_keyboard_mode(KeyboardMode::Exclusive);
             if s.scrim.is_none() {
                 let scrim = gtk::Window::new();
@@ -593,8 +593,8 @@ impl Control {
             }
             s.open = false;
             let now = glib::monotonic_time();
-            s.rise.go(0.0, now, 240, motion::Curve::new(0.3, 0.0, 0.8, 0.15));
-            s.fade.go(0.0, now, 100, motion::FAST_EFFECTS);
+            s.rise.go(0.0, now, 240, motion::Curve::new(0.4, 0.0, 0.9, 0.6));
+            s.fade.go(0.0, now, 180, motion::STANDARD);
             s.window.set_keyboard_mode(KeyboardMode::None);
             if let Some(scrim) = s.scrim.take() {
                 scrim.destroy();
