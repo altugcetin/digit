@@ -101,6 +101,10 @@ impl Strip {
         self.imp().zones.borrow().iter().find(|(z, _)| *z == zone).map(|(_, r)| r.0)
     }
 
+    pub fn zone_end(&self, zone: Zone) -> Option<f64> {
+        self.imp().zones.borrow().iter().find(|(z, _)| *z == zone).map(|(_, r)| r.0 + r.2)
+    }
+
     pub fn zone_at(&self, x: f64, y: f64) -> Option<Zone> {
         if y > self.imp().header.get() + 2.0 * self.imp().lift.get() {
             return None;

@@ -4,7 +4,7 @@ A calm, fast desktop shell for Wayland, written in Rust and GTK 4. It runs on
 **niri** and **Hyprland**.
 
 - **Notch / Dynamic Island / Bar**: clock, music, calls, live activities, notifications with actions
-- **Menu bar**: distro menu, the focused app's File/Edit/View menus, tray icons, status, date; clear or frosted
+- **Menu bar**: distro menu, menus made for the focused app with its own shortcuts (browsers, editors and IDEs, terminals, file managers, office, design, media and chat apps), tray icons, status, a month calendar under the date; clear or frosted
 - **Dock** with magnification, badges and auto-hide
 - **Spotlight** (Alt+Space): apps, windows, files, math, clipboard, web and in-app search
 - **Control Center**: Wi-Fi, Bluetooth, Do Not Disturb, Night Light, power modes, volume, device batteries, system monitor, weather
