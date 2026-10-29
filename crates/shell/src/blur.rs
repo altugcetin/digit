@@ -47,12 +47,27 @@ impl Blur {
         state.blur
     }
 
-    pub fn attach(&self, surface: &gdk::Surface) -> Option<Effect> {
+    pub fn surface_id(surface: &gdk::Surface) -> Option<wayland_client::backend::ObjectId> {
+        surface.downcast_ref::<gdk4_wayland::WaylandSurface>()?.wl_surface().map(|s| s.id())
+    }
+
+    pub fn attach(&self, surface: &gdk::Surface) -> Option<(Effect, wayland_client::backend::ObjectId)> {
         let wl = surface.downcast_ref::<gdk4_wayland::WaylandSurface>()?.wl_surface()?;
-        Some(self.manager.get_background_effect(&wl, &self.qh, ()))
+        if !wl.is_alive() {
+            return None;
+        }
+        Some((self.manager.get_background_effect(&wl, &self.qh, ()), wl.id()))
+    }
+
+    pub fn detach(&self, effect: Effect) {
+        effect.destroy();
+        let _ = self.conn.flush();
     }
 
     pub fn set(&self, effect: &Effect, rects: &[(i32, i32, i32, i32)]) {
+        if !effect.is_alive() {
+            return;
+        }
         let region = self.compositor.create_region(&self.qh, ());
         for &(x, y, w, h) in rects {
             region.add(x, y, w, h);
