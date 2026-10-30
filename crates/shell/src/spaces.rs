@@ -33,6 +33,14 @@ struct Card {
     title: String,
 }
 
+/// A window icon being dragged onto another workspace card.
+struct Drag {
+    card: usize,
+    win: usize,
+    at: (f64, f64),
+    moving: bool,
+}
+
 /// A special workspace, shown as a small chip under the cards.
 struct Chip {
     name: String,
@@ -58,6 +66,9 @@ struct State {
     scrim: Option<gtk::Window>,
     cards: Vec<Card>,
     chips: Vec<Chip>,
+    drag: Option<Drag>,
+    /// Set when a drag ends so the click that follows it does not also pick.
+    dropped: bool,
     hot: Option<Spot>,
     glow: Vec<Tween>,
     rise: Tween,
@@ -150,6 +161,8 @@ fn build(app: &Rc<App>) -> Shared {
         scrim: None,
         cards: Vec::new(),
         chips: Vec::new(),
+        drag: None,
+        dropped: false,
         hot: None,
         glow: Vec::new(),
         rise: Tween::still(0.0),
@@ -235,6 +248,9 @@ fn build(app: &Rc<App>) -> Shared {
     let weak = Rc::downgrade(&st);
     click.connect_released(move |_, _, x, y| {
         if let Some(st) = weak.upgrade() {
+            if std::mem::take(&mut st.borrow_mut().dropped) {
+                return;
+            }
             let at = st.borrow().spot_at(x, y);
             match at {
                 Some(spot) => pick(&st, spot),
@@ -243,6 +259,71 @@ fn build(app: &Rc<App>) -> Shared {
         }
     });
     paint.add_controller(click);
+    let drag = gtk::GestureDrag::new();
+    let weak = Rc::downgrade(&st);
+    drag.connect_drag_begin(move |_, x, y| {
+        let Some(st) = weak.upgrade() else { return };
+        let mut s = st.borrow_mut();
+        s.drag = match s.spot_at(x, y) {
+            Some(Spot::Window(card, win)) => Some(Drag { card, win, at: (x, y), moving: false }),
+            _ => None,
+        };
+    });
+    let weak = Rc::downgrade(&st);
+    drag.connect_drag_update(move |g, dx, dy| {
+        let (Some(st), Some((x, y))) = (weak.upgrade(), g.start_point()) else { return };
+        let target = {
+            let mut s = st.borrow_mut();
+            let Some(d) = s.drag.as_mut() else { return };
+            d.at = (x + dx, y + dy);
+            if !d.moving && dx.hypot(dy) < 6.0 {
+                return;
+            }
+            d.moving = true;
+            let at = d.at;
+            s.spot_at(at.0, at.1).and_then(|sp| match sp {
+                Spot::Card(i) | Spot::Window(i, _) => Some(Spot::Card(i)),
+                Spot::Special(_) => None,
+            })
+        };
+        hover(&st, target);
+        st.borrow().paint.queue_draw();
+    });
+    let weak = Rc::downgrade(&st);
+    drag.connect_drag_end(move |_, _, _| {
+        let Some(st) = weak.upgrade() else { return };
+        let moved = {
+            let mut s = st.borrow_mut();
+            let Some(d) = s.drag.take() else { return };
+            if !d.moving {
+                return;
+            }
+            s.dropped = true;
+            let to = s.spot_at(d.at.0, d.at.1).and_then(|sp| match sp {
+                Spot::Card(i) | Spot::Window(i, _) => Some(i),
+                Spot::Special(_) => None,
+            });
+            let win = s.cards.get(d.card).and_then(|c| c.windows.get(d.win)).map(|w| w.0);
+            match (to, win) {
+                (Some(to), Some(win)) if to != d.card => s.cards.get(to).map(|c| (win, c.id)),
+                _ => None,
+            }
+        };
+        st.borrow().paint.queue_draw();
+        if let Some((win, space)) = moved {
+            let weak = Rc::downgrade(&st);
+            glib::spawn_future_local(async move {
+                let _ = gio::spawn_blocking(move || kit::wm::move_to_space(win, space)).await;
+                glib::timeout_add_local_once(Duration::from_millis(120), move || {
+                    if let Some(st) = weak.upgrade() {
+                        load(&st);
+                        st.borrow().paint.queue_draw();
+                    }
+                });
+            });
+        }
+    });
+    paint.add_controller(drag);
     st
 }
 
@@ -570,9 +651,16 @@ impl State {
                 if self.hot == Some(Spot::Window(i, j)) {
                     draw::fill(s, &draw::round(ix - 4.0, iy - 4.0, ICON + 8.0, ICON + 8.0, 10.0), pal.ink_main.alpha(0.12));
                 }
+                let lifted = self.drag.as_ref().is_some_and(|d| d.moving && d.card == i && d.win == j);
+                if lifted {
+                    s.push_opacity(0.3);
+                }
                 match icon {
                     Some(p) => draw::paintable(s, p, ix, iy, ICON),
                     None => draw::monogram(s, &self.paint, cfg, &crate::apps::pretty(app_id), ix, iy, ICON, pal.raised, pal.ink_main),
+                }
+                if lifted {
+                    s.pop();
                 }
             }
             if card.windows.len() > 4 {
@@ -580,6 +668,18 @@ impl State {
                 draw::text(s, &self.paint, cfg, &format!("+{}", card.windows.len() - 4), 13.0, Face::Number(500), pal.ink_meta, ix, iy + ICON / 2.0, 30.0, left);
             }
             draw::text(s, &self.paint, cfg, &card.title, 12.0, Face::Text(450), pal.ink_meta, x + 14.0, y + CARD_H - 20.0, CARD_W - 28.0, left);
+        }
+        // The dragged window rides under the pointer, a touch larger.
+        if let Some(d) = self.drag.as_ref().filter(|d| d.moving) {
+            if let Some((_, app_id, icon)) = self.cards.get(d.card).and_then(|c| c.windows.get(d.win)) {
+                let size = ICON + 8.0;
+                let (ix, iy) = (d.at.0 - size / 2.0, d.at.1 - size / 2.0);
+                draw::fill(s, &draw::round(ix - 6.0, iy - 6.0, size + 12.0, size + 12.0, 14.0), pal.body.mix(pal.ink_main, 0.12).alpha(0.92));
+                match icon {
+                    Some(p) => draw::paintable(s, p, ix, iy, size),
+                    None => draw::monogram(s, &self.paint, cfg, &crate::apps::pretty(app_id), ix, iy, size, pal.raised, pal.ink_main),
+                }
+            }
         }
         for (k, chip) in self.chips.iter().enumerate() {
             let (x, y, cw) = self.chip_rect(k);

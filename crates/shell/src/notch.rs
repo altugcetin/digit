@@ -1798,7 +1798,8 @@ impl View {
     }
 
     fn place_bars(&self, now: i64) {
-        let call = matches!(self.head, Head::Call);
+        // During a call the workspace switch peek keeps the call's waveform on the right.
+        let call = matches!(self.head, Head::Call) || (matches!(self.head, Head::Peek(Peek::Spaces { .. })) && self.app.call.borrow().is_some());
         let show = !self.open && (matches!(self.head, Head::Idle(true)) || call);
         if show {
             let (_, _, _, r1) = self.wings(&self.head, now);
@@ -2279,7 +2280,9 @@ impl View {
             }
             Head::Peek(Peek::Spaces { idx }) => {
                 self.draw_spaces(s, now, mid);
-                self.text(s, &format!("Desktop {idx}"), 14.0, POINT, pal.ink_main, r0 - 40.0, mid, right + 40.0, end);
+                if self.app.call.borrow().is_none() {
+                    self.text(s, &format!("Desktop {idx}"), 14.0, POINT, pal.ink_main, r0 - 40.0, mid, right + 40.0, end);
+                }
             }
             Head::Peek(Peek::Osd { icon, text, level }) => {
                 self.icon(s, icon, 18.0, false, pal.ink_main, l0 + 9.0, mid);

@@ -283,6 +283,18 @@ pub fn focus_space(id: u64) -> bool {
     }
 }
 
+/// Moves a window to another workspace without following it there.
+pub fn move_to_space(id: u64, space: u64) -> bool {
+    match which() {
+        Wm::Niri => niri(json!({ "Action": { "MoveWindowToWorkspace": { "window_id": id, "reference": { "Id": space }, "focus": false } } })).is_some(),
+        Wm::Hyprland => hypr_dispatch(
+            &format!("movetoworkspacesilent {space},address:0x{id:x}"),
+            &format!("hl.dsp.window.move({{ workspace = {space}, follow = false, window = \"address:0x{id:x}\" }})"),
+        ),
+        Wm::Other => false,
+    }
+}
+
 /// Whether the workspace shown on `output` has a fullscreen window (Hyprland only).
 pub fn fullscreen_on(output: &str) -> bool {
     if which() != Wm::Hyprland {
