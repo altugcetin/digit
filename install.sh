@@ -362,11 +362,31 @@ hook_conf() {
     info "$(basename "$dir"): digit.conf added and sourced (backup *.bak-$s)."
 }
 
+LUA_MARK="-- digit: start the shell with Hyprland (added by install.sh)"
+
+# A Lua config never reads hyprland.conf, so digit's autostart goes straight into hyprland.lua.
+hook_lua() {
+    local main="$CONF/hypr/hyprland.lua"
+    if grep -qsF "$BIN/digit\"" "$main"; then
+        info "hypr: hyprland.lua already starts digit."
+        return 0
+    fi
+    local s
+    s=$(stamp)
+    run cp "$main" "$main.bak-$s"
+    if $DRY; then
+        info "[dry-run] append digit's autostart to $main"
+    else
+        printf '\n%s\nhl.on("hyprland.start", function() hl.exec_cmd("%s") end)\n' "$LUA_MARK" "$BIN/digit" >>"$main"
+    fi
+    info "hypr: digit's autostart appended to hyprland.lua (backup *.bak-$s)."
+}
+
 hook() {
     bold "Connecting digit to $WM"
     case $WM in
         niri) hook_niri ;;
-        hyprland)
+        hyprland) [ -f "$CONF/hypr/hyprland.lua" ] && hook_lua
             hook_conf "$CONF/hypr" "$CONF/hypr/hyprland.conf" "$ROOT/data/hypr/digit.conf" "source = $CONF/hypr/digit.conf" /usr/share/hypr/hyprland.conf
             if command -v Hyprland >/dev/null 2>&1 && Hyprland --help 2>&1 | grep -q verify-config && ! $DRY; then
                 Hyprland --verify-config -c "$CONF/hypr/hyprland.conf" >/dev/null 2>&1 || warn "Hyprland reports problems in hyprland.conf; check it with: Hyprland --verify-config"
@@ -374,17 +394,13 @@ hook() {
     esac
 }
 
-notifications() {
+# Older installs let D-Bus start the whole shell for the first notification, which raced the
+# compositor's own autostart. digit now starts only from the compositor config.
+drop_dbus() {
     local file="$DATA/dbus-1/services/org.freedesktop.Notifications.service"
-    if [ -f "$file" ] && ! grep -q "$BIN/digit" "$file"; then
-        info "Leaving your existing notification service file alone ($file)."
-        return 0
-    fi
-    run mkdir -p "$(dirname "$file")"
-    if $DRY; then
-        info "[dry-run] write $file"
-    else
-        printf '[D-BUS Service]\nName=org.freedesktop.Notifications\nExec=%s\n' "$BIN/digit" >"$file"
+    if grep -qs "$BIN/digit" "$file"; then
+        run rm -f "$file"
+        info "Removed the old D-Bus notification autostart; your compositor config starts digit now."
     fi
 }
 
@@ -395,8 +411,8 @@ uninstall() {
     for a in "${APPS[@]}"; do
         [ -e "$BIN/$a" ] && run rm -f "$BIN/$a"
     done
-    local f="$DATA/dbus-1/services/org.freedesktop.Notifications.service"
-    grep -qs "$BIN/digit" "$f" && run rm -f "$f"
+    drop_dbus
+    local f
     for f in Settings Store Files Snap Rec; do
         run rm -f "$DATA/applications/dev.digit.$f.desktop" "$DATA/icons/hicolor/scalable/apps/dev.digit.$f.svg"
     done
@@ -407,6 +423,9 @@ uninstall() {
     if [ -f "$CONF/hypr/hyprland.conf" ]; then
         run sed -i "\#source = $CONF/hypr/digit.conf#d" "$CONF/hypr/hyprland.conf"
         run rm -f "$CONF/hypr/digit.conf"
+    fi
+    if [ -f "$CONF/hypr/hyprland.lua" ]; then
+        run sed -i -e "\#^$LUA_MARK\$#d" -e "\#hl.exec_cmd(\"$BIN/digit\")#d" "$CONF/hypr/hyprland.lua"
     fi
     info "Done. Your settings in ~/.config/digit and the fonts were kept."
 }
@@ -429,7 +448,7 @@ main() {
     flathub
     fonts
     hook
-    notifications
+    drop_dbus
     case ":$PATH:" in
         *":$BIN:"*) ;;
         *) warn "$BIN is not in your PATH. Add it to run digitctl from a terminal (the compositor config already uses full paths)." ;;
