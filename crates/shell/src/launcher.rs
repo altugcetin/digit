@@ -449,12 +449,21 @@ impl Launcher {
         });
         canvas.add_controller(click);
         let hover = gtk::EventControllerMotion::new();
+        // Results moving under a still pointer also raise motion events; only a pointer that
+        // really moved may take the selection, so Enter right after typing picks the best match.
+        let last: Rc<std::cell::Cell<Option<(f64, f64)>>> = Rc::new(std::cell::Cell::new(None));
+        let seen = last.clone();
+        hover.connect_enter(move |_, x, y| seen.set(Some((x, y))));
         let weak = Rc::downgrade(&self.0);
         hover.connect_motion(move |_, x, y| {
             let Some(s) = weak.upgrade() else { return };
             let me = Launcher(s);
             let bubble = me.bubble_at(x, y).and_then(|m| MODES.iter().position(|e| e.0 == m));
             me.hover_bubble(bubble);
+            let moved = last.replace(Some((x, y))).is_none_or(|(px, py)| (px - x).abs() + (py - y).abs() > 0.5);
+            if !moved {
+                return;
+            }
             if let Some(line) = me.line_at(x, y) {
                 let changed = {
                     let mut s = me.0.borrow_mut();

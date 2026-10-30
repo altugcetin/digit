@@ -190,7 +190,8 @@ pub fn windows() -> Vec<Win> {
                 .iter()
                 .filter(|c| c.get("mapped").and_then(Value::as_bool).unwrap_or(true) && !c.get("hidden").and_then(Value::as_bool).unwrap_or(false))
                 .filter_map(|c| {
-                    let space = c.get("workspace")?.get("id")?.as_i64()?;
+                    // Special workspaces report no id; their windows still belong in the dock.
+                    let space = c.get("workspace").and_then(|w| w.get("id")).and_then(Value::as_i64).unwrap_or(0);
                     let pair = |k: &str| c.get(k).and_then(Value::as_array).map(|a| (a.first().and_then(Value::as_f64).unwrap_or(0.0), a.get(1).and_then(Value::as_f64).unwrap_or(0.0)));
                     let (at, size) = (pair("at"), pair("size"));
                     let history = c.get("focusHistoryID").and_then(Value::as_i64).unwrap_or(1000);
