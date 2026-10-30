@@ -40,6 +40,7 @@ struct Pop {
     slide: Tween,
     fade: Tween,
     open: bool,
+    scrim: Option<gtk::Window>,
     seen: bool,
     agenda: bool,
 }
@@ -61,6 +62,9 @@ pub fn close() {
     {
         let mut pp = p.borrow_mut();
         pp.open = false;
+        if let Some(scrim) = pp.scrim.take() {
+            scrim.destroy();
+        }
         let now = glib::monotonic_time();
         pp.slide.go(0.0, now, 240, motion::Curve::new(0.4, 0.0, 0.9, 0.6));
         pp.fade.go(0.0, now, 180, motion::STANDARD);
@@ -333,6 +337,7 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, _right: f64, _y: f64) 
         slide,
         fade,
         open: true,
+        scrim: None,
         seen: false,
         agenda,
     }));
@@ -367,6 +372,25 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, _right: f64, _y: f64) 
         p.paint.queue_draw();
     });
     paint.add_controller(motion);
+    // "leave" mode: the panel slides away shortly after the pointer leaves it.
+    let away = gtk::EventControllerMotion::new();
+    let gone = Rc::new(std::cell::Cell::new(0u64));
+    let g = gone.clone();
+    away.connect_enter(move |_, _, _| g.set(g.get() + 1));
+    let weak = Rc::downgrade(&pop);
+    away.connect_leave(move |_| {
+        let generation = gone.get() + 1;
+        gone.set(generation);
+        let (weak, gone) = (weak.clone(), gone.clone());
+        glib::timeout_add_local_once(std::time::Duration::from_millis(crate::app::LEAVE_MS), move || {
+            let Some(p) = weak.upgrade() else { return };
+            let fold = gone.get() == generation && p.try_borrow().is_ok_and(|p| p.open && p.app.prefs.borrow().calendar_close == "leave");
+            if fold {
+                close();
+            }
+        });
+    });
+    paint.add_controller(away);
     let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL | gtk::EventControllerScrollFlags::DISCRETE);
     let weak = Rc::downgrade(&pop);
     wheel.connect_scroll(move |_, _, dy| {
@@ -425,13 +449,17 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, _right: f64, _y: f64) 
     window.connect_is_active_notify(move |w| {
         let Some(p) = weak.upgrade() else { return };
         let Ok(mut pp) = p.try_borrow_mut() else { return };
+        // Focus follows the pointer on many compositors, so only "leave" mode closes when focus goes.
         if w.is_active() {
             pp.seen = true;
-        } else if pp.seen {
+        } else if pp.seen && pp.app.prefs.borrow().calendar_close == "leave" {
             drop(pp);
             glib::idle_add_local_once(close);
         }
     });
+    if app.prefs.borrow().calendar_close == "click" {
+        pop.borrow_mut().scrim = Some(crate::paint::scrim(monitor.as_ref(), || close()));
+    }
     OPEN.with(|o| *o.borrow_mut() = Some(pop.clone()));
     DONE.with(|d| *d.borrow_mut() = hook);
     window.present();

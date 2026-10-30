@@ -55,6 +55,7 @@ struct State {
     open: bool,
     inside: bool,
     leave: u64,
+    scrim: Option<gtk::Window>,
     cards: Vec<Card>,
     chips: Vec<Chip>,
     hot: Option<Spot>,
@@ -146,6 +147,7 @@ fn build(app: &Rc<App>) -> Shared {
         open: false,
         inside: false,
         leave: 0,
+        scrim: None,
         cards: Vec::new(),
         chips: Vec::new(),
         hot: None,
@@ -185,7 +187,8 @@ fn build(app: &Rc<App>) -> Shared {
     window.add_controller(keys);
     let weak = Rc::downgrade(&st);
     window.connect_is_active_notify(move |w| {
-        if !w.is_active() {
+        let leave = weak.upgrade().is_some_and(|st| st.try_borrow().is_ok_and(|s| s.app.prefs.borrow().spaces_close == "leave"));
+        if !w.is_active() && leave {
             let weak = weak.clone();
             glib::idle_add_local_once(move || {
                 if let Some(st) = weak.upgrade() {
@@ -215,11 +218,11 @@ fn build(app: &Rc<App>) -> Shared {
         };
         hover(&st, None);
         let weak = Rc::downgrade(&st);
-        glib::timeout_add_local_once(Duration::from_millis(450), move || {
+        glib::timeout_add_local_once(Duration::from_millis(crate::app::LEAVE_MS), move || {
             if let Some(st) = weak.upgrade() {
                 let gone = {
                     let s = st.borrow();
-                    s.leave == generation && !s.inside
+                    s.leave == generation && !s.inside && s.app.prefs.borrow().spaces_close == "leave"
                 };
                 if gone {
                     close(&st);
@@ -300,6 +303,14 @@ fn show(st: &Shared, output: Option<String>) {
         s.rise.go(1.0, now, 420, motion::Curve::new(0.16, 1.0, 0.3, 1.0));
         s.fade.after(1.0, now, 60, 220, motion::STANDARD);
         s.window.set_keyboard_mode(KeyboardMode::OnDemand);
+        if s.app.prefs.borrow().spaces_close == "click" && s.scrim.is_none() {
+            let weak = Rc::downgrade(st);
+            s.scrim = Some(crate::paint::scrim(monitor.as_ref(), move || {
+                if let Some(st) = weak.upgrade() {
+                    close(&st);
+                }
+            }));
+        }
     }
     load(st);
     {
@@ -327,6 +338,9 @@ fn close(st: &Shared) {
         s.rise.go(0.0, now, 240, motion::Curve::new(0.4, 0.0, 0.9, 0.6));
         s.fade.go(0.0, now, 180, motion::STANDARD);
         s.window.set_keyboard_mode(KeyboardMode::None);
+        if let Some(scrim) = s.scrim.take() {
+            scrim.destroy();
+        }
     }
     region(st);
     kick(st);

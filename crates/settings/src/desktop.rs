@@ -341,6 +341,15 @@ pub fn build() -> gtk::Widget {
     toggle(&notch, "fullscreen", "Over fullscreen apps", "Let the dock edge and screen corners open panels while an app is fullscreen. Spotlight always opens", "fullscreen_edges", prefs::get_bool(&t, "fullscreen_edges", false));
     body.append(&notch);
 
+    body.append(&ui::heading("Panels"));
+    let panels = ui::card();
+    let close = [("leave", "When the pointer leaves"), ("click", "On a click elsewhere")];
+    choice(&panels, "toolbar", "Notch", "When the open notch folds away", "notch_close", &close, &prefs::get_str(&t, "notch_close", "leave"));
+    choice(&panels, "grid_view", "Workspaces", "When the workspaces panel in the top-left corner closes", "spaces_close", &close, &prefs::get_str(&t, "spaces_close", "leave"));
+    choice(&panels, "tune", "Control Center", "When Control Center in the bottom-right corner closes", "control_close", &close, &prefs::get_str(&t, "control_close", "leave"));
+    choice(&panels, "calendar_month", "Calendar", "When the calendar under the date closes", "calendar_close", &close, &prefs::get_str(&t, "calendar_close", "leave"));
+    body.append(&panels);
+
     body.append(&ui::heading("Lock and power"));
     let power = ui::card();
     slider(&power, "lock_clock", "Lock after idle", "Minutes without input before the screen locks. 0 never locks on its own", "idle_lock", (0.0, 60.0, 1.0), prefs::get_f64(&t, "idle_lock", 0.0), 0);

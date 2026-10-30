@@ -195,6 +195,8 @@ struct View {
     spots: usize,
     corner: Option<gtk::Window>,
     control_corner: Option<gtk::Window>,
+    /// Catches clicks elsewhere while the notch is open in "click" mode; the notch itself is cut out of it.
+    scrim: Option<gtk::Window>,
     tab: Tab,
     day: i32,
     tab_fade: Tween,
@@ -298,6 +300,7 @@ impl Notch {
             spots: 0,
             corner: None,
             control_corner: None,
+            scrim: None,
             tab: Tab::Nook,
             day: 0,
             tab_fade: Tween::still(1.0),
@@ -646,6 +649,9 @@ impl Notch {
         if let Some(c) = self.0.borrow_mut().control_corner.take() {
             c.destroy();
         }
+        if let Some(c) = self.0.borrow_mut().scrim.take() {
+            c.destroy();
+        }
         let effect = self.0.borrow_mut().effect.take();
         if let (Some((effect, _)), Some(blur)) = (effect, app.blur.as_ref()) {
             blur.detach(effect);
@@ -758,6 +764,19 @@ impl Notch {
                 }
                 v.day = 0;
             }
+            if open && v.app.prefs.borrow().notch_close == "click" && v.scrim.is_none() {
+                let weak = Rc::downgrade(&self.0);
+                v.scrim = Some(crate::paint::scrim(Some(&v.monitor), move || {
+                    if let Some(v) = weak.upgrade() {
+                        Notch(v).set_open(false);
+                    }
+                }));
+                v.region = (0, 0, 0, 0);
+            } else if !open {
+                if let Some(scrim) = v.scrim.take() {
+                    scrim.destroy();
+                }
+            }
             v.app.clone()
         };
         if open {
@@ -807,11 +826,11 @@ impl Notch {
         } else {
             let generation = self.0.borrow().leave;
             let weak = Rc::downgrade(&self.0);
-            glib::timeout_add_local_once(Duration::from_millis(100), move || {
+            glib::timeout_add_local_once(Duration::from_millis(crate::app::LEAVE_MS), move || {
                 if let Some(v) = weak.upgrade() {
                     let fold = {
                         let v = v.borrow();
-                        v.leave == generation && !v.hovered
+                        v.leave == generation && !v.hovered && v.app.prefs.borrow().notch_close == "leave"
                     };
                     if fold {
                         Notch(v).set_open(false);
@@ -1865,6 +1884,14 @@ impl View {
                 let _ = region.union_rectangle(&cairo::RectangleInt::new(0, 0, self.span.max(WIDTH as i32), band));
             }
             surface.set_input_region(Some(&region));
+            if let Some(scrim) = self.scrim.as_ref().and_then(|w| w.surface()) {
+                let geo = self.monitor.geometry();
+                let full = cairo::Region::create_rectangle(&cairo::RectangleInt::new(0, 0, geo.width(), geo.height()));
+                let hole = region.copy();
+                hole.translate((geo.width() - self.window.width()) / 2, 0);
+                let _ = full.subtract(&hole);
+                scrim.set_input_region(Some(&full));
+            }
             self.region = rect;
         }
     }
