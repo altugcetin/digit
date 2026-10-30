@@ -62,16 +62,24 @@ fn push_undo(u: Undo) {
     });
 }
 
+/// Opens each file with its default app; a kind of file with no default asks with Digit's own Open With.
 pub fn open(files: &[gio::File]) {
-    let window = crate::window();
+    let ctx = gdk::Display::default().map(|d| d.app_launch_context());
     for f in files {
-        gtk::FileLauncher::new(Some(f)).launch(window.as_ref(), None::<&gio::Cancellable>, |r| {
-            if let Err(e) = r {
-                if !e.matches(gtk::DialogError::Dismissed) {
+        let ct = f
+            .query_info("standard::content-type", gio::FileQueryInfoFlags::NONE, None::<&gio::Cancellable>)
+            .ok()
+            .and_then(|i| i.content_type())
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "application/octet-stream".into());
+        match gio::AppInfo::default_for_type(&ct, !f.is_native()) {
+            Some(app) => {
+                if let Err(e) = app.launch(std::slice::from_ref(f), ctx.as_ref()) {
                     crate::toast(&format!("Couldn't open: {}", e.message()));
                 }
             }
-        });
+            None => choose_app(&ct, vec![f.clone()]),
+        }
     }
 }
 
@@ -662,6 +670,7 @@ type Ask = Rc<dyn Fn(&Sheet) -> glib::Propagation>;
 #[derive(Clone)]
 pub struct Sheet {
     root: gtk::Box,
+    card: gtk::Box,
     shown: Rc<std::cell::Cell<bool>>,
     asks: Rc<RefCell<Vec<Ask>>>,
 }
@@ -671,7 +680,10 @@ impl Sheet {
         if self.shown.replace(true) {
             return;
         }
+        self.root.set_opacity(0.0);
+        self.root.set_can_target(true);
         crate::overlay_add(&self.root);
+        crate::look::play(&self.root, &self.card, SHEET_MARGIN, true, || {});
         let root = self.root.clone();
         glib::idle_add_local_once(move || {
             root.child_focus(gtk::DirectionType::TabForward);
@@ -689,7 +701,9 @@ impl Sheet {
             }
         }
         self.shown.set(false);
-        crate::overlay_remove(&self.root);
+        self.root.set_can_target(false);
+        let root = self.root.clone();
+        crate::look::play(&self.root, &self.card, SHEET_MARGIN, false, move || crate::overlay_remove(&root));
     }
 
     pub fn is_shown(&self) -> bool {
@@ -701,6 +715,8 @@ impl Sheet {
     }
 }
 
+const SHEET_MARGIN: i32 = 24;
+
 pub fn dialog(title: &str, detail: &str) -> (Sheet, gtk::Box, gtk::Box) {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.add_css_class("sheet-backdrop");
@@ -711,10 +727,11 @@ pub fn dialog(title: &str, detail: &str) -> (Sheet, gtk::Box, gtk::Box) {
     card.set_size_request(420, -1);
     card.set_halign(gtk::Align::Center);
     card.set_valign(gtk::Align::Center);
+    card.set_vexpand(true);
     card.set_margin_start(24);
     card.set_margin_end(24);
-    card.set_margin_top(24);
-    card.set_margin_bottom(24);
+    card.set_margin_top(SHEET_MARGIN + crate::look::DROP as i32);
+    card.set_margin_bottom(SHEET_MARGIN - crate::look::DROP as i32);
     card.append(&kit::ui::text(title, "name big"));
     if !detail.is_empty() {
         let d = kit::ui::text(detail, "sub");
@@ -729,7 +746,7 @@ pub fn dialog(title: &str, detail: &str) -> (Sheet, gtk::Box, gtk::Box) {
     buttons.set_margin_top(6);
     card.append(&buttons);
     root.append(&card);
-    let sheet = Sheet { root: root.clone(), shown: Rc::new(std::cell::Cell::new(false)), asks: Rc::new(RefCell::new(Vec::new())) };
+    let sheet = Sheet { root: root.clone(), card: card.clone(), shown: Rc::new(std::cell::Cell::new(false)), asks: Rc::new(RefCell::new(Vec::new())) };
     let keys = gtk::EventControllerKey::new();
     let me = sheet.clone();
     keys.connect_key_pressed(move |_, k, _, _| {
@@ -1046,7 +1063,11 @@ pub fn terminal(dir: &gio::File) {
 pub fn open_with(infos: Vec<gio::FileInfo>) {
     let Some(first) = infos.first() else { return };
     let ct = first.attribute_string("standard::fast-content-type").map(|s| s.to_string()).unwrap_or_else(|| "application/octet-stream".into());
-    let files: Vec<gio::File> = infos.iter().filter_map(target_of).collect();
+    choose_app(&ct, infos.iter().filter_map(target_of).collect());
+}
+
+fn choose_app(ct: &str, files: Vec<gio::File>) {
+    let ct = ct.to_string();
     let (w, body, buttons) = dialog("Open With", &gio::content_type_get_description(&ct));
     let mut apps = gio::AppInfo::recommended_for_type(&ct);
     for a in gio::AppInfo::all_for_type(&ct) {

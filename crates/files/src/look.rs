@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicBool;
 
 const OPEN_MS: i64 = 260;
 const CLOSE_MS: i64 = 150;
-const DROP: f64 = 18.0;
+pub const DROP: f64 = 18.0;
 const MARGIN: i32 = 36;
 
 struct Look {
@@ -44,7 +44,7 @@ pub fn close() {
         }
         l.root.set_can_target(false);
         let (root, stage) = (l.root.clone(), l.stage.clone());
-        play(&l.root, &l.card, false, move || {
+        play(&l.root, &l.card, MARGIN, false, move || {
             kit::ui::clear(&stage);
             crate::overlay_remove(&root);
             kit::app::trim_later(600);
@@ -53,7 +53,8 @@ pub fn close() {
 }
 
 /// Fades the backdrop and settles the card from slightly below, like the shell's panels; closing runs it back, quicker.
-fn play(root: &gtk::Box, card: &gtk::Box, opening: bool, done: impl FnOnce() + 'static) {
+/// Quick Look and every dialog share it; `margin` is the card's resting top and bottom margin.
+pub fn play(root: &gtk::Box, card: &gtk::Box, margin: i32, opening: bool, done: impl FnOnce() + 'static) {
     let now = glib::monotonic_time();
     let mut t = Tween::still(root.opacity());
     if opening {
@@ -68,8 +69,8 @@ fn play(root: &gtk::Box, card: &gtk::Box, opening: bool, done: impl FnOnce() + '
         let v = t.value(now).clamp(0.0, 1.0);
         w.set_opacity(v);
         let off = ((1.0 - v) * DROP).round() as i32;
-        card.set_margin_top(MARGIN + off);
-        card.set_margin_bottom(MARGIN - off);
+        card.set_margin_top(margin + off);
+        card.set_margin_bottom(margin - off);
         if !t.settled(now) {
             return glib::ControlFlow::Continue;
         }
@@ -134,7 +135,7 @@ fn show() {
     let look = std::rc::Rc::new(Look { root: root.clone(), card: card.clone(), stage, title, sub, shown: RefCell::new(None), busy: RefCell::new(None) });
     LOOK.with(|l| *l.borrow_mut() = Some(look));
     crate::overlay_add(&root);
-    play(&root, &card, true, || {});
+    play(&root, &card, MARGIN, true, || {});
     update();
 }
 
