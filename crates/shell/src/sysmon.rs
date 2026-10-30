@@ -7,6 +7,8 @@ pub struct Stats {
     pub mem: f64,
     pub used: f64,
     pub total: f64,
+    pub swap_used: f64,
+    pub swap_total: f64,
     pub temp: Option<f64>,
     pub gpu: Option<f64>,
 }
@@ -29,12 +31,15 @@ fn cpu_times() -> Option<(u64, u64)> {
     Some((idle, v.iter().take(8).sum()))
 }
 
-fn memory() -> Option<(f64, f64)> {
+/// Used and total RAM, then used and total swap, in GiB.
+fn memory() -> Option<(f64, f64, f64, f64)> {
     let info = std::fs::read_to_string("/proc/meminfo").ok()?;
     let get = |k: &str| info.lines().find(|l| l.starts_with(k)).and_then(|l| l.split_whitespace().nth(1)?.parse::<f64>().ok());
     let total = get("MemTotal:")?;
     let avail = get("MemAvailable:")?;
-    Some(((total - avail) / 1048576.0, total / 1048576.0))
+    let swap = get("SwapTotal:").unwrap_or(0.0);
+    let free = get("SwapFree:").unwrap_or(0.0);
+    Some(((total - avail) / 1048576.0, total / 1048576.0, (swap - free) / 1048576.0, swap / 1048576.0))
 }
 
 fn find_hwmon() -> Option<PathBuf> {
@@ -68,9 +73,11 @@ impl Sampler {
             }
             self.last = Some(now);
         }
-        if let Some((used, total)) = memory() {
+        if let Some((used, total, swap_used, swap_total)) = memory() {
             s.used = used;
             s.total = total;
+            s.swap_used = swap_used;
+            s.swap_total = swap_total;
             s.mem = (used / total.max(0.001)).clamp(0.0, 1.0);
         }
         let hw = self.hwmon.get_or_insert_with(find_hwmon).clone();

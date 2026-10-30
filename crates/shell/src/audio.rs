@@ -223,6 +223,130 @@ impl Link {
     }
 }
 
+/// One row of the mixer: a device or an app stream playing to (or recording from) it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Channel {
+    pub index: u32,
+    pub name: String,
+    pub binary: String,
+    pub level: f64,
+    pub muted: bool,
+    channels: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Mix {
+    pub device: Option<Channel>,
+    pub apps: Vec<Channel>,
+}
+
+fn loudest(v: &ChannelVolume) -> f64 {
+    v.channels().iter().map(Volume::as_u32).max().unwrap_or(0) as f64 / Volume::NORM.as_u32() as f64
+}
+
+fn even(channels: usize, level: f64) -> ChannelVolume {
+    let raw = (level.clamp(0.0, 1.5) * Volume::NORM.as_u32() as f64).round() as u32;
+    let mut volume = ChannelVolume::empty();
+    for _ in 0..channels.max(1) {
+        volume.push(Volume::from_u32_clamped(raw));
+    }
+    volume
+}
+
+/// The app behind a stream as (name, binary). Streams no app owns, like loopbacks, have none.
+fn owner(props: &protocol::Props) -> Option<(String, String)> {
+    let text = |p: protocol::Prop| String::from_utf8_lossy(props.get(p).unwrap_or_default()).trim_end_matches('\0').to_string();
+    let name = text(protocol::Prop::ApplicationName);
+    let mut binary = text(protocol::Prop::ApplicationProcessBinary);
+    if binary.is_empty() {
+        let pid = text(protocol::Prop::ApplicationProcessId);
+        binary = std::fs::read_to_string(format!("/proc/{pid}/comm")).map(|c| c.trim().to_string()).unwrap_or_default();
+    }
+    (!name.is_empty() || !binary.is_empty()).then_some((name, binary))
+}
+
+impl Link {
+    fn mix(&mut self, input: bool) -> Option<Mix> {
+        self.send(protocol::Command::GetServerInfo)?;
+        let (_, server) = protocol::read_reply_message::<protocol::ServerInfo>(&mut self.sock, self.version).ok()?;
+        let mut mix = Mix::default();
+        if input {
+            self.send(protocol::Command::GetSourceInfoList)?;
+            let (_, sources) = protocol::read_reply_message::<protocol::SourceInfoList>(&mut self.sock, self.version).ok()?;
+            self.send(protocol::Command::GetSourceOutputInfoList)?;
+            let (_, outputs) = protocol::read_reply_message::<protocol::SourceOutputInfoList>(&mut self.sock, self.version).ok()?;
+            let monitors: Vec<u32> = sources.iter().filter(|s| s.monitor_of_sink_index.is_some()).map(|s| s.index).collect();
+            mix.device = server.default_source_name.as_ref().and_then(|d| sources.iter().find(|s| s.name.as_c_str() == d.as_c_str())).map(|s| Channel {
+                index: s.index,
+                name: s.description.as_ref().map(|d| d.to_string_lossy().into_owned()).unwrap_or_else(|| s.name.to_string_lossy().into_owned()),
+                binary: String::new(),
+                level: loudest(&s.cvolume),
+                muted: s.muted,
+                channels: s.cvolume.channels().len(),
+            });
+            for o in outputs.iter().filter(|o| !monitors.contains(&o.source_index)) {
+                if let Some((name, binary)) = owner(&o.props) {
+                    mix.apps.push(Channel { index: o.index, name, binary, level: loudest(&o.cvolume), muted: o.muted, channels: o.cvolume.channels().len() });
+                }
+            }
+        } else {
+            let (_, sink) = self.sink()?;
+            self.send(protocol::Command::GetSinkInfo(protocol::GetSinkInfo { index: None, name: Some(CString::new(sink.name.clone()).ok()?) }))?;
+            let (_, info) = protocol::read_reply_message::<protocol::SinkInfo>(&mut self.sock, self.version).ok()?;
+            mix.device = Some(Channel { index: info.index, name: if sink.desc.is_empty() { sink.name } else { sink.desc }, binary: String::new(), level: sink.level, muted: sink.muted, channels: info.cvolume.channels().len() });
+            self.send(protocol::Command::GetSinkInputInfoList)?;
+            let (_, plays) = protocol::read_reply_message::<protocol::SinkInputInfoList>(&mut self.sock, self.version).ok()?;
+            for p in plays.iter().filter(|p| p.has_volume) {
+                if let Some((name, binary)) = owner(&p.props) {
+                    mix.apps.push(Channel { index: p.index, name, binary, level: loudest(&p.cvolume), muted: p.muted, channels: p.cvolume.channels().len() });
+                }
+            }
+        }
+        Some(mix)
+    }
+
+    fn set(&mut self, input: bool, device: bool, ch: &Channel, level: Option<f64>, mute: Option<bool>) -> Option<()> {
+        use protocol::{Command as C, SetDeviceMuteParams as DM, SetDeviceVolumeParams as DV, SetStreamMuteParams as SM, SetStreamVolumeParams as SV};
+        if let Some(level) = level {
+            let volume = even(ch.channels, level);
+            let index = ch.index;
+            self.send(match (input, device) {
+                (false, true) => C::SetSinkVolume(DV { device_index: Some(index), device_name: None, volume }),
+                (true, true) => C::SetSourceVolume(DV { device_index: Some(index), device_name: None, volume }),
+                (false, false) => C::SetSinkInputVolume(SV { index, volume }),
+                (true, false) => C::SetSourceOutputVolume(SV { index, volume }),
+            })?;
+            protocol::read_ack_message(&mut self.sock).ok()?;
+        }
+        if let Some(mute) = mute {
+            let index = ch.index;
+            self.send(match (input, device) {
+                (false, true) => C::SetSinkMute(DM { device_index: Some(index), device_name: None, mute }),
+                (true, true) => C::SetSourceMute(DM { device_index: Some(index), device_name: None, mute }),
+                (false, false) => C::SetSinkInputMute(SM { index, mute }),
+                (true, false) => C::SetSourceOutputMute(SM { index, mute }),
+            })?;
+            protocol::read_ack_message(&mut self.sock).ok()?;
+        }
+        Some(())
+    }
+}
+
+/// Reads the output (or input) device and the app streams on it. Blocks; run it off the main thread.
+pub fn mix(input: bool) -> Option<Mix> {
+    Link::open("digit-mixer")?.mix(input)
+}
+
+/// Sets one mixer row's level and/or mute. Blocks; run it off the main thread.
+pub fn set_channel(input: bool, device: bool, ch: &Channel, level: Option<f64>, mute: Option<bool>) -> bool {
+    Link::open("digit-mixer").and_then(|mut l| l.set(input, device, ch, level, mute)).is_some()
+}
+
+/// The name the rest of the shell shows for an app stream.
+pub fn who(app: &App, ch: &Channel) -> String {
+    speaker(app, &ch.name, &ch.binary)
+}
+
 fn wpctl(args: &[&str]) -> Option<String> {
     let out = std::process::Command::new("wpctl").args(args).stderr(std::process::Stdio::null()).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
