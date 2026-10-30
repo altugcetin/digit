@@ -244,7 +244,9 @@ fn trigger(app: &Rc<App>, monitor: &gdk::Monitor, side: Side) -> gtk::Window {
         if side == Side::Bottom && x >= far {
             if let Some(app) = corner_app.upgrade() {
                 if app.prefs.borrow().control_corner {
-                    crate::control::show_on(&app, Some(corner_out.clone()));
+                    if app.edges_live(&corner_out) {
+                        crate::control::show_on(&app, Some(corner_out.clone()));
+                    }
                     return true;
                 }
             }
@@ -267,6 +269,9 @@ fn trigger(app: &Rc<App>, monitor: &gdk::Monitor, side: Side) -> gtk::Window {
                 return;
             }
             let Some(app) = weak.upgrade() else { return };
+            if !app.edges_live(&output) {
+                return;
+            }
             let same = current().is_some_and(|st| st.try_borrow().is_ok_and(|s| s.output == output));
             if !same {
                 PREFER.with(|p| *p.borrow_mut() = Some(output.clone()));

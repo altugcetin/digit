@@ -39,6 +39,7 @@ pub struct Config {
     pub icon_theme: Option<String>,
     pub hover: bool,
     pub intro: bool,
+    pub fullscreen_edges: bool,
     pub notifications: bool,
     pub polkit: bool,
     pub wallpaper: bool,
@@ -97,6 +98,7 @@ impl Default for Config {
             icon_theme: None,
             hover: true,
             intro: true,
+            fullscreen_edges: false,
             notifications: true,
             polkit: true,
             wallpaper: true,
@@ -167,6 +169,7 @@ pub struct Prefs {
     pub tray: bool,
     pub mic_guard: bool,
     pub control_corner: bool,
+    pub fullscreen_edges: bool,
 }
 
 impl From<&Config> for Prefs {
@@ -208,6 +211,7 @@ impl From<&Config> for Prefs {
             tray: c.tray,
             mic_guard: c.mic_guard,
             control_corner: c.control_corner,
+            fullscreen_edges: c.fullscreen_edges,
         }
     }
 }
