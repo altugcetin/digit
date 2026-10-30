@@ -2,21 +2,24 @@ use crate::app::App;
 use crate::calendar;
 use crate::draw::{self, Face};
 use crate::paint::Paint;
-use gtk::{gdk, glib, pango, prelude::*};
+use gtk::{cairo, gdk, glib, graphene, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use kit::motion::{self, Tween};
+use kit::shape;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-const W: f64 = 280.0;
-const PAD: f64 = 14.0;
-const HEAD: f64 = 36.0;
-const NAMES: f64 = 22.0;
-const CELL: f64 = 34.0;
+const W: f64 = 360.0;
+const PAD: f64 = 20.0;
+const HEAD: f64 = 52.0;
+const NAMES: f64 = 26.0;
+const CELL: f64 = 44.0;
 const CELL_W: f64 = (W - 2.0 * PAD) / 7.0;
 const ROWS: usize = 6;
-const LINE: f64 = 24.0;
+const LINE: f64 = 26.0;
 const LINES: usize = 3;
+const FILLET: f64 = 14.0;
+const RADIUS: f64 = 28.0;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Spot {
@@ -34,7 +37,9 @@ struct Pop {
     month: i32,
     pick: i64,
     hover: Option<Spot>,
+    slide: Tween,
     fade: Tween,
+    open: bool,
     seen: bool,
     agenda: bool,
 }
@@ -50,13 +55,45 @@ pub fn is_open() -> bool {
     OPEN.with(|o| o.borrow().is_some())
 }
 
+/// Slides the panel back out to the right; the window goes once the motion settles.
 pub fn close() {
     let Some(p) = OPEN.with(|o| o.borrow_mut().take()) else { return };
-    let window = p.borrow().window.clone();
-    glib::idle_add_local_once(move || window.destroy());
+    {
+        let mut pp = p.borrow_mut();
+        pp.open = false;
+        let now = glib::monotonic_time();
+        pp.slide.go(0.0, now, 240, motion::Curve::new(0.4, 0.0, 0.9, 0.6));
+        pp.fade.go(0.0, now, 180, motion::STANDARD);
+        pp.window.set_keyboard_mode(KeyboardMode::None);
+        if let Some(surface) = pp.window.surface() {
+            surface.set_input_region(Some(&cairo::Region::create()));
+        }
+    }
+    animate(&p);
     if let Some(h) = DONE.with(|d| d.borrow_mut().take()) {
         h();
     }
+}
+
+fn animate(p: &Rc<RefCell<Pop>>) {
+    let paint = p.borrow().paint.clone();
+    let p = p.clone();
+    paint.add_tick_callback(move |w, clock| {
+        w.queue_draw();
+        let Ok(pp) = p.try_borrow() else { return glib::ControlFlow::Continue };
+        let now = clock.frame_time();
+        if !pp.slide.settled(now) || !pp.fade.settled(now) {
+            return glib::ControlFlow::Continue;
+        }
+        if !pp.open {
+            let window = pp.window.clone();
+            glib::idle_add_local_once(move || {
+                draw::forget(&window);
+                window.destroy();
+            });
+        }
+        glib::ControlFlow::Break
+    });
 }
 
 fn midnight(y: i32, m: i32, d: i32) -> Option<glib::DateTime> {
@@ -69,11 +106,16 @@ fn today() -> Option<glib::DateTime> {
 }
 
 fn grid_top() -> f64 {
-    PAD + HEAD + NAMES
+    HEAD + NAMES
 }
 
 fn list_top() -> f64 {
     grid_top() + CELL * ROWS as f64 + 12.0
+}
+
+/// The panel hangs off the right screen edge under the bar; fillets above and below it meet the edge.
+fn surface(agenda: bool) -> (f64, f64) {
+    (W, height(agenda) + 2.0 * FILLET)
 }
 
 fn height(agenda: bool) -> f64 {
@@ -92,7 +134,8 @@ impl Pop {
     }
 
     fn spot_at(&self, x: f64, y: f64) -> Option<Spot> {
-        if (PAD..PAD + HEAD).contains(&y) {
+        let y = y - FILLET;
+        if (0.0..HEAD).contains(&y) {
             return if x >= W - PAD - 30.0 {
                 Some(Spot::Ahead)
             } else if x >= W - PAD - 62.0 {
@@ -140,18 +183,32 @@ impl Pop {
     fn draw(&self, s: &gtk::Snapshot) {
         let now = self.paint.frame_clock().map(|c| c.frame_time()).unwrap_or_else(glib::monotonic_time);
         let fade = self.fade.value(now).clamp(0.0, 1.0);
+        let slide = self.slide.value(now);
+        if fade < 0.003 && slide < 0.003 {
+            return;
+        }
         let pal = self.app.palette_at(now);
         let cfg = &self.app.cfg;
         let h = height(self.agenda);
+        let (sw, sh) = surface(self.agenda);
         let hot = |spot: Spot| self.hover == Some(spot);
+        s.save();
+        s.translate(&graphene::Point::new(((1.0 - slide) * sw).round() as f32, 0.0));
+        s.save();
+        // A notch hanging from the right edge: the top-edge shape turned a quarter.
+        s.translate(&graphene::Point::new(sw as f32, 0.0));
+        s.rotate(90.0);
+        if let Some(p) = shape::docked_parts(sh / 2.0, 0.0, h, W, RADIUS, FILLET) {
+            draw::slab(s, &p, pal.body.alpha(1.0));
+        }
+        s.restore();
+        s.translate(&graphene::Point::new(0.0, FILLET as f32));
+        let (z, r) = (graphene::Size::zero(), graphene::Size::new(RADIUS as f32, RADIUS as f32));
+        s.push_rounded_clip(&gtk::gsk::RoundedRect::new(graphene::Rect::new(0.0, 0.0, W as f32, h as f32), r, z, z, r));
         s.push_opacity(fade);
-        let shape = draw::round(0.0, 0.0, W, h, 14.0);
-        draw::fill(s, &shape, pal.body.alpha(1.0));
-        let edge = gdk::RGBA::new(1.0, 1.0, 1.0, 0.07);
-        s.append_border(&shape, &[1.0; 4], &[edge, edge, edge, edge]);
-        let mid = PAD + HEAD / 2.0 - 4.0;
+        let mid = 28.0;
         let title = midnight(self.year, self.month, 1).and_then(|d| d.format("%B %Y").ok()).map(|t| t.to_string()).unwrap_or_default();
-        draw::text(s, &self.paint, cfg, &title, 15.0, Face::Text(650), if hot(Spot::Title) { pal.accent } else { pal.ink_main }, PAD + 4.0, mid, W - 2.0 * PAD - 74.0, pango::Alignment::Left);
+        draw::text(s, &self.paint, cfg, &title, 17.0, Face::Text(650), if hot(Spot::Title) { pal.accent } else { pal.ink_main }, PAD + 4.0, mid, W - 2.0 * PAD - 74.0, pango::Alignment::Left);
         for (spot, glyph, cx) in [(Spot::Back, "chevron_left", W - PAD - 46.0), (Spot::Ahead, "chevron_right", W - PAD - 15.0)] {
             if hot(spot) {
                 draw::fill(s, &draw::round(cx - 14.0, mid - 14.0, 28.0, 28.0, 14.0), pal.ink_main.alpha(0.08));
@@ -161,7 +218,7 @@ impl Pop {
         let cells = self.cells();
         for (i, d) in cells.iter().take(7).enumerate() {
             let name: String = d.format("%a").map(|t| t.chars().take(2).collect()).unwrap_or_default();
-            draw::text(s, &self.paint, cfg, &name, 11.5, Face::Text(600), pal.ink_meta, PAD + i as f64 * CELL_W, PAD + HEAD + NAMES / 2.0 - 2.0, CELL_W, pango::Alignment::Center);
+            draw::text(s, &self.paint, cfg, &name, 12.5, Face::Text(600), pal.ink_meta, PAD + i as f64 * CELL_W, HEAD + NAMES / 2.0, CELL_W, pango::Alignment::Center);
         }
         let today = today().map(|t| t.to_unix());
         let marks = self.agenda;
@@ -172,7 +229,7 @@ impl Pop {
             let at = d.to_unix();
             let inside = d.month() == self.month;
             let now_day = Some(at) == today;
-            let dot = draw::round(x + CELL_W / 2.0 - 15.0, cy - 15.0, 30.0, 30.0, 15.0);
+            let dot = draw::round(x + CELL_W / 2.0 - 18.0, cy - 18.0, 36.0, 36.0, 18.0);
             if now_day {
                 draw::fill(s, &dot, pal.accent);
             } else if at == self.pick {
@@ -189,10 +246,10 @@ impl Pop {
             } else {
                 pal.ink_main
             };
-            draw::text(s, &self.paint, cfg, &d.day_of_month().to_string(), 13.5, Face::Number(if now_day { 650 } else { 500 }), ink, x, cy, CELL_W, pango::Alignment::Center);
+            draw::text(s, &self.paint, cfg, &d.day_of_month().to_string(), 15.0, Face::Number(if now_day { 650 } else { 500 }), ink, x, cy, CELL_W, pango::Alignment::Center);
             if marks && inside && !calendar::at(at).is_empty() {
                 let tint = if now_day { pal.on_accent } else { pal.accent };
-                draw::fill(s, &draw::round(x + CELL_W / 2.0 - 2.0, cy + 9.0, 4.0, 4.0, 2.0), tint);
+                draw::fill(s, &draw::round(x + CELL_W / 2.0 - 2.0, cy + 11.0, 4.0, 4.0, 2.0), tint);
             }
         }
         if self.agenda {
@@ -223,6 +280,8 @@ impl Pop {
             }
         }
         s.pop();
+        s.pop();
+        s.restore();
     }
 }
 
@@ -232,7 +291,8 @@ fn changed(p: &Rc<RefCell<Pop>>) {
     }
 }
 
-pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, right: f64, y: f64) {
+/// Opens the calendar as a panel sliding in from the right edge, under the bar.
+pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, _right: f64, _y: f64) {
     crate::popmenu::close();
     close();
     let hook = crate::popmenu::take_then();
@@ -253,12 +313,15 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, right: f64, y: f64) {
     window.set_monitor(monitor.as_ref());
     window.add_css_class("digit");
     window.set_anchor(Edge::Top, true);
-    window.set_anchor(Edge::Left, true);
+    window.set_anchor(Edge::Right, true);
+    window.set_margin(Edge::Top, (app.reserve() - FILLET as i32).max(0));
     let paint = Paint::new(1, 1);
+    let now_us = glib::monotonic_time();
+    let mut slide = Tween::still(0.0);
+    slide.go(1.0, now_us, 420, motion::Curve::new(0.16, 1.0, 0.3, 1.0));
     let mut fade = Tween::still(0.0);
-    fade.go(1.0, glib::monotonic_time(), 140, motion::STANDARD);
-    let screen_w = monitor.as_ref().map(|m| m.geometry().width() as f64).unwrap_or(1920.0);
-    let h = height(agenda);
+    fade.after(1.0, now_us, 60, 220, motion::STANDARD);
+    let (sw, sh) = surface(agenda);
     let pop = Rc::new(RefCell::new(Pop {
         app: app.clone(),
         window: window.clone(),
@@ -267,14 +330,14 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, right: f64, y: f64) {
         month: now.month(),
         pick: now.to_unix(),
         hover: None,
+        slide,
         fade,
+        open: true,
         seen: false,
         agenda,
     }));
-    window.set_margin(Edge::Left, (right - W).clamp(6.0, (screen_w - W - 6.0).max(6.0)) as i32);
-    window.set_margin(Edge::Top, y as i32);
-    window.set_default_size(W as i32, h as i32);
-    paint.set_size_request(W as i32, h as i32);
+    window.set_default_size(sw as i32, sh as i32);
+    paint.set_size_request(sw as i32, sh as i32);
     window.set_child(Some(&paint));
     let weak = Rc::downgrade(&pop);
     paint.on_draw(move |s| {
@@ -372,10 +435,9 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, right: f64, y: f64) {
     OPEN.with(|o| *o.borrow_mut() = Some(pop.clone()));
     DONE.with(|d| *d.borrow_mut() = hook);
     window.present();
-    let weak = Rc::downgrade(&pop);
-    paint.add_tick_callback(move |p, clock| {
-        p.queue_draw();
-        let busy = weak.upgrade().and_then(|m| m.try_borrow().ok().map(|m| !m.fade.settled(clock.frame_time()))).unwrap_or(false);
-        if busy { glib::ControlFlow::Continue } else { glib::ControlFlow::Break }
-    });
+    if let Some(surface) = window.surface() {
+        let body = cairo::RectangleInt::new(0, FILLET as i32, W as i32, height(agenda) as i32);
+        surface.set_input_region(Some(&cairo::Region::create_rectangle(&body)));
+    }
+    animate(&pop);
 }
