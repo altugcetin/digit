@@ -1658,6 +1658,13 @@ impl View {
                 };
                 (self.island_width(summary, body) + room, depth, p.radius())
             }
+            // During a call the switch peek shows only the dots and the call's waveform, so it is
+            // sized like the idle notch rather than with room for "Desktop N".
+            Head::Peek(Peek::Spaces { .. }) if self.app.call.borrow().is_some() => {
+                let left = dots_width(self.spaces().0.len());
+                let right = 28.0 + crate::bars::W as f64;
+                (self.centre() + room + 2.0 * (left.max(right) - 8.0).max(0.0), 0.0, self.idle_r())
+            }
             Head::Peek(p) => (self.centre() + room + 2.0 * p.wing(), 0.0, self.idle_r()),
             Head::Call => {
                 let left = 30.0 + self.text_width(&self.call_time(App::now()), 15.0, Face::Number(560)).max(self.text_width("0:00", 15.0, Face::Number(560))).ceil();
