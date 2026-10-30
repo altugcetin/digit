@@ -20,6 +20,8 @@ const CENTRE: f64 = 116.0;
 const CX: f64 = WIDTH / 2.0;
 const SHEET_W: f64 = 780.0;
 const OPEN_DEPTH: f64 = 156.0;
+/// Extra room above an open Dynamic Island's content, so its top edge matches the sides.
+const ISLAND_PAD: f64 = 9.0;
 const LEFT: f64 = CX - SHEET_W / 2.0 + 22.0;
 const RIGHT: f64 = CX + SHEET_W / 2.0 - 22.0;
 const MEDIA_W: f64 = 318.0;
@@ -1679,7 +1681,7 @@ impl View {
                 let right = 12.0 + crate::bars::W as f64;
                 (self.centre() + room + 2.0 * (left.max(right) - 8.0).max(0.0), 0.0, self.idle_r())
             }
-            Head::Open => (SHEET_W, OPEN_DEPTH, 26.0),
+            Head::Open => (SHEET_W, OPEN_DEPTH + ISLAND_PAD * self.float.target().clamp(0.0, 1.0), 26.0),
         }
     }
 
@@ -1860,6 +1862,13 @@ impl View {
         Self::lift_at(self.float.value(now), self.menu.value(now) * (1.0 - self.widen.value(now)))
     }
 
+    /// Where the content sits below the shape's top: the float lift, plus the island's top
+    /// padding while it is open.
+    fn content_lift(&self, now: i64) -> f64 {
+        let open = (self.depth.value(now).max(0.0) / OPEN_DEPTH).clamp(0.0, 1.0);
+        self.body_lift(now) + ISLAND_PAD * self.float.value(now).clamp(0.0, 1.0) * open
+    }
+
     fn body_lift(&self, now: i64) -> f64 {
         let open = (self.depth.value(now).max(0.0) / 24.0).clamp(0.0, 1.0);
         Self::lift_at(self.float.value(now), self.menu.value(now) * (1.0 - self.widen.value(now)) * (1.0 - open))
@@ -2028,7 +2037,7 @@ impl View {
         }
         let clip = self.app.dock() == Dock::Screen && clip_to(s);
         s.save();
-        s.translate(&graphene::Point::new(0.0, lift as f32));
+        s.translate(&graphene::Point::new(0.0, self.content_lift(now) as f32));
         let fade = self.fade.value(now).clamp(0.0, 1.0);
         if fade > 0.01 {
             s.push_opacity(fade);
@@ -2044,7 +2053,7 @@ impl View {
         let shown = self.sheet.value(now).clamp(0.0, 1.0);
         if sheet > 1.0 && shown > 0.01 && clip_to(s) {
             s.save();
-            s.translate(&graphene::Point::new(0.0, lift as f32));
+            s.translate(&graphene::Point::new(0.0, self.content_lift(now) as f32));
             s.push_opacity(shown);
             self.draw_sheet(s, now);
             s.pop();
@@ -2936,7 +2945,7 @@ impl Default for Canvas {
 }
 
 fn lifted(v: &Rc<RefCell<View>>, y: f64) -> f64 {
-    y - v.try_borrow().map(|v| v.body_lift(App::now())).unwrap_or(0.0)
+    y - v.try_borrow().map(|v| v.content_lift(App::now())).unwrap_or(0.0)
 }
 
 fn legible(tint: Rgb, pal: &kit::palette::Palette) -> Rgb {
