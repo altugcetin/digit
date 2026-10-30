@@ -1,4 +1,5 @@
 mod apps;
+mod bluetooth;
 mod defaults;
 mod desktop;
 mod displays;
@@ -15,12 +16,15 @@ mod system;
 mod ui;
 mod updates;
 mod welcome;
+mod wifi;
 
 use gtk::{gio, glib, prelude::*};
 use std::cell::RefCell;
 
-const PAGES: [(&str, &str, &str); 6] = [
+const PAGES: [(&str, &str, &str); 8] = [
     ("overview", "Overview", "computer"),
+    ("wifi", "Wi-Fi", "wifi"),
+    ("bluetooth", "Bluetooth", "bluetooth"),
     ("updates", "Updates", "system_update_alt"),
     ("apps", "Apps", "apps"),
     ("displays", "Displays", "monitor"),
@@ -40,6 +44,8 @@ thread_local! {
 
 fn build_page(name: &str) -> gtk::Widget {
     match name {
+        "wifi" => wifi::build(),
+        "bluetooth" => bluetooth::build(),
         "updates" => updates::build(),
         "apps" => apps::build(),
         "displays" => displays::build(),

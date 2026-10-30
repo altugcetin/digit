@@ -2,7 +2,7 @@ use gtk::{pango, prelude::*};
 
 pub fn hue(name: &str) -> &'static str {
     match name {
-        "computer" | "view_column" | "package_2" | "dock_to_bottom" | "side_navigation" | "select_window" | "description" => "blue",
+        "computer" | "wifi" | "wifi_off" | "wifi_find" | "wifi_lock" | "signal_wifi_0_bar" | "network_wifi_1_bar" | "network_wifi_2_bar" | "network_wifi_3_bar" | "signal_wifi_4_bar" | "bluetooth" | "bluetooth_disabled" | "bluetooth_searching" | "view_column" | "package_2" | "dock_to_bottom" | "side_navigation" | "select_window" | "description" => "blue",
         "system_update_alt" | "check_circle" | "memory" | "good" => "green",
         "apps" | "dashboard" | "swap_vert" => "purple",
         "palette" | "style" | "interests" => "pink",

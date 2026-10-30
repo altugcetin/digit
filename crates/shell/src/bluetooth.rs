@@ -7,16 +7,53 @@ use std::time::Duration;
 use zbus::zvariant::OwnedValue;
 
 fn glyph(icon: &str) -> &'static str {
-    match icon {
-        i if i.contains("headset") || i.contains("headphone") => "headphones",
-        i if i.contains("speaker") || i.contains("audio") => "speaker",
-        i if i.contains("mouse") => "mouse",
-        i if i.contains("keyboard") => "keyboard",
-        i if i.contains("gaming") || i.contains("joystick") => "sports_esports",
-        i if i.contains("phone") => "smartphone",
-        i if i.contains("watch") => "watch",
-        _ => "bluetooth",
+    kit::bluez::symbol(icon)
+}
+
+/// Answers BlueZ when a pairing started from the Control Center needs it. Only pairings this
+/// process starts reach us, so a code to compare is shown and accepted, and a code to type is shown.
+pub fn agent(app: &Rc<App>) {
+    thread_local! {
+        static ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
+    if ON.with(|o| o.replace(true)) {
+        return;
+    }
+    let weak = Rc::downgrade(app);
+    glib::spawn_future_local(async move {
+        let Ok(conn) = crate::bus::system().await else { return };
+        let Some(rx) = kit::bluez::agent(&conn).await else {
+            ON.with(|o| o.set(false));
+            return;
+        };
+        while let Ok(req) = rx.recv().await {
+            let note = |text: String| {
+                if let Some(app) = weak.upgrade() {
+                    app.request(Peek::Note { text });
+                }
+            };
+            let answer = match req.ask {
+                kit::bluez::Ask::Confirm(name, code) => {
+                    if !code.is_empty() {
+                        note(format!("Pairing with {name} · code {code}"));
+                    }
+                    Some(String::new())
+                }
+                kit::bluez::Ask::Pin(_) => Some("0000".into()),
+                kit::bluez::Ask::Show(name, code) => {
+                    note(format!("Type {code} on {name}"));
+                    None
+                }
+                kit::bluez::Ask::Passkey(name) => {
+                    note(format!("Pair {name} from Settings to type its code"));
+                    None
+                }
+                kit::bluez::Ask::Cancel => None,
+            };
+            let _ = req.reply.try_send(answer);
+        }
+        ON.with(|o| o.set(false));
+    });
 }
 
 pub fn start(app: &Rc<App>) {

@@ -190,3 +190,109 @@ pub fn terminal(argv: &[&str]) -> Result<(), String> {
 pub fn open_uri(uri: &str) {
     let _ = gtk::gio::AppInfo::launch_default_for_uri(uri, gtk::gio::AppLaunchContext::NONE);
 }
+
+/// A small dialog that may ask for text. `done` gets `Some(text)` on the action button
+/// (empty when there is no field) and `None` when it is cancelled or closed some other way.
+pub fn prompt(parent: Option<gtk::Window>, title: &str, detail: &str, field: Option<(&str, bool)>, action: &str, done: impl FnOnce(Option<String>) + 'static) -> gtk::Window {
+    let window = gtk::Window::builder().modal(true).decorated(false).resizable(false).build();
+    window.set_transient_for(parent.as_ref());
+    window.set_title(Some(title));
+    window.add_css_class("digit-dialog");
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    content.add_css_class("dialog");
+    content.set_size_request(420, -1);
+    let t = text(title, "name");
+    t.add_css_class("dialog-title");
+    t.set_wrap(true);
+    t.set_max_width_chars(44);
+    content.append(&t);
+    if !detail.is_empty() {
+        let d = text(detail, "dim");
+        d.set_wrap(true);
+        d.set_max_width_chars(52);
+        content.append(&d);
+    }
+    let entry = field.map(|(hint, secret)| {
+        let e = gtk::Entry::new();
+        e.add_css_class("search");
+        e.set_placeholder_text(Some(hint));
+        e.set_visibility(!secret);
+        if secret {
+            e.set_input_purpose(gtk::InputPurpose::Password);
+            e.set_secondary_icon_name(Some("view-reveal-symbolic"));
+            e.connect_icon_press(|e, _| e.set_visibility(!EntryExt::is_visible(e)));
+        }
+        e.set_margin_top(4);
+        content.append(&e);
+        e
+    });
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    buttons.set_halign(gtk::Align::End);
+    buttons.set_margin_top(10);
+    let no = button("Cancel", "");
+    let go = button(action, "accent");
+    buttons.append(&no);
+    if !action.is_empty() {
+        buttons.append(&go);
+    } else {
+        no.set_label("Close");
+    }
+    content.append(&buttons);
+    window.set_child(Some(&content));
+    let done: std::rc::Rc<RefCell<Option<Box<dyn FnOnce(Option<String>)>>>> = std::rc::Rc::new(RefCell::new(Some(Box::new(done))));
+    let answer = {
+        let done = done.clone();
+        move |v: Option<String>| {
+            if let Some(f) = done.borrow_mut().take() {
+                f(v);
+            }
+        }
+    };
+    let w = window.clone();
+    let a = answer.clone();
+    no.connect_clicked(move |_| {
+        a(None);
+        w.close();
+    });
+    let w = window.clone();
+    let a = answer.clone();
+    let e = entry.clone();
+    let accept = std::rc::Rc::new(move || {
+        a(Some(e.as_ref().map(|e| e.text().to_string()).unwrap_or_default()));
+        w.close();
+    });
+    let ok = accept.clone();
+    go.connect_clicked(move |_| ok());
+    if let Some(e) = &entry {
+        let ok = accept.clone();
+        e.connect_activate(move |_| ok());
+    }
+    let a = answer.clone();
+    window.connect_close_request(move |_| {
+        a(None);
+        glib::Propagation::Proceed
+    });
+    let keys = gtk::EventControllerKey::new();
+    let w = window.clone();
+    keys.connect_key_pressed(move |_, key, _, _| {
+        if key == gtk::gdk::Key::Escape {
+            w.close();
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    window.add_controller(keys);
+    window.present();
+    match &entry {
+        Some(e) => {
+            e.grab_focus();
+        }
+        None if !action.is_empty() => {
+            go.grab_focus();
+        }
+        None => {
+            no.grab_focus();
+        }
+    }
+    window
+}
