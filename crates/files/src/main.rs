@@ -1224,11 +1224,11 @@ button.pm-row:hover, button.pm-row:focus-visible {{ background: alpha({main}, 0.
 button.pm-row:active {{ background: alpha({accent}, 0.25); }}
 button.pm-row:disabled {{ opacity: 0.4; }}
 button.pm-row .pm-glyph {{ font-size: 17px; color: {meta}; min-width: 20px; }}
-button.pm-row .pm-label {{ font-size: 13.5px; }}
-button.pm-row .pm-accel {{ font-size: 12px; color: {meta}; margin-left: 20px; }}
+button.pm-row .pm-label {{ font-size: 13.5px; font-weight: 450; }}
+button.pm-row .pm-accel {{ font-size: 12px; font-weight: 400; color: {meta}; margin-left: 20px; }}
 button.pm-row .pm-trail {{ font-size: 17px; color: {meta}; margin-left: 8px; }}
 button.pm-row.pm-danger .pm-label, button.pm-row.pm-danger .pm-glyph {{ color: #ff6b6b; }}
-button.pm-row.pm-back .pm-label {{ font-weight: 600; }}
+button.pm-row.pm-back .pm-label {{ font-weight: 560; }}
 separator.pm-sep {{ margin: 4px 8px; background: alpha({main}, 0.08); min-height: 1px; }}
 .place-remove {{ opacity: 0; min-width: 22px; min-height: 22px; padding: 0; }}
 list.places row:hover .place-remove {{ opacity: 1; }}
