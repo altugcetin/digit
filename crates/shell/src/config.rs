@@ -40,6 +40,10 @@ pub struct Config {
     pub hover: bool,
     pub intro: bool,
     pub fullscreen_edges: bool,
+    pub notch_close: String,
+    pub spaces_close: String,
+    pub control_close: String,
+    pub calendar_close: String,
     pub notifications: bool,
     pub polkit: bool,
     pub wallpaper: bool,
@@ -99,6 +103,10 @@ impl Default for Config {
             hover: true,
             intro: true,
             fullscreen_edges: false,
+            notch_close: "leave".into(),
+            spaces_close: "leave".into(),
+            control_close: "leave".into(),
+            calendar_close: "leave".into(),
             notifications: true,
             polkit: true,
             wallpaper: true,
@@ -170,6 +178,11 @@ pub struct Prefs {
     pub mic_guard: bool,
     pub control_corner: bool,
     pub fullscreen_edges: bool,
+    /// How each panel closes: "leave" when the pointer leaves it, "click" on a click elsewhere.
+    pub notch_close: String,
+    pub spaces_close: String,
+    pub control_close: String,
+    pub calendar_close: String,
 }
 
 impl From<&Config> for Prefs {
@@ -212,6 +225,10 @@ impl From<&Config> for Prefs {
             mic_guard: c.mic_guard,
             control_corner: c.control_corner,
             fullscreen_edges: c.fullscreen_edges,
+            notch_close: c.notch_close.clone(),
+            spaces_close: c.spaces_close.clone(),
+            control_close: c.control_close.clone(),
+            calendar_close: c.calendar_close.clone(),
         }
     }
 }

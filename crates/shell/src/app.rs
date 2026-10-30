@@ -210,6 +210,8 @@ pub fn discord_place(title: &str) -> Option<(String, String)> {
 }
 
 pub const LIFT: f64 = 7.0;
+/// How long a panel in "leave" mode waits after the pointer leaves before it closes.
+pub const LEAVE_MS: u64 = 350;
 pub const MENU_LIFT: f64 = 4.0;
 
 pub struct App {

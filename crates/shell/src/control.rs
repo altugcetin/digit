@@ -416,6 +416,25 @@ impl Control {
             }
         });
         canvas.add_controller(motion);
+        // "leave" mode: the panel folds shortly after the pointer leaves it.
+        let away = gtk::EventControllerMotion::new();
+        let gone = Rc::new(std::cell::Cell::new(0u64));
+        let g = gone.clone();
+        away.connect_enter(move |_, _, _| g.set(g.get() + 1));
+        let weak = Rc::downgrade(&self.0);
+        away.connect_leave(move |_| {
+            let generation = gone.get() + 1;
+            gone.set(generation);
+            let (weak, gone) = (weak.clone(), gone.clone());
+            glib::timeout_add_local_once(std::time::Duration::from_millis(crate::app::LEAVE_MS), move || {
+                let Some(s) = weak.upgrade() else { return };
+                let fold = gone.get() == generation && s.try_borrow().is_ok_and(|s| s.open && s.app.prefs.borrow().control_close == "leave");
+                if fold {
+                    Control(s).close();
+                }
+            });
+        });
+        canvas.add_controller(away);
         let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
         let weak = Rc::downgrade(&self.0);
         wheel.connect_scroll(move |_, _, dy| {
