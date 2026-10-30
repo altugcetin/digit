@@ -1,4 +1,5 @@
 pub mod app;
+pub mod bluez;
 pub mod calc;
 pub mod color;
 pub mod distro;
@@ -15,5 +16,6 @@ pub mod shape;
 pub mod style;
 pub mod ui;
 pub mod niri;
+pub mod nm;
 pub mod wm;
 pub mod theme;

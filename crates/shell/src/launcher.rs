@@ -95,7 +95,9 @@ enum Act {
     Spawn(Vec<String>),
 }
 
-const PAGES: [(&str, &str, &str, &str, &str); 7] = [
+const PAGES: [(&str, &str, &str, &str, &str); 9] = [
+    ("wifi", "Wi-Fi", "Settings", "wifi", "wifi wi-fi wireless wlan network internet hotspot password ssid"),
+    ("bluetooth", "Bluetooth", "Settings", "bluetooth", "bluetooth pair pairing headphones headset mouse keyboard controller adapter blueman"),
     ("displays", "Displays", "Settings", "monitor", "display displays monitor monitors screen resolution refresh rate hz scale rotation arrange"),
     ("welcome", "Welcome tour", "Set up Digit", "waving_hand", "welcome tour onboarding setup start intro getting started wizard"),
     ("overview", "About this computer", "System overview", "info", "about system computer hardware memory disk processor gpu overview"),

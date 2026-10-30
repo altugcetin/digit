@@ -5,13 +5,17 @@ use crate::draw::{self, Face};
 use gtk::subclass::prelude::*;
 use gtk::{cairo, gdk, glib, graphene, gsk, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use kit::bluez;
 use kit::motion::{self, Tween};
+use kit::nm;
 use kit::palette::Rgb;
 use kit::shape;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+
+mod detail;
 
 const W: f64 = 380.0;
 const FILLET: f64 = 12.0;
@@ -24,7 +28,7 @@ const HEAD: f64 = 34.0;
 const ROW: f64 = 64.0;
 const EMPTY: f64 = 56.0;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Tile {
     Network,
     Bluetooth,
@@ -97,6 +101,7 @@ enum Hit {
     Row(usize),
     Close(usize),
     Device(usize),
+    Detail(detail::D),
 }
 
 #[derive(Clone, Default)]
@@ -108,43 +113,11 @@ struct Net {
     online: bool,
 }
 
-#[derive(Clone)]
-struct Device {
-    path: String,
-    name: String,
-    icon: String,
-    connected: bool,
-    battery: Option<u8>,
-}
-
-#[derive(Clone, Default)]
-struct Blue {
-    adapter: Option<OwnedObjectPath>,
-    on: bool,
-    connected: Vec<String>,
-    devices: Vec<Device>,
-    busy: Vec<String>,
-}
-
 const DEVICE: f64 = 52.0;
 const GREEN: Rgb = Rgb::new(0.19, 0.82, 0.35);
 const RED: Rgb = Rgb::new(1.0, 0.27, 0.23);
 const CELL: f64 = 96.0;
 const PER_ROW: usize = 4;
-
-fn device_symbol(icon: &str) -> &'static str {
-    match icon {
-        i if i.contains("headset") || i.contains("headphone") => "headphones",
-        i if i.contains("audio") || i.contains("speaker") => "speaker",
-        i if i.contains("mouse") => "mouse",
-        i if i.contains("keyboard") => "keyboard",
-        i if i.contains("gaming") || i.contains("joystick") => "sports_esports",
-        i if i.contains("phone") => "smartphone",
-        i if i.contains("computer") => "computer",
-        i if i.contains("watch") => "watch",
-        _ => "bluetooth",
-    }
-}
 
 struct State {
     app: Rc<App>,
@@ -153,7 +126,17 @@ struct State {
     open: bool,
     max_h: f64,
     net: Net,
-    blue: Blue,
+    bt: bluez::Snapshot,
+    busy: Vec<String>,
+    wifi: nm::Wifi,
+    expand: Option<Tile>,
+    reveal: Tween,
+    joining: Option<String>,
+    pass: Option<detail::Pass>,
+    armed: Option<String>,
+    scanning: Option<String>,
+    scan_round: u32,
+    watch_gen: u32,
     rise: Tween,
     fade: Tween,
     height: Tween,
@@ -272,36 +255,18 @@ async fn read_net() -> Net {
     net
 }
 
-async fn read_blue() -> Blue {
-    let mut blue = Blue::default();
-    let Ok(conn) = crate::bus::system().await else { return blue };
-    let Ok(om) = zbus::fdo::ObjectManagerProxy::builder(&conn).destination("org.bluez").and_then(|b| b.path("/")) else { return blue };
-    let Ok(om) = om.build().await else { return blue };
-    let Ok(objects) = om.get_managed_objects().await else { return blue };
-    let flag = |props: &HashMap<String, OwnedValue>, key: &str| props.get(key).and_then(|v| bool::try_from(v.try_clone().ok()?).ok()).unwrap_or(false);
-    for (path, ifaces) in &objects {
-        for (iface, props) in ifaces {
-            match iface.as_str() {
-                "org.bluez.Adapter1" if blue.adapter.is_none() => {
-                    blue.adapter = Some(path.clone());
-                    blue.on = flag(props, "Powered");
-                }
-                "org.bluez.Device1" if flag(props, "Paired") || flag(props, "Connected") => {
-                    let text = |key: &str| props.get(key).and_then(|v| String::try_from(v.try_clone().ok()?).ok());
-                    let name = text("Alias").or_else(|| text("Name")).unwrap_or_else(|| "Device".into());
-                    let connected = flag(props, "Connected");
-                    if connected {
-                        blue.connected.push(name.clone());
-                    }
-                    let battery = ifaces.get("org.bluez.Battery1").and_then(|b| b.get("Percentage")).and_then(|v| u8::try_from(v.try_clone().ok()?).ok());
-                    blue.devices.push(Device { path: path.to_string(), name, icon: text("Icon").unwrap_or_default(), connected, battery });
-                }
-                _ => {}
-            }
-        }
+async fn read_wifi() -> nm::Wifi {
+    match crate::bus::system().await {
+        Ok(conn) => nm::read(&conn).await,
+        Err(_) => nm::Wifi::default(),
     }
-    blue.devices.sort_by(|a, b| b.connected.cmp(&a.connected).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));
-    blue
+}
+
+async fn read_bt() -> bluez::Snapshot {
+    match crate::bus::system().await {
+        Ok(conn) => bluez::read(&conn).await,
+        Err(_) => bluez::Snapshot::default(),
+    }
 }
 
 impl Control {
@@ -324,7 +289,17 @@ impl Control {
             open: false,
             max_h: 600.0,
             net: Net::default(),
-            blue: Blue::default(),
+            bt: bluez::Snapshot::default(),
+            busy: Vec::new(),
+            wifi: nm::Wifi::default(),
+            expand: None,
+            reveal: Tween::still(0.0),
+            joining: None,
+            pass: None,
+            armed: None,
+            scanning: None,
+            scan_round: 0,
+            watch_gen: 0,
             rise: Tween::still(0.0),
             fade: Tween::still(0.0),
             height: Tween::still(0.0),
@@ -355,11 +330,14 @@ impl Control {
         };
         let keys = gtk::EventControllerKey::new();
         let weak = Rc::downgrade(&self.0);
-        keys.connect_key_pressed(move |_, key, _, _| {
+        keys.connect_key_pressed(move |_, key, _, mods| {
+            let Some(s) = weak.upgrade() else { return glib::Propagation::Proceed };
+            let me = Control(s);
+            if me.key(key, mods) {
+                return glib::Propagation::Stop;
+            }
             if matches!(key, gdk::Key::Escape | gdk::Key::space) {
-                if let Some(s) = weak.upgrade() {
-                    Control(s).close();
-                }
+                me.close();
                 return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed
@@ -401,6 +379,18 @@ impl Control {
             }
         });
         canvas.add_controller(drag);
+        let menu = gtk::GestureClick::new();
+        menu.set_button(gdk::BUTTON_SECONDARY);
+        let weak = Rc::downgrade(&self.0);
+        menu.connect_pressed(move |_, _, x, y| {
+            let Some(s) = weak.upgrade() else { return };
+            let me = Control(s);
+            match me.hit(x, y) {
+                Some(Hit::Tile(t @ (Tile::Network | Tile::Bluetooth))) | Some(Hit::Detail(detail::D::Expand(t))) => me.expand(t),
+                _ => {}
+            }
+        });
+        canvas.add_controller(menu);
         let motion = gtk::EventControllerMotion::new();
         let weak = Rc::downgrade(&self.0);
         motion.connect_motion(move |_, x, y| {
@@ -486,6 +476,9 @@ impl Control {
             }
             s.open = true;
             s.scroll = 0.0;
+            s.expand = None;
+            s.pass = None;
+            s.reveal.set(0.0);
             let now = glib::monotonic_time();
             s.rise.go(1.0, now, 420, motion::Curve::new(0.16, 1.0, 0.3, 1.0));
             s.fade.after(1.0, now, 60, 220, motion::STANDARD);
@@ -573,6 +566,8 @@ impl Control {
                 return;
             }
             s.open = false;
+            s.pass = None;
+            s.watch_gen += 1;
             let now = glib::monotonic_time();
             s.rise.go(0.0, now, 240, motion::Curve::new(0.4, 0.0, 0.9, 0.6));
             s.fade.go(0.0, now, 180, motion::STANDARD);
@@ -581,18 +576,20 @@ impl Control {
                 scrim.destroy();
             }
         }
+        self.stop_scan();
         self.kick();
     }
 
     fn refresh(&self) {
         let weak = Rc::downgrade(&self.0);
         glib::spawn_future_local(async move {
-            let (net, blue, power) = futures_util::join!(read_net(), read_blue(), read_power());
+            let (net, bt, wifi, power) = futures_util::join!(read_net(), read_bt(), read_wifi(), read_power());
             let Some(s) = weak.upgrade() else { return };
             {
                 let mut st = s.borrow_mut();
                 st.net = net;
-                st.blue = blue;
+                st.bt = bt;
+                st.wifi = wifi;
                 st.power = power;
             }
             Control(s).changed();
@@ -600,13 +597,17 @@ impl Control {
     }
 
     fn resize(&self) {
+        self.resize_with(260, motion::STANDARD);
+    }
+
+    fn resize_with(&self, ms: i64, curve: motion::Curve) {
         let mut s = self.0.borrow_mut();
         let target = s.content().min(s.max_h);
         let now = glib::monotonic_time();
         if s.height.target() < 1.0 {
             s.height.set(target);
-        } else {
-            s.height.go(target, now, 260, motion::STANDARD);
+        } else if (s.height.target() - target).abs() > 0.5 {
+            s.height.go(target, now, ms, curve);
         }
         let limit = (s.content() - s.max_h).max(0.0);
         s.scroll = s.scroll.min(limit);
@@ -677,9 +678,9 @@ impl Control {
                 }
             }
             Some(Hit::Tile(Tile::Bluetooth)) => {
-                let blue = self.0.borrow().blue.clone();
-                if let Some(path) = blue.adapter {
-                    self.set_property("org.bluez", path.as_str(), "org.bluez.Adapter1", "Powered", !blue.on);
+                let adapter = self.0.borrow().bt.chosen().cloned();
+                if let Some(a) = adapter {
+                    self.set_property("org.bluez", &a.path, "org.bluez.Adapter1", "Powered", !a.powered);
                 }
             }
             Some(Hit::Mute) => {
@@ -700,6 +701,7 @@ impl Control {
                 self.changed();
             }
             Some(Hit::Device(i)) => self.toggle_device(i),
+            Some(Hit::Detail(d)) => self.act(d),
             Some(Hit::Close(i)) => self.forget(i, false),
             Some(Hit::Row(i)) => self.forget(i, true),
             Some(Hit::Slider) | None => {
@@ -736,11 +738,11 @@ impl Control {
     }
 
     fn toggle_device(&self, i: usize) {
-        let Some(dev) = self.0.borrow().blue.devices.get(i).cloned() else { return };
-        if self.0.borrow().blue.busy.contains(&dev.path) {
+        let Some(dev) = self.0.borrow().known().get(i).cloned() else { return };
+        if self.0.borrow().busy.contains(&dev.path) {
             return;
         }
-        self.0.borrow_mut().blue.busy.push(dev.path.clone());
+        self.0.borrow_mut().busy.push(dev.path.clone());
         self.0.borrow().canvas.queue_draw();
         let weak = Rc::downgrade(&self.0);
         glib::spawn_future_local(async move {
@@ -754,7 +756,7 @@ impl Control {
                 }
             }
             let Some(s) = weak.upgrade() else { return };
-            s.borrow_mut().blue.busy.retain(|b| *b != dev.path);
+            s.borrow_mut().busy.retain(|b| *b != dev.path);
             if failed.is_some() {
                 let app = s.borrow().app.clone();
                 app.request(crate::app::Peek::Note { text: format!("{} couldn't {}", dev.name, if dev.connected { "disconnect" } else { "connect" }) });
@@ -807,9 +809,24 @@ impl Control {
 }
 
 impl State {
+    /// Paired or connected devices on every adapter, for the quick list under the tiles.
+    fn known(&self) -> Vec<bluez::Device> {
+        let mut v: Vec<bluez::Device> = self.bt.devices.iter().filter(|d| d.paired || d.connected).cloned().collect();
+        v.sort_by(|a, b| b.connected.cmp(&a.connected).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+        v
+    }
+
+    fn bt_on(&self) -> bool {
+        self.bt.chosen().is_some_and(|a| a.powered)
+    }
+
+    fn quick_devices(&self) -> bool {
+        self.bt_on() && self.expand != Some(Tile::Bluetooth) && !self.known().is_empty()
+    }
+
     fn tiles(&self) -> Vec<Tile> {
         let mut t = vec![Tile::Network];
-        if self.blue.adapter.is_some() {
+        if !self.bt.adapters.is_empty() {
             t.push(Tile::Bluetooth);
         }
         t.push(Tile::Quiet);
@@ -828,12 +845,13 @@ impl State {
         let tiles = rows * TILE_H + (rows - 1.0).max(0.0) * TILE_GAP;
         let n = self.app.history.borrow().len();
         let list = if n == 0 { EMPTY } else { n as f64 * ROW };
-        let devices = if self.blue.on && !self.blue.devices.is_empty() { HEAD + self.blue.devices.len() as f64 * DEVICE + 8.0 } else { 0.0 };
+        let devices = if self.quick_devices() { HEAD + self.known().len() as f64 * DEVICE + 8.0 } else { 0.0 };
+        let detail = self.expand.map(|t| self.detail_height(t) * self.reveal.target()).unwrap_or(0.0);
         let cells = self.app.gadgets.borrow().len();
         let batteries = if cells == 0 { 0.0 } else { HEAD + cells.div_ceil(PER_ROW) as f64 * CELL + 6.0 };
         let system = HEAD + CELL + 6.0;
         let weather = if self.app.weather.borrow().is_some() { 58.0 } else { 0.0 };
-        PAD + weather + tiles + 14.0 + batteries + system + devices + SOUND + 16.0 + HEAD + list + PAD
+        PAD + weather + tiles + detail + 14.0 + batteries + system + devices + SOUND + 16.0 + HEAD + list + PAD
     }
 
     fn step(&mut self, now: i64) -> bool {
@@ -844,7 +862,7 @@ impl State {
                 self.region = rect;
             }
         }
-        let moving = [&self.rise, &self.fade, &self.height].iter().any(|t| !t.settled(now)) || self.app.palette_moving(now);
+        let moving = [&self.rise, &self.fade, &self.height, &self.reveal].iter().any(|t| !t.settled(now)) || self.app.palette_moving(now);
         if !moving && !self.open && self.window.is_visible() {
             let window = self.window.clone();
             glib::idle_add_local_once(move || window.set_visible(false));
@@ -866,9 +884,10 @@ impl State {
                 (icon, title.into(), state, if n.wifi { n.wifi_on } else { n.online })
             }
             Tile::Bluetooth => {
-                let b = &self.blue;
-                let state = if !b.on { "Off".into() } else if b.connected.is_empty() { "On".into() } else { b.connected.join(", ") };
-                (if b.on { "bluetooth" } else { "bluetooth_disabled" }, "Bluetooth".into(), state, b.on)
+                let on = self.bt_on();
+                let connected: Vec<String> = self.bt.devices.iter().filter(|d| d.connected).map(|d| d.name.clone()).collect();
+                let state = if !on { "Off".into() } else if connected.is_empty() { "On".into() } else { connected.join(", ") };
+                (if on { "bluetooth" } else { "bluetooth_disabled" }, "Bluetooth".into(), state, on)
             }
             Tile::Quiet => {
                 let on = self.app.dnd.get();
@@ -951,21 +970,37 @@ impl State {
         }
         let tiles = self.tiles();
         let tile_w = (inner - TILE_GAP) / 2.0;
+        let opened = match self.expand {
+            Some(t) => self.draw_detail(s, now, t, x0, y + TILE_H, inner, shift, &mut hits),
+            None => 0.0,
+        };
         for (i, tile) in tiles.iter().enumerate() {
             let tx = x0 + (i % 2) as f64 * (tile_w + TILE_GAP);
-            let ty = y + (i / 2) as f64 * (TILE_H + TILE_GAP);
+            let ty = y + (i / 2) as f64 * (TILE_H + TILE_GAP) + if i >= 2 { opened } else { 0.0 };
             let (icon, title, state, on) = self.tile_look(*tile);
             let hovered = self.hover == Some(Hit::Tile(*tile));
             let base = if on { pal.accent } else { pal.ink_main.mix(pal.body, if hovered { 0.11 } else { 0.06 }) };
             fill(s, &rounded(tx, ty, tile_w, TILE_H, 18.0), base);
             let (ink, sub) = if on { (pal.on_accent, pal.on_accent.mix(pal.accent, 0.72)) } else { (pal.ink_main, pal.ink_meta) };
             draw::icon(s, &canvas, &cfg, icon, 22.0, on, ink, tx + 30.0, ty + TILE_H / 2.0);
-            draw::text(s, &canvas, &cfg, &title, 14.0, Face::Text(560), ink, tx + 54.0, ty + 24.0, tile_w - 62.0, pango::Alignment::Left);
-            draw::text(s, &canvas, &cfg, &state, 12.5, Face::Text(420), sub, tx + 54.0, ty + 42.0, tile_w - 62.0, pango::Alignment::Left);
+            let more = matches!(tile, Tile::Network | Tile::Bluetooth);
+            let text_w = tile_w - 62.0 - if more { 22.0 } else { 0.0 };
+            draw::text(s, &canvas, &cfg, &title, 14.0, Face::Text(560), ink, tx + 54.0, ty + 24.0, text_w, pango::Alignment::Left);
+            draw::text(s, &canvas, &cfg, &state, 12.5, Face::Text(420), sub, tx + 54.0, ty + 42.0, text_w, pango::Alignment::Left);
             hits.push((Hit::Tile(*tile), tx, ty + shift, tile_w, TILE_H));
+            if more {
+                let (cx, cy) = (tx + tile_w - 20.0, ty + TILE_H / 2.0);
+                let hot = self.hover == Some(Hit::Detail(detail::D::Expand(*tile)));
+                if hot {
+                    fill(s, &rounded(cx - 13.0, cy - 13.0, 26.0, 26.0, 13.0), if on { pal.on_accent.alpha(0.18) } else { pal.ink_main.alpha(0.10) });
+                }
+                let open = self.expand == Some(*tile) && self.reveal.target() > 0.5;
+                draw::icon(s, &canvas, &cfg, if open { "expand_less" } else { "expand_more" }, 18.0, false, sub, cx, cy);
+                hits.push((Hit::Detail(detail::D::Expand(*tile)), cx - 15.0, cy - 15.0 + shift, 30.0, 30.0));
+            }
         }
         let rows = tiles.len().div_ceil(2) as f64;
-        y += rows * TILE_H + (rows - 1.0).max(0.0) * TILE_GAP + 14.0;
+        y += rows * TILE_H + (rows - 1.0).max(0.0) * TILE_GAP + opened + 14.0;
         {
             draw::text(s, &canvas, &cfg, "System", 14.0, Face::Text(600), pal.ink_main, x0 + 4.0, y + HEAD / 2.0, 220.0, pango::Alignment::Left);
             y += HEAD;
@@ -1026,19 +1061,20 @@ impl State {
             }
             y += gadgets.len().div_ceil(PER_ROW) as f64 * CELL + 6.0;
         }
-        if self.blue.on && !self.blue.devices.is_empty() {
+        if self.quick_devices() {
             draw::text(s, &canvas, &cfg, "Bluetooth devices", 14.0, Face::Text(600), pal.ink_main, x0 + 4.0, y + HEAD / 2.0, 220.0, pango::Alignment::Left);
             y += HEAD;
-            for (i, d) in self.blue.devices.iter().enumerate() {
+            let known = self.known();
+            for (i, d) in known.iter().enumerate() {
                 let ry = y + i as f64 * DEVICE;
                 let hovered = self.hover == Some(Hit::Device(i));
                 if hovered {
                     fill(s, &rounded(x0 - 6.0, ry + 2.0, inner + 12.0, DEVICE - 4.0, 14.0), pal.ink_main.mix(pal.body, 0.07));
                 }
-                let busy = self.blue.busy.contains(&d.path);
+                let busy = self.busy.contains(&d.path);
                 let badge = rounded(x0 + 2.0, ry + DEVICE / 2.0 - 16.0, 32.0, 32.0, 16.0);
                 fill(s, &badge, if d.connected { pal.accent.alpha(0.22) } else { pal.raised });
-                draw::icon(s, &canvas, &cfg, device_symbol(&d.icon), 18.0, d.connected, if d.connected { pal.accent } else { pal.ink_meta }, x0 + 18.0, ry + DEVICE / 2.0);
+                draw::icon(s, &canvas, &cfg, bluez::symbol(&d.icon), 18.0, d.connected, if d.connected { pal.accent } else { pal.ink_meta }, x0 + 18.0, ry + DEVICE / 2.0);
                 let sub = if busy {
                     if d.connected { "Disconnecting…".to_string() } else { "Connecting…".to_string() }
                 } else {
@@ -1062,7 +1098,7 @@ impl State {
                 fill(s, &rounded(kx, sy + 3.0, knob, knob, knob / 2.0), if on { pal.on_accent } else { pal.ink_main });
                 hits.push((Hit::Device(i), x0 - 6.0, ry + 2.0 + shift, inner + 12.0, DEVICE - 4.0));
             }
-            y += self.blue.devices.len() as f64 * DEVICE + 8.0;
+            y += known.len() as f64 * DEVICE + 8.0;
         }
         let (level, muted) = self.app.volume.get().unwrap_or((0.0, false));
         let mid = y + SOUND / 2.0;
