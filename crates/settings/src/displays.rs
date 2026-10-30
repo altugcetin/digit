@@ -476,6 +476,68 @@ fn rgb(c: gtk::gdk::RGBA) -> (f64, f64, f64) {
     (c.red() as f64, c.green() as f64, c.blue() as f64)
 }
 
+const SHEET_MARGIN: i32 = 24;
+
+/// A dialog card centred over the Settings page with a dimmed backdrop.
+#[derive(Clone)]
+struct Sheet {
+    root: gtk::Box,
+    card: gtk::Box,
+}
+
+impl Sheet {
+    fn new(title: &str, detail: &gtk::Label, buttons: &[&gtk::Button]) -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.add_css_class("sheet-backdrop");
+        root.set_hexpand(true);
+        root.set_vexpand(true);
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        card.add_css_class("dialog");
+        card.set_size_request(420, -1);
+        card.set_halign(gtk::Align::Center);
+        card.set_valign(gtk::Align::Center);
+        card.set_vexpand(true);
+        card.set_margin_start(24);
+        card.set_margin_end(24);
+        card.append(&kit::ui::text(title, "dialog-title"));
+        detail.set_xalign(0.0);
+        card.append(detail);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.set_halign(gtk::Align::End);
+        row.set_margin_top(6);
+        for b in buttons {
+            row.append(*b);
+        }
+        card.append(&row);
+        root.append(&card);
+        Sheet { root, card }
+    }
+
+    fn show(&self) {
+        if self.root.parent().is_some() {
+            return;
+        }
+        let Some(layer) = crate::layer() else { return };
+        self.root.set_opacity(0.0);
+        self.root.set_can_target(true);
+        layer.add_overlay(&self.root);
+        kit::ui::settle(&self.root, &self.card, SHEET_MARGIN, true, || {});
+    }
+
+    fn hide(&self) {
+        if self.root.parent().is_none() {
+            return;
+        }
+        self.root.set_can_target(false);
+        let root = self.root.clone();
+        kit::ui::settle(&self.root, &self.card, SHEET_MARGIN, false, move || {
+            if let Some(layer) = root.parent().and_downcast::<gtk::Overlay>() {
+                layer.remove_overlay(&root);
+            }
+        });
+    }
+}
+
 pub fn build() -> gtk::Widget {
     let (scroll, body) = ui::page("Displays", "Drag screens to arrange them, then choose resolution, refresh rate, scale and rotation. New settings undo themselves after 15 seconds unless you keep them.");
     let (wm, outs) = read();
@@ -495,19 +557,11 @@ pub fn build() -> gtk::Widget {
     body.append(&card);
     let detail = ui::card();
     body.append(&detail);
-    let confirm = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    confirm.add_css_class("row");
-    let ask = kit::ui::text("", "name");
-    ask.set_hexpand(true);
+    // Keep or revert asks in a dialog over the page, like the dialogs in Files.
+    let ask = kit::ui::text("", "sub");
     let revert = ui::button("Revert", "");
     let keep = ui::button("Keep Changes", "accent");
-    confirm.append(&ask);
-    confirm.append(&revert);
-    confirm.append(&keep);
-    let bar = ui::card();
-    bar.append(&confirm);
-    bar.set_visible(false);
-    body.append(&bar);
+    let bar = Sheet::new("Keep these display settings?", &ask, &[&revert, &keep]);
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     actions.set_halign(gtk::Align::End);
     actions.set_margin_top(4);
@@ -721,7 +775,7 @@ pub fn build() -> gtk::Widget {
             if let Some(id) = pending {
                 id.remove();
             }
-            bar.set_visible(false);
+            bar.hide();
             apply.set_sensitive(true);
             if keep {
                 match persist(wm, &outs) {
@@ -784,7 +838,7 @@ pub fn build() -> gtk::Widget {
                 return;
             }
             apply2.set_sensitive(false);
-            bar.set_visible(true);
+            bar.show();
             let left = Rc::new(std::cell::Cell::new(15));
             ask.set_text("Keep these display settings? Reverting in 15 s");
             let (ask, finish, left, s3) = (ask.clone(), finish.clone(), left.clone(), s2.clone());

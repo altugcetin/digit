@@ -225,8 +225,54 @@ mod libc_signal {
     pub const TERM: i32 = 15;
 }
 
+/// Scale or mode changes keep the monitor but change its logical size; the notch, bar and
+/// wallpaper are sized when built, so that monitor's surfaces are rebuilt.
+fn watch_monitor(app: &Rc<App>, monitor: &gdk::Monitor) {
+    if unsafe { monitor.data::<bool>("digit-watched") }.is_some() {
+        return;
+    }
+    unsafe { monitor.set_data("digit-watched", true) };
+    let pending = Rc::new(std::cell::Cell::new(0u32));
+    for prop in ["geometry", "scale-factor", "scale"] {
+        let (weak, pending) = (Rc::downgrade(app), pending.clone());
+        monitor.connect_notify_local(Some(prop), move |m, _| {
+            let generation = pending.get() + 1;
+            pending.set(generation);
+            let (weak, pending, output) = (weak.clone(), pending.clone(), m.connector().map(|c| c.to_string()).unwrap_or_default());
+            glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
+                if pending.get() == generation {
+                    if let (Some(app), Some(display)) = (weak.upgrade(), gdk::Display::default()) {
+                        reshape(&app, &display, &output);
+                    }
+                }
+            });
+        });
+    }
+}
+
+fn reshape(app: &Rc<App>, display: &gdk::Display, output: &str) {
+    let stale: Vec<notch::Notch> = {
+        let mut list = app.notches.borrow_mut();
+        let (drop, keep): (Vec<_>, Vec<_>) = list.drain(..).partition(|n| n.output() == output);
+        *list = keep;
+        drop
+    };
+    for n in stale {
+        n.destroy();
+    }
+    app.wallpapers.forget(output);
+    place(app, display);
+    dock::apply(app);
+    night::apply(app);
+    desk::apply(app);
+    corners::apply(app);
+}
+
 fn place(app: &Rc<App>, display: &gdk::Display) {
     let monitors: Vec<gdk::Monitor> = display.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect();
+    for m in &monitors {
+        watch_monitor(app, m);
+    }
     if app.cfg.wallpaper {
         app.wallpapers.place(&monitors);
     }

@@ -194,7 +194,9 @@ impl Strip {
         } else {
             full.clone()
         };
-        let edge = ((w - imp.keep.get()) / 2.0).floor() - 10.0;
+        // The middle kept free for the notch shrinks with the screen, so narrow or scaled-up
+        // screens still have room for the app menus.
+        let edge = ((w - imp.keep.get().min(w * 0.36)) / 2.0).floor() - 10.0;
         let show = motion_in(((t - 0.3) / 0.55).clamp(0.0, 1.0)).max(menu);
         if edge < 80.0 || show <= 0.01 {
             imp.zones.borrow_mut().clear();
