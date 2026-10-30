@@ -613,7 +613,8 @@ impl State {
         s.save();
         s.translate(&graphene::Point::new((w + FILLET) as f32, (h + FILLET) as f32));
         s.scale(-1.0, -1.0);
-        let parts = shape::cornered_parts(w + FILLET, h + FILLET, w, h, RADIUS, FILLET);
+        let radius = RADIUS * self.app.round();
+        let parts = shape::cornered_parts(w + FILLET, h + FILLET, w, h, radius, FILLET);
         if let Some(p) = &parts {
             draw::slab(s, p, pal.body.alpha(1.0));
         }
@@ -622,7 +623,7 @@ impl State {
             graphene::Rect::new(0.0, 0.0, w as f32, h as f32),
             graphene::Size::zero(),
             graphene::Size::zero(),
-            graphene::Size::new(RADIUS as f32, RADIUS as f32),
+            graphene::Size::new(radius as f32, radius as f32),
             graphene::Size::zero(),
         ));
         s.push_opacity(fade);
@@ -633,7 +634,7 @@ impl State {
             let (x, y) = self.card_rect(i);
             let glow = self.glow.get(i).map_or(0.0, |g| g.value(now).clamp(0.0, 1.0));
             let base = if card.active { 0.15 } else { 0.08 };
-            draw::fill(s, &draw::round(x, y, CARD_W, CARD_H, 20.0), pal.ink_main.alpha(base + 0.06 * glow));
+            draw::fill(s, &draw::round(x, y, CARD_W, CARD_H, 20.0 * self.app.round()), pal.ink_main.alpha(base + 0.06 * glow));
             let ink = if card.active { pal.accent } else { pal.ink_main };
             draw::text(s, &self.paint, cfg, &card.idx.to_string(), 17.0, Face::Number(600), ink, x + 14.0, y + 22.0, 40.0, left);
             let count = match card.windows.len() {

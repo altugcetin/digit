@@ -12,6 +12,12 @@ const PILL_H: f64 = 32.0;
 const ROW: f64 = 54.0;
 const BT_ROW: f64 = 50.0;
 const AIM_ROW: f64 = 42.0;
+/// Width of the label column in the crosshair card; the choices start after it.
+const AIM_LABEL: f64 = 62.0;
+const AIM_SWATCH: f64 = 44.0;
+/// Media card: cover size, and the column the title, artist and controls share.
+const ART: f64 = 84.0;
+const MEDIA_TEXT: f64 = PAD + ART + 16.0;
 const MAX_ROWS: usize = 6;
 const GRAPH_H: f64 = 86.0;
 const HISTORY: usize = 60;
@@ -36,6 +42,8 @@ pub enum Hit {
     Bare,
     Head(Kind),
     Body(Kind),
+    /// A card's edge or corner: bits 1 left, 2 right, 4 top, 8 bottom.
+    Resize(Kind, u8),
     Pin(Kind),
     Close(Kind),
     Rec(Rec),
@@ -153,7 +161,8 @@ pub fn height(st: &State, kind: Kind) -> f64 {
         }
         Kind::Media => {
             if st.app.media.borrow().bus.is_some() {
-                HEAD + 128.0
+                // Cover, then the progress bar and its times, then the card's own padding.
+                HEAD + 2.0 + ART + 18.0 + 4.0 + 22.0 + PAD - 4.0
             } else {
                 HEAD + 110.0
             }
@@ -226,8 +235,9 @@ pub fn items(st: &State, kind: Kind, w: f64) -> Vec<Item> {
         }
         Kind::Media => {
             if st.app.media.borrow().bus.is_some() {
+                // Bottom-aligned with the cover; the first button's glyph lines up with the text above.
                 for i in 0..3u8 {
-                    out.push(item(Hit::Media(i), PAD + 104.0 + i as f64 * 46.0, HEAD + 52.0, 40.0, 40.0));
+                    out.push(item(Hit::Media(i), MEDIA_TEXT - 8.0 + i as f64 * 46.0, HEAD + 2.0 + ART - 40.0, 40.0, 40.0));
                 }
             }
         }
@@ -245,7 +255,7 @@ pub fn items(st: &State, kind: Kind, w: f64) -> Vec<Item> {
             out.push(item(Hit::AimOn, w - PAD - 52.0, HEAD + 2.0 + 10.0, 52.0, 26.0));
             let top = HEAD + 2.0 + 44.0;
             let chips = |out: &mut Vec<Item>, row: f64, labels: &[&str], make: fn(u8) -> Hit| {
-                let mut x = PAD + 74.0;
+                let mut x = PAD + AIM_LABEL;
                 for (i, l) in labels.iter().enumerate() {
                     let cw = pill_w(st, l) - 4.0;
                     out.push(item(make(i as u8), x, top + row * AIM_ROW + 6.0, cw, AIM_ROW - 12.0));
@@ -255,7 +265,7 @@ pub fn items(st: &State, kind: Kind, w: f64) -> Vec<Item> {
             chips(&mut out, 0.0, &["Dot", "Cross"], Hit::AimStyle);
             chips(&mut out, 1.0, &["Small", "Medium", "Large"], Hit::AimSize);
             for i in 0..AIM_COLORS.len() {
-                out.push(item(Hit::AimColor(i as u8), PAD + 74.0 + i as f64 * 38.0, top + 2.0 * AIM_ROW + 6.0, AIM_ROW - 12.0, AIM_ROW - 12.0));
+                out.push(item(Hit::AimColor(i as u8), PAD + AIM_LABEL + 4.0 + i as f64 * AIM_SWATCH, top + 2.0 * AIM_ROW + 6.0, AIM_ROW - 12.0, AIM_ROW - 12.0));
             }
         }
     }
@@ -283,28 +293,29 @@ impl Ink<'_> {
 
     /// A rounded label button; `on` fills it with the accent.
     fn pill(&self, it: &Item, label: &str, on: bool) {
-        let glow = if self.hot(it.hit) { 0.08 } else { 0.0 };
-        let back = if on { self.pal.accent.alpha(1.0 - glow) } else { self.pal.ink_main.alpha(0.08 + glow) };
+        let hot = self.hot(it.hit);
+        let back = if on { self.pal.accent } else { self.pal.ink_main.mix(self.pal.body, if hot { 0.14 } else { 0.08 }) };
         draw::fill(self.s, &draw::round(it.x, it.y, it.w, it.h, it.h / 2.0), back);
-        self.text(label, 13.0, Face::Text(560), if on { self.pal.on_accent } else { self.pal.ink_main }, it.x, it.y + it.h / 2.0, it.w, pango::Alignment::Center);
+        self.text(label, 13.0, Face::Text(500), if on { self.pal.on_accent } else { self.pal.ink_main }, it.x, it.y + it.h / 2.0, it.w, pango::Alignment::Center);
     }
 
     fn switch(&self, it: &Item, on: bool) {
         let (x, y, w, h) = (it.x + 6.0, it.y + 2.0, it.w - 12.0, it.h - 4.0);
+        // The same switch as Control Center's device rows.
         let track = if on { self.pal.accent } else { self.pal.ink_main.alpha(if self.hot(it.hit) { 0.24 } else { 0.18 }) };
         draw::fill(self.s, &draw::round(x, y, w, h, h / 2.0), track);
         let k = h - 6.0;
         let kx = if on { x + w - k - 3.0 } else { x + 3.0 };
-        draw::fill(self.s, &draw::round(kx, y + 3.0, k, k, k / 2.0), if on { self.pal.on_accent } else { self.pal.ink_main.alpha(0.85) });
+        draw::fill(self.s, &draw::round(kx, y + 3.0, k, k, k / 2.0), if on { self.pal.on_accent } else { self.pal.ink_main });
     }
 
     fn tabs(&self, items: &[Item], labels: &[&str], chosen: usize) {
         for (i, (it, l)) in items.iter().zip(labels).enumerate() {
             let on = i == chosen;
-            let glow = if self.hot(it.hit) { 0.08 } else { 0.0 };
-            let back = if on { self.pal.accent.alpha(0.2 + glow) } else { self.pal.ink_main.alpha(glow) };
+            let hot = self.hot(it.hit);
+            let back = if on { self.pal.accent } else if hot { self.pal.ink_main.mix(self.pal.body, 0.12) } else { self.pal.body.alpha(0.0) };
             draw::fill(self.s, &draw::round(it.x, it.y, it.w, it.h, it.h / 2.0), back);
-            self.text(l, 13.0, Face::Text(if on { 620 } else { 520 }), if on { self.pal.accent } else { self.pal.ink_meta }, it.x, it.y + it.h / 2.0, it.w, pango::Alignment::Center);
+            self.text(l, 13.0, Face::Text(if on { 600 } else { 500 }), if on { self.pal.on_accent } else { self.pal.ink_meta }, it.x, it.y + it.h / 2.0, it.w, pango::Alignment::Center);
         }
     }
 
@@ -344,8 +355,8 @@ pub fn draw(st: &State, s: &gtk::Snapshot, kind: Kind, pal: &Palette, w: f64, h:
                         let live = r != Rec::Save || replay;
                         let on = r == Rec::Record && taping;
                         let glow = if live && ink.hot(it.hit) { 0.07 } else { 0.0 };
-                        let back = if on { RED.alpha(0.2 + glow) } else { pal.ink_main.alpha(0.07 + glow) };
-                        draw::fill(s, &draw::round(it.x, it.y, it.w, it.h, 20.0), back);
+                        let back = if on { RED.alpha(0.2 + glow) } else { pal.ink_main.mix(pal.body, 0.07 + glow) };
+                        draw::fill(s, &draw::round(it.x, it.y, it.w, it.h, 20.0 * st.app.round()), back);
                         let (glyph, label) = match r {
                             Rec::Region => ("screenshot_region", "Region"),
                             Rec::Screen => ("screenshot_monitor", "Screen"),
@@ -394,17 +405,19 @@ pub fn draw(st: &State, s: &gtk::Snapshot, kind: Kind, pal: &Palette, w: f64, h:
             ink.text(&format!("{:.0}%", value * 100.0), 30.0, Face::Number(620), pal.ink_main, PAD + 2.0, top + 24.0, 120.0, left);
             ink.text(&sub, 12.0, Face::Number(500), pal.ink_meta, PAD + 2.0, top + 56.0, 120.0, left);
             let (gx, gw) = (PAD + 128.0, w - 2.0 * PAD - 128.0);
-            let frame = draw::round(gx, top, gw, GRAPH_H, 14.0);
+            // The graph takes whatever height the card was given.
+            let gh = (h - top - PAD).max(GRAPH_H);
+            let frame = draw::round(gx, top, gw, gh, 14.0 * st.app.round());
             draw::fill(s, &frame, pal.ink_main.alpha(0.05));
             let hist = &d.history[tab.min(3)];
             if hist.len() >= 2 {
                 s.push_rounded_clip(&frame);
                 let step = gw / (HISTORY - 1) as f64;
                 let x0 = gx + gw - (hist.len() - 1) as f64 * step;
-                let at = |i: usize, v: f64| (x0 + i as f64 * step, top + GRAPH_H - 6.0 - v.clamp(0.0, 1.0) * (GRAPH_H - 14.0));
+                let at = |i: usize, v: f64| (x0 + i as f64 * step, top + gh - 6.0 - v.clamp(0.0, 1.0) * (gh - 14.0));
                 let line = gsk::PathBuilder::new();
                 let area = gsk::PathBuilder::new();
-                area.move_to(x0 as f32, (top + GRAPH_H) as f32);
+                area.move_to(x0 as f32, (top + gh) as f32);
                 for (i, v) in hist.iter().enumerate() {
                     let (x, y) = at(i, *v);
                     if i == 0 {
@@ -414,7 +427,7 @@ pub fn draw(st: &State, s: &gtk::Snapshot, kind: Kind, pal: &Palette, w: f64, h:
                     }
                     area.line_to(x as f32, y as f32);
                 }
-                area.line_to((gx + gw) as f32, (top + GRAPH_H) as f32);
+                area.line_to((gx + gw) as f32, (top + gh) as f32);
                 area.close();
                 s.append_fill(&area.to_path(), gsk::FillRule::Winding, &pal.accent.alpha(0.22).rgba());
                 s.append_stroke(&line.to_path(), &gsk::Stroke::new(2.0), &pal.accent.rgba());
@@ -481,7 +494,7 @@ pub fn draw(st: &State, s: &gtk::Snapshot, kind: Kind, pal: &Palette, w: f64, h:
                 ink.empty("music_off", "Nothing playing", w, HEAD, h - HEAD - PAD);
                 return;
             }
-            let art = draw::round(PAD, HEAD + 4.0, 88.0, 88.0, 16.0);
+            let art = draw::round(PAD, HEAD + 2.0, ART, ART, 16.0 * st.app.round());
             match &m.art {
                 Some(tex) => {
                     s.push_rounded_clip(&art);
@@ -490,13 +503,13 @@ pub fn draw(st: &State, s: &gtk::Snapshot, kind: Kind, pal: &Palette, w: f64, h:
                 }
                 None => {
                     draw::fill(s, &art, m.tint.unwrap_or(pal.accent).alpha(0.2));
-                    ink.icon("music_note", 34.0, true, m.tint.unwrap_or(pal.accent), PAD + 44.0, HEAD + 48.0);
+                    ink.icon("music_note", 34.0, true, m.tint.unwrap_or(pal.accent), PAD + ART / 2.0, HEAD + 2.0 + ART / 2.0);
                 }
             }
-            let tx = PAD + 104.0;
+            let tx = MEDIA_TEXT;
             let title = if m.title.is_empty() { m.player.as_str() } else { m.title.as_str() };
-            ink.text(title, 15.0, Face::Text(620), pal.ink_main, tx, HEAD + 14.0, w - tx - PAD, left);
-            ink.text(&m.artist, 13.0, Face::Text(480), pal.ink_meta, tx, HEAD + 36.0, w - tx - PAD, left);
+            ink.text(title, 15.0, Face::Text(600), pal.ink_main, tx, HEAD + 14.0, w - tx - PAD, left);
+            ink.text(&m.artist, 13.0, Face::Text(450), pal.ink_meta, tx, HEAD + 34.0, w - tx - PAD, left);
             for it in &items {
                 let Hit::Media(i) = it.hit else { continue };
                 let live = match i {
@@ -519,12 +532,12 @@ pub fn draw(st: &State, s: &gtk::Snapshot, kind: Kind, pal: &Palette, w: f64, h:
             if m.length > 0.0 {
                 let pos = if m.playing { m.position + (crate::app::App::now() - m.position_at) as f64 / 1e6 } else { m.position };
                 let frac = (pos / m.length).clamp(0.0, 1.0);
-                let y = HEAD + 108.0;
+                let y = HEAD + 2.0 + ART + 18.0;
                 draw::fill(s, &draw::round(PAD, y, w - 2.0 * PAD, 4.0, 2.0), pal.ink_main.alpha(0.12));
                 draw::fill(s, &draw::round(PAD, y, ((w - 2.0 * PAD) * frac).max(4.0), 4.0, 2.0), pal.accent);
                 let t = |secs: f64| gsr::clock(secs.max(0.0) as u64);
-                ink.text(&t(pos), 11.0, Face::Number(500), pal.ink_meta, PAD, y + 12.0, 80.0, left);
-                ink.text(&t(m.length), 11.0, Face::Number(500), pal.ink_meta, w - PAD - 80.0, y + 12.0, 80.0, pango::Alignment::Right);
+                ink.text(&t(pos), 11.5, Face::Number(500), pal.ink_meta, PAD, y + 17.0, 80.0, left);
+                ink.text(&t(m.length), 11.5, Face::Number(500), pal.ink_meta, w - PAD - 80.0, y + 17.0, 80.0, pango::Alignment::Right);
             }
         }
         Kind::Bluetooth => {
@@ -551,7 +564,7 @@ pub fn draw(st: &State, s: &gtk::Snapshot, kind: Kind, pal: &Palette, w: f64, h:
                 let it = &items.iter().find(|x| x.hit == Hit::BtDevice(i));
                 let y = top + i as f64 * BT_ROW;
                 if let Some(it) = it.filter(|it| ink.hot(it.hit) && adapter.powered) {
-                    draw::fill(s, &draw::round(it.x, it.y, it.w, it.h, 14.0), pal.ink_main.alpha(0.07));
+                    draw::fill(s, &draw::round(it.x, it.y, it.w, it.h, 14.0 * st.app.round()), pal.ink_main.alpha(0.07));
                 }
                 let busy = d.bt_busy.contains(&dev.path);
                 draw::fill(s, &draw::round(PAD, y + 6.0, 34.0, 34.0, 17.0), if dev.connected { pal.accent } else { pal.ink_main.alpha(0.1) });
@@ -570,7 +583,7 @@ pub fn draw(st: &State, s: &gtk::Snapshot, kind: Kind, pal: &Palette, w: f64, h:
         }
         Kind::Notes => {
             let (fx, fy, fw, fh) = notes_field(w, h);
-            draw::fill(s, &draw::round(fx, fy, fw, fh, 16.0), pal.ink_main.alpha(0.05));
+            draw::fill(s, &draw::round(fx, fy, fw, fh, 16.0 * st.app.round()), pal.ink_main.alpha(0.05));
             let b = st.notes.buffer();
             if b.char_count() == 0 {
                 ink.text("Write something here…", 14.0, Face::Text(450), pal.ink_faint, fx + 12.0, fy + 18.0, fw - 24.0, left);
@@ -585,7 +598,7 @@ pub fn draw(st: &State, s: &gtk::Snapshot, kind: Kind, pal: &Palette, w: f64, h:
             }
             let top = HEAD + 2.0 + 44.0;
             for (row, label) in ["Style", "Size", "Color"].iter().enumerate() {
-                ink.text(label, 13.0, Face::Text(500), pal.ink_meta, PAD + 2.0, top + row as f64 * AIM_ROW + AIM_ROW / 2.0, 70.0, left);
+                ink.text(label, 13.0, Face::Text(500), pal.ink_meta, PAD + 2.0, top + row as f64 * AIM_ROW + AIM_ROW / 2.0, AIM_LABEL - 4.0, left);
             }
             let labels = ["Dot", "Cross", "Small", "Medium", "Large"];
             for it in &items {
@@ -594,11 +607,11 @@ pub fn draw(st: &State, s: &gtk::Snapshot, kind: Kind, pal: &Palette, w: f64, h:
                     Hit::AimSize(v) => ink.pill(it, labels[2 + v as usize], aim.size == v),
                     Hit::AimColor(v) => {
                         let on = aim.color == v;
+                        // The chosen colour sits on an accent disc, like a selected pill.
                         if on || ink.hot(it.hit) {
-                            s.append_border(&draw::round(it.x - 3.0, it.y - 3.0, it.w + 6.0, it.h + 6.0, it.h / 2.0 + 3.0), &[2.0; 4], &[if on { pal.accent } else { pal.ink_faint }.rgba(); 4]);
+                            draw::fill(s, &draw::round(it.x - 4.0, it.y - 4.0, it.w + 8.0, it.h + 8.0, it.h / 2.0 + 4.0), if on { pal.accent } else { pal.ink_main.mix(pal.body, 0.14) });
                         }
                         draw::fill(s, &draw::round(it.x, it.y, it.w, it.h, it.h / 2.0), AIM_COLORS[v as usize]);
-                        s.append_border(&draw::round(it.x, it.y, it.w, it.h, it.h / 2.0), &[1.0; 4], &[pal.hairline.rgba(); 4]);
                     }
                     _ => {}
                 }

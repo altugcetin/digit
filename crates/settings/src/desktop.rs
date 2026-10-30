@@ -65,6 +65,20 @@ pub(crate) fn choice(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &
     card.append(&row);
 }
 
+fn find_switch(w: &gtk::Widget) -> Option<gtk::Switch> {
+    if let Some(s) = w.downcast_ref::<gtk::Switch>() {
+        return Some(s.clone());
+    }
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        if let Some(s) = find_switch(&c) {
+            return Some(s);
+        }
+        child = c.next_sibling();
+    }
+    None
+}
+
 pub(crate) fn toggle(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, on: bool) {
     let (row, end) = ui::row(Some(icon), title, sub);
     let sw = gtk::Switch::new();
@@ -336,6 +350,13 @@ pub fn build() -> gtk::Widget {
     choice(&notch, "call", "Call activity", "A live pill with the call timer and voice waveform while an app uses the microphone", "notch_call", &[("voice", "Voice and video apps"), ("any", "Any app using the microphone"), ("off", "Off")], &prefs::get_str(&t, "notch_call", "voice"));
     toggle(&notch, "mic_off", "Block idle microphone", "Voice apps like Discord can keep listening after a call ends. Digit silences only their microphone stream until a real call starts, then gives it back instantly", "mic_guard", prefs::get_bool(&t, "mic_guard", true));
         toggle(&notch, "touch_app", "Open on hover", "Expand the notch when the pointer rests on it", "hover", prefs::get_bool(&t, "hover", true));
+    toggle(&notch, "rounded_corner", "Match app roundness", "The notch's corners follow Roundness under Apps", "notch_round_follow", prefs::get_bool(&t, "notch_round_follow", true));
+    slider(&notch, "rounded_corner", "Notch roundness", "Used when the notch doesn't match the app roundness. 1.00 is the standard notch", "notch_round", (0.3, 1.8, 0.05), prefs::get_f64(&t, "notch_round", 1.0), 2);
+    // The notch's own roundness only applies while it doesn't follow the apps.
+    if let (Some(own), Some(follow)) = (notch.last_child(), notch.last_child().and_then(|w| w.prev_sibling()).and_then(|row| find_switch(&row))) {
+        own.set_sensitive(!follow.is_active());
+        follow.connect_active_notify(move |s| own.set_sensitive(!s.is_active()));
+    }
     toggle(&notch, "north_west", "Workspace corner", "Move the pointer to the top-left corner to see workspaces", "hot_corner", prefs::get_bool(&t, "hot_corner", true));
     toggle(&notch, "south_east", "Control Center corner", "Move the pointer to the bottom-right corner to open Control Center", "control_corner", prefs::get_bool(&t, "control_corner", true));
     toggle(&notch, "fullscreen", "Over fullscreen apps", "Let the dock edge and screen corners open panels while an app is fullscreen. Spotlight always opens", "fullscreen_edges", prefs::get_bool(&t, "fullscreen_edges", false));

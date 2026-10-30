@@ -686,7 +686,8 @@ impl Notch {
             v.widen.go(if wide { 1.0 } else { 0.0 }, now, MORPH_MS, MORPH);
             v.float.go(if floating { 1.0 } else { 0.0 }, now, MORPH_MS, MORPH);
             let head = v.target(now);
-            let (w, _, r) = v.geometry(&head, now);
+            let (w, depth, r) = v.geometry(&head, now);
+            let r = v.rounded(r, depth);
             v.w.go(w, now, MORPH_MS, MORPH);
             v.r.go(r, now, MORPH_MS, MORPH);
             if let Some(st) = &v.strip {
@@ -1642,6 +1643,13 @@ impl View {
         if n == 0 { 0.0 } else { 4.0 + 12.0 * n as f64 }
     }
 
+    /// Applies the notch roundness to a corner radius. A closed notch can grow no rounder
+    /// than a pill; an open one has more room.
+    fn rounded(&self, r: f64, depth: f64) -> f64 {
+        let limit = if depth > 0.0 { 60.0 } else { (self.header() / 2.0).floor() };
+        (r * self.app.notch_round()).clamp(0.0, limit.max(r))
+    }
+
     fn geometry(&self, head: &Head, _now: i64) -> (f64, f64, f64) {
         let room = 2.0 * self.room();
         match head {
@@ -1701,6 +1709,7 @@ impl View {
         let want = self.target(now);
         let was_peek = matches!(self.want, Head::Peek(_));
         let (w, depth, r) = self.geometry(&want, now);
+        let r = self.rounded(r, depth);
         let (ms, curve) = if self.open {
             (500, motion::DEFAULT_SPATIAL)
         } else if depth > 0.0 || self.depth.target() > 0.0 && matches!(want, Head::Peek(_)) {

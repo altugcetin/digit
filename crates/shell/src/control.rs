@@ -913,8 +913,9 @@ impl State {
         s.save();
         s.translate(&graphene::Point::new(0.0, shift as f32));
         let solid = pal.body.a >= 1.0;
-        let parts = if solid { shape::cornered_parts(right, bottom, W, h, RADIUS, FILLET) } else { None };
-        let path = if solid { None } else { shape::cornered(right, bottom, W, h, RADIUS, FILLET) };
+        let radius = RADIUS * self.app.round();
+        let parts = if solid { shape::cornered_parts(right, bottom, W, h, radius, FILLET) } else { None };
+        let path = if solid { None } else { shape::cornered(right, bottom, W, h, radius, FILLET) };
         if let Some(p) = &parts {
             draw::slab(s, p, pal.body);
             s.push_rounded_clip(&p.0);
@@ -956,7 +957,7 @@ impl State {
             let (icon, title, state, on) = self.tile_look(*tile);
             let hovered = self.hover == Some(Hit::Tile(*tile));
             let base = if on { pal.accent } else { pal.ink_main.mix(pal.body, if hovered { 0.11 } else { 0.06 }) };
-            fill(s, &rounded(tx, ty, tile_w, TILE_H, 18.0), base);
+            fill(s, &rounded(tx, ty, tile_w, TILE_H, (18.0 * self.app.round()).min(TILE_H / 2.0)), base);
             let (ink, sub) = if on { (pal.on_accent, pal.on_accent.mix(pal.accent, 0.72)) } else { (pal.ink_main, pal.ink_meta) };
             draw::icon(s, &canvas, &cfg, icon, 22.0, on, ink, tx + 30.0, ty + TILE_H / 2.0);
             let more = matches!(tile, Tile::Network | Tile::Bluetooth);
