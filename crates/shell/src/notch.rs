@@ -1733,7 +1733,7 @@ impl View {
         }
         {
             let lights = self.app.lights.borrow();
-            self.dots[0].go(if lights.screen > 0 { 1.0 } else { 0.0 }, now, 320, motion::STANDARD);
+            self.dots[0].go(if lights.sharing() { 1.0 } else { 0.0 }, now, 320, motion::STANDARD);
             self.dots[1].go(if lights.capture() { 1.0 } else { 0.0 }, now, 320, motion::STANDARD);
             if lights.capture() {
                 self.capture.set(if lights.camera.is_empty() { ORANGE } else { GREEN });
@@ -2367,7 +2367,7 @@ impl View {
                 let color = match light {
                     crate::privacy::Light::Camera => GREEN,
                     crate::privacy::Light::Mic => ORANGE,
-                    crate::privacy::Light::Screen => RED,
+                    crate::privacy::Light::Screen | crate::privacy::Light::Record => RED,
                 };
                 let disc = graphene::Rect::new(l0 as f32, (mid - 12.0) as f32, 24.0, 24.0);
                 s.push_rounded_clip(&gsk::RoundedRect::from_rect(disc, 12.0));

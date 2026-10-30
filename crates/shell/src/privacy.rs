@@ -11,6 +11,7 @@ pub enum Light {
     Camera,
     Mic,
     Screen,
+    Record,
 }
 
 impl Light {
@@ -19,6 +20,7 @@ impl Light {
             Light::Camera => "videocam",
             Light::Mic => "mic",
             Light::Screen => "screen_share",
+            Light::Record => "radio_button_checked",
         }
     }
 
@@ -27,6 +29,7 @@ impl Light {
             Light::Camera => "Camera",
             Light::Mic => "Microphone",
             Light::Screen => "Screen sharing",
+            Light::Record => "Recording",
         }
     }
 }
@@ -37,6 +40,8 @@ pub struct Lights {
     pub mic: Vec<String>,
     pub talk: Vec<String>,
     pub screen: usize,
+    /// What digit's own recorder is doing; it stands in for the screen sharing light.
+    pub record: Option<crate::gsr::Mode>,
 }
 
 impl Lights {
@@ -45,7 +50,11 @@ impl Lights {
     }
 
     pub fn count(&self) -> usize {
-        usize::from(self.capture()) + usize::from(self.screen > 0)
+        usize::from(self.capture()) + usize::from(self.sharing())
+    }
+
+    pub fn sharing(&self) -> bool {
+        self.screen > 0 || self.record.is_some()
     }
 }
 

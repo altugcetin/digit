@@ -49,7 +49,7 @@ async fn focused_output() -> Option<String> {
     gio::spawn_blocking(kit::wm::focused_output).await.ok().flatten()
 }
 
-const HELP: &str = "open | close | toggle | tray | note <words> | dnd [on|off|toggle|status] | night [on|off|toggle|status] | awake [on|off|toggle|status] | volume [up|down|mute|<0-150>] | mic | brightness up|down | screenshot | pick | lock [preview] | session | control | spaces | clipboard | settings | launcher [text] | menu <logo|app|window|date|N|traymenu N> | dock show|hide|toggle | layout <name> | wallpaper <image> | demo <peek> | status | key <action>";
+const HELP: &str = "open | close | toggle | tray | note <words> | dnd [on|off|toggle|status] | night [on|off|toggle|status] | awake [on|off|toggle|status] | volume [up|down|mute|<0-150>] | mic | brightness up|down | screenshot | pick | lock [preview] | session | control | spaces | clipboard | settings | launcher [text] | menu <logo|app|window|date|N|traymenu N> | dock show|hide|toggle | layout <name> | wallpaper <image> | demo <peek> | record [panel|start|stop|toggle|pause|replay [on|off|toggle]|replay-save [seconds]|stream [on|off|toggle]|settings|status] | status | key <action>";
 
 async fn handle(app: &Rc<App>, words: &[String]) -> String {
     let verb = words.first().map(String::as_str).unwrap_or("");
@@ -314,10 +314,76 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
                 "screen_sharing": lights.screen > 0,
                 "locked": crate::lock::active(),
                 "compositor": kit::wm::name(),
+                "recorder": crate::gsr::describe(),
             })
             .to_string()
         }
+        "record" => record(app, &words[1..]),
         "help" => HELP.into(),
         _ => HELP.into(),
+    }
+}
+
+const RECORD: &str = "record panel | start | stop | toggle | pause | replay [on|off|toggle] | replay-save [seconds] | stream [on|off|toggle] | settings | status";
+
+fn record(app: &Rc<App>, words: &[String]) -> String {
+    use crate::gsr::{self, Mode};
+    let want = |w: Option<&String>| match w.map(String::as_str) {
+        None | Some("toggle") => Ok(None),
+        Some("on") => Ok(Some(true)),
+        Some("off") => Ok(Some(false)),
+        Some(_) => Err(()),
+    };
+    match words.first().map(String::as_str).unwrap_or("panel") {
+        "panel" => {
+            crate::record::toggle(app);
+            "ok".into()
+        }
+        "toggle" => {
+            let app = app.clone();
+            crate::record::after_close(move || gsr::toggle_record(&app));
+            "ok".into()
+        }
+        "start" => {
+            let app = app.clone();
+            crate::record::after_close(move || gsr::record(&app, true));
+            "ok".into()
+        }
+        "stop" => {
+            if gsr::stop() { "ok".into() } else { "not recording".into() }
+        }
+        "pause" => {
+            if gsr::pause() { "ok".into() } else { "no recording to pause".into() }
+        }
+        "replay-save" => {
+            let secs = match words.get(1).map(|w| w.trim_end_matches('s').parse::<u32>()) {
+                None => None,
+                Some(Ok(n)) => Some(n),
+                Some(Err(_)) => return "record replay-save [seconds]".into(),
+            };
+            if gsr::save_replay(secs) { "ok".into() } else { "instant replay is off".into() }
+        }
+        verb @ ("replay" | "stream") => {
+            let Ok(want) = want(words.get(1)) else { return format!("record {verb} on | off | toggle") };
+            let mode = if verb == "replay" { Mode::Replay } else { Mode::Stream };
+            let app = app.clone();
+            let starting = want.unwrap_or(gsr::status().is_none_or(|s| s.mode != mode));
+            if starting && mode == Mode::Stream {
+                crate::record::after_close(move || {
+                    let _ = gsr::switch(&app, mode, want);
+                });
+                return "ok".into();
+            }
+            match gsr::switch(&app, mode, want) {
+                Ok(()) => "ok".into(),
+                Err(e) => e,
+            }
+        }
+        "settings" => {
+            gsr::settings();
+            "ok".into()
+        }
+        "status" => gsr::describe().to_string(),
+        _ => RECORD.into(),
     }
 }

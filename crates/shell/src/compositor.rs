@@ -396,6 +396,8 @@ pub fn watch(app: &std::rc::Rc<crate::app::App>) {
         while let Ok(feed) = rx.recv().await {
             let Some(app) = weak.upgrade() else { break };
             match feed {
+                // digit's own recorder shows as recording, not as someone sharing the screen.
+                Feed::Casts(n) if n > 0 && crate::gsr::status().is_some() => {}
                 Feed::Casts(n) if n > 0 => {
                     quiet.set(quiet.get() + 1);
                     app.set_lights(|l| l.screen = n);
