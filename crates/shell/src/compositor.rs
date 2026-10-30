@@ -392,17 +392,35 @@ pub fn watch(app: &std::rc::Rc<crate::app::App>) {
     }
     let weak = std::rc::Rc::downgrade(app);
     let quiet = std::rc::Rc::new(std::cell::Cell::new(0u64));
+    let live = std::rc::Rc::new(std::cell::Cell::new(false));
+    let starts = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let pending = std::rc::Rc::new(std::cell::Cell::new(false));
     gtk::glib::spawn_future_local(async move {
         while let Ok(feed) = rx.recv().await {
             let Some(app) = weak.upgrade() else { break };
             match feed {
                 // digit's own recorder shows as recording, not as someone sharing the screen.
                 Feed::Casts(n) if n > 0 && crate::gsr::status().is_some() => {}
+                // A screenshot is a cast that starts and stops within a moment; only a cast that is
+                // still on (or starts again) a second later counts as sharing the screen.
                 Feed::Casts(n) if n > 0 => {
                     quiet.set(quiet.get() + 1);
-                    app.set_lights(|l| l.screen = n);
+                    live.set(true);
+                    starts.set(starts.get() + 1);
+                    if app.lights.borrow().screen == 0 && !pending.replace(true) {
+                        let (later, live, starts, pending) = (std::rc::Rc::downgrade(&app), live.clone(), starts.clone(), pending.clone());
+                        gtk::glib::timeout_add_local_once(Duration::from_millis(1000), move || {
+                            pending.set(false);
+                            let real = live.get() || starts.get() >= 2;
+                            starts.set(0);
+                            if let (true, Some(app)) = (real, later.upgrade()) {
+                                app.set_lights(|l| l.screen = n);
+                            }
+                        });
+                    }
                 }
                 Feed::Casts(_) => {
+                    live.set(false);
                     let generation = quiet.get() + 1;
                     quiet.set(generation);
                     let (later, quiet) = (std::rc::Rc::downgrade(&app), quiet.clone());
