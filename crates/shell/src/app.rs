@@ -428,7 +428,14 @@ impl App {
             Some((Light::Mic, who.clone()))
         } else if before.camera.is_empty() && !after.camera.is_empty() {
             Some((Light::Camera, "In use".into()))
-        } else if before.screen == 0 && after.screen > 0 {
+        } else if after.record.is_some() && after.record != before.record {
+            let who = match after.record {
+                Some(crate::gsr::Mode::Replay) => "Instant replay on",
+                Some(crate::gsr::Mode::Stream) => "Live",
+                _ => "Started",
+            };
+            Some((Light::Record, who.into()))
+        } else if before.screen == 0 && after.screen > 0 && after.record.is_none() {
             Some((Light::Screen, "Started".into()))
         } else {
             None
