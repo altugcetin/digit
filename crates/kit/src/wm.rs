@@ -282,6 +282,19 @@ pub fn focus_space(id: u64) -> bool {
     }
 }
 
+/// Whether the workspace shown on `output` has a fullscreen window (Hyprland only).
+pub fn fullscreen_on(output: &str) -> bool {
+    if which() != Wm::Hyprland {
+        return false;
+    }
+    let Some(id) = hypr_outputs().iter().find(|m| text(m, "name") == output).and_then(|m| m.get("activeWorkspace")?.get("id")?.as_i64()) else { return false };
+    hypr_json("workspaces")
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .any(|w| w.get("id").and_then(Value::as_i64) == Some(id) && w.get("hasfullscreen").and_then(Value::as_bool).unwrap_or(false))
+}
+
 /// A Hyprland special workspace (scratchpad) that currently holds windows.
 #[derive(Clone, Debug, Default)]
 pub struct Special {

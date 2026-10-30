@@ -188,7 +188,7 @@ pub fn corner(app: &Rc<App>, monitor: &gdk::Monitor) -> gtk::Window {
     let output = monitor.connector().map(|c| c.to_string());
     motion.connect_enter(move |_, _, _| {
         if let Some(app) = weak.upgrade() {
-            if app.prefs.borrow().control_corner {
+            if app.prefs.borrow().control_corner && output.as_deref().is_none_or(|o| app.edges_live(o)) {
                 show_on(&app, output.clone());
             }
         }

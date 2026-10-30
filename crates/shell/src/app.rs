@@ -452,6 +452,11 @@ impl App {
         self.cfg.dock
     }
 
+    /// Screen edges and corners stay quiet while a fullscreen app is up, unless the user allows them.
+    pub fn edges_live(&self, output: &str) -> bool {
+        self.prefs.borrow().fullscreen_edges || !kit::wm::fullscreen_on(output)
+    }
+
     pub fn header(&self) -> f64 {
         if self.wide() { self.prefs.borrow().wide_height.clamp(26.0, 64.0).round() } else { self.cfg.header() }
     }
