@@ -101,7 +101,11 @@ pub struct Package {
     pub confidence: Confidence,
     /// The AppStream name, when it says more than the package name.
     pub title: String,
+    /// AppStream's cached icon; Arch ships these as JPEG XL, which the store converts to show.
     pub icon: String,
+    /// The icon-theme name AppStream gives, shown while (or instead of) the cached icon.
+    #[serde(default)]
+    pub stock: String,
 }
 
 impl Package {
@@ -269,15 +273,27 @@ struct Record {
 }
 
 /// Reads `desc` (and `files`, for a `.files` database) entries from `bsdtar -xO` output.
-/// Each package's desc starts with `%FILENAME%`; in a files database its `%FILES%` follow.
+/// A package's desc starts with `%FILENAME%` and its file list with `%FILES%`; the two come
+/// together but in either order (Arch writes desc first, CachyOS files first), so a record
+/// ends when the section it is about to start again has already been seen.
 fn records(input: impl BufRead, mut each: impl FnMut(Record)) {
     let mut cur = Record::default();
     let mut section = String::new();
+    let mut described = false;
     for line in input.lines() {
         let Ok(line) = line else { break };
         if line.starts_with('%') && line.ends_with('%') && line.len() > 2 {
-            if line == "%FILENAME%" && !cur.name.is_empty() {
-                each(std::mem::take(&mut cur));
+            let again = (line == "%FILENAME%" && described) || (line == "%FILES%" && cur.files.is_some());
+            if again {
+                if !cur.name.is_empty() {
+                    each(std::mem::take(&mut cur));
+                } else {
+                    cur = Record::default();
+                }
+                described = false;
+            }
+            if line == "%FILENAME%" {
+                described = true;
             }
             if line == "%FILES%" {
                 cur.files = Some(Files::default());
@@ -345,6 +361,7 @@ struct Component {
     kind: String,
     name: String,
     icon: String,
+    stock: String,
 }
 
 fn appstream() -> HashMap<String, Component> {
@@ -364,7 +381,7 @@ fn appstream() -> HashMap<String, Component> {
 
 fn components(xml: &str, out: &mut HashMap<String, Component>) {
     let mut origin = String::new();
-    let (mut kind, mut name, mut pkg, mut icon) = (String::new(), String::new(), String::new(), String::new());
+    let (mut kind, mut name, mut pkg, mut icon, mut stock) = (String::new(), String::new(), String::new(), String::new(), String::new());
     let mut depth = 0usize;
     let mut grab: Option<&str> = None;
     let mut icon_size = 0u32;
@@ -378,6 +395,7 @@ fn components(xml: &str, out: &mut HashMap<String, Component>) {
                     name.clear();
                     pkg.clear();
                     icon.clear();
+                    stock.clear();
                     icon_size = 0;
                 }
             }
@@ -389,6 +407,7 @@ fn components(xml: &str, out: &mut HashMap<String, Component>) {
                 grab = match tag {
                     "name" if depth == 2 && attr(attrs, "xml:lang").is_none() && name.is_empty() => Some("name"),
                     "pkgname" if depth == 2 => Some("pkgname"),
+                    "icon" if depth == 2 && attr(attrs, "type") == Some("stock") && stock.is_empty() => Some("stock"),
                     "icon" if depth == 2 && attr(attrs, "type") == Some("cached") => {
                         let w = attr(attrs, "width").and_then(|w| w.parse().ok()).unwrap_or(0);
                         if (w >= icon_size && w <= 128) || icon.is_empty() {
@@ -409,6 +428,7 @@ fn components(xml: &str, out: &mut HashMap<String, Component>) {
                 match grab {
                     Some("name") => name = t,
                     Some("pkgname") => pkg = t,
+                    Some("stock") => stock = t,
                     Some("icon") => {
                         let size = if icon_size > 0 { format!("{icon_size}x{icon_size}") } else { "64x64".into() };
                         let p = Path::new(SWCATALOG).join("icons").join(&origin).join(size).join(&t);
@@ -423,7 +443,7 @@ fn components(xml: &str, out: &mut HashMap<String, Component>) {
             Event::End("component") => {
                 depth = 0;
                 if !pkg.is_empty() {
-                    let c = Component { kind: kind.clone(), name: name.clone(), icon: icon.clone() };
+                    let c = Component { kind: kind.clone(), name: name.clone(), icon: icon.clone(), stock: stock.clone() };
                     // A package can have several components; a desktop application describes it best.
                     let better = out.get(&pkg).is_none_or(|old: &Component| old.kind != "desktop-application" && c.kind == "desktop-application");
                     if better {
@@ -521,6 +541,7 @@ impl Index {
 
     /// Exact names first, then applications and tools, then description matches, with
     /// libraries, system parts and meta-packages pushed down (harder in "Apps & Tools").
+    /// In "Apps & Tools" only what is known to be an application or a command-line tool shows.
     pub fn search(&self, query: &str, apps_only: bool, limit: usize) -> Vec<&Package> {
         let q = kit::fuzzy::fold(query.trim());
         if q.is_empty() {
@@ -537,7 +558,10 @@ impl Index {
                 let described = (q.len() > 2 && desc.contains(&q)).then_some(150);
                 let best = [exact, prefix, fuzzy, described].into_iter().flatten().max()?;
                 let p = &self.packages[i];
-                let kind = if p.confidence >= Confidence::Medium || p.kind == Kind::Unknown { p.kind } else { Kind::Unknown };
+                let kind = p.shown();
+                if apps_only && !matches!(kind, Kind::Application | Kind::Cli) {
+                    return None;
+                }
                 Some((best + kind.weight(apps_only), i))
             })
             .collect();
@@ -557,7 +581,7 @@ pub fn load() -> Option<Index> {
         return None;
     }
     let detailed = dbs.iter().any(|(_, p)| p.extension().is_some_and(|e| e == "files"));
-    let mut stamp = String::from("v1");
+    let mut stamp = String::from("v3");
     for (_, p) in &dbs {
         stamp.push_str(&format!("|{}:{}", p.display(), stamp_of(p)));
     }
@@ -592,7 +616,7 @@ pub fn load() -> Option<Index> {
             let signals = Signals { name: r.name.clone(), desc: r.desc.clone(), depends: r.depends, appstream: comp.map(|c| c.kind.clone()), files, entries_shown: shown };
             let (kind, also, confidence) = classify(&signals);
             let title = comp.map(|c| c.name.clone()).filter(|t| !t.eq_ignore_ascii_case(&r.name)).unwrap_or_default();
-            packages.push(Package { name: r.name, version: r.version, desc: r.desc, repo: repo.clone(), url: r.url, kind, also, confidence, title, icon: comp.map(|c| c.icon.clone()).unwrap_or_default() });
+            packages.push(Package { name: r.name, version: r.version, desc: r.desc, repo: repo.clone(), url: r.url, kind, also, confidence, title, icon: comp.map(|c| c.icon.clone()).unwrap_or_default(), stock: comp.map(|c| c.stock.clone()).unwrap_or_default() });
         });
         let _ = child.wait();
     }
@@ -685,6 +709,16 @@ mod tests {
         assert_eq!((got[0].name.as_str(), got[0].version.as_str(), got[0].depends), ("a", "1-1", 2));
         assert_eq!(got[0].files.as_ref().map(|f| f.bins), Some(1));
         assert!(got[1].files.is_none());
+    }
+
+    #[test]
+    fn reads_file_lists_that_come_before_their_desc() {
+        let text = "%FILES%\nusr/lib/libc.so.6\n\n%FILENAME%\nglibc-2-1.pkg\n\n%NAME%\nglibc\n\n%FILES%\nusr/bin/x\n\n%FILENAME%\nx-1-1.pkg\n\n%NAME%\nx\n\n";
+        let mut got = Vec::new();
+        records(BufReader::new(text.as_bytes()), |r| got.push(r));
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[0].name.as_str(), got[0].files.as_ref().map(|f| f.libs)), ("glibc", Some(1)));
+        assert_eq!((got[1].name.as_str(), got[1].files.as_ref().map(|f| f.bins)), ("x", Some(1)));
     }
 
     #[test]

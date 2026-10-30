@@ -654,19 +654,60 @@ fn packages_head(s: &Rc<Store>, arch: &crate::arch::Index) -> gtk::Widget {
     row.upcast()
 }
 
+/// A package's AppStream icon. Arch caches them as JPEG XL, which GTK may not read, so each is
+/// turned into a PNG under the cache once (with djxl) and the theme icon stands in meanwhile.
+fn package_icon(p: &crate::arch::Package) -> Option<gtk::Image> {
+    let theme = gdk::Display::default().map(|d| gtk::IconTheme::for_display(&d));
+    let stock = (!p.stock.is_empty() && theme.as_ref().is_some_and(|t| t.has_icon(&p.stock))).then(|| p.stock.clone());
+    if p.icon.is_empty() && stock.is_none() {
+        return None;
+    }
+    let image = gtk::Image::new();
+    image.set_pixel_size(52);
+    image.set_valign(gtk::Align::Center);
+    let source = std::path::PathBuf::from(&p.icon);
+    let readable = !p.icon.is_empty() && !p.icon.ends_with(".jxl");
+    let png = glib::user_cache_dir().join("digit/store/icons").join(source.file_stem().map(|s| s.to_string_lossy().into_owned() + ".png").unwrap_or_default());
+    if readable {
+        image.set_from_file(Some(&source));
+    } else if !p.icon.is_empty() && png.exists() {
+        image.set_from_file(Some(&png));
+    } else {
+        match &stock {
+            Some(name) => image.set_icon_name(Some(name)),
+            None => image.set_icon_name(Some("package-x-generic")),
+        }
+        if !p.icon.is_empty() && glib::find_program_in_path("djxl").is_some() {
+            let weak = image.downgrade();
+            glib::spawn_future_local(async move {
+                if let Some(dir) = png.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let tmp = png.with_extension("part.png");
+                let args: [&std::ffi::OsStr; 4] = ["djxl".as_ref(), source.as_os_str(), tmp.as_os_str(), "--quiet".as_ref()];
+                let Ok(p) = gio::Subprocess::newv(&args, gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE) else { return };
+                if p.wait_check_future().await.is_ok() && std::fs::rename(&tmp, &png).is_ok() {
+                    if let Some(image) = weak.upgrade() {
+                        image.set_from_file(Some(&png));
+                    }
+                }
+            });
+        }
+    }
+    Some(image)
+}
+
 fn package_row(s: &Rc<Store>, p: &crate::arch::Package) -> gtk::Widget {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 14);
     row.add_css_class("lockup");
     let kind = p.shown();
-    if p.icon.is_empty() {
-        let t = ui::tile(kind.glyph());
-        t.set_valign(gtk::Align::Center);
-        row.append(&t);
-    } else {
-        let image = gtk::Image::from_file(&p.icon);
-        image.set_pixel_size(52);
-        image.set_valign(gtk::Align::Center);
-        row.append(&image);
+    match package_icon(p) {
+        Some(image) => row.append(&image),
+        None => {
+            let t = ui::tile(kind.glyph());
+            t.set_valign(gtk::Align::Center);
+            row.append(&t);
+        }
     }
     let col = gtk::Box::new(gtk::Orientation::Vertical, 3);
     col.set_hexpand(true);
