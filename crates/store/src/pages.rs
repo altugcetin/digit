@@ -602,16 +602,116 @@ fn search(s: &Rc<Store>, q: &str) -> gtk::Widget {
         b.append(&jobs);
     }
     let hits = cat.search(q, 40);
-    if hits.is_empty() && !any_job {
+    let arch = s.arch.borrow().clone();
+    let packages = arch.as_ref().map(|a| a.search(q, !s.all_packages.get(), 30)).unwrap_or_default();
+    if hits.is_empty() && !any_job && packages.is_empty() {
         b.append(&message("search_off", "No apps match", "Try a word for what you want to do, like “edit photos” or “record”."));
     } else if !hits.is_empty() {
+        if arch.is_some() {
+            b.append(&ui::heading("Flathub"));
+        }
         let card = ui::card();
         for app in hits {
             card.append(&lockup(s, app));
         }
         b.append(&card);
     }
+    if let Some(arch) = arch.as_ref().filter(|_| !packages.is_empty()) {
+        b.append(&packages_head(s, arch));
+        let card = ui::card();
+        for p in packages {
+            card.append(&package_row(s, p));
+        }
+        b.append(&card);
+    }
     scroll.upcast()
+}
+
+/// "Arch packages" with the Apps & Tools / All Packages switch.
+fn packages_head(s: &Rc<Store>, arch: &crate::arch::Index) -> gtk::Widget {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    row.set_margin_top(10);
+    let h = ui::heading("Arch packages");
+    h.set_hexpand(true);
+    h.set_xalign(0.0);
+    row.append(&h);
+    if !arch.detailed {
+        let hint = ui::text("Package types are rough until the file lists are synced (sudo pacman -Fy)", "dim");
+        hint.set_ellipsize(pango::EllipsizeMode::End);
+        row.append(&hint);
+    }
+    for (label, all) in [("Apps & Tools", false), ("All Packages", true)] {
+        let t = ui::button(label, if s.all_packages.get() == all { "accent" } else { "" });
+        t.connect_clicked(move |_| {
+            if let Some(s) = store() {
+                if s.all_packages.replace(all) != all {
+                    s.refresh();
+                }
+            }
+        });
+        row.append(&t);
+    }
+    row.upcast()
+}
+
+fn package_row(s: &Rc<Store>, p: &crate::arch::Package) -> gtk::Widget {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 14);
+    row.add_css_class("lockup");
+    let kind = p.shown();
+    if p.icon.is_empty() {
+        let t = ui::tile(kind.glyph());
+        t.set_valign(gtk::Align::Center);
+        row.append(&t);
+    } else {
+        let image = gtk::Image::from_file(&p.icon);
+        image.set_pixel_size(52);
+        image.set_valign(gtk::Align::Center);
+        row.append(&image);
+    }
+    let col = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    col.set_hexpand(true);
+    col.set_valign(gtk::Align::Center);
+    let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let n = ui::text(if p.title.is_empty() { &p.name } else { &p.title }, "name");
+    n.set_ellipsize(pango::EllipsizeMode::End);
+    top.append(&n);
+    let v = ui::text(&if p.title.is_empty() { p.version.clone() } else { format!("{} · {}", p.name, p.version) }, "dim");
+    v.set_ellipsize(pango::EllipsizeMode::End);
+    top.append(&v);
+    col.append(&top);
+    let sub = ui::text(&p.desc, "sub");
+    sub.set_ellipsize(pango::EllipsizeMode::End);
+    col.append(&sub);
+    let tags = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    tags.append(&ui::badge(kind.label(), if matches!(kind, crate::arch::Kind::Application | crate::arch::Kind::Cli) { "accent" } else { "" }));
+    for also in p.also.iter().filter(|_| p.confidence >= crate::arch::Confidence::Medium) {
+        tags.append(&ui::badge(also.label(), ""));
+    }
+    tags.append(&ui::badge(&format!("Arch · {}", p.repo), ""));
+    let installed = s.arch_installed.borrow().get(&p.name).cloned();
+    if let Some(v) = &installed {
+        tags.append(&ui::badge(&format!("Installed {v}"), "good"));
+    }
+    col.append(&tags);
+    row.append(&col);
+    let key = format!("arch:{}", p.name);
+    let working = s.busy.borrow().as_deref() == Some(key.as_str());
+    let (label, kind) = match (working, installed.is_some()) {
+        (true, _) => ("Working…", ""),
+        (false, true) => ("Remove", ""),
+        (false, false) => ("Install", "accent"),
+    };
+    let b = ui::button(label, kind);
+    b.set_valign(gtk::Align::Center);
+    b.set_sensitive(!working && s.busy.borrow().is_none());
+    let name = p.name.clone();
+    b.connect_clicked(move |_| {
+        if let Some(s) = store() {
+            s.pacman(&name);
+        }
+    });
+    row.append(&b);
+    row.upcast()
 }
 
 fn date(ts: u64) -> String {

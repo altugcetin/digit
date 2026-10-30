@@ -1,3 +1,4 @@
+mod arch;
 mod catalog;
 mod flatpak;
 mod pages;
@@ -59,6 +60,11 @@ pub struct Store {
     bar_label: gtk::Label,
     bar_progress: gtk::ProgressBar,
     pub catalog: RefCell<Option<Rc<Catalog>>>,
+    /// Arch repository packages, when this is an Arch system.
+    pub arch: RefCell<Option<Rc<arch::Index>>>,
+    pub arch_installed: RefCell<HashMap<String, String>>,
+    /// Search shows every package rather than favouring apps and tools.
+    pub all_packages: Cell<bool>,
     pub installed: RefCell<HashMap<String, flatpak::Installed>>,
     pub updates: RefCell<HashSet<String>>,
     pub lists: RefCell<HashMap<String, Vec<String>>>,
@@ -233,6 +239,56 @@ impl Store {
             match result {
                 Ok(()) => me.note(&format!("{name}: done"), false),
                 Err(e) => me.note(&e, true),
+            }
+            me.refresh();
+        });
+    }
+
+    /// Installs or removes an Arch package through pkexec, so polkit asks for the password.
+    pub fn pacman(self: &Rc<Self>, name: &str) {
+        if self.busy.borrow().is_some() {
+            self.note("Another app is still being installed", true);
+            return;
+        }
+        let key = format!("arch:{name}");
+        let remove = self.arch_installed.borrow().contains_key(name);
+        *self.busy.borrow_mut() = Some(key);
+        self.bar_label.set_text(&format!("{} {name}", if remove { "Removing" } else { "Installing" }));
+        self.bar_label.remove_css_class("warn");
+        self.bar_progress.set_visible(true);
+        self.bar_progress.set_fraction(0.0);
+        self.bar.set_reveal_child(true);
+        self.refresh();
+        let me = self.clone();
+        let name = name.to_string();
+        glib::spawn_future_local(async move {
+            let bar = me.bar_progress.clone();
+            let pulse = glib::timeout_add_local(std::time::Duration::from_millis(300), move || {
+                bar.pulse();
+                glib::ControlFlow::Continue
+            });
+            let args: Vec<&std::ffi::OsStr> = if remove {
+                vec!["pkexec".as_ref(), "pacman".as_ref(), "-R".as_ref(), "--noconfirm".as_ref(), name.as_ref()]
+            } else {
+                vec!["pkexec".as_ref(), "pacman".as_ref(), "-S".as_ref(), "--needed".as_ref(), "--noconfirm".as_ref(), name.as_ref()]
+            };
+            let result = match gio::Subprocess::newv(&args, gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_PIPE) {
+                Ok(p) => match p.communicate_utf8_future(None).await {
+                    Ok(_) if p.is_successful() => Ok(()),
+                    Ok((_, err)) => Err(match p.exit_status() {
+                        126 | 127 => "Cancelled".to_string(),
+                        _ => err.map(|e| e.lines().rev().map(str::trim).find(|l| l.starts_with("error:")).unwrap_or("pacman failed").to_string()).unwrap_or_else(|| "pacman failed".into()),
+                    }),
+                    Err(e) => Err(e.to_string()),
+                },
+                Err(e) => Err(e.to_string()),
+            };
+            pulse.remove();
+            *me.busy.borrow_mut() = None;
+            *me.arch_installed.borrow_mut() = gio::spawn_blocking(arch::installed).await.unwrap_or_default();
+            match result {
+                Ok(()) => me.note(&format!("{name}: done"), false),
+                Err(e) => me.note(&format!("{name}: {e}"), true),
             }
             me.refresh();
         });
@@ -469,6 +525,9 @@ fn build(app: &gtk::Application) -> Rc<Store> {
         bar_label,
         bar_progress,
         catalog: RefCell::new(None),
+        arch: RefCell::new(None),
+        arch_installed: RefCell::new(HashMap::new()),
+        all_packages: Cell::new(false),
         installed: RefCell::new(HashMap::new()),
         updates: RefCell::new(HashSet::new()),
         lists: RefCell::new(HashMap::new()),
@@ -534,6 +593,24 @@ fn build(app: &gtk::Application) -> Rc<Store> {
 
 fn load(store: &Rc<Store>) {
     load_with(store, true);
+    load_arch(store);
+}
+
+/// Builds the Arch package index in the background; search picks it up once it is there.
+fn load_arch(store: &Rc<Store>) {
+    if !arch::available() {
+        return;
+    }
+    let me = store.clone();
+    glib::spawn_future_local(async move {
+        let (index, installed) = gio::spawn_blocking(|| (arch::load(), arch::installed())).await.unwrap_or((None, HashMap::new()));
+        let Some(index) = index else { return };
+        *me.arch.borrow_mut() = Some(Rc::new(index));
+        *me.arch_installed.borrow_mut() = installed;
+        if matches!(*me.current.borrow(), Page::Search(_)) {
+            me.refresh();
+        }
+    });
 }
 
 async fn set_up_flathub() {

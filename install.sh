@@ -194,12 +194,14 @@ deps() {
             run_pkgs=(wtype curl upower polkit flatpak) ;;
         arch)
             build=(base-devel pkgconf gtk4 gtk4-layer-shell wayland)
-            run_pkgs=(wtype curl upower polkit flatpak) ;;
+            run_pkgs=(wtype curl upower polkit flatpak archlinux-appstream-data) ;;
     esac
     bold "System packages"
     info "${build[*]} ${run_pkgs[*]}"
     if confirm "Install them with your package manager (asks for your sudo password)?"; then
         install_pkgs "${build[@]}" "${run_pkgs[@]}"
+        # Digit Store tells apps, tools and libraries apart from each package's file list.
+        [ "$FAMILY" = arch ] && run sudo pacman -Fy
     else
         warn "Skipped. The build may fail if something is missing."
     fi
