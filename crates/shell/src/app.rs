@@ -461,6 +461,31 @@ impl App {
         self.cfg.dock
     }
 
+    /// The Roundness setting as a factor for panel corners (1.0 is the default look).
+    pub fn round(&self) -> f64 {
+        self.prefs.borrow().ui_round.clamp(0.3, 1.8)
+    }
+
+    /// The notch's corner factor: the app roundness, or its own value when overridden.
+    pub fn notch_round(&self) -> f64 {
+        let (follow, own) = {
+            let p = self.prefs.borrow();
+            (p.notch_round_follow, p.notch_round)
+        };
+        if follow { self.round() } else { own.clamp(0.3, 1.8) }
+    }
+
+    /// The card colour of the chosen surface (Black, Graphite or Tinted), as the apps use it.
+    pub fn card(&self, pal: &Palette) -> Rgb {
+        let mix = |a: Rgb, b: Rgb, t: f64| Rgb::new(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t);
+        let hex = |v: u32| Rgb::new(((v >> 16) & 0xff) as f64 / 255.0, ((v >> 8) & 0xff) as f64 / 255.0, (v & 0xff) as f64 / 255.0);
+        match self.prefs.borrow().ui_surface.as_str() {
+            "graphite" => hex(0x1b1b1f),
+            "tinted" => mix(hex(0x0e0e0e), pal.accent, 0.085),
+            _ => hex(0x0f0f0f),
+        }
+    }
+
     /// Screen edges and corners stay quiet while a fullscreen app is up, unless the user allows them.
     pub fn edges_live(&self, output: &str) -> bool {
         self.prefs.borrow().fullscreen_edges || !kit::wm::fullscreen_on(output)
@@ -557,11 +582,18 @@ impl App {
         if before.surface != next.surface || restyle {
             self.set_roles(self.roles.get());
         }
-        if restyle {
+        // Roundness changes reshape the notch at once (restyle retargets its corner radius) and
+        // redraw any open panel, rather than waiting for the next open or close.
+        let rounding = before.ui_round != next.ui_round || before.notch_round_follow != next.notch_round_follow || before.notch_round != next.notch_round;
+        if restyle || rounding {
             let notches: Vec<notch::Notch> = self.notches.borrow().iter().cloned().collect();
             for n in notches {
                 n.restyle();
             }
+        }
+        if rounding || before.ui_surface != next.ui_surface {
+            self.redraw();
+            crate::gamebar::changed();
         }
         if before.menubar_look != next.menubar_look {
             self.changed();

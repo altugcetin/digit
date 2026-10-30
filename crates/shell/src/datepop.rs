@@ -202,12 +202,13 @@ impl Pop {
         // A notch hanging from the right edge: the top-edge shape turned a quarter.
         s.translate(&graphene::Point::new(sw as f32, 0.0));
         s.rotate(90.0);
-        if let Some(p) = shape::docked_parts(sh / 2.0, 0.0, h, W, RADIUS, FILLET) {
+        let radius = RADIUS * self.app.round();
+        if let Some(p) = shape::docked_parts(sh / 2.0, 0.0, h, W, radius, FILLET) {
             draw::slab(s, &p, pal.body.alpha(1.0));
         }
         s.restore();
         s.translate(&graphene::Point::new(0.0, FILLET as f32));
-        let (z, r) = (graphene::Size::zero(), graphene::Size::new(RADIUS as f32, RADIUS as f32));
+        let (z, r) = (graphene::Size::zero(), graphene::Size::new(radius as f32, radius as f32));
         s.push_rounded_clip(&gtk::gsk::RoundedRect::new(graphene::Rect::new(0.0, 0.0, W as f32, h as f32), r, z, z, r));
         s.push_opacity(fade);
         let mid = 28.0;

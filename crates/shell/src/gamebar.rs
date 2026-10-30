@@ -26,7 +26,7 @@ const OUT_MS: i64 = 240;
 const CLEAR_MS: u64 = 280;
 const HEAD: f64 = 46.0;
 const PAD: f64 = 16.0;
-const RADIUS: f64 = 24.0;
+const RADIUS: f64 = 26.0;
 const BAR_TOP: f64 = 16.0;
 const BAR_H: f64 = 52.0;
 const SLOT: f64 = 40.0;
@@ -75,12 +75,32 @@ impl Kind {
     fn width(self) -> f64 {
         match self {
             Kind::Resources => 360.0,
-            Kind::Mixer | Kind::Media => 340.0,
-            Kind::Bluetooth | Kind::Crosshair => 300.0,
+            Kind::Mixer | Kind::Media | Kind::Crosshair => 340.0,
+            Kind::Bluetooth => 300.0,
             Kind::Recorder | Kind::Notes => 320.0,
         }
     }
+
+    /// The narrowest a card can be dragged before its content stops fitting.
+    fn min_width(self) -> f64 {
+        match self {
+            Kind::Notes => 220.0,
+            Kind::Bluetooth => 260.0,
+            Kind::Resources | Kind::Mixer => 300.0,
+            Kind::Media => 310.0,
+            Kind::Recorder => 320.0,
+            Kind::Crosshair => 340.0,
+        }
+    }
+
+    /// Whether the card has a use for more height (the notes field, the resource graph).
+    fn stretches(self) -> bool {
+        matches!(self, Kind::Notes | Kind::Resources)
+    }
 }
+
+/// How close to a card's edge a press resizes it instead of moving or clicking.
+const GRIP: f64 = 6.0;
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 struct Spot {
@@ -89,6 +109,11 @@ struct Spot {
     y: f64,
     open: bool,
     pinned: bool,
+    /// The size the user dragged the card to; 0 keeps the natural size.
+    #[serde(default)]
+    w: f64,
+    #[serde(default)]
+    h: f64,
 }
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -122,11 +147,15 @@ struct Card {
     y: f64,
     open: bool,
     pinned: bool,
+    w: f64,
+    h: f64,
     vis: Tween,
 }
 
 enum Drag {
     Move { kind: Kind, dx: f64, dy: f64 },
+    /// `from` is the pointer where the drag began, `rect` the card's rectangle then.
+    Resize { kind: Kind, edges: u8, from: (f64, f64), rect: (f64, f64, f64, f64) },
     Slide { row: usize, x0: f64, w: f64 },
 }
 
@@ -177,7 +206,7 @@ fn load() -> Saved {
     let fresh = saved.cards.is_empty();
     for kind in KINDS {
         if !saved.cards.iter().any(|c| c.kind == kind) {
-            saved.cards.push(Spot { kind, x: -1.0, y: -1.0, open: fresh && kind != Kind::Crosshair, pinned: false });
+            saved.cards.push(Spot { kind, x: -1.0, y: -1.0, open: fresh && kind != Kind::Crosshair, pinned: false, w: 0.0, h: 0.0 });
         }
     }
     saved
@@ -278,7 +307,7 @@ fn build(app: &Rc<App>) -> Shared {
         css,
         open: false,
         rise: Tween::still(0.0),
-        cards: saved.cards.iter().map(|c| Card { kind: c.kind, x: c.x, y: c.y, open: c.open, pinned: c.pinned, vis: Tween::still(if c.open { 1.0 } else { 0.0 }) }).collect(),
+        cards: saved.cards.iter().map(|c| Card { kind: c.kind, x: c.x, y: c.y, open: c.open, pinned: c.pinned, w: c.w, h: c.h, vis: Tween::still(if c.open { 1.0 } else { 0.0 }) }).collect(),
         aim: saved.crosshair,
         hot: None,
         drag: None,
@@ -591,6 +620,12 @@ fn hover(st: &Shared, x: f64, y: f64) {
     s.hot = at;
     let cursor = match at {
         Some(Hit::Head(_)) => Some("grab"),
+        Some(Hit::Resize(_, e)) => Some(match e {
+            1 | 2 => "ew-resize",
+            4 | 8 => "ns-resize",
+            5 | 10 => "nwse-resize",
+            _ => "nesw-resize",
+        }),
         Some(Hit::Body(_) | Hit::Bare) | None => None,
         Some(_) => Some("pointer"),
     };
@@ -620,6 +655,12 @@ fn drag_begin(st: &Shared, x: f64, y: f64) {
             }
             s.paint.queue_draw();
         }
+        Hit::Resize(kind, edges) => {
+            raise(&mut s, kind);
+            let Some(c) = s.cards.iter().find(|c| c.kind == kind) else { return };
+            let rect = s.rect(c);
+            s.drag = Some(Drag::Resize { kind, edges, from: (x, y), rect });
+        }
         Hit::Level(row) => {
             let Some(c) = s.cards.iter().find(|c| c.kind == Kind::Mixer) else { return };
             let (cx, _, w, _) = s.rect(c);
@@ -640,10 +681,39 @@ fn drag_to(st: &Shared, x: f64, y: f64, moved: f64) {
     match s.drag {
         Some(Drag::Move { kind, dx, dy }) => {
             let (sw, sh) = s.size();
-            let h = s.height(kind);
+            let Some((w, h)) = s.cards.iter().find(|c| c.kind == kind).map(|c| s.card_size(c)) else { return };
             let Some(c) = s.cards.iter_mut().find(|c| c.kind == kind) else { return };
-            c.x = (x - dx).clamp(0.0, (sw - kind.width()).max(0.0)).round();
+            c.x = (x - dx).clamp(0.0, (sw - w).max(0.0)).round();
             c.y = (y - dy).clamp(0.0, (sh - h).max(0.0)).round();
+            s.place_notes(glib::monotonic_time());
+            s.paint.queue_draw();
+        }
+        Some(Drag::Resize { kind, edges, from, rect: (rx, ry, rw, rh) }) => {
+            let (sw, sh) = s.size();
+            let (dx, dy) = (x - from.0, y - from.1);
+            let (min_w, max_w) = (kind.min_width(), (kind.width() * 2.2).min(sw));
+            let min_h = s.height(kind).min(if kind == Kind::Notes { 160.0 } else { f64::MAX });
+            let max_h = sh * 0.9;
+            let (mut nx, mut ny, mut nw, mut nh) = (rx, ry, rw, rh);
+            if edges & 2 != 0 {
+                nw = (rw + dx).clamp(min_w, max_w.min(sw - rx));
+            }
+            if edges & 1 != 0 {
+                nw = (rw - dx).clamp(min_w, max_w.min(rx + rw));
+                nx = rx + rw - nw;
+            }
+            if edges & 8 != 0 {
+                nh = (rh + dy).clamp(min_h, max_h.min(sh - ry));
+            }
+            if edges & 4 != 0 {
+                nh = (rh - dy).clamp(min_h, max_h.min(ry + rh));
+                ny = ry + rh - nh;
+            }
+            let Some(c) = s.cards.iter_mut().find(|c| c.kind == kind) else { return };
+            (c.x, c.y, c.w) = (nx.round(), ny.round(), nw.round());
+            if kind.stretches() {
+                c.h = nh.round();
+            }
             s.place_notes(glib::monotonic_time());
             s.paint.queue_draw();
         }
@@ -666,7 +736,7 @@ fn drag_end(st: &Shared) {
         s.paint.set_cursor_from_name(None);
         s.hot = None;
         match drag {
-            Some(Drag::Move { .. }) => {
+            Some(Drag::Move { .. } | Drag::Resize { .. }) => {
                 s.save();
                 false
             }
@@ -827,6 +897,8 @@ fn press(st: &Shared, hit: Hit) {
             region(st);
             kick(st);
         }
+        // A click on an edge without dragging does nothing.
+        Hit::Resize(..) => {}
         Hit::Head(kind) | Hit::Body(kind) => {
             if kind == Kind::Notes {
                 let notes = st.borrow().notes.clone();
@@ -999,9 +1071,17 @@ impl State {
         }
     }
 
+    /// The card's size: what the user dragged it to, never below what its content needs.
+    fn card_size(&self, c: &Card) -> (f64, f64) {
+        let natural = self.height(c.kind);
+        let w = if c.w > 0.0 { c.w.max(c.kind.min_width()) } else { c.kind.width() };
+        let h = if c.kind.stretches() && c.h > 0.0 { c.h.max(if c.kind == Kind::Notes { 160.0 } else { natural }) } else { natural };
+        (w, h)
+    }
+
     fn rect(&self, c: &Card) -> (f64, f64, f64, f64) {
         let (sw, sh) = self.size();
-        let (w, h) = (c.kind.width(), self.height(c.kind));
+        let (w, h) = self.card_size(c);
         let (x, y) = if c.x < 0.0 || c.y < 0.0 { self.home(c.kind) } else { (c.x, c.y) };
         (x.clamp(0.0, (sw - w).max(0.0)).round(), y.clamp(0.0, (sh - h).max(0.0)).round(), w, h)
     }
@@ -1012,7 +1092,7 @@ impl State {
             c.x = x;
             c.y = y;
         }
-        let saved = Saved { cards: self.cards.iter().map(|c| Spot { kind: c.kind, x: c.x, y: c.y, open: c.open, pinned: c.pinned }).collect(), crosshair: self.aim };
+        let saved = Saved { cards: self.cards.iter().map(|c| Spot { kind: c.kind, x: c.x, y: c.y, open: c.open, pinned: c.pinned, w: c.w, h: c.h }).collect(), crosshair: self.aim };
         if let Ok(text) = serde_json::to_string_pretty(&saved) {
             let _ = std::fs::create_dir_all(kit::theme::state_dir());
             let _ = std::fs::write(file(), text);
@@ -1074,6 +1154,22 @@ impl State {
                 continue;
             }
             let (lx, ly) = (x - cx, y - cy);
+            let mut edges = 0u8;
+            if lx <= GRIP {
+                edges |= 1;
+            } else if lx >= w - GRIP {
+                edges |= 2;
+            }
+            if c.kind.stretches() {
+                if ly <= GRIP {
+                    edges |= 4;
+                } else if ly >= h - GRIP {
+                    edges |= 8;
+                }
+            }
+            if edges != 0 {
+                return Some(Hit::Resize(c.kind, edges));
+            }
             let found = cards::head_items(c.kind, w).into_iter().chain(cards::items(self, c.kind, w)).find(|i| lx >= i.x && lx <= i.x + i.w && ly >= i.y && ly <= i.y + i.h).map(|i| i.hit);
             return Some(found.unwrap_or(if ly <= HEAD { Hit::Head(c.kind) } else { Hit::Body(c.kind) }));
         }
@@ -1082,7 +1178,9 @@ impl State {
 
     fn draw(&self, s: &gtk::Snapshot) {
         let now = self.paint.frame_clock().map(|c| c.frame_time()).unwrap_or_else(glib::monotonic_time);
-        let pal = self.app.palette_at(now);
+        // Cards sit on the surface chosen in Settings (Black, Graphite or Tinted), like the apps.
+        let mut pal = self.app.palette_at(now);
+        pal.body = self.app.card(&pal);
         let (sw, sh) = self.size();
         let rise = self.rise.value(now).clamp(0.0, 1.0);
         if rise > 0.003 {
@@ -1116,22 +1214,22 @@ impl State {
 
     fn draw_card(&self, s: &gtk::Snapshot, c: &Card, pal: &Palette, w: f64, h: f64) {
         let cfg = &self.app.cfg;
-        let shape = draw::round(0.0, 0.0, w, h, RADIUS);
-        s.append_outset_shadow(&shape, &Rgb::new(0.0, 0.0, 0.0).alpha(0.32).rgba(), 0.0, 8.0, 0.0, 28.0);
+        let shape = draw::round(0.0, 0.0, w, h, RADIUS * self.app.round());
+        // Same surface as the shell's panels: solid body, no outline, a soft shadow to lift it off windows.
+        s.append_outset_shadow(&shape, &Rgb::new(0.0, 0.0, 0.0).alpha(0.24).rgba(), 0.0, 10.0, 0.0, 30.0);
         draw::fill(s, &shape, pal.body.alpha(1.0));
-        s.append_border(&shape, &[1.0; 4], &[pal.hairline.rgba(); 4]);
         let mid = HEAD / 2.0 + 2.0;
-        draw::icon(s, &self.paint, cfg, c.kind.glyph(), 18.0, true, pal.accent, PAD + 9.0, mid);
-        draw::text(s, &self.paint, cfg, c.kind.title(), 14.0, Face::Text(620), pal.ink_main, PAD + 26.0, mid, w - 2.0 * PAD - 100.0, pango::Alignment::Left);
+        draw::icon(s, &self.paint, cfg, c.kind.glyph(), 18.0, false, pal.ink_meta, PAD + 9.0, mid);
+        draw::text(s, &self.paint, cfg, c.kind.title(), 14.0, Face::Text(600), pal.ink_main, PAD + 26.0, mid, w - 2.0 * PAD - 100.0, pango::Alignment::Left);
         for item in cards::head_items(c.kind, w) {
             let hot = self.hot == Some(item.hit);
             let (glyph, on) = match item.hit {
                 Hit::Pin(_) => ("keep", c.pinned),
                 _ => ("close", false),
             };
-            let back = if on { pal.accent.alpha(0.18 + if hot { 0.08 } else { 0.0 }) } else { pal.ink_main.alpha(if hot { 0.09 } else { 0.0 }) };
+            let back = if on { pal.accent } else if hot { pal.ink_main.mix(pal.body, 0.12) } else { pal.body.alpha(0.0) };
             draw::fill(s, &draw::round(item.x, item.y, item.w, item.h, item.h / 2.0), back);
-            draw::icon(s, &self.paint, cfg, glyph, 18.0, on, if on { pal.accent } else { pal.ink_meta }, item.x + item.w / 2.0, item.y + item.h / 2.0);
+            draw::icon(s, &self.paint, cfg, glyph, 18.0, on, if on { pal.on_accent } else { pal.ink_meta }, item.x + item.w / 2.0, item.y + item.h / 2.0);
         }
         cards::draw(self, s, c.kind, pal, w, h);
     }
@@ -1140,22 +1238,20 @@ impl State {
         let cfg = &self.app.cfg;
         let (x0, w, slots) = self.bar();
         let shape = draw::round(x0, BAR_TOP, w, BAR_H, BAR_H / 2.0);
-        s.append_outset_shadow(&shape, &Rgb::new(0.0, 0.0, 0.0).alpha(0.32).rgba(), 0.0, 8.0, 0.0, 28.0);
+        s.append_outset_shadow(&shape, &Rgb::new(0.0, 0.0, 0.0).alpha(0.24).rgba(), 0.0, 10.0, 0.0, 30.0);
         draw::fill(s, &shape, pal.body.alpha(1.0));
-        s.append_border(&shape, &[1.0; 4], &[pal.hairline.rgba(); 4]);
         let mid = BAR_TOP + BAR_H / 2.0;
         for (kind, sx) in &slots {
             let on = self.cards.iter().any(|c| c.kind == *kind && c.open);
             let hot = self.hot == Some(Hit::Bar(*kind));
-            let back = if on { pal.accent.alpha(0.2 + if hot { 0.08 } else { 0.0 }) } else { pal.ink_main.alpha(if hot { 0.09 } else { 0.0 }) };
+            let back = if on { pal.accent } else if hot { pal.ink_main.mix(pal.body, 0.12) } else { pal.body.alpha(0.0) };
             draw::fill(s, &draw::round(x0 + sx, mid - SLOT / 2.0, SLOT, SLOT, SLOT / 2.0), back);
             let glyph = if *kind == Kind::Recorder && gsr::status().is_some() { "radio_button_checked" } else { kind.glyph() };
-            let ink = if *kind == Kind::Recorder && gsr::status().is_some() { RED } else if on { pal.accent } else { pal.ink_main };
+            let ink = if *kind == Kind::Recorder && gsr::status().is_some() { RED } else if on { pal.on_accent } else { pal.ink_main };
             draw::icon(s, &self.paint, cfg, glyph, 20.0, on, ink, x0 + sx + SLOT / 2.0, mid);
         }
         let mut x = x0 + 10.0 + KINDS.len() as f64 * (SLOT + 4.0) + 4.0;
-        draw::fill(s, &draw::round(x, mid - 12.0, 1.0, 24.0, 0.0), pal.hairline);
-        x += 14.0;
+        x += 10.0;
         let clock = self.app.clock.borrow().clone();
         let cw = draw::width(&self.paint, cfg, &clock, 15.0, Face::Number(600)).ceil();
         draw::text(s, &self.paint, cfg, &clock, 15.0, Face::Number(600), pal.ink_main, x, mid, cw + 2.0, pango::Alignment::Left);
