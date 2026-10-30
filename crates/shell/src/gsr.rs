@@ -140,7 +140,7 @@ fn changed() {
     if let Some(app) = app {
         app.set_lights(|l| l.record = mode);
     }
-    crate::record::changed();
+    crate::gamebar::changed();
 }
 
 fn save() {
@@ -341,7 +341,7 @@ pub fn start(app: &Rc<App>, mode: Mode) {
         notify("GPU Screen Recorder isn't installed", "Install the gpu-screen-recorder package to record the screen");
         return;
     }
-    crate::record::changed();
+    crate::gamebar::changed();
     glib::spawn_future_local(async move {
         let built = match target().await {
             Some((target, region)) => argv(mode, &target, region.as_deref()),
@@ -360,7 +360,7 @@ pub fn start(app: &Rc<App>, mode: Mode) {
                 if !e.is_empty() {
                     notify("Can't start recording", &e);
                 }
-                crate::record::changed();
+                crate::gamebar::changed();
                 return;
             }
         };
