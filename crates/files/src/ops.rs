@@ -757,6 +757,15 @@ pub fn dialog(title: &str, detail: &str) -> (Sheet, gtk::Box, gtk::Box) {
         glib::Propagation::Proceed
     });
     root.add_controller(keys);
+    let click = gtk::GestureClick::new();
+    let (me, inner) = (sheet.clone(), card.clone());
+    click.connect_released(move |g, _, x, y| {
+        let Some(w) = g.widget() else { return };
+        if !w.pick(x, y, gtk::PickFlags::DEFAULT).is_some_and(|p| p == inner || p.is_ancestor(&inner)) {
+            me.close();
+        }
+    });
+    root.add_controller(click);
     (sheet, body, buttons)
 }
 
