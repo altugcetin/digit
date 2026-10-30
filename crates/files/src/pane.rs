@@ -600,6 +600,12 @@ impl Pane {
                         let (px, py) = g.widget().and_then(|w| w.compute_point(&p.root, &gtk::graphene::Point::new(x as f32, y as f32))).map(|pt| (pt.x() as f64, pt.y() as f64)).unwrap_or((x, y));
                         crate::menu(&p, Some((px, py)), false);
                     }
+                    1 => {
+                        let held = g.current_event_state().intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK);
+                        if !held && g.widget().is_some_and(|w| Pane::item_at(&w, x, y).is_none()) {
+                            p.sel.unselect_all();
+                        }
+                    }
                     8 => p.back(),
                     9 => p.forward(),
                     _ => {}

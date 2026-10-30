@@ -151,12 +151,22 @@ fn sep() -> gtk::Separator {
 }
 
 pub fn show(host: &impl IsA<gtk::Widget>, x: f64, y: f64, items: Vec<Item>) {
-    let host = host.as_ref().clone();
+    present(host.as_ref(), items, gdk::Rectangle::new(x as i32, y as i32, 1, 1), gtk::Align::Start);
+}
+
+/// Opens the menu under a button, lined up with its right edge.
+pub fn show_under(host: &impl IsA<gtk::Widget>, items: Vec<Item>) {
+    let host = host.as_ref();
+    present(host, items, gdk::Rectangle::new(0, host.height(), host.width(), 1), gtk::Align::End);
+}
+
+fn present(host: &gtk::Widget, items: Vec<Item>, at: gdk::Rectangle, align: gtk::Align) {
+    let host = host.clone();
     let window = host.root().and_then(|r| r.downcast::<gtk::ApplicationWindow>().ok());
     let pop = gtk::Popover::new();
     pop.add_css_class("pm");
     pop.set_has_arrow(false);
-    pop.set_halign(gtk::Align::Start);
+    pop.set_halign(align);
     pop.set_parent(&host);
     let stack = gtk::Stack::new();
     stack.set_transition_type(gtk::StackTransitionType::SlideLeftRight);
@@ -168,7 +178,7 @@ pub fn show(host: &impl IsA<gtk::Widget>, x: f64, y: f64, items: Vec<Item>) {
     stack.add_named(&main, Some("main"));
     stack.set_visible_child_name("main");
     pop.set_child(Some(&stack));
-    pop.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+    pop.set_pointing_to(Some(&at));
     pop.connect_closed(|pop| {
         let pop = pop.clone();
         glib::idle_add_local_once(move || pop.unparent());

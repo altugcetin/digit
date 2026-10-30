@@ -21,7 +21,9 @@ const FILLET: f64 = 14.0;
 const RADIUS: f64 = 28.0;
 const ICON: f64 = 30.0;
 const SURFACE_W: f64 = PER_ROW as f64 * CARD_W + (PER_ROW - 1) as f64 * GAP + 2.0 * PAD + FILLET;
-const SURFACE_H: f64 = TOP + ROWS as f64 * CARD_H + (ROWS - 1) as f64 * GAP + PAD + FILLET;
+const CHIP_H: f64 = 32.0;
+const CHIP_ICON: f64 = 18.0;
+const SURFACE_H: f64 = TOP + ROWS as f64 * CARD_H + (ROWS - 1) as f64 * GAP + GAP + CHIP_H + PAD + FILLET;
 
 struct Card {
     id: u64,
@@ -31,10 +33,18 @@ struct Card {
     title: String,
 }
 
+/// A special workspace, shown as a small chip under the cards.
+struct Chip {
+    name: String,
+    shown: bool,
+    icons: Vec<(String, Option<gdk::Paintable>)>,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Spot {
     Card(usize),
     Window(usize, usize),
+    Special(usize),
 }
 
 struct State {
@@ -46,6 +56,7 @@ struct State {
     inside: bool,
     leave: u64,
     cards: Vec<Card>,
+    chips: Vec<Chip>,
     hot: Option<Spot>,
     glow: Vec<Tween>,
     rise: Tween,
@@ -136,6 +147,7 @@ fn build(app: &Rc<App>) -> Shared {
         inside: false,
         leave: 0,
         cards: Vec::new(),
+        chips: Vec::new(),
         hot: None,
         glow: Vec::new(),
         rise: Tween::still(0.0),
@@ -233,6 +245,7 @@ fn build(app: &Rc<App>) -> Shared {
 
 fn load(st: &Shared) {
     let windows = compositor::windows();
+    let specials = kit::wm::specials();
     let mut s = st.borrow_mut();
     let scale = s.window.scale_factor().max(1);
     let apps = s.app.apps.clone();
@@ -254,6 +267,16 @@ fn load(st: &Shared) {
             }
         })
         .collect();
+    let output = s.output.clone();
+    s.chips = specials
+        .into_iter()
+        .filter(|sp| sp.output == output)
+        .take(PER_ROW)
+        .map(|sp| Chip { name: sp.name, shown: sp.shown, icons: sp.apps.iter().take(3).map(|a| (a.clone(), draw::app_icon(&apps, a, CHIP_ICON as i32, scale))).collect() })
+        .collect();
+    if s.hot.is_some_and(|h| matches!(h, Spot::Special(k) if k >= s.chips.len())) {
+        s.hot = None;
+    }
     let n = s.cards.len();
     s.glow.resize(n, Tween::still(0.0));
     if s.hot.is_some_and(|h| matches!(h, Spot::Card(i) | Spot::Window(i, _) if i >= n)) {
@@ -315,6 +338,17 @@ fn pick(st: &Shared, spot: Spot) {
         match spot {
             Spot::Card(i) => s.cards.get(i).map(|c| (true, c.id)),
             Spot::Window(i, j) => s.cards.get(i).and_then(|c| c.windows.get(j)).map(|w| (false, w.0)),
+            Spot::Special(k) => {
+                let name = s.chips.get(k).map(|c| c.name.clone());
+                drop(s);
+                close(st);
+                if let Some(name) = name {
+                    glib::spawn_future_local(async move {
+                        let _ = gio::spawn_blocking(move || kit::wm::toggle_special(&name)).await;
+                    });
+                }
+                return;
+            }
         }
     };
     close(st);
@@ -332,8 +366,9 @@ fn hover(st: &Shared, at: Option<Spot>) {
             return;
         }
         s.hot = at;
-        let card = at.map(|a| match a {
-            Spot::Card(i) | Spot::Window(i, _) => i,
+        let card = at.and_then(|a| match a {
+            Spot::Card(i) | Spot::Window(i, _) => Some(i),
+            Spot::Special(_) => None,
         });
         let now = glib::monotonic_time();
         for (i, g) in s.glow.iter_mut().enumerate() {
@@ -356,7 +391,7 @@ fn nudge(st: &Shared, by: i32) {
         }
         let at = match s.hot {
             Some(Spot::Card(i)) | Some(Spot::Window(i, _)) => i as i32,
-            None => 0,
+            Some(Spot::Special(_)) | None => 0,
         };
         (at + by).clamp(0, n - 1) as usize
     };
@@ -422,7 +457,16 @@ impl State {
         let n = self.cards.len().max(1);
         let cols = n.min(PER_ROW) as f64;
         let rows = n.div_ceil(PER_ROW) as f64;
-        (cols * CARD_W + (cols - 1.0) * GAP + 2.0 * PAD, TOP + rows * CARD_H + (rows - 1.0) * GAP + PAD)
+        let chips = if self.chips.is_empty() { 0.0 } else { GAP + CHIP_H };
+        (cols * CARD_W + (cols - 1.0) * GAP + 2.0 * PAD, TOP + rows * CARD_H + (rows - 1.0) * GAP + chips + PAD)
+    }
+
+    fn chip_rect(&self, k: usize) -> (f64, f64, f64) {
+        let (w, _) = self.size();
+        let n = self.chips.len().max(1) as f64;
+        let cw = ((w - 2.0 * PAD - (n - 1.0) * GAP) / n).min(CARD_W);
+        let rows = self.cards.len().max(1).div_ceil(PER_ROW) as f64;
+        (PAD + k as f64 * (cw + GAP), TOP + rows * CARD_H + (rows - 1.0) * GAP + GAP, cw)
     }
 
     fn card_rect(&self, i: usize) -> (f64, f64) {
@@ -436,6 +480,12 @@ impl State {
     }
 
     fn spot_at(&self, x: f64, y: f64) -> Option<Spot> {
+        for k in 0..self.chips.len() {
+            let (cx, cy, cw) = self.chip_rect(k);
+            if x >= cx && x <= cx + cw && y >= cy && y <= cy + CHIP_H {
+                return Some(Spot::Special(k));
+            }
+        }
         for (i, card) in self.cards.iter().enumerate() {
             let (cx, cy) = self.card_rect(i);
             if x < cx || x > cx + CARD_W || y < cy || y > cy + CARD_H {
@@ -516,6 +566,24 @@ impl State {
                 draw::text(s, &self.paint, cfg, &format!("+{}", card.windows.len() - 4), 13.0, Face::Number(500), pal.ink_meta, ix, iy + ICON / 2.0, 30.0, left);
             }
             draw::text(s, &self.paint, cfg, &card.title, 12.0, Face::Text(450), pal.ink_meta, x + 14.0, y + CARD_H - 20.0, CARD_W - 28.0, left);
+        }
+        for (k, chip) in self.chips.iter().enumerate() {
+            let (x, y, cw) = self.chip_rect(k);
+            let hot = self.hot == Some(Spot::Special(k));
+            let base = if chip.shown { 0.15 } else { 0.08 };
+            draw::fill(s, &draw::round(x, y, cw, CHIP_H, CHIP_H / 2.0), pal.ink_main.alpha(base + if hot { 0.06 } else { 0.0 }));
+            let ink = if chip.shown { pal.accent } else { pal.ink_main };
+            draw::icon(s, &self.paint, cfg, "stacks", 16.0, false, ink, x + 22.0, y + CHIP_H / 2.0);
+            let room = cw - 40.0 - chip.icons.len() as f64 * (CHIP_ICON + 4.0) - 12.0;
+            draw::text(s, &self.paint, cfg, &chip.name, 12.5, Face::Text(550), ink, x + 36.0, y + CHIP_H / 2.0, room.max(0.0), left);
+            for (j, (app_id, icon)) in chip.icons.iter().enumerate() {
+                let ix = x + cw - 12.0 - (chip.icons.len() - j) as f64 * (CHIP_ICON + 4.0) + 4.0;
+                let iy = y + (CHIP_H - CHIP_ICON) / 2.0;
+                match icon {
+                    Some(p) => draw::paintable(s, p, ix, iy, CHIP_ICON),
+                    None => draw::monogram(s, &self.paint, cfg, &crate::apps::pretty(app_id), ix, iy, CHIP_ICON, pal.raised, pal.ink_main),
+                }
+            }
         }
         s.pop();
         s.pop();

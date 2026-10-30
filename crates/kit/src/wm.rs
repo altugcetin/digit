@@ -282,6 +282,42 @@ pub fn focus_space(id: u64) -> bool {
     }
 }
 
+/// A Hyprland special workspace (scratchpad) that currently holds windows.
+#[derive(Clone, Debug, Default)]
+pub struct Special {
+    pub name: String,
+    pub output: String,
+    pub shown: bool,
+    pub apps: Vec<String>,
+}
+
+pub fn specials() -> Vec<Special> {
+    if which() != Wm::Hyprland {
+        return Vec::new();
+    }
+    let shown: Vec<String> = hypr_outputs().iter().filter_map(|m| m.get("specialWorkspace").map(|s| text(s, "name"))).filter(|n| !n.is_empty()).collect();
+    let clients = hypr_json("clients").and_then(|v| v.as_array().cloned()).unwrap_or_default();
+    let mut out: Vec<Special> = hypr_json("workspaces")
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter(|w| text(w, "name").starts_with("special:") || w.get("id").and_then(Value::as_i64).is_some_and(|i| i < 0))
+        .map(|w| {
+            let full = text(w, "name");
+            let apps = clients.iter().filter(|c| c.get("workspace").is_some_and(|s| text(s, "name") == full)).map(|c| text(c, "class")).collect();
+            Special { name: full.strip_prefix("special:").unwrap_or(&full).to_string(), output: text(w, "monitor"), shown: shown.contains(&full), apps }
+        })
+        .filter(|s| !s.apps.is_empty())
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+pub fn toggle_special(name: &str) -> bool {
+    let arg = if name == "special" { String::new() } else { name.to_string() };
+    hypr_dispatch(&format!("togglespecialworkspace {arg}"), &format!("hl.dsp.workspace.toggle_special({})", serde_json::to_string(&arg).unwrap_or_default()))
+}
+
 pub fn minimize(app_id: &str) -> bool {
     let Some(me) = focused_window().filter(|w| w.app_id == app_id) else { return false };
     match which() {

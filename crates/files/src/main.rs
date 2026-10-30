@@ -16,16 +16,21 @@ use std::rc::Rc;
 pub const APP_ID: &str = "dev.digit.Files";
 
 struct Tab {
-    paned: gtk::Paned,
-    panes: RefCell<Vec<Rc<Pane>>>,
-    active: Cell<usize>,
+    pane: Rc<Pane>,
     title: gtk::Label,
+}
+
+/// One side of the window: its own row of tabs. Split view shows two of these.
+struct Column {
+    notebook: gtk::Notebook,
+    tabs: RefCell<Vec<Rc<Tab>>>,
 }
 
 struct Files {
     window: gtk::ApplicationWindow,
-    notebook: gtk::Notebook,
-    tabs: RefCell<Vec<Rc<Tab>>>,
+    split: gtk::Paned,
+    columns: RefCell<Vec<Rc<Column>>>,
+    current: Cell<usize>,
     crumbs: gtk::Box,
     path_stack: gtk::Stack,
     path_entry: gtk::Entry,
@@ -60,25 +65,39 @@ pub fn window() -> Option<gtk::Window> {
     files().map(|f| f.window.clone().upcast())
 }
 
-fn tab() -> Option<Rc<Tab>> {
+fn column() -> Option<Rc<Column>> {
     let f = files()?;
-    let i = f.notebook.current_page()? as usize;
-    f.tabs.borrow().get(i).cloned()
+    let columns = f.columns.borrow();
+    columns.get(f.current.get()).or_else(|| columns.first()).cloned()
+}
+
+impl Column {
+    fn tab(&self) -> Option<Rc<Tab>> {
+        let i = self.notebook.current_page()? as usize;
+        self.tabs.borrow().get(i).cloned()
+    }
+}
+
+fn tab() -> Option<Rc<Tab>> {
+    column()?.tab()
 }
 
 pub fn active() -> Option<Rc<Pane>> {
-    let t = tab()?;
-    let panes = t.panes.borrow();
-    panes.get(t.active.get()).or_else(|| panes.first()).cloned()
+    tab().map(|t| t.pane.clone())
 }
 
 fn other() -> Option<Rc<Pane>> {
-    let t = tab()?;
-    let panes = t.panes.borrow();
-    if panes.len() < 2 {
+    let f = files()?;
+    let columns = f.columns.borrow();
+    if columns.len() < 2 {
         return None;
     }
-    panes.get(1 - t.active.get().min(1)).cloned()
+    columns.get(1 - f.current.get().min(1))?.tab().map(|t| t.pane.clone())
+}
+
+fn panes() -> Vec<Rc<Pane>> {
+    let Some(f) = files() else { return Vec::new() };
+    f.columns.borrow().iter().flat_map(|c| c.tabs.borrow().iter().map(|t| t.pane.clone()).collect::<Vec<_>>()).collect()
 }
 
 pub fn toast(msg: &str) {
@@ -136,23 +155,17 @@ pub fn jobs_busy() -> bool {
 }
 
 pub fn refresh_all() {
-    let Some(f) = files() else { return };
-    for t in f.tabs.borrow().iter() {
-        for p in t.panes.borrow().iter() {
-            if !p.location().is_native() && !ops::is_trash(&p.location()) {
-                p.refresh();
-            }
+    for p in panes() {
+        if !p.location().is_native() && !ops::is_trash(&p.location()) {
+            p.refresh();
         }
     }
 }
 
 pub fn set_cut(uris: Vec<String>) {
-    let Some(f) = files() else { return };
-    for t in f.tabs.borrow().iter() {
-        for p in t.panes.borrow().iter() {
-            *p.cut.borrow_mut() = uris.clone();
-            p.redraw_items();
-        }
+    for p in panes() {
+        *p.cut.borrow_mut() = uris.clone();
+        p.redraw_items();
     }
 }
 
@@ -195,31 +208,37 @@ pub fn overlay_remove(w: &gtk::Box) {
 }
 
 pub fn focus_pane(p: &Rc<Pane>) {
-    let Some(t) = tab() else { return };
-    let i = t.panes.borrow().iter().position(|x| Rc::ptr_eq(x, p));
+    let Some(f) = files() else { return };
+    let i = f.columns.borrow().iter().position(|c| c.tabs.borrow().iter().any(|t| Rc::ptr_eq(&t.pane, p)));
     if let Some(i) = i {
-        if t.active.get() != i {
-            t.active.set(i);
-            for (k, q) in t.panes.borrow().iter().enumerate() {
-                if k == i {
-                    q.root.add_css_class("focused");
-                } else {
-                    q.root.remove_css_class("focused");
-                }
-            }
+        if f.current.get() != i {
+            f.current.set(i);
+            mark_focus();
             sync();
+        }
+    }
+}
+
+/// In split view the side being worked in gets an outline.
+fn mark_focus() {
+    let Some(f) = files() else { return };
+    let split = f.columns.borrow().len() > 1;
+    for (i, c) in f.columns.borrow().iter().enumerate() {
+        for t in c.tabs.borrow().iter() {
+            if split && i == f.current.get() {
+                t.pane.root.add_css_class("focused");
+            } else {
+                t.pane.root.remove_css_class("focused");
+            }
         }
     }
 }
 
 pub fn location_changed(p: &Rc<Pane>) {
     let Some(f) = files() else { return };
-    for t in f.tabs.borrow().iter() {
-        if t.panes.borrow().iter().any(|x| Rc::ptr_eq(x, p)) {
-            let first = t.panes.borrow().first().cloned();
-            if let Some(first) = first {
-                t.title.set_text(&title_of(&first.location()));
-            }
+    for c in f.columns.borrow().iter() {
+        for t in c.tabs.borrow().iter().filter(|t| Rc::ptr_eq(&t.pane, p)) {
+            t.title.set_text(&title_of(&p.location()));
         }
     }
     if active().is_some_and(|a| Rc::ptr_eq(&a, p)) {
@@ -368,13 +387,13 @@ fn complete() {
 }
 
 pub fn new_tab(file: &gio::File) {
-    let Some(f) = files() else { return };
+    if let Some(c) = column() {
+        add_tab(&c, file);
+    }
+}
+
+fn add_tab(c: &Rc<Column>, file: &gio::File) {
     let pane = Pane::new(file);
-    let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-    paned.set_wide_handle(false);
-    paned.set_start_child(Some(&pane.root));
-    paned.set_resize_start_child(true);
-    paned.set_shrink_start_child(false);
     let label = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let title = kit::ui::text(&title_of(file), "");
     title.set_ellipsize(pango::EllipsizeMode::End);
@@ -384,59 +403,128 @@ pub fn new_tab(file: &gio::File) {
     let x = kit::app::control("close", "");
     x.add_css_class("tab-close");
     label.append(&x);
-    let tab = Rc::new(Tab { paned: paned.clone(), panes: RefCell::new(vec![pane.clone()]), active: Cell::new(0), title });
-    let n = f.notebook.append_page(&paned, Some(&label));
-    f.notebook.set_tab_reorderable(&paned, true);
-    f.tabs.borrow_mut().insert(n as usize, tab);
-    let pg = paned.clone();
+    let tab = Rc::new(Tab { pane: pane.clone(), title });
+    let n = c.notebook.append_page(&pane.root, Some(&label));
+    c.notebook.set_tab_reorderable(&pane.root, true);
+    c.tabs.borrow_mut().insert(n as usize, tab);
+    let page = pane.root.clone().upcast::<gtk::Widget>();
+    let pg = page.clone();
     x.connect_clicked(move |_| close_tab(&pg));
-    f.notebook.set_show_tabs(f.notebook.n_pages() > 1);
-    f.notebook.set_current_page(Some(n));
+    let middle = gtk::GestureClick::new();
+    middle.set_button(2);
+    middle.connect_released(move |g, _, _, _| {
+        g.set_state(gtk::EventSequenceState::Claimed);
+        close_tab(&page);
+    });
+    label.add_controller(middle);
+    c.notebook.set_show_tabs(c.notebook.n_pages() > 1);
+    c.notebook.set_current_page(Some(n));
     pane.focus();
+    focus_pane(&pane);
+    mark_focus();
     sync();
 }
 
-fn close_tab(page: &gtk::Paned) {
+fn close_tab(page: &gtk::Widget) {
     let Some(f) = files() else { return };
-    let Some(i) = f.notebook.page_num(page) else { return };
-    if f.notebook.n_pages() <= 1 {
-        f.window.close();
+    let Some(c) = f.columns.borrow().iter().find(|c| c.notebook.page_num(page).is_some()).cloned() else { return };
+    let Some(i) = c.notebook.page_num(page) else { return };
+    if c.notebook.n_pages() <= 1 {
+        if f.columns.borrow().len() > 1 {
+            close_column(&c);
+        } else {
+            f.window.close();
+        }
         return;
     }
-    f.notebook.remove_page(Some(i));
-    f.tabs.borrow_mut().remove(i as usize);
-    f.notebook.set_show_tabs(f.notebook.n_pages() > 1);
+    c.notebook.remove_page(Some(i));
+    c.tabs.borrow_mut().remove(i as usize);
+    c.notebook.set_show_tabs(c.notebook.n_pages() > 1);
+    kit::app::trim_later(800);
+    sync();
+}
+
+fn new_column() -> Rc<Column> {
+    let notebook = gtk::Notebook::new();
+    notebook.set_show_border(false);
+    notebook.set_show_tabs(false);
+    notebook.set_scrollable(true);
+    notebook.set_hexpand(true);
+    notebook.set_vexpand(true);
+    let c = Rc::new(Column { notebook: notebook.clone(), tabs: RefCell::new(Vec::new()) });
+    let weak = Rc::downgrade(&c);
+    notebook.connect_switch_page(move |_, page, _| {
+        let Some(c) = weak.upgrade() else { return };
+        let picked = c.tabs.borrow().iter().find(|t| t.pane.root.upcast_ref::<gtk::Widget>() == page).map(|t| t.pane.clone());
+        glib::idle_add_local_once(move || {
+            if let Some(p) = picked {
+                focus_pane(&p);
+            }
+            sync();
+        });
+    });
+    let weak = Rc::downgrade(&c);
+    notebook.connect_page_reordered(move |_, child, to| {
+        let Some(c) = weak.upgrade() else { return };
+        let mut tabs = c.tabs.borrow_mut();
+        if let Some(from) = tabs.iter().position(|t| t.pane.root.upcast_ref::<gtk::Widget>() == child) {
+            let t = tabs.remove(from);
+            let at = (to as usize).min(tabs.len());
+            tabs.insert(at, t);
+        }
+    });
+    c
+}
+
+fn close_column(c: &Rc<Column>) {
+    let Some(f) = files() else { return };
+    let Some(i) = f.columns.borrow().iter().position(|x| Rc::ptr_eq(x, c)) else { return };
+    f.columns.borrow_mut().remove(i);
+    let keep = f.columns.borrow().first().cloned();
+    if let Some(keep) = keep {
+        f.split.set_end_child(None::<&gtk::Widget>);
+        f.split.set_start_child(Some(&keep.notebook));
+    }
+    f.current.set(0);
+    mark_focus();
+    if let Some(p) = active() {
+        p.focus();
+    }
     kit::app::trim_later(800);
     sync();
 }
 
 fn toggle_split() {
-    let Some(t) = tab() else { return };
-    let len = t.panes.borrow().len();
-    if len > 1 {
-        let gone = t.panes.borrow_mut().pop();
-        t.paned.set_end_child(None::<&gtk::Widget>);
-        t.active.set(0);
-        drop(gone);
-        if let Some(p) = t.panes.borrow().first() {
-            p.root.remove_css_class("focused");
-            p.focus();
-        }
-    } else {
-        let loc = active().map(|p| p.location()).unwrap_or_else(|| gio::File::for_path(glib::home_dir()));
-        let p = Pane::new(&loc);
-        t.paned.set_end_child(Some(&p.root));
-        t.paned.set_resize_end_child(true);
-        t.paned.set_shrink_end_child(false);
-        let w = t.paned.width();
-        if w > 0 {
-            t.paned.set_position(w / 2);
-        }
-        t.panes.borrow_mut().push(p.clone());
-        p.focus();
-        focus_pane(&p);
+    let Some(f) = files() else { return };
+    let right = f.columns.borrow().get(1).cloned();
+    if let Some(right) = right {
+        close_column(&right);
+        return;
     }
-    sync();
+    let loc = active().map(|p| p.location()).unwrap_or_else(|| gio::File::for_path(glib::home_dir()));
+    let c = new_column();
+    f.split.set_end_child(Some(&c.notebook));
+    let w = f.split.width();
+    if w > 0 {
+        f.split.set_position(w / 2);
+    }
+    f.columns.borrow_mut().push(c.clone());
+    f.current.set(1);
+    add_tab(&c, &loc);
+}
+
+/// Ctrl+Tab and Ctrl+Shift+Tab walk the tabs of the side being worked in.
+fn cycle_tab(by: i32) {
+    let Some(c) = column() else { return };
+    let n = c.notebook.n_pages() as i32;
+    if n < 2 {
+        return;
+    }
+    let at = c.notebook.current_page().unwrap_or(0) as i32;
+    c.notebook.set_current_page(Some((at + by).rem_euclid(n) as u32));
+    if let Some(t) = c.tab() {
+        t.pane.focus();
+    }
 }
 
 fn toggle_info() {
@@ -477,7 +565,7 @@ fn actions(window: &gtk::ApplicationWindow) {
     });
     action(window, "close-tab", || {
         if let Some(t) = tab() {
-            close_tab(&t.paned);
+            close_tab(t.pane.root.upcast_ref());
         }
     });
     action(window, "split", toggle_split);
@@ -676,12 +764,8 @@ fn actions(window: &gtk::ApplicationWindow) {
         let on = !a.state().and_then(|s| s.get::<bool>()).unwrap_or(false);
         a.set_state(&on.to_variant());
         let _ = kit::prefs::set("files_hidden", toml::Value::Boolean(on));
-        if let Some(f) = files() {
-            for t in f.tabs.borrow().iter() {
-                for p in t.panes.borrow().iter() {
-                    p.set_hidden(on);
-                }
-            }
+        for p in panes() {
+            p.set_hidden(on);
         }
     });
     window.add_action(&hidden);
@@ -734,12 +818,8 @@ fn apply_sort(v: &str) {
         "name-desc" => (0, true),
         _ => (0, false),
     };
-    if let Some(f) = files() {
-        for t in f.tabs.borrow().iter() {
-            for p in t.panes.borrow().iter() {
-                p.sort_by(col, desc);
-            }
-        }
+    for p in panes() {
+        p.sort_by(col, desc);
     }
 }
 
@@ -879,38 +959,25 @@ pub fn menu(p: &Rc<Pane>, at: Option<(f64, f64)>, items: bool) {
     popup::show(&p.root, x, y, m);
 }
 
-fn app_menu() -> gio::Menu {
-    let m = gio::Menu::new();
-    let a = gio::Menu::new();
-    a.append(Some("New Window"), Some("win.new-window"));
-    a.append(Some("New Tab"), Some("win.new-tab"));
-    a.append(Some("Split View"), Some("win.split"));
-    a.append(Some("Info Panel"), Some("win.info"));
-    a.append(Some("Sidebar"), Some("win.sidebar"));
-    m.append_section(None, &a);
-    let v = gio::Menu::new();
-    v.append(Some("Show Hidden Files"), Some("win.hidden"));
-    let sort = gio::Menu::new();
-    for (label, key) in [("Name", "name"), ("Name, Z to A", "name-desc"), ("Size", "size"), ("Modified", "modified"), ("Kind", "kind")] {
-        let item = gio::MenuItem::new(Some(label), None);
-        item.set_action_and_target_value(Some("win.sort"), Some(&key.to_variant()));
-        sort.append_item(&item);
-    }
-    v.append_submenu(Some("Sort By"), &sort);
-    let th = gio::Menu::new();
-    for (label, key) in [("Everywhere", "all"), ("This Computer Only", "local"), ("Never", "off")] {
-        let item = gio::MenuItem::new(Some(label), None);
-        item.set_action_and_target_value(Some("win.thumbs"), Some(&key.to_variant()));
-        th.append_item(&item);
-    }
-    v.append_submenu(Some("Thumbnails"), &th);
-    m.append_section(None, &v);
-    let o = gio::Menu::new();
-    o.append(Some("Undo"), Some("win.undo"));
-    o.append(Some("Open Terminal Here"), Some("win.terminal"));
-    o.append(Some("Keyboard Shortcuts"), Some("win.shortcuts"));
-    m.append_section(None, &o);
-    m
+fn app_menu() -> Vec<popup::Item> {
+    use popup::{Item, act, act_with, sub};
+    let sorts = [("sort_by_alpha", "Name", "name"), ("sort_by_alpha", "Name, Z to A", "name-desc"), ("straighten", "Size", "size"), ("schedule", "Modified", "modified"), ("category", "Kind", "kind")];
+    let thumbs = [("public", "Everywhere", "all"), ("computer", "This Computer Only", "local"), ("hide_image", "Never", "off")];
+    vec![
+        act("open_in_new", "New Window", "win.new-window"),
+        act("tab", "New Tab", "win.new-tab"),
+        act("vertical_split", "Split View", "win.split"),
+        act("info", "Info Panel", "win.info"),
+        act("side_navigation", "Sidebar", "win.sidebar"),
+        Item::Sep,
+        act("visibility", "Show Hidden Files", "win.hidden"),
+        sub("sort", "Sort By", sorts.iter().map(|(g, l, k)| act_with(g, l, "win.sort", k.to_variant())).collect()),
+        sub("image", "Thumbnails", thumbs.iter().map(|(g, l, k)| act_with(g, l, "win.thumbs", k.to_variant())).collect()),
+        Item::Sep,
+        act("undo", "Undo", "win.undo"),
+        act("terminal", "Open Terminal Here", "win.terminal"),
+        act("keyboard", "Keyboard Shortcuts", "win.shortcuts"),
+    ]
 }
 
 fn shortcuts() {
@@ -926,6 +993,7 @@ fn shortcuts() {
         ("Backspace / Alt+↑", "Parent folder"),
         ("Alt+← / Alt+→", "Back / forward"),
         ("Ctrl+T · Ctrl+W", "New tab · close tab"),
+        ("Ctrl+Tab · Ctrl+Shift+Tab", "Next tab · previous tab"),
         ("F3", "Split view"),
         ("F7 · F8", "Copy · move to other pane"),
         ("F2", "Rename (many items: batch)"),
@@ -1101,13 +1169,9 @@ fn header(window: &gtk::ApplicationWindow) -> (gtk::Widget, gtk::Box, gtk::Stack
     infob.set_action_name(Some("win.info"));
     infob.set_tooltip_text(Some("Info (Ctrl+I)"));
     bar.append(&infob);
-    let more = gtk::MenuButton::new();
-    more.set_child(Some(&kit::ui::sym("more_horiz")));
+    let more = kit::app::control("more_horiz", "");
     more.add_css_class("ctl-menu");
-    more.set_menu_model(Some(&app_menu()));
-    if let Some(p) = more.popover() {
-        kit::ui::menu_popover(&p);
-    }
+    more.connect_clicked(|b| popup::show_under(b, app_menu()));
     bar.append(&more);
     bar.append(&kit::app::controls(window, APP_ID));
     (bar.upcast(), crumbs, stack, entry, search, [back, forward, up, view])
@@ -1230,25 +1294,14 @@ fn build(app: &gtk::Application, start: &gio::File) -> Rc<Files> {
     side_rev.set_transition_duration(160);
     side_rev.set_child(Some(&side_box));
     side_rev.set_reveal_child(true);
-    let notebook = gtk::Notebook::new();
-    notebook.set_show_border(false);
-    notebook.set_show_tabs(false);
-    notebook.set_scrollable(true);
-    notebook.set_hexpand(true);
-    notebook.set_vexpand(true);
-    notebook.connect_switch_page(|_, _, _| {
-        glib::idle_add_local_once(sync);
-    });
-    notebook.connect_page_reordered(|nb, child, to| {
-        let Some(f) = files() else { return };
-        let mut tabs = f.tabs.borrow_mut();
-        if let Some(from) = tabs.iter().position(|t| t.paned.upcast_ref::<gtk::Widget>() == child) {
-            let t = tabs.remove(from);
-            let at = (to as usize).min(tabs.len());
-            tabs.insert(at, t);
-        }
-        let _ = nb;
-    });
+    let first = new_column();
+    let split = gtk::Paned::new(gtk::Orientation::Horizontal);
+    split.set_wide_handle(false);
+    split.set_start_child(Some(&first.notebook));
+    split.set_resize_start_child(true);
+    split.set_shrink_start_child(false);
+    split.set_resize_end_child(true);
+    split.set_shrink_end_child(false);
     let info = info::Info::new();
     let info_rev = gtk::Revealer::new();
     info_rev.set_transition_type(gtk::RevealerTransitionType::SlideLeft);
@@ -1271,7 +1324,7 @@ fn build(app: &gtk::Application, start: &gio::File) -> Rc<Files> {
     trash_bar.set_child(Some(&trash_bar_box));
     let center = gtk::Box::new(gtk::Orientation::Vertical, 0);
     center.append(&trash_bar);
-    center.append(&notebook);
+    center.append(&split);
     let jobs = gtk::Box::new(gtk::Orientation::Vertical, 4);
     jobs.add_css_class("jobs");
     let jobs_rev = gtk::Revealer::new();
@@ -1297,9 +1350,14 @@ fn build(app: &gtk::Application, start: &gio::File) -> Rc<Files> {
     overlay.add_overlay(&toast_rev);
     window.set_child(Some(&overlay));
     let keys = gtk::EventControllerKey::new();
-    keys.connect_key_pressed(|_, k, _, _| {
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    keys.connect_key_pressed(|_, k, _, m| {
         if k == gdk::Key::Escape && look::open() {
             look::close();
+            return glib::Propagation::Stop;
+        }
+        if m.contains(gdk::ModifierType::CONTROL_MASK) && matches!(k, gdk::Key::Tab | gdk::Key::ISO_Left_Tab | gdk::Key::KP_Tab) {
+            cycle_tab(if m.contains(gdk::ModifierType::SHIFT_MASK) || k == gdk::Key::ISO_Left_Tab { -1 } else { 1 });
             return glib::Propagation::Stop;
         }
         glib::Propagation::Proceed
@@ -1308,8 +1366,9 @@ fn build(app: &gtk::Application, start: &gio::File) -> Rc<Files> {
     action(&window, "shortcuts", shortcuts);
     let f = Rc::new(Files {
         window: window.clone(),
-        notebook,
-        tabs: RefCell::new(Vec::new()),
+        split,
+        columns: RefCell::new(vec![first]),
+        current: Cell::new(0),
         crumbs,
         path_stack,
         path_entry,

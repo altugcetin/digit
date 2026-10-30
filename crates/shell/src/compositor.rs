@@ -322,6 +322,14 @@ fn snapshot(tx: &async_channel::Sender<Feed>, last: &mut (Vec<Running>, Vec<Spac
     true
 }
 
+/// Screenshot and colour picker tools read the screen through the same capture path; that is not screen sharing.
+const CAPTURE_TOOLS: [&str; 6] = ["digit-snap", "grim", "hyprpicker", "hyprshot", "wayfreeze", "flameshot"];
+
+fn capture_tool_running() -> bool {
+    let Ok(procs) = std::fs::read_dir("/proc") else { return false };
+    procs.flatten().any(|p| std::fs::read_to_string(p.path().join("comm")).is_ok_and(|c| CAPTURE_TOOLS.contains(&c.trim())))
+}
+
 fn hypr_events(tx: async_channel::Sender<Feed>) {
     let mut wait = 1;
     loop {
@@ -344,6 +352,9 @@ fn hypr_events(tx: async_channel::Sender<Feed>) {
                     }
                     "screencast" => {
                         let n = usize::from(data.starts_with('1'));
+                        if n > casts && capture_tool_running() {
+                            continue;
+                        }
                         if n != casts {
                             casts = n;
                             if tx.send_blocking(Feed::Casts(n)).is_err() {

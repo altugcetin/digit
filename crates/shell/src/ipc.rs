@@ -49,7 +49,7 @@ async fn focused_output() -> Option<String> {
     gio::spawn_blocking(kit::wm::focused_output).await.ok().flatten()
 }
 
-const HELP: &str = "open | close | toggle | tray | note <words> | dnd [on|off|toggle|status] | night [on|off|toggle|status] | awake [on|off|toggle|status] | volume [up|down|mute|<0-150>] | mic | brightness up|down | lock [preview] | session | control | spaces | clipboard | settings | launcher [text] | menu <logo|app|window|date|N|traymenu N> | dock show|hide|toggle | layout <name> | wallpaper <image> | demo <peek> | status | key <action>";
+const HELP: &str = "open | close | toggle | tray | note <words> | dnd [on|off|toggle|status] | night [on|off|toggle|status] | awake [on|off|toggle|status] | volume [up|down|mute|<0-150>] | mic | brightness up|down | screenshot | pick | lock [preview] | session | control | spaces | clipboard | settings | launcher [text] | menu <logo|app|window|date|N|traymenu N> | dock show|hide|toggle | layout <name> | wallpaper <image> | demo <peek> | status | key <action>";
 
 async fn handle(app: &Rc<App>, words: &[String]) -> String {
     let verb = words.first().map(String::as_str).unwrap_or("");
@@ -287,6 +287,14 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
             Some("up") => if crate::brightness::step(app, "brightness-up") { "ok".into() } else { "no backlight".into() },
             Some("down") => if crate::brightness::step(app, "brightness-down") { "ok".into() } else { "no backlight".into() },
             _ => "brightness up | down".into(),
+        },
+        "screenshot" => {
+            let _ = gio::spawn_blocking(crate::compositor::screenshot).await;
+            "ok".into()
+        }
+        "pick" => match crate::child::spawn(&["digit-snap".as_ref(), "pick".as_ref()], gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE) {
+            Ok(_) => "ok".into(),
+            Err(_) => "digit-snap is missing".into(),
         },
         "control" | "spaces" | "session" | "clipboard" | "settings" => Box::pin(handle(app, &["key".to_string(), verb.to_string()])).await,
         "status" => {

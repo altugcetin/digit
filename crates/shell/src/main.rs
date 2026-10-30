@@ -27,6 +27,7 @@ mod gpu;
 mod hooks;
 mod icons;
 mod idle;
+mod intro;
 mod ipc;
 mod launcher;
 mod layouts;
@@ -134,6 +135,7 @@ fn run() {
     load_palette(&app);
     watch_palette(&app);
     place(&app, &display);
+    intro::play(&app);
     let monitors = display.monitors();
     let weak = Rc::downgrade(&app);
     monitors.connect_items_changed(move |_, _, _, _| {
