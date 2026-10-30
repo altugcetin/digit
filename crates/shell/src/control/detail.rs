@@ -12,8 +12,6 @@ const OPEN: Curve = Curve::new(0.16, 1.0, 0.3, 1.0);
 const SHUT: Curve = Curve::new(0.4, 0.0, 0.9, 0.6);
 const TOP: f64 = 10.0;
 const INSET: f64 = 8.0;
-const SEG: f64 = 30.0;
-const CHIP: f64 = 34.0;
 const ROW: f64 = 48.0;
 const SUB: f64 = 28.0;
 const NOTE: f64 = 40.0;
@@ -26,11 +24,8 @@ const NETS: usize = 8;
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(super) enum D {
     Expand(Tile),
-    Adapter(usize),
-    Power,
     Visible,
     Scan,
-    WifiPower,
     WifiScan,
     Device(usize),
     Trust(usize),
@@ -53,13 +48,10 @@ pub(super) struct Pass {
 
 #[derive(Clone, Copy)]
 enum Item {
-    Adapters,
-    BtChips,
     BtNote,
     Device(usize),
     Nearby,
     Searching,
-    WifiChips,
     WifiNote,
     Current,
     Info(u8),
@@ -71,8 +63,6 @@ enum Item {
 
 fn height(i: Item) -> f64 {
     match i {
-        Item::Adapters => SEG + 8.0,
-        Item::BtChips | Item::WifiChips => CHIP + 6.0,
         Item::BtNote | Item::WifiNote | Item::Searching | Item::Looking => NOTE,
         Item::Device(_) | Item::Net(_) | Item::Current => ROW,
         Item::Info(_) => INFO,
@@ -102,10 +92,6 @@ impl State {
             match self.bt.chosen() {
                 None => v.push(Item::BtNote),
                 Some(a) => {
-                    if self.bt.adapters.len() > 1 {
-                        v.push(Item::Adapters);
-                    }
-                    v.push(Item::BtChips);
                     let (list, paired) = self.bt_devices();
                     if !a.powered || (paired == 0 && !a.discovering && list.is_empty()) {
                         v.push(Item::BtNote);
@@ -122,7 +108,6 @@ impl State {
                 }
             }
         } else {
-            v.push(Item::WifiChips);
             if self.wifi.device.is_none() || !self.wifi.enabled {
                 v.push(Item::WifiNote);
             } else {
@@ -177,20 +162,6 @@ impl State {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn chip(&self, s: &gtk::Snapshot, pal: &Palette, x: f64, y: f64, w: f64, icon: &str, label: &str, on: bool, d: D, hits: &mut Vec<(D, f64, f64, f64, f64)>) {
-        let (canvas, cfg) = (&self.canvas, &self.app.cfg);
-        let hot = self.hover == Some(Hit::Detail(d));
-        let base = if on { pal.accent } else { pal.ink_main.mix(pal.body, if hot { 0.14 } else { 0.08 }) };
-        fill(s, &rounded(x, y, w, CHIP, CHIP / 2.0), base);
-        let ink = if on { pal.on_accent } else { pal.ink_main };
-        let lw = draw::width(canvas, cfg, label, 13.0, Face::Text(540)).ceil().min(w - 44.0);
-        let start = x + (w - 24.0 - lw) / 2.0;
-        draw::icon(s, canvas, cfg, icon, 17.0, on, ink, start + 9.0, y + CHIP / 2.0);
-        draw::text(s, canvas, cfg, label, 13.0, Face::Text(540), ink, start + 24.0, y + CHIP / 2.0, lw + 2.0, pango::Alignment::Left);
-        hits.push((d, x, y, w, CHIP));
-    }
-
-    #[allow(clippy::too_many_arguments)]
     fn small(&self, s: &gtk::Snapshot, pal: &Palette, cx: f64, cy: f64, icon: &str, tint: Option<kit::palette::Rgb>, d: D, hits: &mut Vec<(D, f64, f64, f64, f64)>) {
         let hot = self.hover == Some(Hit::Detail(d));
         let bg = match tint {
@@ -223,32 +194,6 @@ impl State {
         let (canvas, cfg) = (&self.canvas, &self.app.cfg);
         let mid = y + h / 2.0;
         match item {
-            Item::Adapters => {
-                let n = self.bt.adapters.len().max(1);
-                fill(s, &rounded(x, y, w, SEG, SEG / 2.0), pal.ink_main.mix(pal.body, 0.08));
-                let sw = w / n as f64;
-                let pick = self.bt.chosen().map(|a| a.id.clone());
-                for (i, a) in self.bt.adapters.iter().enumerate() {
-                    let sx = x + i as f64 * sw;
-                    let on = pick.as_ref() == Some(&a.id);
-                    let hot = self.hover == Some(Hit::Detail(D::Adapter(i)));
-                    if on {
-                        fill(s, &rounded(sx + 2.0, y + 2.0, sw - 4.0, SEG - 4.0, (SEG - 4.0) / 2.0), pal.accent);
-                    } else if hot {
-                        fill(s, &rounded(sx + 2.0, y + 2.0, sw - 4.0, SEG - 4.0, (SEG - 4.0) / 2.0), pal.ink_main.alpha(0.08));
-                    }
-                    let label = format!("{} · {}", a.name, a.id);
-                    draw::text(s, canvas, cfg, &label, 12.5, Face::Text(if on { 600 } else { 500 }), if on { pal.on_accent } else if a.powered { pal.ink_main } else { pal.ink_meta }, sx + 8.0, y + SEG / 2.0, sw - 16.0, pango::Alignment::Center);
-                    hits.push((D::Adapter(i), sx, y, sw, SEG));
-                }
-            }
-            Item::BtChips => {
-                let Some(a) = self.bt.chosen() else { return };
-                let cw = (w - 16.0) / 3.0;
-                self.chip(s, pal, x, y, cw, "power_settings_new", if a.powered { "On" } else { "Off" }, a.powered, D::Power, hits);
-                self.chip(s, pal, x + cw + 8.0, y, cw, if a.discoverable { "visibility" } else { "visibility_off" }, "Visible", a.discoverable, D::Visible, hits);
-                self.chip(s, pal, x + 2.0 * (cw + 8.0), y, cw, "bluetooth_searching", if a.discovering { "Scanning" } else { "Scan" }, a.discovering, D::Scan, hits);
-            }
             Item::BtNote => {
                 let text = match self.bt.chosen() {
                     None => "No Bluetooth adapter".to_string(),
@@ -317,12 +262,6 @@ impl State {
                     self.small(s, pal, sx - 22.0, mid, "delete", armed.then_some(pal.risk), D::Remove(i), hits);
                     self.small(s, pal, sx - 56.0, mid, "verified_user", d.trusted.then_some(pal.accent), D::Trust(i), hits);
                 }
-            }
-            Item::WifiChips => {
-                let cw = (w - 8.0) / 2.0;
-                let on = self.wifi.enabled && self.wifi.device.is_some();
-                self.chip(s, pal, x, y, cw, if on { "wifi" } else { "wifi_off" }, if on { "On" } else { "Off" }, on, D::WifiPower, hits);
-                self.chip(s, pal, x + cw + 8.0, y, cw, "refresh", "Scan", false, D::WifiScan, hits);
             }
             Item::WifiNote => {
                 let text = if self.wifi.device.is_none() { "No Wi-Fi hardware" } else if !self.wifi.hardware { "Turned off by a hardware switch" } else { "Wi-Fi is off" };
@@ -424,16 +363,22 @@ impl State {
             }
             Item::Foot => {
                 fill(s, &rounded(x + 6.0, y + 3.0, w - 12.0, 1.0, 0.5), pal.hairline);
-                let hot = self.hover == Some(Hit::Detail(D::More));
-                if hot {
-                    fill(s, &rounded(x, y + 7.0, w, h - 9.0, 14.0), pal.ink_main.mix(pal.body, 0.07));
-                }
+                // Settings sits first; the tile's own actions follow as glyphs.
                 let fm = y + 5.0 + (h - 5.0) / 2.0;
-                draw::icon(s, canvas, cfg, "settings", 18.0, false, pal.ink_sec, x + 22.0, fm);
-                let label = if t == Tile::Bluetooth { "Bluetooth Settings…" } else { "Wi-Fi Settings…" };
-                draw::text(s, canvas, cfg, label, 13.5, Face::Text(520), pal.ink_main, x + 48.0, fm, w - 80.0, pango::Alignment::Left);
-                draw::icon(s, canvas, cfg, "chevron_right", 18.0, false, pal.ink_meta, x + w - 18.0, fm);
-                hits.push((D::More, x, y + 7.0, w, h - 9.0));
+                let step = 36.0;
+                let mut gx = x + 18.0;
+                self.small(s, pal, gx, fm, "settings", None, D::More, hits);
+                if t == Tile::Bluetooth {
+                    if let Some(a) = self.bt.chosen().filter(|a| a.powered) {
+                        gx += step;
+                        self.small(s, pal, gx, fm, if a.discoverable { "visibility" } else { "visibility_off" }, a.discoverable.then_some(pal.accent), D::Visible, hits);
+                        gx += step;
+                        self.small(s, pal, gx, fm, "bluetooth_searching", a.discovering.then_some(pal.accent), D::Scan, hits);
+                    }
+                } else if self.wifi.enabled && self.wifi.device.is_some() {
+                    gx += step;
+                    self.small(s, pal, gx, fm, "sync", None, D::WifiScan, hits);
+                }
             }
         }
     }
@@ -564,19 +509,6 @@ impl Control {
         let adapter = self.0.borrow().bt.chosen().cloned();
         match d {
             D::Expand(t) => self.expand(t),
-            D::Adapter(i) => {
-                let Some(a) = self.0.borrow().bt.adapters.get(i).cloned() else { return };
-                self.stop_scan();
-                if let Err(e) = bluez::choose(&a.id) {
-                    self.note(format!("Bluetooth: {e}"));
-                }
-                self.changed();
-                self.refresh();
-            }
-            D::Power => {
-                let Some(a) = adapter else { return };
-                self.run("Bluetooth", async move |c| bluez::set_adapter(&c, &a.path, "Powered", !a.powered).await);
-            }
             D::Visible => {
                 let Some(a) = adapter else { return };
                 self.run("Bluetooth", async move |c| bluez::set_adapter(&c, &a.path, "Discoverable", !a.discoverable).await);
@@ -642,10 +574,6 @@ impl Control {
                 }
                 let Some(a) = adapter else { return };
                 self.run("Couldn't remove", async move |c| bluez::remove(&c, &a.path, &dev.path).await);
-            }
-            D::WifiPower => {
-                let on = !self.0.borrow().wifi.enabled;
-                self.run("Wi-Fi", async move |c| nm::set_enabled(&c, on).await);
             }
             D::WifiScan => self.wifi_scan(),
             D::Disconnect => {

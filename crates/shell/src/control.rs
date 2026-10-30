@@ -100,7 +100,6 @@ enum Hit {
     Clear,
     Row(usize),
     Close(usize),
-    Device(usize),
     Detail(detail::D),
 }
 
@@ -113,7 +112,6 @@ struct Net {
     online: bool,
 }
 
-const DEVICE: f64 = 52.0;
 const GREEN: Rgb = Rgb::new(0.19, 0.82, 0.35);
 const RED: Rgb = Rgb::new(1.0, 0.27, 0.23);
 const CELL: f64 = 96.0;
@@ -700,7 +698,6 @@ impl Control {
                 }
                 self.changed();
             }
-            Some(Hit::Device(i)) => self.toggle_device(i),
             Some(Hit::Detail(d)) => self.act(d),
             Some(Hit::Close(i)) => self.forget(i, false),
             Some(Hit::Row(i)) => self.forget(i, true),
@@ -735,34 +732,6 @@ impl Control {
         let h = s.height.target();
         let bottom = s.max_h + FILLET;
         x >= FILLET && y >= bottom - h
-    }
-
-    fn toggle_device(&self, i: usize) {
-        let Some(dev) = self.0.borrow().known().get(i).cloned() else { return };
-        if self.0.borrow().busy.contains(&dev.path) {
-            return;
-        }
-        self.0.borrow_mut().busy.push(dev.path.clone());
-        self.0.borrow().canvas.queue_draw();
-        let weak = Rc::downgrade(&self.0);
-        glib::spawn_future_local(async move {
-            let method = if dev.connected { "Disconnect" } else { "Connect" };
-            let mut failed = None;
-            if let Ok(conn) = crate::bus::system().await {
-                if let Ok(p) = zbus::Proxy::new_owned(conn, "org.bluez", dev.path.clone(), "org.bluez.Device1").await {
-                    if let Err(e) = p.call_method(method, &()).await {
-                        failed = Some(e.to_string());
-                    }
-                }
-            }
-            let Some(s) = weak.upgrade() else { return };
-            s.borrow_mut().busy.retain(|b| *b != dev.path);
-            if failed.is_some() {
-                let app = s.borrow().app.clone();
-                app.request(crate::app::Peek::Note { text: format!("{} couldn't {}", dev.name, if dev.connected { "disconnect" } else { "connect" }) });
-            }
-            Control(s).refresh();
-        });
     }
 
     fn set_property(&self, dest: &'static str, path: &str, iface: &'static str, name: &'static str, value: bool) {
@@ -809,19 +778,8 @@ impl Control {
 }
 
 impl State {
-    /// Paired or connected devices on every adapter, for the quick list under the tiles.
-    fn known(&self) -> Vec<bluez::Device> {
-        let mut v: Vec<bluez::Device> = self.bt.devices.iter().filter(|d| d.paired || d.connected).cloned().collect();
-        v.sort_by(|a, b| b.connected.cmp(&a.connected).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));
-        v
-    }
-
     fn bt_on(&self) -> bool {
         self.bt.chosen().is_some_and(|a| a.powered)
-    }
-
-    fn quick_devices(&self) -> bool {
-        self.bt_on() && self.expand != Some(Tile::Bluetooth) && !self.known().is_empty()
     }
 
     fn tiles(&self) -> Vec<Tile> {
@@ -845,13 +803,12 @@ impl State {
         let tiles = rows * TILE_H + (rows - 1.0).max(0.0) * TILE_GAP;
         let n = self.app.history.borrow().len();
         let list = if n == 0 { EMPTY } else { n as f64 * ROW };
-        let devices = if self.quick_devices() { HEAD + self.known().len() as f64 * DEVICE + 8.0 } else { 0.0 };
         let detail = self.expand.map(|t| self.detail_height(t) * self.reveal.target()).unwrap_or(0.0);
         let cells = self.app.gadgets.borrow().len();
         let batteries = if cells == 0 { 0.0 } else { HEAD + cells.div_ceil(PER_ROW) as f64 * CELL + 6.0 };
         let system = HEAD + CELL + 6.0;
         let weather = if self.app.weather.borrow().is_some() { 58.0 } else { 0.0 };
-        PAD + weather + tiles + detail + 14.0 + batteries + system + devices + SOUND + 16.0 + HEAD + list + PAD
+        PAD + weather + tiles + detail + 14.0 + batteries + system + SOUND + 16.0 + HEAD + list + PAD
     }
 
     fn step(&mut self, now: i64) -> bool {
@@ -1060,45 +1017,6 @@ impl State {
                 draw::text(s, &canvas, &cfg, &g.name, 11.5, Face::Text(450), pal.ink_meta, cx - cw / 2.0 + 3.0, cy + 56.0, cw - 6.0, pango::Alignment::Center);
             }
             y += gadgets.len().div_ceil(PER_ROW) as f64 * CELL + 6.0;
-        }
-        if self.quick_devices() {
-            draw::text(s, &canvas, &cfg, "Bluetooth devices", 14.0, Face::Text(600), pal.ink_main, x0 + 4.0, y + HEAD / 2.0, 220.0, pango::Alignment::Left);
-            y += HEAD;
-            let known = self.known();
-            for (i, d) in known.iter().enumerate() {
-                let ry = y + i as f64 * DEVICE;
-                let hovered = self.hover == Some(Hit::Device(i));
-                if hovered {
-                    fill(s, &rounded(x0 - 6.0, ry + 2.0, inner + 12.0, DEVICE - 4.0, 14.0), pal.ink_main.mix(pal.body, 0.07));
-                }
-                let busy = self.busy.contains(&d.path);
-                let badge = rounded(x0 + 2.0, ry + DEVICE / 2.0 - 16.0, 32.0, 32.0, 16.0);
-                fill(s, &badge, if d.connected { pal.accent.alpha(0.22) } else { pal.raised });
-                draw::icon(s, &canvas, &cfg, bluez::symbol(&d.icon), 18.0, d.connected, if d.connected { pal.accent } else { pal.ink_meta }, x0 + 18.0, ry + DEVICE / 2.0);
-                let sub = if busy {
-                    if d.connected { "Disconnecting…".to_string() } else { "Connecting…".to_string() }
-                } else {
-                    match (d.connected, d.battery) {
-                        (true, Some(b)) => format!("Connected · {b}%"),
-                        (true, None) => "Connected".into(),
-                        (false, _) => "Not connected".into(),
-                    }
-                };
-                let tx = x0 + 46.0;
-                let tw = inner - 46.0 - 60.0;
-                draw::text(s, &canvas, &cfg, &d.name, 14.0, Face::Text(540), pal.ink_main, tx, ry + 18.0, tw, pango::Alignment::Left);
-                draw::text(s, &canvas, &cfg, &sub, 12.5, Face::Text(420), pal.ink_meta, tx, ry + 36.0, tw, pango::Alignment::Left);
-                let (sw_w, sw_h) = (40.0, 24.0);
-                let sx = x0 + inner - sw_w - 4.0;
-                let sy = ry + DEVICE / 2.0 - sw_h / 2.0;
-                let on = d.connected != busy;
-                fill(s, &rounded(sx, sy, sw_w, sw_h, sw_h / 2.0), if on { pal.accent } else { pal.ink_main.alpha(0.18) });
-                let knob = sw_h - 6.0;
-                let kx = if on { sx + sw_w - knob - 3.0 } else { sx + 3.0 };
-                fill(s, &rounded(kx, sy + 3.0, knob, knob, knob / 2.0), if on { pal.on_accent } else { pal.ink_main });
-                hits.push((Hit::Device(i), x0 - 6.0, ry + 2.0 + shift, inner + 12.0, DEVICE - 4.0));
-            }
-            y += known.len() as f64 * DEVICE + 8.0;
         }
         let (level, muted) = self.app.volume.get().unwrap_or((0.0, false));
         let mid = y + SOUND / 2.0;
