@@ -34,10 +34,16 @@ fn ask(words: &[String]) -> Option<String> {
     Some(reply.trim().to_string())
 }
 
+/// Commands of the `digit` binary itself; everything else goes to the running shell.
+const LOCAL: [&str; 4] = ["release", "theme", "auth", "--register"];
+
 fn main() {
-    let words: Vec<String> = std::env::args().skip(1).collect();
-    let key = words.first().is_some_and(|w| w == "key");
-    let shell = matches!(words.first().map(String::as_str), Some("msg" | "key"));
+    let mut words: Vec<String> = std::env::args().skip(1).collect();
+    if words.is_empty() || matches!(words[0].as_str(), "-h" | "--help") {
+        words = vec!["help".into()];
+    }
+    let key = words[0] == "key";
+    let shell = !LOCAL.contains(&words[0].as_str());
     if shell {
         let sent = if words[0] == "msg" { &words[1..] } else { &words[..] };
         if let Some(reply) = ask(sent) {
@@ -48,6 +54,9 @@ fn main() {
             if reply == "ok" {
                 return;
             }
+        } else if !matches!(words[0].as_str(), "key" | "wallpaper") {
+            eprintln!("digitctl: digit is not running");
+            std::process::exit(1);
         }
     }
     let full = std::env::current_exe().ok().and_then(|p| p.canonicalize().ok()).map(|p| p.with_file_name("digit")).filter(|p| p.exists()).unwrap_or_else(|| PathBuf::from("digit"));

@@ -240,6 +240,7 @@ pub fn build() -> gtk::Widget {
     });
     end.append(&pick);
     look.append(&row);
+    toggle(&look, "auto_awesome", "Startup animation", "Greet each start of the shell with a short full-screen animation", "intro", prefs::get_bool(&t, "intro", true));
     body.append(&look);
 
     body.append(&ui::heading("Apps"));

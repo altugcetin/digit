@@ -1,11 +1,18 @@
 use crate::pane::{is_dir, kind, size_text, target_of};
 use gtk::{gdk, gio, glib, pango, prelude::*};
+use kit::motion::{self, Tween};
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+const OPEN_MS: i64 = 260;
+const CLOSE_MS: i64 = 150;
+const DROP: f64 = 18.0;
+const MARGIN: i32 = 36;
+
 struct Look {
     root: gtk::Box,
+    card: gtk::Box,
     stage: gtk::Box,
     title: gtk::Label,
     sub: gtk::Label,
@@ -35,10 +42,42 @@ pub fn close() {
         if let Some(b) = l.busy.borrow_mut().take() {
             b.store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        kit::ui::clear(&l.stage);
-        crate::overlay_remove(&l.root);
-        kit::app::trim_later(600);
+        l.root.set_can_target(false);
+        let (root, stage) = (l.root.clone(), l.stage.clone());
+        play(&l.root, &l.card, false, move || {
+            kit::ui::clear(&stage);
+            crate::overlay_remove(&root);
+            kit::app::trim_later(600);
+        });
     }
+}
+
+/// Fades the backdrop and settles the card from slightly below, like the shell's panels; closing runs it back, quicker.
+fn play(root: &gtk::Box, card: &gtk::Box, opening: bool, done: impl FnOnce() + 'static) {
+    let now = glib::monotonic_time();
+    let mut t = Tween::still(root.opacity());
+    if opening {
+        t.go(1.0, now, OPEN_MS, motion::Curve::new(0.16, 1.0, 0.3, 1.0));
+    } else {
+        t.go(0.0, now, CLOSE_MS, motion::Curve::new(0.4, 0.0, 0.9, 0.6));
+    }
+    let card = card.clone();
+    let done = std::cell::Cell::new(Some(done));
+    root.add_tick_callback(move |w, clock| {
+        let now = clock.frame_time();
+        let v = t.value(now).clamp(0.0, 1.0);
+        w.set_opacity(v);
+        let off = ((1.0 - v) * DROP).round() as i32;
+        card.set_margin_top(MARGIN + off);
+        card.set_margin_bottom(MARGIN - off);
+        if !t.settled(now) {
+            return glib::ControlFlow::Continue;
+        }
+        if let Some(f) = done.take() {
+            f();
+        }
+        glib::ControlFlow::Break
+    });
 }
 
 fn show() {
@@ -50,8 +89,8 @@ fn show() {
     card.add_css_class("look");
     card.set_halign(gtk::Align::Center);
     card.set_valign(gtk::Align::Center);
-    card.set_margin_top(36);
-    card.set_margin_bottom(36);
+    card.set_margin_top(MARGIN + DROP as i32);
+    card.set_margin_bottom(MARGIN - DROP as i32);
     card.set_margin_start(48);
     card.set_margin_end(48);
     let head = gtk::Box::new(gtk::Orientation::Horizontal, 10);
@@ -91,9 +130,11 @@ fn show() {
         }
     });
     root.add_controller(click);
-    let look = std::rc::Rc::new(Look { root: root.clone(), stage, title, sub, shown: RefCell::new(None), busy: RefCell::new(None) });
+    root.set_opacity(0.0);
+    let look = std::rc::Rc::new(Look { root: root.clone(), card: card.clone(), stage, title, sub, shown: RefCell::new(None), busy: RefCell::new(None) });
     LOOK.with(|l| *l.borrow_mut() = Some(look));
     crate::overlay_add(&root);
+    play(&root, &card, true, || {});
     update();
 }
 
