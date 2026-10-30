@@ -341,6 +341,19 @@ pub struct Wallpapers {
 }
 
 impl Wallpapers {
+    /// Drops the wallpaper surface of one output so the next `place` builds it at the new size.
+    pub fn forget(&self, output: &str) {
+        let gone: Vec<gtk::Window> = {
+            let mut screens = self.screens.borrow_mut();
+            let (drop, keep): (Vec<Screen>, Vec<Screen>) = screens.drain(..).partition(|s| s.output == output);
+            *screens = keep;
+            drop.into_iter().map(|s| s.window).collect()
+        };
+        for w in gone {
+            w.destroy();
+        }
+    }
+
     pub fn place(self: &Rc<Self>, monitors: &[gdk::Monitor]) {
         let names: Vec<String> = monitors.iter().map(|m| m.connector().map(|c| c.to_string()).unwrap_or_default()).collect();
         let mut gone = Vec::new();

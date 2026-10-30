@@ -295,6 +295,7 @@ fn window(app: &gtk::Application) -> gtk::ApplicationWindow {
     stack.set_vexpand(true);
     let layer = gtk::Overlay::new();
     layer.set_child(Some(&stack));
+    LAYER.with(|l| *l.borrow_mut() = Some(layer.clone()));
     let strip = gtk::WindowHandle::new();
     strip.set_valign(gtk::Align::Start);
     strip.set_size_request(-1, 26);
@@ -362,4 +363,13 @@ fn main() -> glib::ExitCode {
         glib::ExitCode::SUCCESS
     });
     app.run()
+}
+
+thread_local! {
+    static LAYER: std::cell::RefCell<Option<gtk::Overlay>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The overlay over the page area, where in-window dialogs sit.
+pub fn layer() -> Option<gtk::Overlay> {
+    LAYER.with(|l| l.borrow().clone())
 }

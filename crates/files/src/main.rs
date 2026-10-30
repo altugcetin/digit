@@ -1230,7 +1230,6 @@ button.pm-row .pm-trail {{ font-size: 17px; color: {meta}; margin-left: 8px; }}
 button.pm-row.pm-danger .pm-label, button.pm-row.pm-danger .pm-glyph {{ color: #ff6b6b; }}
 button.pm-row.pm-back .pm-label {{ font-weight: 600; }}
 separator.pm-sep {{ margin: 4px 8px; background: alpha({main}, 0.08); min-height: 1px; }}
-.sheet-backdrop {{ background: rgba(0,0,0,0.42); }}
 .place-remove {{ opacity: 0; min-width: 22px; min-height: 22px; padding: 0; }}
 list.places row:hover .place-remove {{ opacity: 1; }}
 columnview.list > listview > row:hover {{ background: alpha({main}, 0.05); }}

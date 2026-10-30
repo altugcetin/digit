@@ -1,13 +1,10 @@
 use crate::pane::{is_dir, kind, size_text, target_of};
 use gtk::{gdk, gio, glib, pango, prelude::*};
-use kit::motion::{self, Tween};
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-const OPEN_MS: i64 = 260;
-const CLOSE_MS: i64 = 150;
-pub const DROP: f64 = 18.0;
+pub const DROP: f64 = kit::ui::SETTLE_DROP;
 const MARGIN: i32 = 36;
 
 struct Look {
@@ -52,33 +49,9 @@ pub fn close() {
     }
 }
 
-/// Fades the backdrop and settles the card from slightly below, like the shell's panels; closing runs it back, quicker.
-/// Quick Look and every dialog share it; `margin` is the card's resting top and bottom margin.
+/// Quick Look and every Files dialog share the shell-like settle; `margin` is the card's resting margin.
 pub fn play(root: &gtk::Box, card: &gtk::Box, margin: i32, opening: bool, done: impl FnOnce() + 'static) {
-    let now = glib::monotonic_time();
-    let mut t = Tween::still(root.opacity());
-    if opening {
-        t.go(1.0, now, OPEN_MS, motion::Curve::new(0.16, 1.0, 0.3, 1.0));
-    } else {
-        t.go(0.0, now, CLOSE_MS, motion::Curve::new(0.4, 0.0, 0.9, 0.6));
-    }
-    let card = card.clone();
-    let done = std::cell::Cell::new(Some(done));
-    root.add_tick_callback(move |w, clock| {
-        let now = clock.frame_time();
-        let v = t.value(now).clamp(0.0, 1.0);
-        w.set_opacity(v);
-        let off = ((1.0 - v) * DROP).round() as i32;
-        card.set_margin_top(margin + off);
-        card.set_margin_bottom(margin - off);
-        if !t.settled(now) {
-            return glib::ControlFlow::Continue;
-        }
-        if let Some(f) = done.take() {
-            f();
-        }
-        glib::ControlFlow::Break
-    });
+    kit::ui::settle(root, card, margin, opening, done);
 }
 
 fn show() {
