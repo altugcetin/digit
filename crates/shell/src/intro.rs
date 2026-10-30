@@ -4,21 +4,31 @@ use crate::paint::Paint;
 use gtk::{cairo, gdk, glib, graphene, gsk, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use kit::motion::{self, Curve};
-use kit::palette::Rgb;
 use std::rc::Rc;
 
-const GROW_MS: f64 = 520.0;
-const REVEAL_AT: f64 = 950.0;
-const REVEAL_MS: f64 = 640.0;
-const PILL_W: f64 = 188.0;
-const PILL_H: f64 = 46.0;
-const NOTCH_W: f64 = 128.0;
-const BLACK: Rgb = Rgb::new(0.0, 0.0, 0.0);
-const LIGHT: Rgb = Rgb::new(0.96, 0.96, 0.97);
+/// The wordmark is drawn with dotless i's; the accent dots above them are the mark itself.
+const WORD: &str = "dıgıt";
+const PX: f64 = 76.0;
+const SPRING: Curve = Curve::new(0.34, 1.56, 0.64, 1.0);
 const SETTLE: Curve = Curve::new(0.16, 1.0, 0.3, 1.0);
+const GLIDE: Curve = Curve::new(0.65, 0.0, 0.35, 1.0);
 
-/// Covers every screen when the shell starts: a notch grows in the middle and says hello,
-/// then flies up into its place while the desktop opens out from behind it.
+// Timeline, in milliseconds from the start.
+const DOT_IN: f64 = 120.0;
+const SPLIT: f64 = 620.0;
+const LETTERS: f64 = 820.0;
+const STAGGER: f64 = 75.0;
+const HOP: f64 = 1750.0;
+const OUT: f64 = 2400.0;
+const OUT_MS: f64 = 700.0;
+const FADE: f64 = 2700.0;
+const FADE_MS: f64 = 1500.0;
+const END: f64 = FADE + FADE_MS + 40.0;
+/// Slow in, slow out: the backdrop melts away instead of being cut.
+const MELT: Curve = Curve::new(0.45, 0.0, 0.55, 1.0);
+
+/// Covers every screen when the shell starts: a dot springs up, splits into the dots of the
+/// wordmark as its letters rise into place, then the curtain opens from the middle.
 pub fn play(app: &Rc<App>) {
     if !app.cfg.intro {
         return;
@@ -54,7 +64,7 @@ fn cover(app: &Rc<App>, monitor: &gdk::Monitor, start: i64) {
     let win = window.clone();
     paint.add_tick_callback(move |w, clock| {
         w.queue_draw();
-        if ((clock.frame_time() - start) as f64 / 1000.0) < REVEAL_AT + REVEAL_MS + 40.0 {
+        if ((clock.frame_time() - start) as f64 / 1000.0) < END {
             return glib::ControlFlow::Continue;
         }
         let win = win.clone();
@@ -82,6 +92,17 @@ fn ease(c: Curve, t: f64) -> f64 {
     c.at(t.clamp(0.0, 1.0))
 }
 
+/// 0 → 1 over `ms` starting at `from`.
+fn span(t: f64, from: f64, ms: f64) -> f64 {
+    ((t - from) / ms).clamp(0.0, 1.0)
+}
+
+fn dot(s: &gtk::Snapshot, x: f64, y: f64, r: f64, color: kit::palette::Rgb) {
+    if r > 0.1 {
+        draw::fill(s, &draw::round(x - r, y - r, 2.0 * r, 2.0 * r, r), color);
+    }
+}
+
 fn frame(app: &App, paint: &Paint, s: &gtk::Snapshot, start: i64, greeting: &str) {
     let now = paint.frame_clock().map(|c| c.frame_time()).unwrap_or_else(glib::monotonic_time);
     let t = (now - start) as f64 / 1000.0;
@@ -91,50 +112,95 @@ fn frame(app: &App, paint: &Paint, s: &gtk::Snapshot, start: i64, greeting: &str
     }
     let pal = app.palette_at(now);
     let cfg = &app.cfg;
-    let grow = ease(SETTLE, t / GROW_MS);
-    let open = ease(motion::EMPHASIZED_DECEL, (t - REVEAL_AT) / REVEAL_MS);
-    let fly = ease(Curve::new(0.5, 0.0, 0.0, 1.0), (t - REVEAL_AT) / (REVEAL_MS * 0.8));
-    let (cx, from_y, to_y) = (w / 2.0, h / 2.0 - 14.0, app.header() / 2.0);
-    let cy = from_y + (to_y - from_y) * fly;
+    let (cx, cy) = (w / 2.0, h / 2.0 - 10.0);
 
-    // The curtain, with a hole that widens from the notch as it lifts.
-    if open < 1.0 {
-        let full = graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
-        let radius = open * w.hypot(h);
-        s.push_mask(gsk::MaskMode::InvertedAlpha);
-        s.append_color(&pal.body.alpha(1.0).rgba(), &full);
-        s.pop();
-        if radius > 0.5 {
-            draw::fill(s, &draw::round(cx - radius, cy - radius, 2.0 * radius, 2.0 * radius, radius), BLACK);
-        }
-        s.pop();
+    // The backdrop: the shell's own surface, solid until the mark has gone, then a long fade.
+    let melt = ease(MELT, span(t, FADE, FADE_MS));
+    if melt >= 1.0 {
+        return;
+    }
+    let full = graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
+    s.append_color(&pal.body.alpha(1.0 - melt).rgba(), &full);
+    let glow = ease(motion::STANDARD, span(t, 0.0, 900.0)) * (1.0 - ease(motion::STANDARD, span(t, OUT, OUT_MS + 300.0)));
+    let halo = (w.min(h) * 0.55) as f32;
+    let stops = [
+        gsk::ColorStop::new(0.0, pal.accent.alpha(0.13 * glow).rgba()),
+        gsk::ColorStop::new(0.45, pal.accent.alpha(0.04 * glow).rgba()),
+        gsk::ColorStop::new(1.0, pal.accent.alpha(0.0).rgba()),
+    ];
+    s.append_radial_gradient(&full, &graphene::Point::new(cx as f32, cy as f32), halo, halo, 0.0, 1.0, &stops);
+
+    // Lay out the wordmark letter by letter so each can move on its own.
+    let face = Face::Text(700);
+    let letters: Vec<pango::Layout> = WORD.chars().map(|c| draw::shaped(paint, cfg, &c.to_string(), PX, face)).collect();
+    let advance: Vec<f64> = letters.iter().map(|l| l.extents().1.width() as f64 / pango::SCALE as f64).collect();
+    let height = letters.first().map_or(PX, |l| l.extents().1.height() as f64 / pango::SCALE as f64);
+    let gather = ease(SETTLE, span(t, LETTERS, 900.0));
+    let leave = ease(Curve::new(0.4, 0.0, 0.2, 1.0), span(t, OUT, OUT_MS));
+    let track = 22.0 * (1.0 - gather) + 10.0 * leave;
+    let total: f64 = advance.iter().sum::<f64>() + track * (advance.len() as f64 - 1.0);
+    let top = cy - height / 2.0;
+    let mut xs = Vec::with_capacity(letters.len());
+    let mut x = cx - total / 2.0;
+    for a in &advance {
+        xs.push(x);
+        x += a + track;
     }
 
-    // The notch: grows into a pill, then shrinks to notch size on its way up and melts into the real one.
-    let pw = PILL_W * grow + (NOTCH_W - PILL_W) * fly;
-    let ph = PILL_H * grow.min(1.0) + (app.header() - PILL_H) * fly;
-    let gone = ease(motion::STANDARD, (t - REVEAL_AT - REVEAL_MS * 0.45) / (REVEAL_MS * 0.55));
-    if pw > 1.0 && gone < 1.0 {
-        s.push_opacity(1.0 - gone);
-        let glow = (1.0 - ease(motion::STANDARD, (t - GROW_MS) / 600.0)) * grow;
-        if glow > 0.01 {
-            let g = 10.0 * glow;
-            draw::fill(s, &draw::round(cx - pw / 2.0 - g, cy - ph / 2.0 - g, pw + 2.0 * g, ph + 2.0 * g, ph / 2.0 + g), pal.accent.alpha(0.18 * glow));
+    // Leaving: the mark drifts up, eases back and dissolves before the backdrop goes.
+    let size = 1.0 - 0.06 * leave;
+    s.save();
+    s.translate(&graphene::Point::new(cx as f32, (cy - 16.0 * leave) as f32));
+    s.scale(size as f32, size as f32);
+    s.translate(&graphene::Point::new(-cx as f32, -cy as f32));
+    s.push_opacity(1.0 - leave);
+
+    for (i, l) in letters.iter().enumerate() {
+        let p = span(t, LETTERS + i as f64 * STAGGER, 560.0);
+        let k = ease(SETTLE, p);
+        if k <= 0.0 {
+            continue;
         }
-        draw::fill(s, &draw::round(cx - pw / 2.0, cy - ph / 2.0, pw, ph, ph / 2.0), BLACK);
-        let word = ease(SETTLE, (t - 160.0) / 420.0) * (1.0 - (fly * 2.5).min(1.0));
-        if word > 0.0 {
-            let span = 120.0;
-            s.push_clip(&graphene::Rect::new((cx - span / 2.0) as f32, (cy - ph / 2.0) as f32, (span * word) as f32, ph as f32));
-            draw::text(s, paint, cfg, "digit", 19.0, Face::Text(600), LIGHT.alpha(word), cx - span / 2.0, cy + 3.0 * (1.0 - word), span, pango::Alignment::Center);
-            s.pop();
-        }
-        s.pop();
+        s.save();
+        s.translate(&graphene::Point::new(xs[i] as f32, (top + 26.0 * (1.0 - k)) as f32));
+        s.append_layout(l, &pal.ink_main.alpha(ease(motion::STANDARD, p)).rgba());
+        s.restore();
     }
 
-    // A quiet hello under the notch, gone as soon as the curtain moves.
-    let hello = ease(SETTLE, (t - 320.0) / 380.0) * (1.0 - (open * 4.0).min(1.0));
+    // The mark: one dot springs up in the middle, then splits into the dots of the two i's.
+    let r = PX * 0.085;
+    let targets: Vec<(f64, f64)> = WORD
+        .chars()
+        .enumerate()
+        .filter(|(_, c)| *c == 'ı')
+        .map(|(i, _)| {
+            let (ink, _) = letters[i].extents();
+            let ix = xs[i] + (ink.x() as f64 + ink.width() as f64 / 2.0) / pango::SCALE as f64;
+            let iy = top + ink.y() as f64 / pango::SCALE as f64 - PX * 0.11 - r;
+            (ix, iy)
+        })
+        .collect();
+    let born = ease(SPRING, span(t, DOT_IN, 520.0));
+    let split = ease(GLIDE, span(t, SPLIT, 560.0));
+    for ring in 0..2 {
+        let p = span(t, DOT_IN + 140.0 + ring as f64 * 160.0, 900.0);
+        if p > 0.0 && p < 1.0 {
+            let rr = r * (1.5 + 10.0 * ease(motion::EMPHASIZED_DECEL, p));
+            draw::fill(s, &draw::round(cx - rr, cy - rr, 2.0 * rr, 2.0 * rr, rr), pal.accent.alpha(0.16 * (1.0 - p)));
+        }
+    }
+    for (k, (tx, ty)) in targets.iter().enumerate() {
+        let hop = span(t, HOP + k as f64 * 110.0, 380.0);
+        let lift = 12.0 * (std::f64::consts::PI * hop).sin();
+        let (x, y) = (cx + (tx - cx) * split, cy + (ty - cy) * split - lift);
+        let size = r * born * (1.35 - 0.35 * split);
+        dot(s, x, y, size, pal.accent);
+    }
+
+    let hello = ease(SETTLE, span(t, 1450.0, 500.0));
     if hello > 0.0 {
-        draw::text(s, paint, cfg, greeting, 13.0, Face::Text(450), pal.ink_meta.alpha(hello), cx - 160.0, from_y + PILL_H / 2.0 + 26.0 + 6.0 * (1.0 - hello), 320.0, pango::Alignment::Center);
+        draw::text(s, paint, cfg, greeting, 15.0, Face::Text(450), pal.ink_meta.alpha(hello), cx - 200.0, cy + height / 2.0 + 34.0 + 8.0 * (1.0 - hello), 400.0, pango::Alignment::Center);
     }
+    s.pop();
+    s.restore();
 }
