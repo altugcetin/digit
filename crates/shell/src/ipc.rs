@@ -49,12 +49,12 @@ async fn focused_output() -> Option<String> {
     gio::spawn_blocking(kit::wm::focused_output).await.ok().flatten()
 }
 
-const HELP: &str = "open | close | toggle | tray | note <words> | dnd [on|off|toggle|status] | night [on|off|toggle|status] | awake [on|off|toggle|status] | volume [up|down|mute|<0-150>] | mic | brightness up|down | screenshot | pick | lock [preview] | session | control | spaces | clipboard | settings | launcher [text] | menu <logo|app|window|date|N|traymenu N> | dock show|hide|toggle | layout <name> | wallpaper <image> | demo <peek> | gamebar [toggle|open|close|status] | record [panel|start|stop|toggle|pause|replay [on|off|toggle]|replay-save [seconds]|stream [on|off|toggle]|settings|status] | status | key <action>";
+const HELP: &str = "open | close | toggle | tray | phone | note <words> | dnd [on|off|toggle|status] | night [on|off|toggle|status] | awake [on|off|toggle|status] | volume [up|down|mute|<0-150>] | mic | brightness up|down | screenshot | pick | lock [preview] | session | control | spaces | clipboard | settings | launcher [text] | menu <logo|app|window|date|N|traymenu N> | dock show|hide|toggle | layout <name> | wallpaper <image> | demo <peek> | gamebar [toggle|open|close|status] | record [panel|start|stop|toggle|pause|replay [on|off|toggle]|replay-save [seconds]|stream [on|off|toggle]|settings|status] | status | key <action>";
 
 async fn handle(app: &Rc<App>, words: &[String]) -> String {
     let verb = words.first().map(String::as_str).unwrap_or("");
     match verb {
-        "open" | "close" | "toggle" | "tray" => {
+        "open" | "close" | "toggle" | "tray" | "phone" => {
             let output = focused_output().await;
             let notches: Vec<_> = app.notches.borrow().iter().cloned().collect();
             let target = notches.iter().find(|n| Some(n.output()) == output).or(notches.first()).cloned();
@@ -63,6 +63,10 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
                 "open" => true,
                 "tray" => {
                     notch.show_tray();
+                    return "ok".into();
+                }
+                "phone" => {
+                    notch.show_phone();
                     return "ok".into();
                 }
                 "close" => false,

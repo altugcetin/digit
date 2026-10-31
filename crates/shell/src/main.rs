@@ -41,6 +41,7 @@ mod night;
 mod notch;
 mod notify;
 mod paint;
+mod phone;
 mod picker;
 mod polkit;
 mod menubar;
@@ -163,6 +164,7 @@ fn run() {
     power::start(&app);
     bluetooth::start(&app);
     devices::start(&app);
+    phone::refresh(&app);
     idle::start(&app);
     night::start(&app);
     sni::start(&app);

@@ -32,6 +32,8 @@ const TOOLS: [(&str, &str); 4] = [("screenshot_region", "Screenshot"), ("coloriz
 const FILES_W: f64 = 452.0;
 const TILE: f64 = 82.0;
 const TILES: usize = 5;
+const PHONE_W: f64 = 300.0;
+const NOTES: usize = 3;
 const DEVICES: usize = 2;
 const CHIP: f64 = 28.0;
 const CHIPS: usize = 7;
@@ -63,6 +65,9 @@ enum Hot {
     CallMute,
     CallOpen,
     CallSwitch,
+    PhoneAction(usize),
+    PhoneSwitch,
+    PhoneDismiss(usize),
     Action(usize),
 }
 
@@ -76,9 +81,9 @@ impl Hot {
             Hot::Action(_) => 8,
             Hot::Seek => 3,
             Hot::Volume => 4,
-            Hot::Tab(i) => 5 + i.min(1),
+            Hot::Tab(i) => if i < 2 { 5 + i } else { 11 },
             Hot::Gear => 7,
-            Hot::Day(_) | Hot::Tile(_) | Hot::Remove(_) | Hot::Device(_) | Hot::Tool(_) | Hot::Sender(_) => 9,
+            Hot::Day(_) | Hot::Tile(_) | Hot::Remove(_) | Hot::Device(_) | Hot::Tool(_) | Hot::Sender(_) | Hot::PhoneAction(_) | Hot::PhoneSwitch | Hot::PhoneDismiss(_) => 9,
         }
     }
 }
@@ -87,7 +92,10 @@ impl Hot {
 enum Tab {
     Nook,
     Tray,
+    Phone,
 }
+
+const TABS: [(Tab, &str, &str); 3] = [(Tab::Nook, "lightbulb", "Nook"), (Tab::Tray, "inbox", "Tray"), (Tab::Phone, "smartphone", "Phone")];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Landing {
@@ -188,7 +196,7 @@ struct View {
     timed: bool,
     pointer: Option<(f64, f64)>,
     hot: Option<Hot>,
-    glow: [Tween; 11],
+    glow: [Tween; 12],
     /// The open notch shows the player instead of the call it would normally show; cleared when the call ends.
     media_over_call: std::cell::Cell<bool>,
     /// Fades the media spot back in after flipping between the call and the player.
@@ -297,7 +305,7 @@ impl Notch {
             timed: true,
             pointer: None,
             hot: None,
-            glow: [Tween::still(0.0); 11],
+            glow: [Tween::still(0.0); 12],
             media_over_call: std::cell::Cell::new(false),
             flip: Tween::still(1.0),
             tuning: false,
@@ -744,6 +752,17 @@ impl Notch {
         self.0.borrow().open
     }
 
+    pub fn show_phone(&self) {
+        let app = self.0.borrow().app.clone();
+        crate::phone::refresh(&app);
+        if self.is_open() {
+            self.switch_tab(Tab::Phone);
+        } else {
+            self.0.borrow_mut().tab = Tab::Phone;
+            self.set_open(true);
+        }
+    }
+
     pub fn show_tray(&self) {
         if self.is_open() {
             self.switch_tab(Tab::Tray);
@@ -915,6 +934,9 @@ impl Notch {
         if tab == Tab::Tray {
             crate::share::forget_senders();
             crate::share::scan(&app);
+        }
+        if tab == Tab::Phone {
+            crate::phone::refresh(&app);
         }
         let at = self.0.borrow().pointer;
         self.point(at);
@@ -1261,7 +1283,21 @@ impl Notch {
                 return;
             }
             Some(Hot::Tab(i)) => {
-                self.switch_tab(if i == 0 { Tab::Nook } else { Tab::Tray });
+                self.switch_tab(TABS[i].0);
+                return;
+            }
+            Some(Hot::PhoneAction(i)) => {
+                crate::phone::act(&app, crate::phone::ACTIONS[i].0);
+                return;
+            }
+            Some(Hot::PhoneSwitch) => {
+                crate::phone::switch(&app);
+                return;
+            }
+            Some(Hot::PhoneDismiss(i)) => {
+                if let Some(n) = crate::phone::phone().and_then(|p| p.notes.get(i).cloned()) {
+                    crate::phone::dismiss(&n);
+                }
                 return;
             }
             Some(Hot::Tool(i)) => {
@@ -1481,6 +1517,19 @@ impl View {
                 let m = self.app.media.borrow();
                 (p.seek.contains(x, y) && m.timing == Timing::Timed && m.can_seek).then_some(Hot::Seek)
             }
+            Tab::Phone => {
+                let phone = crate::phone::phone()?;
+                if crate::phone::next().is_some() && self.phone_switch_rect().contains(x, y) {
+                    return Some(Hot::PhoneSwitch);
+                }
+                if !phone.reachable {
+                    return None;
+                }
+                if let Some(i) = (0..crate::phone::ACTIONS.len()).find(|&i| self.phone_action_rect(i).contains(x, y)) {
+                    return Some(Hot::PhoneAction(i));
+                }
+                (0..phone.notes.len().min(NOTES)).find(|&i| phone.notes[i].dismissable && self.note_rect(i).contains(x, y)).map(Hot::PhoneDismiss)
+            }
             Tab::Tray => {
                 for i in 0..crate::tray::len().min(TILES) {
                     if self.remove_rect(i).contains(x, y) {
@@ -1505,8 +1554,8 @@ impl View {
     fn tab_rects(&self) -> Vec<(Rect, &'static str, &'static str)> {
         let mid = self.header() / 2.0;
         let mut x = CX - SHEET_W / 2.0 + 14.0;
-        let mut out = Vec::with_capacity(2);
-        for (icon, label) in [("lightbulb", "Nook"), ("inbox", "Tray")] {
+        let mut out = Vec::with_capacity(TABS.len());
+        for (_, icon, label) in TABS {
             let w = 40.0 + self.text_width(label, 14.0, POINT).ceil() + 12.0;
             out.push((Rect { x, y: mid - 13.0, w, h: 26.0 }, icon, label));
             x += w + 6.0;
@@ -1531,6 +1580,25 @@ impl View {
         let x0 = TOOLS_X + ((RIGHT - TOOLS_X) - 96.0) / 2.0;
         let y0 = self.body_top() + 4.0;
         Rect { x: x0 + (i % 2) as f64 * 52.0, y: y0 + (i / 2) as f64 * 52.0, w: 44.0, h: 44.0 }
+    }
+
+    fn phone_rect(&self) -> Rect {
+        Rect { x: LEFT, y: self.body_top(), w: PHONE_W, h: 120.0 }
+    }
+
+    fn phone_switch_rect(&self) -> Rect {
+        let p = self.phone_rect();
+        Rect { x: p.x + p.w - 42.0, y: p.y + 14.0, w: 30.0, h: 30.0 }
+    }
+
+    fn phone_action_rect(&self, i: usize) -> Rect {
+        let p = self.phone_rect();
+        Rect { x: p.x + 16.0 + i as f64 * 42.0, y: p.y + p.h - 46.0, w: 36.0, h: 36.0 }
+    }
+
+    fn note_rect(&self, i: usize) -> Rect {
+        let x = LEFT + PHONE_W + 14.0;
+        Rect { x, y: self.body_top() + 4.0 + i as f64 * 38.0, w: RIGHT - x, h: 36.0 }
     }
 
     fn files_rect(&self) -> Rect {
@@ -2269,8 +2337,8 @@ impl View {
             Head::Open => {
                 let _ = (l0, left, r0, right);
                 for (i, (r, icon, label)) in self.tab_rects().iter().enumerate() {
-                    let on = (i == 0) == (self.tab == Tab::Nook);
-                    let glow = self.glow[5 + i].value(now).clamp(0.0, 1.0);
+                    let on = TABS[i].0 == self.tab;
+                    let glow = self.glow[Hot::Tab(i).index()].value(now).clamp(0.0, 1.0);
                     let fill = if on { 0.14 } else { 0.0 } + 0.07 * glow;
                     if fill > 0.005 {
                         s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), 13.0));
@@ -2659,6 +2727,7 @@ impl View {
         match self.tab {
             Tab::Nook => self.draw_nook(s, now),
             Tab::Tray => self.draw_tray(s, now),
+            Tab::Phone => self.draw_phone(s, now),
         }
         s.pop();
     }
@@ -2851,6 +2920,119 @@ impl View {
         if let Some(name) = label {
             let r = self.tool_rect(2);
             self.text(s, name, 11.0, REST, pal.ink_meta.alpha(glow), TOOLS_X - 6.0, r.y + r.h + 13.0, RIGHT - TOOLS_X + 12.0, pango::Alignment::Center);
+        }
+    }
+
+    fn draw_phone(&self, s: &gtk::Snapshot, now: i64) {
+        let pal = self.pal.get();
+        let start = pango::Alignment::Left;
+        let center = pango::Alignment::Center;
+        let top = self.body_top();
+        let Some(phone) = crate::phone::phone() else {
+            let (title, sub) = if crate::phone::daemon() {
+                ("No phone paired", "Pair your phone in the KDE Connect app to see it here")
+            } else {
+                ("KDE Connect isn't running", "Install kdeconnect and pair your phone to see it here")
+            };
+            let mid = top + 56.0;
+            self.icon(s, "smartphone", 30.0, true, pal.ink_faint, CX, mid - 22.0);
+            self.text(s, title, 15.0, POINT, pal.ink_main, LEFT, mid + 12.0, RIGHT - LEFT, center);
+            self.text(s, sub, 12.0, REST, pal.ink_meta, LEFT, mid + 32.0, RIGHT - LEFT, center);
+            return;
+        };
+        let p = self.phone_rect();
+        s.push_rounded_clip(&gsk::RoundedRect::from_rect(p.graphene(), 20.0));
+        s.append_color(&pal.ink_main.alpha(0.04).rgba(), &p.graphene());
+        s.pop();
+        let disc = graphene::Rect::new((p.x + 14.0) as f32, (p.y + 14.0) as f32, 40.0, 40.0);
+        s.push_rounded_clip(&gsk::RoundedRect::from_rect(disc, 20.0));
+        s.append_color(&(if phone.reachable { pal.accent.alpha(0.18) } else { pal.ink_main.alpha(0.08) }).rgba(), &disc);
+        s.pop();
+        self.icon(s, phone.glyph(), 22.0, true, if phone.reachable { pal.accent } else { pal.ink_meta }, p.x + 34.0, p.y + 34.0);
+        let next = crate::phone::next();
+        let name_w = p.w - 80.0 - if next.is_some() { 36.0 } else { 0.0 };
+        self.text(s, &phone.name, 16.0, Face::Text(620), pal.ink_main, p.x + 66.0, p.y + 25.0, name_w, start);
+        let glow = self.glow[9].value(now).clamp(0.0, 1.0);
+        if next.is_some() {
+            let r = self.phone_switch_rect();
+            let hot = self.hot == Some(Hot::PhoneSwitch);
+            s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), 15.0));
+            s.append_color(&pal.ink_main.alpha(if hot { 0.09 + 0.08 * glow } else { 0.07 }).rgba(), &r.graphene());
+            s.pop();
+            self.icon(s, "swap_horiz", 17.0, false, if hot { pal.ink_main } else { pal.ink_meta }, r.x + r.w / 2.0, r.y + r.h / 2.0);
+        }
+        let mut status = Vec::new();
+        if !phone.reachable {
+            status.push("Not reachable".to_string());
+        }
+        if let Some((charge, charging)) = phone.battery {
+            status.push(format!("{charge}%{}", if charging { " · Charging" } else { "" }));
+        }
+        if let Some((kind, _)) = &phone.signal {
+            status.push(kind.clone());
+        }
+        // The status line gives way to the hovered button's name, then to an action's outcome.
+        let hovered = match self.hot {
+            Some(Hot::PhoneAction(i)) if phone.reachable => crate::phone::ACTIONS.get(i).map(|a| a.2.to_string()),
+            Some(Hot::PhoneSwitch) => next.as_ref().map(|n| format!("Switch to {}", n.name)),
+            _ => None,
+        };
+        let line = hovered.or_else(crate::phone::note).unwrap_or_else(|| if status.is_empty() { "Connected".to_string() } else { status.join(" · ") });
+        self.text(s, &line, 12.0, REST, if phone.reachable { pal.ink_meta } else { pal.ink_faint }, p.x + 66.0, p.y + 45.0, p.w - 80.0, start);
+        for (i, (_, icon, _)) in crate::phone::ACTIONS.iter().enumerate() {
+            let r = self.phone_action_rect(i);
+            let hot = self.hot == Some(Hot::PhoneAction(i));
+            let fill = if !phone.reachable { 0.04 } else if hot { 0.09 + 0.08 * glow } else { 0.09 };
+            s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), 18.0));
+            s.append_color(&pal.ink_main.alpha(fill).rgba(), &r.graphene());
+            s.pop();
+            let ink = if phone.reachable { pal.ink_main } else { pal.ink_faint };
+            self.icon(s, icon, 18.0, true, ink, r.x + r.w / 2.0, r.y + r.h / 2.0);
+        }
+        let x = LEFT + PHONE_W + 14.0;
+        let w = RIGHT - x;
+        let call = crate::phone::call();
+        if phone.notes.is_empty() && call.is_none() {
+            let msg = if phone.reachable { "No notifications from your phone" } else { "Notifications show up while the phone is reachable" };
+            self.icon(s, "notifications", 24.0, false, pal.ink_faint, x + w / 2.0, top + 44.0);
+            self.text(s, msg, 13.0, REST, pal.ink_meta, x, top + 76.0, w, center);
+            return;
+        }
+        let mut row = 0;
+        if let Some(c) = &call {
+            let r = self.note_rect(row);
+            let mid = r.y + r.h / 2.0;
+            self.icon(s, "call", 18.0, true, GREEN, r.x + 16.0, mid);
+            self.text(s, c, 13.0, Face::Text(560), pal.ink_main, r.x + 36.0, mid, r.w - 44.0, start);
+            row += 1;
+        }
+        for (i, n) in phone.notes.iter().enumerate().take(NOTES.saturating_sub(row)) {
+            let r = self.note_rect(row);
+            row += 1;
+            let hot = self.hot == Some(Hot::PhoneDismiss(i));
+            let mid = r.y + r.h / 2.0;
+            match &n.icon {
+                Some(t) => self.draw_paintable(s, t.upcast_ref(), r.x + 4.0, mid - 12.0, 24.0, 6.0),
+                None => self.icon(s, "notifications", 18.0, false, pal.ink_meta, r.x + 16.0, mid),
+            }
+            let head = if n.title.is_empty() { n.app.clone() } else if n.app.is_empty() || n.app == n.title { n.title.clone() } else { format!("{} · {}", n.app, n.title) };
+            let room = r.w - 44.0 - if n.dismissable { 30.0 } else { 0.0 };
+            self.text(s, &head, 13.0, Face::Text(560), pal.ink_main, r.x + 36.0, mid - 8.0, room, start);
+            self.text(s, &n.text, 12.0, REST, pal.ink_meta, r.x + 36.0, mid + 9.0, room, start);
+            if n.dismissable {
+                let cx = r.x + r.w - 14.0;
+                if hot {
+                    let d = graphene::Rect::new((cx - 11.0) as f32, (mid - 11.0) as f32, 22.0, 22.0);
+                    s.push_rounded_clip(&gsk::RoundedRect::from_rect(d, 11.0));
+                    s.append_color(&pal.ink_main.alpha(0.1 + 0.06 * glow).rgba(), &d);
+                    s.pop();
+                }
+                self.icon(s, "close", 14.0, false, if hot { pal.ink_main } else { pal.ink_faint }, cx, mid);
+            }
+        }
+        let more = phone.notes.len() + call.is_some() as usize;
+        if more > NOTES {
+            self.text(s, &format!("+{} more", more - NOTES), 11.0, REST, pal.ink_faint, x, top + 4.0 + NOTES as f64 * 38.0 + 6.0, w, pango::Alignment::Right);
         }
     }
 
