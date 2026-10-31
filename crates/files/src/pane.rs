@@ -35,6 +35,8 @@ pub struct Pane {
     hidden: Rc<Cell<bool>>,
     typed: RefCell<(String, Instant)>,
     zoom: Cell<usize>,
+    /// Bumped by each zoom, so an older zoom animation steps aside.
+    zoom_gen: Cell<u64>,
     view: Cell<View>,
     found: gio::ListStore,
     hunt: RefCell<Option<Arc<AtomicBool>>>,
@@ -223,6 +225,7 @@ impl Pane {
             query,
             hidden,
             typed: RefCell::new((String::new(), Instant::now())),
+            zoom_gen: Cell::new(0),
             zoom: Cell::new(kit::prefs::number(&kit::prefs::read(), "files_zoom", 3.0).clamp(0.0, (SIZES.len() - 1) as f64) as usize),
             view: Cell::new(View::Grid),
             found: gio::ListStore::new::<gio::FileInfo>(),
@@ -587,6 +590,19 @@ impl Pane {
                 crate::selection_changed(&p);
             }
         });
+        // In split view the side under the pointer becomes the one being worked in.
+        let hover = gtk::EventControllerMotion::new();
+        let me = self.weak();
+        hover.connect_enter(move |c, _, _| {
+            let Some(p) = me.upgrade() else { return };
+            crate::focus_pane(&p);
+            // Take keyboard focus too, unless something is being typed into.
+            let typing = c.widget().and_then(|w| w.root()).and_then(|r| r.focus()).is_some_and(|f| f.is::<gtk::Text>() || f.ancestor(gtk::Text::static_type()).is_some());
+            if !typing {
+                p.focus();
+            }
+        });
+        self.root.add_controller(hover);
         for w in [self.grid.clone().upcast::<gtk::Widget>(), self.list.clone().upcast::<gtk::Widget>()] {
             let click = gtk::GestureClick::new();
             click.set_button(0);
@@ -877,8 +893,48 @@ impl Pane {
         if z == self.zoom.get() {
             return;
         }
+        let from = SIZES[self.zoom.get()] as f64;
         self.zoom.set(z);
         let _ = kit::prefs::set("files_zoom", toml::Value::Integer(z as i64));
+        if self.view.get() != View::Grid || !self.grid.is_mapped() {
+            self.rebind();
+            return;
+        }
+        // Grow or shrink the icons on screen smoothly, then rebind once at the new size so
+        // thumbnails load at the right resolution.
+        use kit::motion::{Curve, Tween};
+        let mut t = Tween::still(from);
+        t.go(SIZES[z] as f64, glib::monotonic_time(), 200, Curve::new(0.2, 0.0, 0.0, 1.0));
+        let generation = self.zoom_gen.get() + 1;
+        self.zoom_gen.set(generation);
+        let me = self.weak();
+        self.grid.add_tick_callback(move |grid, clock| {
+            let Some(p) = me.upgrade() else { return glib::ControlFlow::Break };
+            if p.zoom_gen.get() != generation {
+                return glib::ControlFlow::Break;
+            }
+            let now = clock.frame_time();
+            let px = t.value(now).round() as i32;
+            let room = px + (px / 4).max(12);
+            let mut cell = grid.first_child();
+            while let Some(c) = cell {
+                if let Some(frame) = c.first_child().and_then(|b| b.first_child()) {
+                    frame.set_size_request(room, room);
+                    if let Some(img) = frame.first_child().and_downcast::<gtk::Image>() {
+                        img.set_pixel_size(px);
+                    }
+                }
+                cell = c.next_sibling();
+            }
+            if !t.settled(now) {
+                return glib::ControlFlow::Continue;
+            }
+            p.rebind();
+            glib::ControlFlow::Break
+        });
+    }
+
+    fn rebind(self: &Rc<Self>) {
         self.grid.set_factory(None::<&gtk::ListItemFactory>);
         self.grid.set_factory(Some(&self.grid_factory()));
     }
