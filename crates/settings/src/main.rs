@@ -338,10 +338,12 @@ fn window(app: &gtk::Application) -> gtk::ApplicationWindow {
     if overlay {
         let mon = gtk::gdk::Display::default().and_then(|d| d.monitors().item(0)).and_downcast::<gtk::gdk::Monitor>().map(|m| m.geometry());
         let (mw, mh) = mon.map(|g| (g.width(), g.height())).unwrap_or((1600, 900));
-        root.set_size_request(1080.min(mw * 92 / 100), 720.min(mh * 88 / 100));
+        // The size it was last resized to, or a default; never bigger than the screen.
+        let (w, h) = kit::ui::remembered("settings_size").unwrap_or((1080.min(mw * 92 / 100), 720.min(mh * 88 / 100)));
+        root.set_size_request(w.clamp(480, (mw - 32).max(480)), h.clamp(360, (mh - 32).max(360)));
         let (layer, backdrop) = ui::overlay_card(&root);
         window.set_child(Some(&layer));
-        ui::overlay_handling(window.upcast_ref(), &backdrop, &root);
+        ui::overlay_handling(window.upcast_ref(), &backdrop, &root, Some("settings_size"));
         backdrop.set_opacity(0.0);
         ui::settle(&backdrop, &root, 0, true, || {});
         let closing = std::rc::Rc::new(std::cell::Cell::new(false));

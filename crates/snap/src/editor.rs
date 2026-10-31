@@ -160,7 +160,7 @@ fn open_base(app: &gtk::Application, base: draw::Base, output: String, origin: R
     col.append(&bottom);
     let (layer, backdrop) = kit::ui::overlay_card(&col);
     window.set_child(Some(&layer));
-    kit::ui::overlay_handling(window.upcast_ref(), &backdrop, &col);
+    kit::ui::overlay_handling(window.upcast_ref(), &backdrop, &col, None);
     let weak = Rc::downgrade(&ed);
     area.set_draw_func(move |_, cr, w, h| {
         if let Some(e) = weak.upgrade() {

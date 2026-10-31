@@ -283,10 +283,17 @@ pub fn overlay_card(card: &impl IsA<gtk::Widget>) -> (gtk::Overlay, gtk::Box) {
 /// How close to a card's edge, inside or out, a press starts a resize.
 const GRIP: f64 = 10.0;
 
+/// A size kept by `overlay_handling` under `key`, if there is one.
+pub fn remembered(key: &str) -> Option<(i32, i32)> {
+    let t = crate::prefs::read();
+    let a = t.get(key)?.as_array()?;
+    Some((a.first()?.as_integer()? as i32, a.get(1)?.as_integer()? as i32))
+}
+
 /// Gives an overlay card from `overlay_card` window-like handling: dragging any of its edges or
 /// corners resizes it (it stays centred, so the opposite side moves too), and a click on the empty
 /// backdrop closes the window.
-pub fn overlay_handling(window: &gtk::Window, backdrop: &gtk::Box, card: &impl IsA<gtk::Widget>) {
+pub fn overlay_handling(window: &gtk::Window, backdrop: &gtk::Box, card: &impl IsA<gtk::Widget>, remember: Option<&'static str>) {
     use std::cell::Cell;
     use std::rc::Rc;
     let card = card.as_ref().clone();
@@ -354,7 +361,16 @@ pub fn overlay_handling(window: &gtk::Window, backdrop: &gtk::Box, card: &impl I
     }
     {
         let resize = resize.clone();
-        drag.connect_drag_end(move |_, _, _| resize.set(None));
+        let card = card.clone();
+        drag.connect_drag_end(move |_, _, _| {
+            // Keep the size for next time, when the caller asks for it.
+            if resize.take().is_some() {
+                if let Some(key) = remember {
+                    let (w, h) = card.size_request();
+                    let _ = crate::prefs::set(key, toml::Value::Array(vec![toml::Value::Integer(w as i64), toml::Value::Integer(h as i64)]));
+                }
+            }
+        });
     }
     backdrop.add_controller(drag);
     let click = gtk::GestureClick::new();
