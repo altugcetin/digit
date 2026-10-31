@@ -463,7 +463,7 @@ impl App {
 
     /// The Roundness setting as a factor for panel corners (1.0 is the default look).
     pub fn round(&self) -> f64 {
-        self.prefs.borrow().ui_round.clamp(0.3, 1.8)
+        self.prefs.borrow().ui_round.clamp(0.1, 1.8)
     }
 
     /// The notch's corner factor: the app roundness, or its own value when overridden.
@@ -472,7 +472,7 @@ impl App {
             let p = self.prefs.borrow();
             (p.notch_round_follow, p.notch_round)
         };
-        if follow { self.round() } else { own.clamp(0.3, 1.8) }
+        if follow { self.round() } else { own.clamp(0.1, 1.8) }
     }
 
     /// The card colour of the chosen surface (Black, Graphite or Tinted), as the apps use it.

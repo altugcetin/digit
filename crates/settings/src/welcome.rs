@@ -1,4 +1,4 @@
-use crate::desktop::{accent, choice, save, slider};
+use crate::desktop::{accent, choice, corners, save, slider};
 use crate::{prefs, ui};
 use gtk::{gio, glib, prelude::*};
 use std::cell::Cell;
@@ -246,7 +246,7 @@ fn step(index: usize, t: &toml::Table) -> gtk::Widget {
             let card = ui::card();
             choice(&card, "layers", "App surfaces", "", "ui_surface", &[("black", "Black"), ("graphite", "Graphite"), ("tinted", "Tinted")], &prefs::get_str(t, "ui_surface", "black"));
             accent(&card, t);
-            slider(&card, "rounded_corner", "Roundness", "", "ui_round", (0.3, 1.8, 0.05), prefs::get_f64(t, "ui_round", 1.0), 2);
+            corners(&card, "rounded_corner", "Corners", "", "ui_round", prefs::get_f64(t, "ui_round", 1.0));
             choice(&card, "dark_mode", "Notch and dock", "", "surface", &[("black", "Pure black"), ("tinted", "Tinted")], &prefs::get_str(t, "surface", "black"));
             page.append(&card);
         }

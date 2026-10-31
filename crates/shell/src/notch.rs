@@ -62,6 +62,7 @@ enum Hot {
     Sender(usize),
     CallMute,
     CallOpen,
+    CallSwitch,
     Action(usize),
 }
 
@@ -71,6 +72,7 @@ impl Hot {
             Hot::Control(i) => i,
             Hot::CallMute => 0,
             Hot::CallOpen => 1,
+            Hot::CallSwitch => 10,
             Hot::Action(_) => 8,
             Hot::Seek => 3,
             Hot::Volume => 4,
@@ -186,7 +188,11 @@ struct View {
     timed: bool,
     pointer: Option<(f64, f64)>,
     hot: Option<Hot>,
-    glow: [Tween; 10],
+    glow: [Tween; 11],
+    /// The open notch shows the player instead of the call it would normally show; cleared when the call ends.
+    media_over_call: std::cell::Cell<bool>,
+    /// Fades the media spot back in after flipping between the call and the player.
+    flip: Tween,
     tuning: bool,
     tune: Tween,
     sliding: bool,
@@ -291,7 +297,9 @@ impl Notch {
             timed: true,
             pointer: None,
             hot: None,
-            glow: [Tween::still(0.0); 10],
+            glow: [Tween::still(0.0); 11],
+            media_over_call: std::cell::Cell::new(false),
+            flip: Tween::still(1.0),
             tuning: false,
             tune: Tween::still(0.0),
             sliding: false,
@@ -1221,6 +1229,18 @@ impl Notch {
                 audio::ask(Ask::MicFlip);
                 return;
             }
+            Some(Hot::CallSwitch) => {
+                {
+                    let mut v = self.0.borrow_mut();
+                    v.media_over_call.set(!v.media_over_call.get());
+                    v.flip.set(0.0);
+                    v.flip.go(1.0, App::now(), 240, motion::STANDARD);
+                }
+                let at = self.0.borrow().pointer;
+                self.point(at);
+                self.kick();
+                return;
+            }
             Some(Hot::CallOpen) => {
                 let who = app.call.borrow().as_ref().map(|c| c.who.to_lowercase());
                 self.set_open(false);
@@ -1436,7 +1456,10 @@ impl View {
         }
         match self.tab {
             Tab::Nook => {
-                if self.app.call.borrow().is_some() {
+                if self.can_switch(now) && self.switch_rect().contains(x, y) {
+                    return Some(Hot::CallSwitch);
+                }
+                if self.showing_call(now) {
                     let (mute, open) = self.call_buttons();
                     if mute.contains(x, y) {
                         return Some(Hot::CallMute);
@@ -1803,7 +1826,7 @@ impl View {
         if self.glass.target() != glass {
             self.glass.go(glass, now, 360, motion::STANDARD);
         }
-        let tweens = [&self.w, &self.depth, &self.r, &self.fade, &self.sheet, &self.back, &self.meter, &self.art_scale, &self.fill, &self.tune, &self.hush, &self.spot, &self.tab_fade, &self.float, &self.widen, &self.menu, &self.glass];
+        let tweens = [&self.w, &self.depth, &self.r, &self.fade, &self.sheet, &self.back, &self.meter, &self.art_scale, &self.fill, &self.tune, &self.hush, &self.spot, &self.tab_fade, &self.flip, &self.float, &self.widen, &self.menu, &self.glass];
         let moving = tweens.into_iter().chain(self.glow.iter()).chain(self.dots.iter()).any(|t| !t.settled(now));
         let rolling = self.roll.iter().flatten().any(|t| now < t + ROLL);
         moving || rolling || self.app.palette_moving(now)
@@ -2516,6 +2539,38 @@ impl View {
         s.pop();
     }
 
+    /// Whether the open notch shows the call card rather than the player.
+    fn showing_call(&self, now: i64) -> bool {
+        if self.app.call.borrow().is_none() {
+            self.media_over_call.set(false);
+            return false;
+        }
+        !(self.media_over_call.get() && self.app.media.borrow().present(now))
+    }
+
+    /// A call and a player are both around, so the media spot can flip between them.
+    fn can_switch(&self, now: i64) -> bool {
+        self.app.call.borrow().is_some() && self.app.media.borrow().present(now)
+    }
+
+    fn switch_rect(&self) -> Rect {
+        Rect { x: LEFT + MEDIA_W - 34.0, y: self.body_top() + 6.0, w: 34.0, h: 34.0 }
+    }
+
+    fn draw_switch(&self, s: &gtk::Snapshot, now: i64) {
+        if !self.can_switch(now) {
+            return;
+        }
+        let pal = self.pal.get();
+        let r = self.switch_rect();
+        let glow = self.glow[10].value(now).clamp(0.0, 1.0);
+        s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), (r.h / 2.0) as f32));
+        s.append_color(&pal.ink_main.alpha(0.09 + 0.07 * glow).rgba(), &r.graphene());
+        s.pop();
+        let icon = if self.showing_call(now) { "music_note" } else { "call" };
+        self.icon(s, icon, 18.0, true, pal.ink_main, r.x + r.w / 2.0, r.y + r.h / 2.0);
+    }
+
     fn call_buttons(&self) -> (Rect, Rect) {
         let y = self.body_top() + 76.0;
         (Rect { x: LEFT + 82.0, y, w: 104.0, h: 34.0 }, Rect { x: LEFT + 194.0, y, w: 104.0, h: 34.0 })
@@ -2547,18 +2602,19 @@ impl View {
         s.pop();
         let t = ((now - since).max(0) / 1_000_000) as u64;
         let clock = if t >= 3600 { format!("{}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60) } else { format!("{}:{:02}", t / 60, t % 60) };
+        let text_w = MEDIA_W - 82.0 - if self.can_switch(now) { 42.0 } else { 0.0 };
         let place = self.app.call_place.borrow().clone();
         match place {
             Some((channel, server)) => {
-                self.text(s, &format!("On a call · {who}"), 13.0, REST, GREEN, LEFT + 96.0, top + 16.0, MEDIA_W - 96.0, start);
-                self.text(s, &channel, 17.0, Face::Text(620), pal.ink_main, LEFT + 82.0, top + 38.0, MEDIA_W - 82.0, start);
+                self.text(s, &format!("On a call · {who}"), 13.0, REST, GREEN, LEFT + 96.0, top + 16.0, text_w - 14.0, start);
+                self.text(s, &channel, 17.0, Face::Text(620), pal.ink_main, LEFT + 82.0, top + 38.0, text_w, start);
                 let sub = if server.is_empty() { clock.clone() } else { format!("{server} · {clock}") };
-                self.text(s, &sub, 14.0, Face::Text(480), pal.ink_meta, LEFT + 82.0, top + 60.0, MEDIA_W - 82.0, start);
+                self.text(s, &sub, 14.0, Face::Text(480), pal.ink_meta, LEFT + 82.0, top + 60.0, text_w, start);
             }
             None => {
-                self.text(s, "On a call", 13.0, REST, GREEN, LEFT + 96.0, top + 16.0, MEDIA_W - 96.0, start);
-                self.text(s, &who, 17.0, Face::Text(620), pal.ink_main, LEFT + 82.0, top + 38.0, MEDIA_W - 82.0, start);
-                self.text(s, &clock, 15.0, Face::Number(560), pal.ink_meta, LEFT + 82.0, top + 60.0, MEDIA_W - 82.0, start);
+                self.text(s, "On a call", 13.0, REST, GREEN, LEFT + 96.0, top + 16.0, text_w - 14.0, start);
+                self.text(s, &who, 17.0, Face::Text(620), pal.ink_main, LEFT + 82.0, top + 38.0, text_w, start);
+                self.text(s, &clock, 15.0, Face::Number(560), pal.ink_meta, LEFT + 82.0, top + 60.0, text_w, start);
             }
         }
         let muted = self.app.mic_muted.get().unwrap_or(false);
@@ -2575,13 +2631,13 @@ impl View {
     }
 
     fn player(&self, now: i64) -> Option<Player> {
-        if self.app.call.borrow().is_some() || !self.app.media.borrow().present(now) {
+        if self.showing_call(now) || !self.app.media.borrow().present(now) {
             return None;
         }
         let top = self.body_top();
         let art = Rect { x: LEFT, y: top + 4.0, w: 104.0, h: 104.0 };
         let info_x = LEFT + 122.0;
-        let info_w = MEDIA_W - 122.0;
+        let info_w = MEDIA_W - 122.0 - if self.can_switch(now) { 42.0 } else { 0.0 };
         let ccx = info_x + 52.0;
         let button = |cx: f64| Rect { x: cx - 18.0, y: top + 96.0 - 18.0, w: 36.0, h: 36.0 };
         Some(Player {
@@ -2622,7 +2678,14 @@ impl View {
     }
 
     fn draw_media(&self, s: &gtk::Snapshot, now: i64) {
-        if self.app.call.borrow().is_some() {
+        self.draw_switch(s, now);
+        s.push_opacity(self.flip.value(now).clamp(0.0, 1.0));
+        self.draw_media_body(s, now);
+        s.pop();
+    }
+
+    fn draw_media_body(&self, s: &gtk::Snapshot, now: i64) {
+        if self.showing_call(now) {
             self.draw_call(s, now);
             return;
         }

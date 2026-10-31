@@ -65,6 +65,71 @@ pub(crate) fn choice(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &
     card.append(&row);
 }
 
+/// Preset corner radii, as multiples of the standard roundness.
+const CORNERS: [(f64, &str); 4] = [(0.15, "Square"), (0.55, "Subtle"), (1.0, "Rounded"), (1.6, "Round")];
+
+/// A row followed by preview tiles, one per preset; returns the whole block.
+pub(crate) fn corners(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, value: f64) -> gtk::Box {
+    let block = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let (row, _) = ui::row(Some(icon), title, sub);
+    block.append(&row);
+    let tiles = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    tiles.add_css_class("corners");
+    tiles.set_homogeneous(true);
+    let at = CORNERS.iter().enumerate().min_by(|a, b| (a.1.0 - value).abs().total_cmp(&(b.1.0 - value).abs())).map_or(2, |(i, _)| i);
+    let mut first: Option<gtk::ToggleButton> = None;
+    for (i, (r, name)) in CORNERS.into_iter().enumerate() {
+        let b = gtk::ToggleButton::new();
+        b.add_css_class("corner");
+        let col = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        let area = gtk::DrawingArea::new();
+        area.add_css_class("corner-tile");
+        area.set_content_height(72);
+        area.set_hexpand(true);
+        area.set_draw_func(move |a, cr, w, h| {
+            let (w, h) = (w as f64, h as f64);
+            let (x0, y0) = (w * 0.26, h * 0.32);
+            let rad = (22.0 * r).min(h - y0 - 4.0);
+            let ink = a.color();
+            cr.move_to(x0, h);
+            cr.line_to(x0, y0 + rad);
+            cr.arc(x0 + rad, y0 + rad, rad, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
+            cr.line_to(w, y0);
+            cr.line_to(w, h);
+            cr.close_path();
+            cr.set_source_rgba(ink.red() as f64, ink.green() as f64, ink.blue() as f64, 0.06);
+            let _ = cr.fill_preserve();
+            cr.new_path();
+            cr.move_to(x0, h);
+            cr.line_to(x0, y0 + rad);
+            cr.arc(x0 + rad, y0 + rad, rad, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
+            cr.line_to(w, y0);
+            cr.set_source_rgba(ink.red() as f64, ink.green() as f64, ink.blue() as f64, 0.7);
+            cr.set_line_width(2.0);
+            let _ = cr.stroke();
+        });
+        col.append(&area);
+        let label = gtk::Label::new(Some(name));
+        label.add_css_class("corner-name");
+        col.append(&label);
+        b.set_child(Some(&col));
+        match &first {
+            Some(f) => b.set_group(Some(f)),
+            None => first = Some(b.clone()),
+        }
+        b.set_active(i == at);
+        b.connect_toggled(move |b| {
+            if b.is_active() {
+                save(key, toml::Value::Float(r));
+            }
+        });
+        tiles.append(&b);
+    }
+    block.append(&tiles);
+    card.append(&block);
+    block
+}
+
 fn find_switch(w: &gtk::Widget) -> Option<gtk::Switch> {
     if let Some(s) = w.downcast_ref::<gtk::Switch>() {
         return Some(s.clone());
@@ -261,7 +326,7 @@ pub fn build() -> gtk::Widget {
     let apps = ui::card();
     choice(&apps, "layers", "Surfaces", "Background of Settings, Store, Files and the recorder", "ui_surface", &[("black", "Black"), ("graphite", "Graphite"), ("tinted", "Tinted")], &prefs::get_str(&t, "ui_surface", "black"));
     accent(&apps, &t);
-    slider(&apps, "rounded_corner", "Roundness", "Corners of cards, menus, buttons and dialogs", "ui_round", (0.3, 1.8, 0.05), prefs::get_f64(&t, "ui_round", 1.0), 2);
+    corners(&apps, "rounded_corner", "Corners", "Cards, menus, buttons and dialogs", "ui_round", prefs::get_f64(&t, "ui_round", 1.0));
     choice(&apps, "density_medium", "Density", "", "ui_density", &[("comfortable", "Comfortable"), ("compact", "Compact")], &prefs::get_str(&t, "ui_density", "comfortable"));
     body.append(&apps);
 
@@ -350,8 +415,8 @@ pub fn build() -> gtk::Widget {
     choice(&notch, "call", "Call activity", "A live pill with the call timer and voice waveform while an app uses the microphone", "notch_call", &[("voice", "Voice and video apps"), ("any", "Any app using the microphone"), ("off", "Off")], &prefs::get_str(&t, "notch_call", "voice"));
     toggle(&notch, "mic_off", "Block idle microphone", "Voice apps like Discord can keep listening after a call ends. Digit silences only their microphone stream until a real call starts, then gives it back instantly", "mic_guard", prefs::get_bool(&t, "mic_guard", true));
         toggle(&notch, "touch_app", "Open on hover", "Expand the notch when the pointer rests on it", "hover", prefs::get_bool(&t, "hover", true));
-    toggle(&notch, "rounded_corner", "Match app roundness", "The notch's corners follow Roundness under Apps", "notch_round_follow", prefs::get_bool(&t, "notch_round_follow", true));
-    slider(&notch, "rounded_corner", "Notch roundness", "Used when the notch doesn't match the app roundness. 1.00 is the standard notch", "notch_round", (0.3, 1.8, 0.05), prefs::get_f64(&t, "notch_round", 1.0), 2);
+    toggle(&notch, "rounded_corner", "Match app roundness", "The notch's corners follow Corners under Apps", "notch_round_follow", prefs::get_bool(&t, "notch_round_follow", true));
+    corners(&notch, "rounded_corner", "Notch corners", "Used when the notch doesn't match the apps", "notch_round", prefs::get_f64(&t, "notch_round", 1.0));
     // The notch's own roundness only applies while it doesn't follow the apps.
     if let (Some(own), Some(follow)) = (notch.last_child(), notch.last_child().and_then(|w| w.prev_sibling()).and_then(|row| find_switch(&row))) {
         own.set_sensitive(!follow.is_active());

@@ -33,7 +33,7 @@ pub fn look() -> Look {
     let t = crate::prefs::read();
     let accent = crate::prefs::text(&t, "ui_accent", "wallpaper");
     Look {
-        round: crate::prefs::number(&t, "ui_round", 1.0).clamp(0.3, 1.8),
+        round: crate::prefs::number(&t, "ui_round", 1.0).clamp(0.1, 1.8),
         surface: crate::prefs::text(&t, "ui_surface", "black"),
         accent: hex_ok(&accent).then(|| accent.to_lowercase()),
         dense: crate::prefs::text(&t, "ui_density", "comfortable") == "compact",
@@ -226,6 +226,13 @@ progressbar progress {{ background: {accent}; min-height: 4px; border-radius: 4p
 .swatch {{ min-width: 22px; min-height: 22px; padding: 0; border-radius: 999px; border: none; box-shadow: inset 0 0 0 1px alpha(#ffffff, 0.16); transition: box-shadow 160ms ease; }}
 .swatch:checked {{ box-shadow: 0 0 0 2px @d_card, 0 0 0 4px {main}; }}
 .swatch .sym {{ font-size: 15px; color: {main}; }}
+.corners {{ padding: 2px 14px 12px 14px; }}
+.corner {{ background: transparent; border: none; box-shadow: none; outline: none; padding: 0; color: {meta}; }}
+.corner .corner-tile {{ background: alpha({main}, 0.04); border-radius: 12px; box-shadow: inset 0 0 0 1px alpha({main}, 0.07); transition: box-shadow 160ms ease; }}
+.corner:hover .corner-tile {{ box-shadow: inset 0 0 0 1px alpha({main}, 0.18); }}
+.corner:checked .corner-tile {{ box-shadow: inset 0 0 0 2px {main}; }}
+.corner .corner-name {{ font-weight: 450; }}
+.corner:checked .corner-name {{ color: {main}; font-weight: 650; }}
 .sw-wallpaper {{ background: alpha({main}, 0.12); }}
 .sw-ff6b6b {{ background: #ff6b6b; }}
 .sw-ff9f43 {{ background: #ff9f43; }}
