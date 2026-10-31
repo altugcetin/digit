@@ -57,11 +57,27 @@ pub fn build() -> gtk::Widget {
     body.append(&ui::heading("Your shortcuts"));
     body.append(&custom_card(&live));
     // Start at the top even when a button deep in the page takes focus.
+    // Remember how far down the page is, so redrawing it after a change keeps the place;
+    // a fresh visit starts at the top even when a button deep in the page takes focus.
+    let adj = scroll.vadjustment();
+    adj.connect_value_changed(|a| SCROLLED.with(|c| c.set(a.value())));
     scroll.connect_map(|s| {
         let adj = s.vadjustment();
-        glib::idle_add_local_once(move || adj.set_value(0.0));
+        let to = if KEEP.with(|k| k.replace(false)) { SCROLLED.with(Cell::get) } else { 0.0 };
+        // The page's height settles over the first frames; keep placing it until it fits.
+        let tries = Rc::new(Cell::new(0));
+        glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+            adj.set_value(to);
+            tries.set(tries.get() + 1);
+            if (adj.value() - to).abs() < 1.0 || tries.get() > 20 { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+        });
     });
     scroll.upcast()
+}
+
+thread_local! {
+    static SCROLLED: Cell<f64> = const { Cell::new(0.0) };
+    static KEEP: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Lets a row's subtitle wrap instead of being cut off.
@@ -79,28 +95,38 @@ fn key_button(keys: &str) -> gtk::Button {
     b
 }
 
-fn default_row(b: &Bind, live: &[Bind]) -> gtk::Box {
+fn default_row(b: &Bind, _live: &[Bind]) -> gtk::Box {
     let (row, end) = ui::row(None, &b.label, "");
-    let changed = keybinds::changed(&b.id);
-    if changed {
-        let reset = kit::app::control("restart_alt", "");
-        reset.set_tooltip_text(Some("Back to the default"));
-        let id = b.id.clone();
-        reset.connect_clicked(move |_| commit(keybinds::reset(&id)));
-        end.append(&reset);
-    }
     let keys = key_button(&b.keys);
-    let (id, others) = (b.id.clone(), live.to_vec());
+    // A change updates this row in place; redrawing the whole page would flicker.
+    let reset = kit::app::control("restart_alt", "");
+    reset.set_tooltip_text(Some("Back to the default"));
+    reset.set_visible(keybinds::changed(&b.id));
+    {
+        let (id, keys) = (b.id.clone(), keys.clone());
+        reset.connect_clicked(move |r| {
+            if save(keybinds::reset(&id)) {
+                let def = keybinds::defaults().into_iter().find(|d| d.id == id).map(|d| d.keys).unwrap_or_default();
+                keys.set_label(if def.is_empty() { "Off" } else { &def });
+                r.set_visible(false);
+            }
+        });
+    }
+    end.append(&reset);
+    let (id, reset_btn) = (b.id.clone(), reset.clone());
     keys.connect_clicked(move |btn| {
-        let (id, others) = (id.clone(), others.clone());
+        let (id, btn2, reset_btn) = (id.clone(), btn.clone(), reset_btn.clone());
         record(btn.upcast_ref(), move |picked| {
             if !picked.is_empty() {
-                if let Some(o) = taken(&others, &picked, &id) {
+                if let Some(o) = taken(&kit::hyprconf::shortcuts().0, &picked, &id) {
                     ui::fail(&format!("{picked} already opens {o}"));
                     return;
                 }
             }
-            commit(keybinds::set_keys(&id, &picked));
+            if save(keybinds::set_keys(&id, &picked)) {
+                btn2.set_label(if picked.is_empty() { "Off" } else { &picked });
+                reset_btn.set_visible(keybinds::changed(&id));
+            }
         });
     });
     end.append(&keys);
@@ -178,11 +204,23 @@ fn custom_card(live: &[Bind]) -> gtk::Box {
 }
 
 /// Saves a change, regenerates digit's Hyprland files and redraws the page.
+/// Saves a change and regenerates digit's Hyprland files, without redrawing the page.
+fn save(r: Result<(), String>) -> bool {
+    match r.and_then(|_| kit::hyprconf::apply()) {
+        Ok(()) => true,
+        Err(e) => {
+            ui::fail(&e);
+            false
+        }
+    }
+}
+
 fn commit(r: Result<(), String>) {
     if let Err(e) = r.and_then(|_| kit::hyprconf::apply()) {
         ui::fail(&e);
         return;
     }
+    KEEP.with(|k| k.set(true));
     crate::reload("keyboard");
 }
 
