@@ -1,6 +1,7 @@
 use crate::desktop::{accent, choice, corners, save, slider, surfaces};
 use crate::{prefs, ui};
 use gtk::{gio, glib, prelude::*};
+use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -311,11 +312,19 @@ pub fn open(app: &gtk::Application) {
     let t = prefs::read();
     let window = gtk::ApplicationWindow::new(app);
     window.set_title(Some("Welcome to Digit"));
-    window.set_default_size(820, 640);
-    window.set_decorated(false);
-    window.add_css_class("digit-settings");
+    window.add_css_class("digit-dialog");
     window.add_css_class("welcome");
+    // A full-screen overlay rather than a window: it stays on top and only Skip or Get started closes it.
+    window.init_layer_shell();
+    window.set_namespace(Some("digit-welcome"));
+    window.set_layer(Layer::Overlay);
+    window.set_keyboard_mode(KeyboardMode::Exclusive);
+    for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+        window.set_anchor(edge, true);
+    }
+    window.set_exclusive_zone(-1);
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.set_size_request(820, 640);
     let top = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     top.set_margin_top(14);
     top.set_margin_start(18);
@@ -353,7 +362,8 @@ pub fn open(app: &gtk::Application) {
     bottom.append(&spacer);
     bottom.append(&next);
     root.append(&bottom);
-    window.set_child(Some(&root));
+    let (layer, backdrop) = kit::ui::overlay_card(&root);
+    window.set_child(Some(&layer));
     let at = Rc::new(Cell::new(0usize));
     let sync = {
         let (stack, dots, back, next, at) = (stack.clone(), dots.clone(), back.clone(), next.clone(), at.clone());
@@ -403,10 +413,9 @@ pub fn open(app: &gtk::Application) {
     }
     let keys = gtk::EventControllerKey::new();
     {
-        let (at, sync, window) = (at.clone(), sync.clone(), window.clone());
+        let (at, sync) = (at.clone(), sync.clone());
         keys.connect_key_pressed(move |_, key, _, _| {
             match key {
-                gtk::gdk::Key::Escape => finish(window.upcast_ref()),
                 gtk::gdk::Key::Right if at.get() + 1 < STEPS => {
                     at.set(at.get() + 1);
                     sync();
@@ -421,33 +430,21 @@ pub fn open(app: &gtk::Application) {
         });
     }
     window.add_controller(keys);
-    let drag = gtk::GestureDrag::new();
-    let grab: std::rc::Rc<std::cell::Cell<Option<(f64, f64)>>> = std::rc::Rc::new(std::cell::Cell::new(None));
+    let closing = Rc::new(Cell::new(false));
     {
-        let (grab, root2) = (grab.clone(), root.clone());
-        drag.connect_drag_begin(move |_, x, y| {
-            let on_button = root2.pick(x, y, gtk::PickFlags::DEFAULT).is_some_and(|w| w.is::<gtk::Button>() || w.ancestor(gtk::Button::static_type()).is_some());
-            grab.set((y <= 60.0 && !on_button).then_some((x, y)));
+        let (backdrop, root) = (backdrop.clone(), root.clone());
+        window.connect_close_request(move |w| {
+            if closing.replace(true) {
+                OPEN.with(|o| o.borrow_mut().take());
+                return glib::Propagation::Proceed;
+            }
+            let w = w.clone();
+            kit::ui::settle(&backdrop, &root, 0, false, move || w.close());
+            glib::Propagation::Stop
         });
     }
-    {
-        let (grab, window) = (grab.clone(), window.clone());
-        drag.connect_drag_update(move |g, dx, dy| {
-            let Some((x, y)) = grab.get() else { return };
-            if dx.hypot(dy) < 4.0 {
-                return;
-            }
-            grab.set(None);
-            if let (Some(surface), Some(device)) = (window.surface().and_then(|s| s.downcast::<gtk::gdk::Toplevel>().ok()), g.device()) {
-                surface.begin_move(&device, g.current_button() as i32, x, y, g.current_event_time());
-            }
-        });
-    }
-    root.add_controller(drag);
-    window.connect_close_request(|_| {
-        OPEN.with(|o| o.borrow_mut().take());
-        glib::Propagation::Proceed
-    });
     OPEN.with(|o| *o.borrow_mut() = Some(window.clone()));
+    backdrop.set_opacity(0.0);
     window.present();
+    kit::ui::settle(&backdrop, &root, 0, true, || {});
 }

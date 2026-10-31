@@ -2,6 +2,7 @@ use crate::draw::{self, Mark, Rgba, Tool, TOOLS};
 use crate::out;
 use crate::windows::Rect;
 use gtk::{cairo, gdk, glib, prelude::*};
+use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -91,9 +92,17 @@ fn pixbuf_base(pb: &gtk::gdk_pixbuf::Pixbuf) -> Option<draw::Base> {
 fn open_base(app: &gtk::Application, base: draw::Base, output: String, origin: Rect) {
     let prefs = out::prefs();
     let window = gtk::ApplicationWindow::builder().application(app).title("Screenshot").build();
-    window.set_decorated(false);
-    window.add_css_class("digit-settings");
+    window.add_css_class("digit-dialog");
     window.add_css_class("snap-editor");
+    // A full-screen overlay rather than a window; Esc (or Ctrl+W) closes it, clicks around it do nothing.
+    window.init_layer_shell();
+    window.set_namespace(Some("digit-snap-editor"));
+    window.set_layer(Layer::Overlay);
+    window.set_keyboard_mode(KeyboardMode::Exclusive);
+    for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+        window.set_anchor(edge, true);
+    }
+    window.set_exclusive_zone(-1);
     let area = gtk::DrawingArea::new();
     area.set_hexpand(true);
     area.set_vexpand(true);
@@ -149,7 +158,8 @@ fn open_base(app: &gtk::Application, base: draw::Base, output: String, origin: R
     col.append(&top);
     col.append(&stage);
     col.append(&bottom);
-    window.set_child(Some(&col));
+    let (layer, backdrop) = kit::ui::overlay_card(&col);
+    window.set_child(Some(&layer));
     let weak = Rc::downgrade(&ed);
     area.set_draw_func(move |_, cr, w, h| {
         if let Some(e) = weak.upgrade() {
@@ -161,14 +171,20 @@ fn open_base(app: &gtk::Application, base: draw::Base, output: String, origin: R
     let (mw, mh) = mon.map(|g| (g.width() as f64, g.height() as f64)).unwrap_or((1600.0, 900.0));
     let k = ed.base.w as f64 / origin.2.max(1.0);
     let (iw, ih) = (ed.base.w as f64 / k.max(1.0), ed.base.h as f64 / k.max(1.0));
-    window.set_default_size((iw + 96.0).clamp(1040.0, mw * 0.86) as i32, (ih + 200.0).clamp(600.0, mh * 0.86) as i32);
+    col.set_size_request((iw + 96.0).clamp(1040.0, mw * 0.86) as i32, (ih + 200.0).clamp(600.0, mh * 0.86) as i32);
     ed.select_tool(Tool::Arrow);
     ed.sync_style();
+    backdrop.set_opacity(0.0);
     window.present();
+    kit::ui::settle(&backdrop, &col, 0, true, || {});
     area.grab_focus();
     let weak = Rc::downgrade(&ed);
-    window.connect_close_request(move |_| {
+    let closing = Rc::new(Cell::new(false));
+    window.connect_close_request(move |w| {
         let Some(e) = weak.upgrade() else { return glib::Propagation::Proceed };
+        if closing.get() {
+            return glib::Propagation::Proceed;
+        }
         if e.dirty.get() {
             let w = e.window.clone();
             let e2 = e.clone();
@@ -178,7 +194,10 @@ fn open_base(app: &gtk::Application, base: draw::Base, output: String, origin: R
             });
             return glib::Propagation::Stop;
         }
-        glib::Propagation::Proceed
+        closing.set(true);
+        let w = w.clone();
+        kit::ui::settle(&backdrop, &col, 0, false, move || w.close());
+        glib::Propagation::Stop
     });
     let keep = ed.clone();
     window.connect_destroy(move |_| {
@@ -189,7 +208,7 @@ fn open_base(app: &gtk::Application, base: draw::Base, output: String, origin: R
 fn unfocus(w: &impl IsA<gtk::Widget>) {
     let mut c = w.as_ref().first_child();
     while let Some(x) = c {
-        if x.is::<gtk::Button>() || x.is::<gtk::MenuButton>() || x.is::<gtk::ColorDialogButton>() {
+        if x.is::<gtk::Button>() || x.is::<gtk::MenuButton>() {
             x.set_focus_on_click(false);
             x.set_focusable(false);
         }
@@ -259,10 +278,14 @@ fn toolbar(ed: &Rc<Ed>) -> gtk::Widget {
         });
         bar.append(&b);
     }
-    let spacer = gtk::WindowHandle::new();
+    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
     bar.append(&spacer);
-    bar.append(&kit::app::controls(&ed.window, crate::APP_ID));
+    let close = kit::app::control("close", "close");
+    close.set_tooltip_text(Some("Close (Esc)"));
+    let w = ed.window.clone();
+    close.connect_clicked(move |_| w.close());
+    bar.append(&close);
     bar.upcast()
 }
 
@@ -323,16 +346,27 @@ fn footer(ed: &Rc<Ed>) -> gtk::Widget {
         style.append(&b);
         ed.swatches.borrow_mut().push((col, b));
     }
-    let custom = gtk::ColorDialogButton::new(Some(gtk::ColorDialog::new()));
+    // A popover, not the color dialog: a separate window would open underneath the overlay.
+    let custom = gtk::MenuButton::new();
     custom.add_css_class("swatch");
     custom.set_tooltip_text(Some("Any color"));
-    let weak = Rc::downgrade(ed);
-    custom.connect_rgba_notify(move |b| {
-        if let Some(e) = weak.upgrade() {
-            let c = b.rgba();
-            e.set_color([c.red() as f64, c.green() as f64, c.blue() as f64, 1.0]);
-        }
-    });
+    custom.set_child(Some(&kit::ui::sym("palette")));
+    let pop = gtk::Popover::new();
+    kit::ui::menu_popover(&pop);
+    #[allow(deprecated)]
+    {
+        let chooser = gtk::ColorChooserWidget::new();
+        chooser.set_use_alpha(false);
+        let weak = Rc::downgrade(ed);
+        chooser.connect_rgba_notify(move |c| {
+            if let Some(e) = weak.upgrade() {
+                let c = c.rgba();
+                e.set_color([c.red() as f64, c.green() as f64, c.blue() as f64, 1.0]);
+            }
+        });
+        pop.set_child(Some(&chooser));
+    }
+    custom.set_popover(Some(&pop));
     style.append(&custom);
     style.append(&sep());
     for (wv, label) in [(2.0, "Thin"), (4.0, "Medium"), (8.0, "Thick")] {
@@ -1034,7 +1068,13 @@ impl Ed {
             2 => {
                 let toast = self.toast.clone();
                 let w = self.window.clone();
+                // The file chooser is an ordinary window, so step below it until it closes.
+                w.set_layer(Layer::Bottom);
+                w.set_keyboard_mode(KeyboardMode::None);
+                let back = w.clone();
                 out::save_as(tex, Some(w.upcast_ref()), move |p| {
+                    back.set_layer(Layer::Overlay);
+                    back.set_keyboard_mode(KeyboardMode::Exclusive);
                     if let Some(p) = p {
                         toast.set_text(&format!("Saved to {}", p.display()));
                         toast.set_visible(true);
