@@ -267,7 +267,16 @@ button.style-card:checked {{ background: alpha({accent}, 0.10); box-shadow: inse
 .distro-logo {{ -gtk-icon-shadow: 0 2px 8px rgba(0,0,0,0.35); }}
 .activity {{ background: @d_raised; border-radius: var(--r-pop); padding: 12px 16px; margin: 0 32px 18px 32px; }}
 expander-widget title {{ color: {meta}; font-size: 13px; }}
-scrollbar slider {{ background: alpha({main}, 0.25); }}
+scrollbar, scrollbar.overlay-indicator {{ background: transparent; border: none; box-shadow: none; padding: 0; }}
+scrollbar trough {{ background: transparent; border: none; box-shadow: none; }}
+scrollbar button {{ min-width: 0; min-height: 0; padding: 0; border: none; background: none; box-shadow: none; -gtk-icon-size: 0; }}
+scrollbar slider {{ background: alpha({main}, 0.22); border: none; box-shadow: none; outline: none; border-radius: 99px; transition: min-width 160ms ease, min-height 160ms ease, margin 160ms ease, background-color 160ms ease; }}
+scrollbar.vertical slider {{ min-width: 4px; min-height: 36px; margin: 3px 5px; }}
+scrollbar.horizontal slider {{ min-height: 4px; min-width: 36px; margin: 5px 3px; }}
+scrollbar.vertical:hover slider {{ min-width: 8px; margin: 3px 3px; }}
+scrollbar.horizontal:hover slider {{ min-height: 8px; margin: 3px 3px; }}
+scrollbar slider:hover {{ background: alpha({main}, 0.36); }}
+scrollbar slider:active {{ background: alpha({main}, 0.5); }}
 "#
     )
 }
