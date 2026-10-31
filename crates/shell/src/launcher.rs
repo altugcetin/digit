@@ -310,7 +310,15 @@ fn rounded(x: f64, y: f64, w: f64, h: f64, r: f64) -> gsk::RoundedRect {
 }
 
 fn slab(s: &gtk::Snapshot, shape: &gsk::RoundedRect, fill: Rgb) {
+    shadow(s, shape);
+    face(s, shape, fill);
+}
+
+fn shadow(s: &gtk::Snapshot, shape: &gsk::RoundedRect) {
     s.append_outset_shadow(shape, &gdk::RGBA::new(0.0, 0.0, 0.0, 0.34), 0.0, 10.0, 0.0, 30.0);
+}
+
+fn face(s: &gtk::Snapshot, shape: &gsk::RoundedRect, fill: Rgb) {
     s.push_rounded_clip(shape);
     s.append_color(&fill.rgba(), shape.bounds());
     s.pop();
@@ -1180,7 +1188,10 @@ impl State {
                 let glow = self.glow[i].value(now).clamp(0.0, 1.0);
                 let grow = 1.5 * glow;
                 let fill = if on { pal.accent } else { pal.ink_main.mix(pal.body, 0.09 * glow) };
-                slab(s, &rounded(x - grow, PAD - grow, BUBBLE + 2.0 * grow, BUBBLE + 2.0 * grow, BUBBLE / 2.0 + grow), fill);
+                // The shadow keeps the resting size: a blurred shadow whose size changes every frame
+                // gets re-rendered by the GL renderer and flickers, so only the face grows on hover.
+                shadow(s, &rounded(x, PAD, BUBBLE, BUBBLE, BUBBLE / 2.0));
+                face(s, &rounded(x - grow, PAD - grow, BUBBLE + 2.0 * grow, BUBBLE + 2.0 * grow, BUBBLE / 2.0 + grow), fill);
                 let ink = if on { pal.on_accent } else { pal.ink_main.mix(pal.ink_sec, glow) };
                 draw::icon(s, &canvas, &cfg, icon, 24.0, on, ink, x + BUBBLE / 2.0, mid);
                 s.pop();
