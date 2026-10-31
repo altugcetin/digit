@@ -242,6 +242,7 @@ progressbar progress {{ background: {accent}; min-height: 4px; border-radius: 4p
 .corner:checked .corner-tile {{ outline: 2px solid {main}; outline-offset: -2px; }}
 .corner .corner-name {{ font-weight: 450; }}
 .corner:checked .corner-name {{ color: {main}; font-weight: 650; }}
+.corner .corner-tile.accent-tile {{ background: @d_base; }}
 .surf-win {{ border-style: solid; border-width: 2px 0 0 2px; border-color: alpha({main}, 0.7); border-radius: 16px 0 0 0; padding: 10px 0 0 10px; }}
 .surf-card {{ border-radius: 8px 0 0 0; padding: 8px 9px; }}
 .surf-line {{ background: alpha({main}, 0.45); border-radius: 3px; }}
