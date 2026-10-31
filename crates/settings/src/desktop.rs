@@ -526,6 +526,7 @@ pub fn build() -> gtk::Widget {
 
     body.append(&ui::heading("Search"));
     let find = ui::card();
+    toggle(&find, "text_select_move_forward_character", "Smooth caret", "The caret in Spotlight glides as you type and blinks softly, like VS Code", "smooth_caret", prefs::get_bool(&t, "smooth_caret", true));
     toggle(&find, "manage_search", "Search inside apps", "Spotlight asks apps that offer results, such as Files, Firefox tabs and Characters", "search_apps", prefs::get_bool(&t, "search_apps", true));
     let listed = kit::search::listed();
     let off = kit::search::off_list(&t);
