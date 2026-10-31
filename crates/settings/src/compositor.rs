@@ -70,13 +70,11 @@ pub fn build() -> gtk::Widget {
         let (gi, go) = (f("hypr_gaps_in", 4.0), f("hypr_gaps_out", 8.0));
         let at = GAPS.iter().position(|g| g.1 == gi && g.2 == go).unwrap_or(usize::MAX);
         let items = GAPS.iter().map(|(name, i, o)| (*name, gaps_picture(*i, *o))).collect();
-        tiles(&win, "padding", "Gaps", "Between windows and at the screen edges; fine-tune them below", items, at, |i| {
+        tiles(&win, "padding", "Gaps", "Between windows and at the screen edges", items, at, |i| {
             save("hypr_gaps_in", toml::Value::Float(GAPS[i].1));
             save("hypr_gaps_out", toml::Value::Float(GAPS[i].2));
         });
     }
-    slider(&win, "padding", "Gaps between windows", "", "hypr_gaps_in", (0.0, 24.0, 1.0), f("hypr_gaps_in", 4.0), 0);
-    slider(&win, "fit_screen", "Gaps at the screen edges", "", "hypr_gaps_out", (0.0, 48.0, 1.0), f("hypr_gaps_out", 8.0), 0);
     slider(&win, "border_style", "Border width", "", "hypr_border", (0.0, 6.0, 1.0), f("hypr_border", 2.0), 0);
     body.append(&win);
 
