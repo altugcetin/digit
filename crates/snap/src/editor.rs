@@ -94,7 +94,7 @@ fn open_base(app: &gtk::Application, base: draw::Base, output: String, origin: R
     let window = gtk::ApplicationWindow::builder().application(app).title("Screenshot").build();
     window.add_css_class("digit-dialog");
     window.add_css_class("snap-editor");
-    // A full-screen overlay rather than a window; Esc (or Ctrl+W) closes it, clicks around it do nothing.
+    // A full-screen overlay rather than a window; Esc, Ctrl+W or a click beside it closes it.
     window.init_layer_shell();
     window.set_namespace(Some("digit-snap-editor"));
     window.set_layer(Layer::Overlay);
@@ -160,6 +160,7 @@ fn open_base(app: &gtk::Application, base: draw::Base, output: String, origin: R
     col.append(&bottom);
     let (layer, backdrop) = kit::ui::overlay_card(&col);
     window.set_child(Some(&layer));
+    kit::ui::overlay_handling(window.upcast_ref(), &backdrop, &col);
     let weak = Rc::downgrade(&ed);
     area.set_draw_func(move |_, cr, w, h| {
         if let Some(e) = weak.upgrade() {

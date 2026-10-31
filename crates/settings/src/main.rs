@@ -334,6 +334,7 @@ fn window(app: &gtk::Application) -> gtk::ApplicationWindow {
         root.set_size_request(1080.min(mw * 92 / 100), 720.min(mh * 88 / 100));
         let (layer, backdrop) = ui::overlay_card(&root);
         window.set_child(Some(&layer));
+        ui::overlay_handling(window.upcast_ref(), &backdrop, &root);
         backdrop.set_opacity(0.0);
         ui::settle(&backdrop, &root, 0, true, || {});
         let closing = std::rc::Rc::new(std::cell::Cell::new(false));

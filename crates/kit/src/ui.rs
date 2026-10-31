@@ -280,6 +280,100 @@ pub fn overlay_card(card: &impl IsA<gtk::Widget>) -> (gtk::Overlay, gtk::Box) {
     (layer, backdrop)
 }
 
+/// How close to a card's edge, inside or out, a press starts a resize.
+const GRIP: f64 = 10.0;
+
+/// Gives an overlay card from `overlay_card` window-like handling: dragging any of its edges or
+/// corners resizes it (it stays centred, so the opposite side moves too), and a click on the empty
+/// backdrop closes the window.
+pub fn overlay_handling(window: &gtk::Window, backdrop: &gtk::Box, card: &impl IsA<gtk::Widget>) {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let card = card.as_ref().clone();
+    // The sides being dragged (-1, 0 or 1 across and down) and the size it started from.
+    type Grab = ((f64, f64), (i32, i32));
+    let resize: Rc<Cell<Option<Grab>>> = Rc::new(Cell::new(None));
+    let edge = {
+        let (card, backdrop) = (card.clone(), backdrop.clone());
+        move |x: f64, y: f64| -> Option<(f64, f64)> {
+            let b = card.compute_bounds(&backdrop)?;
+            let (l, t, r, btm) = (b.x() as f64, b.y() as f64, (b.x() + b.width()) as f64, (b.y() + b.height()) as f64);
+            if x < l - GRIP || x > r + GRIP || y < t - GRIP || y > btm + GRIP {
+                return None;
+            }
+            let near = |v: f64, a: f64, z: f64| if (v - a).abs() <= GRIP { -1.0 } else if (v - z).abs() <= GRIP { 1.0 } else { 0.0 };
+            let (sx, sy) = (near(x, l, r), near(y, t, btm));
+            (sx != 0.0 || sy != 0.0).then_some((sx, sy))
+        }
+    };
+    let cursor = |(sx, sy): (f64, f64)| match (sx as i32, sy as i32) {
+        (0, _) => "ns-resize",
+        (_, 0) => "ew-resize",
+        (a, b) if a == b => "nwse-resize",
+        _ => "nesw-resize",
+    };
+    let inside = {
+        let (card, backdrop) = (card.clone(), backdrop.clone());
+        move |x: f64, y: f64| card.compute_bounds(&backdrop).is_some_and(|b| b.contains_point(&gtk::graphene::Point::new(x as f32, y as f32)))
+    };
+    let motion = gtk::EventControllerMotion::new();
+    motion.set_propagation_phase(gtk::PropagationPhase::Capture);
+    {
+        let (edge, backdrop, resize) = (edge.clone(), backdrop.clone(), resize.clone());
+        motion.connect_motion(move |_, x, y| {
+            if resize.get().is_none() {
+                backdrop.set_cursor_from_name(edge(x, y).map(cursor));
+            }
+        });
+    }
+    backdrop.add_controller(motion);
+    let drag = gtk::GestureDrag::new();
+    drag.set_propagation_phase(gtk::PropagationPhase::Capture);
+    {
+        let (edge, card, resize) = (edge.clone(), card.clone(), resize.clone());
+        drag.connect_drag_begin(move |g, x, y| match edge(x, y) {
+            Some(sides) => {
+                resize.set(Some((sides, (card.width(), card.height()))));
+                g.set_state(gtk::EventSequenceState::Claimed);
+            }
+            None => {
+                g.set_state(gtk::EventSequenceState::Denied);
+            }
+        });
+    }
+    {
+        let (card, backdrop, resize) = (card.clone(), backdrop.clone(), resize.clone());
+        drag.connect_drag_update(move |_, dx, dy| {
+            let Some(((sx, sy), (w0, h0))) = resize.get() else { return };
+            let (wmax, hmax) = ((backdrop.width() - 32).max(480), (backdrop.height() - 32).max(360));
+            let (cw, ch) = card.size_request();
+            let w = if sx != 0.0 { ((w0 as f64 + 2.0 * dx * sx).round() as i32).clamp(480, wmax) } else { cw };
+            let h = if sy != 0.0 { ((h0 as f64 + 2.0 * dy * sy).round() as i32).clamp(360, hmax) } else { ch };
+            card.set_size_request(w, h);
+        });
+    }
+    {
+        let resize = resize.clone();
+        drag.connect_drag_end(move |_, _, _| resize.set(None));
+    }
+    backdrop.add_controller(drag);
+    let click = gtk::GestureClick::new();
+    let pressed_out = Rc::new(Cell::new(false));
+    {
+        let (inside, edge, pressed_out) = (inside.clone(), edge.clone(), pressed_out.clone());
+        click.connect_pressed(move |_, _, x, y| pressed_out.set(!inside(x, y) && edge(x, y).is_none()));
+    }
+    {
+        let window = window.clone();
+        click.connect_released(move |_, _, x, y| {
+            if pressed_out.replace(false) && !inside(x, y) && edge(x, y).is_none() && resize.get().is_none() {
+                window.close();
+            }
+        });
+    }
+    backdrop.add_controller(click);
+}
+
 fn plain_popovers(w: &impl IsA<gtk::Widget>) {
     let mut child = w.first_child();
     while let Some(c) = child {
