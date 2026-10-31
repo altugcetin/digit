@@ -7,6 +7,7 @@ mod drivers;
 mod flatpak;
 mod fw;
 mod guard;
+mod keyboard;
 mod niri;
 mod overview;
 mod pk;
@@ -21,7 +22,7 @@ mod wifi;
 use gtk::{gio, glib, prelude::*};
 use std::cell::RefCell;
 
-const PAGES: [(&str, &str, &str); 8] = [
+const PAGES: [(&str, &str, &str); 9] = [
     ("overview", "Overview", "computer"),
     ("wifi", "Wi-Fi", "wifi"),
     ("bluetooth", "Bluetooth", "bluetooth"),
@@ -30,6 +31,7 @@ const PAGES: [(&str, &str, &str); 8] = [
     ("displays", "Displays", "monitor"),
     ("drivers", "Drivers", "memory"),
     ("desktop", "Desktop", "palette"),
+    ("keyboard", "Keyboard", "keyboard"),
 ];
 
 struct Shell {
@@ -51,11 +53,12 @@ fn build_page(name: &str) -> gtk::Widget {
         "displays" => displays::build(),
         "drivers" => drivers::build(),
         "desktop" => desktop::build(),
+        "keyboard" => keyboard::build(),
         _ => overview::build(),
     }
 }
 
-fn show(name: &str) {
+pub(crate) fn show(name: &str) {
     SHELL.with(|s| {
         let Some(s) = s.borrow().as_ref().map(|s| (s.stack.clone(), s.list.clone())) else { return };
         let (stack, list) = s;
@@ -230,7 +233,7 @@ pub fn main_window() -> Option<gtk::ApplicationWindow> {
     SHELL.with(|s| s.borrow().as_ref().map(|s| s.window.clone()))
 }
 
-fn reload(name: &str) {
+pub(crate) fn reload(name: &str) {
     SHELL.with(|s| {
         let Some(stack) = s.borrow().as_ref().map(|s| s.stack.clone()) else { return };
         let Some(old) = stack.child_by_name(name) else { return };
@@ -395,6 +398,32 @@ fn main() -> glib::ExitCode {
     if std::env::args().nth(1).as_deref() == Some("--register") {
         install();
         return glib::ExitCode::SUCCESS;
+    }
+    // The installer sets digit up on Hyprland through here, sharing the code Settings uses.
+    if std::env::args().nth(1).as_deref() == Some("--hypr-setup") {
+        let Some(mode) = std::env::args().nth(2).as_deref().and_then(kit::hyprconf::Mode::parse) else {
+            eprintln!("usage: digit-settings --hypr-setup full|minimal");
+            return glib::ExitCode::FAILURE;
+        };
+        return match kit::hyprconf::setup(mode) {
+            Ok(note) => {
+                println!("{note}");
+                glib::ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                glib::ExitCode::FAILURE
+            }
+        };
+    }
+    if std::env::args().nth(1).as_deref() == Some("--hypr-remove") {
+        return match kit::hyprconf::remove() {
+            Ok(()) => glib::ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e}");
+                glib::ExitCode::FAILURE
+            }
+        };
     }
     let renderer = std::env::var("DIGIT_SETTINGS_RENDERER").ok().filter(|r| matches!(r.as_str(), "cairo" | "gl" | "ngl" | "vulkan")).unwrap_or_else(|| "gl".into());
     unsafe {

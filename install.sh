@@ -12,6 +12,7 @@ MIN_GTK=4.18
 MIN_LAYER=1.2
 
 WM=""
+SETUP=""
 YES=false
 DRY=false
 DEPS=true
@@ -35,7 +36,8 @@ usage() {
 digit installer
 
   ./install.sh                  detect everything and install
-  ./install.sh --wm niri        force a compositor (niri | hyprland)
+  ./install.sh --wm hyprland    pick the compositor (hyprland | niri)
+  ./install.sh --setup minimal  Hyprland setup: full (default) | minimal
   ./install.sh --yes            do not ask, take the defaults
   ./install.sh --no-deps        skip system packages
   ./install.sh --dry-run        show what would happen
@@ -50,6 +52,8 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --wm) WM=${2:-}; shift ;;
         --wm=*) WM=${1#--wm=} ;;
+        --setup) SETUP=${2:-}; shift ;;
+        --setup=*) SETUP=${1#--setup=} ;;
         -y|--yes) YES=true ;;
         --no-deps) DEPS=false ;;
         --dry-run) DRY=true ;;
@@ -143,27 +147,43 @@ installed_wms() {
 
 pick_wm() {
     if [ -n "$WM" ]; then
-        case $WM in niri|hyprland) ;; *) die "--wm must be niri or hyprland" ;; esac
+        case $WM in niri|hyprland) ;; *) die "--wm must be hyprland or niri" ;; esac
         return
     fi
-    local now
+    # Offer the one running (or installed) first, but always let the user pick.
+    local now first
     now=$(running_wm)
-    if [ -n "$now" ]; then
-        WM=$now
-        info "Running inside $WM."
+    mapfile -t found < <(installed_wms)
+    first=${now:-${found[0]:-hyprland}}
+    local options=() w label
+    for w in "$first" hyprland niri; do
+        [[ " ${options[*]} " == *" $w"* ]] && continue
+        label=$w
+        if [ "$w" = "$now" ]; then
+            label="$label (running now)"
+        elif [[ " ${found[*]:-} " == *" $w "* ]]; then
+            label="$label (installed)"
+        else
+            label="$label (will be installed)"
+        fi
+        options+=("$label")
+    done
+    choose "Which compositor should digit use?" "${options[@]}"
+    WM=${REPLY%% *}
+}
+
+# Hyprland only: a full setup starts from digit's config (the old one is backed up), a minimal
+# one adds digit's part to the end of the existing config.
+pick_setup() {
+    [ "$WM" = hyprland ] || return 0
+    if [ -n "$SETUP" ]; then
+        case $SETUP in full|minimal) ;; *) die "--setup must be full or minimal" ;; esac
         return
     fi
-    mapfile -t found < <(installed_wms)
-    if [ "${#found[@]}" -eq 1 ]; then
-        WM=${found[0]}
-        info "Found $WM."
-    elif [ "${#found[@]}" -gt 1 ]; then
-        choose "Several compositors are installed. Which one should digit use?" "${found[@]}"
-        WM=$REPLY
-    else
-        choose "No supported compositor found. Which one should be installed?" "niri (recommended)" "hyprland"
-        WM=${REPLY%% *}
-    fi
+    choose "How should digit set up Hyprland?" \
+        "full     (recommended) digit's whole config: shortcuts, window keys, looks; ~/.config/hypr is backed up first" \
+        "minimal  keep your config and add digit's part to the end of hyprland.lua"
+    SETUP=${REPLY%% *}
 }
 
 install_wm() {
@@ -343,55 +363,16 @@ hook_niri() {
     info "niri: ~/.config/niri/digit.kdl added and included (backup *.bak-$s)."
 }
 
-hook_conf() {
-    local dir=$1 main=$2 src=$3 line=$4 fallback=$5
-    run mkdir -p "$dir"
-    if [ ! -f "$main" ] && [ -n "$fallback" ] && [ -f "$fallback" ]; then
-        run cp "$fallback" "$main"
-    fi
-    local s
-    s=$(stamp)
-    [ -f "$main" ] && run cp "$main" "$main.bak-$s"
-    [ -f "$dir/digit.conf" ] && run cp "$dir/digit.conf" "$dir/digit.conf.bak-$s"
-    if $DRY; then
-        info "[dry-run] write $dir/digit.conf"
-    else
-        absolute <"$src" >"$dir/digit.conf"
-    fi
-    if ! grep -qsF "$line" "$main"; then
-        if $DRY; then info "[dry-run] append '$line' to $main"; else printf '\n%s\n' "$line" >>"$main"; fi
-    fi
-    info "$(basename "$dir"): digit.conf added and sourced (backup *.bak-$s)."
-}
-
-LUA_MARK="-- digit: start the shell with Hyprland (added by install.sh)"
-
-# A Lua config never reads hyprland.conf, so digit's autostart goes straight into hyprland.lua.
-hook_lua() {
-    local main="$CONF/hypr/hyprland.lua"
-    if grep -qsF "$BIN/digit\"" "$main"; then
-        info "hypr: hyprland.lua already starts digit."
-        return 0
-    fi
-    local s
-    s=$(stamp)
-    run cp "$main" "$main.bak-$s"
-    if $DRY; then
-        info "[dry-run] append digit's autostart to $main"
-    else
-        printf '\n%s\nhl.on("hyprland.start", function() hl.exec_cmd("%s") end)\n' "$LUA_MARK" "$BIN/digit" >>"$main"
-    fi
-    info "hypr: digit's autostart appended to hyprland.lua (backup *.bak-$s)."
-}
-
 hook() {
     bold "Connecting digit to $WM"
     case $WM in
         niri) hook_niri ;;
-        hyprland) [ -f "$CONF/hypr/hyprland.lua" ] && hook_lua
-            hook_conf "$CONF/hypr" "$CONF/hypr/hyprland.conf" "$ROOT/data/hypr/digit.conf" "source = $CONF/hypr/digit.conf" /usr/share/hypr/hyprland.conf
-            if command -v Hyprland >/dev/null 2>&1 && Hyprland --help 2>&1 | grep -q verify-config && ! $DRY; then
-                Hyprland --verify-config -c "$CONF/hypr/hyprland.conf" >/dev/null 2>&1 || warn "Hyprland reports problems in hyprland.conf; check it with: Hyprland --verify-config"
+        hyprland)
+            # digit-settings does the Hyprland setup, the same code its Settings page uses.
+            if $DRY; then
+                info "[dry-run] $BIN/digit-settings --hypr-setup $SETUP"
+            elif ! "$BIN/digit-settings" --hypr-setup "$SETUP" | sed 's/^/  /'; then
+                warn "The Hyprland setup did not finish; run it again from digit Settings > Desktop > Windows."
             fi ;;
     esac
 }
@@ -409,6 +390,9 @@ drop_dbus() {
 uninstall() {
     bold "Removing digit"
     pkill -x digit 2>/dev/null || true
+    if [ -d "$CONF/hypr/digit" ] && [ -x "$BIN/digit-settings" ]; then
+        run "$BIN/digit-settings" --hypr-remove
+    fi
     local a
     for a in "${APPS[@]}"; do
         [ -e "$BIN/$a" ] && run rm -f "$BIN/$a"
@@ -422,13 +406,6 @@ uninstall() {
         run sed -i '/include optional=true "digit.kdl"/d' "$CONF/niri/config.kdl"
         run rm -f "$CONF/niri/digit.kdl"
     fi
-    if [ -f "$CONF/hypr/hyprland.conf" ]; then
-        run sed -i "\#source = $CONF/hypr/digit.conf#d" "$CONF/hypr/hyprland.conf"
-        run rm -f "$CONF/hypr/digit.conf"
-    fi
-    if [ -f "$CONF/hypr/hyprland.lua" ]; then
-        run sed -i -e "\#^$LUA_MARK\$#d" -e "\#hl.exec_cmd(\"$BIN/digit\")#d" "$CONF/hypr/hyprland.lua"
-    fi
     info "Done. Your settings in ~/.config/digit and the fonts were kept."
 }
 
@@ -440,6 +417,7 @@ main() {
     fi
     bold "digit installer · $NAME_SHOWN"
     pick_wm
+    pick_setup
     if $DEPS; then
         install_wm
         deps
