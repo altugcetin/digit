@@ -68,47 +68,25 @@ pub(crate) fn choice(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &
 /// Preset corner radii, as multiples of the standard roundness.
 const CORNERS: [(f64, &str); 4] = [(0.15, "Square"), (0.55, "Subtle"), (1.0, "Rounded"), (1.6, "Round")];
 
-/// A row followed by preview tiles, one per preset; returns the whole block.
-pub(crate) fn corners(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, value: f64) -> gtk::Box {
+/// A row followed by a strip of picture tiles, one per option; returns the whole block.
+fn tiles(card: &gtk::Box, icon: &str, title: &str, sub: &str, items: Vec<(&str, gtk::Widget)>, at: usize, pick: impl Fn(usize) + 'static) -> gtk::Box {
     let block = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let (row, _) = ui::row(Some(icon), title, sub);
     block.append(&row);
-    let tiles = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    tiles.add_css_class("corners");
-    tiles.set_homogeneous(true);
-    let at = CORNERS.iter().enumerate().min_by(|a, b| (a.1.0 - value).abs().total_cmp(&(b.1.0 - value).abs())).map_or(2, |(i, _)| i);
+    let strip = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    strip.add_css_class("corners");
+    strip.set_homogeneous(true);
+    strip.set_halign(gtk::Align::Start);
+    let pick = Rc::new(pick);
     let mut first: Option<gtk::ToggleButton> = None;
-    for (i, (r, name)) in CORNERS.into_iter().enumerate() {
+    for (i, (name, picture)) in items.into_iter().enumerate() {
         let b = gtk::ToggleButton::new();
         b.add_css_class("corner");
         let col = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        let area = gtk::DrawingArea::new();
-        area.add_css_class("corner-tile");
-        area.set_content_height(72);
-        area.set_hexpand(true);
-        area.set_draw_func(move |a, cr, w, h| {
-            let (w, h) = (w as f64, h as f64);
-            let (x0, y0) = (w * 0.26, h * 0.32);
-            let rad = (22.0 * r).min(h - y0 - 4.0);
-            let ink = a.color();
-            cr.move_to(x0, h);
-            cr.line_to(x0, y0 + rad);
-            cr.arc(x0 + rad, y0 + rad, rad, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
-            cr.line_to(w, y0);
-            cr.line_to(w, h);
-            cr.close_path();
-            cr.set_source_rgba(ink.red() as f64, ink.green() as f64, ink.blue() as f64, 0.06);
-            let _ = cr.fill_preserve();
-            cr.new_path();
-            cr.move_to(x0, h);
-            cr.line_to(x0, y0 + rad);
-            cr.arc(x0 + rad, y0 + rad, rad, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
-            cr.line_to(w, y0);
-            cr.set_source_rgba(ink.red() as f64, ink.green() as f64, ink.blue() as f64, 0.7);
-            cr.set_line_width(2.0);
-            let _ = cr.stroke();
-        });
-        col.append(&area);
+        picture.add_css_class("corner-tile");
+        picture.set_size_request(136, 72);
+        picture.set_overflow(gtk::Overflow::Hidden);
+        col.append(&picture);
         let label = gtk::Label::new(Some(name));
         label.add_css_class("corner-name");
         col.append(&label);
@@ -118,16 +96,87 @@ pub(crate) fn corners(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: 
             None => first = Some(b.clone()),
         }
         b.set_active(i == at);
+        let pick = pick.clone();
         b.connect_toggled(move |b| {
             if b.is_active() {
-                save(key, toml::Value::Float(r));
+                pick(i);
             }
         });
-        tiles.append(&b);
+        strip.append(&b);
     }
-    block.append(&tiles);
+    block.append(&strip);
     card.append(&block);
     block
+}
+
+/// Corner presets, each pictured as the top-left corner of a window.
+pub(crate) fn corners(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, value: f64) -> gtk::Box {
+    let at = CORNERS.iter().enumerate().min_by(|a, b| (a.1.0 - value).abs().total_cmp(&(b.1.0 - value).abs())).map_or(2, |(i, _)| i);
+    let items = CORNERS
+        .into_iter()
+        .map(|(r, name)| {
+            let area = gtk::DrawingArea::new();
+            area.set_draw_func(move |a, cr, w, h| {
+                let (w, h) = (w as f64, h as f64);
+                let (x0, y0) = (w * 0.26, h * 0.32);
+                let rad = (22.0 * r).min(h - y0 - 4.0);
+                let ink = a.color();
+                let edge = || {
+                    cr.move_to(x0, h);
+                    cr.line_to(x0, y0 + rad);
+                    cr.arc(x0 + rad, y0 + rad, rad, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
+                    cr.line_to(w, y0);
+                };
+                edge();
+                cr.line_to(w, h);
+                cr.close_path();
+                cr.set_source_rgba(ink.red() as f64, ink.green() as f64, ink.blue() as f64, 0.06);
+                let _ = cr.fill();
+                edge();
+                cr.set_source_rgba(ink.red() as f64, ink.green() as f64, ink.blue() as f64, 0.7);
+                cr.set_line_width(2.0);
+                let _ = cr.stroke();
+            });
+            (name, area.upcast())
+        })
+        .collect();
+    tiles(card, icon, title, sub, items, at, move |i| save(key, toml::Value::Float(CORNERS[i].0)))
+}
+
+/// App surfaces, each pictured as the corner of a window in that surface with a card inside.
+pub(crate) fn surfaces(card: &gtk::Box, icon: &str, title: &str, sub: &str, current: &str) -> gtk::Box {
+    const SURFACES: [(&str, &str); 3] = [("black", "Black"), ("graphite", "Graphite"), ("tinted", "Tinted")];
+    let at = SURFACES.iter().position(|s| s.0 == current).unwrap_or(0);
+    let items = SURFACES
+        .into_iter()
+        .map(|(value, name)| {
+            let tile = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            let win = gtk::Box::new(gtk::Orientation::Vertical, 5);
+            win.add_css_class("surf-win");
+            win.add_css_class(&format!("surf-{value}"));
+            win.set_hexpand(true);
+            // Same spot as the corner previews: a quarter in from the left, a third down.
+            win.set_margin_start(35);
+            win.set_margin_top(23);
+            let inner = gtk::Box::new(gtk::Orientation::Vertical, 5);
+            inner.add_css_class("surf-card");
+            inner.set_vexpand(true);
+            let line = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            line.add_css_class("surf-line");
+            line.set_size_request(44, 5);
+            line.set_halign(gtk::Align::Start);
+            let pill = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            pill.add_css_class("surf-pill");
+            pill.set_size_request(22, 5);
+            pill.set_halign(gtk::Align::Start);
+            inner.append(&line);
+            inner.append(&pill);
+            win.append(&inner);
+            tile.append(&win);
+            (name, tile.upcast())
+        })
+        .collect();
+    tiles(card, icon, title, sub, items, at, move |i| save("ui_surface", toml::Value::String(SURFACES[i].0.to_string())))
 }
 
 fn find_switch(w: &gtk::Widget) -> Option<gtk::Switch> {
@@ -324,7 +373,7 @@ pub fn build() -> gtk::Widget {
 
     body.append(&ui::heading("Apps"));
     let apps = ui::card();
-    choice(&apps, "layers", "Surfaces", "Background of Settings, Store, Files and the recorder", "ui_surface", &[("black", "Black"), ("graphite", "Graphite"), ("tinted", "Tinted")], &prefs::get_str(&t, "ui_surface", "black"));
+    surfaces(&apps, "layers", "Surfaces", "Background of Settings, Store, Files and the Game Bar", &prefs::get_str(&t, "ui_surface", "black"));
     accent(&apps, &t);
     corners(&apps, "rounded_corner", "Corners", "Cards, menus, buttons and dialogs", "ui_round", prefs::get_f64(&t, "ui_round", 1.0));
     choice(&apps, "density_medium", "Density", "", "ui_density", &[("comfortable", "Comfortable"), ("compact", "Compact")], &prefs::get_str(&t, "ui_density", "comfortable"));

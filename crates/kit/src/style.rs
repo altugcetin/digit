@@ -110,6 +110,13 @@ pub fn css() -> String {
     let lk = look();
     let [base, card, raised, pop, field] = surfaces(&lk, accent);
     let px = |v: f64| format!("{}px", (v * lk.round).round());
+    let previews: String = ["black", "graphite", "tinted"]
+        .iter()
+        .map(|name| {
+            let [base, card, ..] = surfaces(&Look { surface: name.to_string(), ..look() }, accent);
+            format!(".surf-{name} {{ background: {base}; }}\n.surf-{name} .surf-card {{ background: {card}; }}\n")
+        })
+        .collect();
     let (r_card, r_row, r_ctl, r_pop, r_dialog, r_hero) = (px(20.0), px(15.0), px(12.0), px(18.0), px(26.0), px(26.0));
     let row_y = if lk.dense { "7px" } else { "11px" };
     format!(
@@ -228,12 +235,16 @@ progressbar progress {{ background: {accent}; min-height: 4px; border-radius: 4p
 .swatch .sym {{ font-size: 15px; color: {main}; }}
 .corners {{ padding: 2px 14px 12px 14px; }}
 .corner {{ background: transparent; border: none; box-shadow: none; outline: none; padding: 0; color: {meta}; }}
-.corner .corner-tile {{ background: alpha({main}, 0.04); border-radius: 12px; box-shadow: inset 0 0 0 1px alpha({main}, 0.07); transition: box-shadow 160ms ease; }}
-.corner:hover .corner-tile {{ box-shadow: inset 0 0 0 1px alpha({main}, 0.18); }}
-.corner:checked .corner-tile {{ box-shadow: inset 0 0 0 2px {main}; }}
+.corner .corner-tile {{ background: alpha({main}, 0.04); border-radius: 12px; outline: 1px solid alpha({main}, 0.07); outline-offset: -1px; transition: outline-color 160ms ease; }}
+.corner:hover .corner-tile {{ outline-color: alpha({main}, 0.18); }}
+.corner:checked .corner-tile {{ outline: 2px solid {main}; outline-offset: -2px; }}
 .corner .corner-name {{ font-weight: 450; }}
 .corner:checked .corner-name {{ color: {main}; font-weight: 650; }}
-.sw-wallpaper {{ background: alpha({main}, 0.12); }}
+.surf-win {{ border-style: solid; border-width: 2px 0 0 2px; border-color: alpha({main}, 0.7); border-radius: 16px 0 0 0; padding: 10px 0 0 10px; }}
+.surf-card {{ border-radius: 8px 0 0 0; padding: 8px 9px; }}
+.surf-line {{ background: alpha({main}, 0.45); border-radius: 3px; }}
+.surf-pill {{ background: {accent}; border-radius: 3px; }}
+{previews}.sw-wallpaper {{ background: alpha({main}, 0.12); }}
 .sw-ff6b6b {{ background: #ff6b6b; }}
 .sw-ff9f43 {{ background: #ff9f43; }}
 .sw-f7d154 {{ background: #f7d154; }}
