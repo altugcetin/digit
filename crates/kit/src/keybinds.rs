@@ -41,8 +41,15 @@ pub enum Win {
     Move(Dir),
     Workspace(u8),
     ToWorkspace(u8),
+    /// The next (1) or previous (-1) workspace in use.
+    StepWorkspace(i8),
     Drag,
     Resize,
+    Grow(Dir),
+    Pin,
+    Group,
+    Scratchpad,
+    ToScratchpad,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -136,10 +143,22 @@ pub fn defaults() -> Vec<Bind> {
         bind("fullscreen", "Windows", "Fullscreen", "SUPER + F", Act::Window(Win::Fullscreen), n, true),
         bind("drag", "Windows", "Move a window with the mouse", "SUPER + mouse:272", Act::Window(Win::Drag), MOUSE, true),
         bind("resize", "Windows", "Resize a window with the mouse", "SUPER + mouse:273", Act::Window(Win::Resize), MOUSE, true),
+        bind("pin", "Windows", "Keep a floating window on every workspace", "SUPER + P", Act::Window(Win::Pin), n, true),
+        bind("group", "Windows", "Group windows into tabs", "SUPER + G", Act::Window(Win::Group), n, true),
+        bind("scratchpad", "Workspaces", "Show or hide the scratchpad", "SUPER + GRAVE", Act::Window(Win::Scratchpad), n, true),
+        bind("to-scratchpad", "Workspaces", "Move window to the scratchpad", "SUPER + SHIFT + GRAVE", Act::Window(Win::ToScratchpad), n, true),
+        bind("workspace-next", "Workspaces", "Next workspace", "SUPER + mouse_down", Act::Window(Win::StepWorkspace(1)), n, true),
+        bind("workspace-prev", "Workspaces", "Previous workspace", "SUPER + mouse_up", Act::Window(Win::StepWorkspace(-1)), n, true),
+        bind("play", "Media keys", "Play or pause", "XF86AudioPlay", Act::Shell("playerctl play-pause".into()), LOCKED, true),
+        bind("pause", "Media keys", "Play or pause", "XF86AudioPause", Act::Shell("playerctl play-pause".into()), LOCKED, true),
+        bind("next", "Media keys", "Next track", "XF86AudioNext", Act::Shell("playerctl next".into()), LOCKED, true),
+        bind("previous", "Media keys", "Previous track", "XF86AudioPrev", Act::Shell("playerctl previous".into()), LOCKED, true),
+        bind("mic-mute", "Media keys", "Mute the microphone", "XF86AudioMicMute", Act::Shell("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle".into()), LOCKED, true),
     ];
     for (d, key) in [(Dir::Left, "LEFT"), (Dir::Right, "RIGHT"), (Dir::Up, "UP"), (Dir::Down, "DOWN")] {
         out.push(bind(&format!("focus-{}", d.name()), "Windows", &format!("Focus {}", d.name()), &format!("SUPER + {key}"), Act::Window(Win::Focus(d)), n, true));
         out.push(bind(&format!("move-{}", d.name()), "Windows", &format!("Move window {}", d.name()), &format!("SUPER + SHIFT + {key}"), Act::Window(Win::Move(d)), n, true));
+        out.push(bind(&format!("grow-{}", d.name()), "Windows", &format!("Resize window {}", d.name()), &format!("SUPER + CTRL + {key}"), Act::Window(Win::Grow(d)), Opts { repeating: true, ..n }, true));
     }
     for i in 1..=10u8 {
         let key = i % 10;

@@ -1,5 +1,6 @@
 mod apps;
 mod bluetooth;
+mod compositor;
 mod defaults;
 mod desktop;
 mod displays;
@@ -22,7 +23,7 @@ mod wifi;
 use gtk::{gio, glib, prelude::*};
 use std::cell::RefCell;
 
-const PAGES: [(&str, &str, &str); 9] = [
+const PAGES: [(&str, &str, &str); 10] = [
     ("overview", "Overview", "computer"),
     ("wifi", "Wi-Fi", "wifi"),
     ("bluetooth", "Bluetooth", "bluetooth"),
@@ -32,6 +33,7 @@ const PAGES: [(&str, &str, &str); 9] = [
     ("drivers", "Drivers", "memory"),
     ("desktop", "Desktop", "palette"),
     ("keyboard", "Keyboard", "keyboard"),
+    ("compositor", "Compositor", "tune"),
 ];
 
 struct Shell {
@@ -54,6 +56,7 @@ fn build_page(name: &str) -> gtk::Widget {
         "drivers" => drivers::build(),
         "desktop" => desktop::build(),
         "keyboard" => keyboard::build(),
+        "compositor" => compositor::build(),
         _ => overview::build(),
     }
 }
@@ -410,6 +413,15 @@ fn main() -> glib::ExitCode {
                 println!("{note}");
                 glib::ExitCode::SUCCESS
             }
+            Err(e) => {
+                eprintln!("{e}");
+                glib::ExitCode::FAILURE
+            }
+        };
+    }
+    if std::env::args().nth(1).as_deref() == Some("--hypr-sync") {
+        return match kit::hyprconf::apply() {
+            Ok(()) => glib::ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("{e}");
                 glib::ExitCode::FAILURE

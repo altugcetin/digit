@@ -1,0 +1,1 @@
+-- Workspace rules from digit Settings, e.g. hl.workspace_rule({ workspace = "1", monitor = "DP-1" })

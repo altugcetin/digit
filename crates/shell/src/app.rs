@@ -595,6 +595,14 @@ impl App {
             self.redraw();
             crate::gamebar::changed();
         }
+        if before.ui_round != next.ui_round {
+            // Window corners in a full Hyprland setup follow the same Corners setting.
+            glib::spawn_future_local(async {
+                if let Ok(Err(e)) = gtk::gio::spawn_blocking(kit::hyprconf::apply).await {
+                    eprintln!("digit: {e}");
+                }
+            });
+        }
         if before.menubar_look != next.menubar_look {
             self.changed();
         }

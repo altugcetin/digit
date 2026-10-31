@@ -7,6 +7,15 @@ use std::time::Duration;
 pub(crate) fn save(key: &str, value: toml::Value) {
     if let Err(e) = prefs::set(key, value) {
         ui::fail(&format!("Could not save: {e}"));
+        return;
+    }
+    // Compositor settings go straight into digit's part of the Hyprland config.
+    if key.starts_with("hypr_") {
+        glib::spawn_future_local(async {
+            if let Ok(Err(e)) = gio::spawn_blocking(kit::hyprconf::apply).await {
+                ui::fail(&e);
+            }
+        });
     }
 }
 
