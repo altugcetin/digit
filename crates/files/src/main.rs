@@ -1202,7 +1202,7 @@ list.places row:selected {{ background: alpha({main}, 0.12); color: {main}; }}
 .side-head {{ font-size: 12px; font-weight: 600; color: alpha({meta}, 0.75); margin: 12px 4px 2px 4px; }}
 .place-icon {{ font-size: 18px; color: {accent}; }}
 list.places row button.ctl {{ min-width: 24px; min-height: 24px; }}
-.pane {{ background: #050505; border-radius: 16px; margin: 0 8px 8px 0; }}
+.pane {{ background: mix(@d_base, @d_card, 0.35); border-radius: 16px; margin: 0 8px 8px 0; }}
 .pane.focused {{ box-shadow: inset 0 0 0 1px alpha({accent}, 0.35); }}
 gridview.grid, columnview.list, columnview.list listview {{ background: transparent; color: {main}; }}
 gridview.grid {{ padding: 12px; }}
@@ -1244,18 +1244,18 @@ button.crumb:drop(active) {{ background: alpha({accent}, 0.20); color: {main}; }
 rubberband {{ background: alpha({accent}, 0.18); border: 1px solid alpha({accent}, 0.6); border-radius: 6px; }}
 .status {{ color: {meta}; font-size: 12px; padding: 6px 14px 8px 14px; }}
 .empty-icon {{ font-size: 64px; color: alpha({meta}, 0.5); }}
-.info {{ background: #050505; border-radius: 16px; margin: 0 8px 8px 0; }}
+.info {{ background: mix(@d_base, @d_card, 0.35); border-radius: 16px; margin: 0 8px 8px 0; }}
 .info-body {{ padding: 20px 18px; }}
 .info-art {{ margin: 6px 0; }}
 .name.big {{ font-size: 17px; font-weight: 600; }}
 .job {{ padding: 6px 4px; }}
-.jobs {{ background: #0d0d0d; border-radius: 16px; padding: 8px 14px; margin: 0 8px 8px 8px; }}
+.jobs {{ background: @d_card; border-radius: 16px; padding: 8px 14px; margin: 0 8px 8px 8px; }}
 .toast {{ background: @d_raised; color: {main}; border-radius: 999px; padding: 9px 18px; margin-bottom: 26px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }}
 .trash-bar {{ padding: 0 8px 8px 8px; }}
 .look-backdrop {{ background: rgba(0,0,0,0.62); }}
-.look {{ background: #0e0e0e; border-radius: 26px; padding: 16px 18px 18px 18px; box-shadow: 0 24px 60px rgba(0,0,0,0.6); }}
+.look {{ background: @d_card; border-radius: 26px; padding: 16px 18px 18px 18px; box-shadow: 0 24px 60px rgba(0,0,0,0.6); }}
 .stage {{ border-radius: 16px; }}
-textview.look-text, textview.look-text text {{ background: #070707; color: {main}; font-size: 13px; }}
+textview.look-text, textview.look-text text {{ background: mix(@d_base, @d_card, 0.5); color: {main}; font-size: 13px; }}
 notebook > header {{ background: transparent; border: none; box-shadow: none; padding: 0 8px; }}
 notebook > header > tabs > tab {{ background: transparent; border-radius: 12px; padding: 4px 10px; margin: 0 2px 6px 0; color: {meta}; border: none; box-shadow: none; outline: none; min-height: 24px; }}
 notebook > header > tabs > tab:checked {{ background: alpha({main}, 0.10); color: {main}; }}

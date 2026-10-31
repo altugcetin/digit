@@ -411,7 +411,7 @@ button.chip:hover {{ background: @d_raised; }}
 .feature {{ border-radius: 28px; padding: 30px 34px; background: linear-gradient(120deg, alpha({accent}, 0.30), #0e0e0e 62%); }}
 .eyebrow {{ color: {accent}; font-size: 12px; font-weight: 650; letter-spacing: 1px; }}
 .jobtile {{ background: @d_card; border-radius: var(--r-card); padding: 16px; border: none; box-shadow: none; min-width: 168px; }}
-.jobtile:hover {{ background: #171717; }}
+.jobtile:hover {{ background: @d_raised; }}
 .pick {{ background: @d_card; border-radius: calc(var(--r-card) + 2px); padding: 18px; min-width: 220px; }}
 .lockup {{ padding: 10px 12px; border-radius: 16px; }}
 .lockup:hover {{ background: alpha({main}, 0.05); }}
