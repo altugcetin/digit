@@ -33,7 +33,7 @@ window.pin, window.pin.background {{ background: transparent; }}
 button.ctl.act {{ color: {main}; min-width: 36px; min-height: 36px; }}
 .editbar {{ padding: 8px 10px; }}
 .editfoot {{ padding: 10px 14px 12px 14px; }}
-.stage {{ background: #050505; border-radius: 16px; margin: 0 10px; }}
+.stage {{ background: mix(@d_base, @d_card, 0.35); border-radius: 16px; margin: 0 10px; }}
 button.toolbtn {{ background: transparent; border: none; box-shadow: none; border-radius: 10px; min-width: 34px; min-height: 34px; padding: 0; color: {meta}; }}
 button.toolbtn:hover {{ background: alpha({main}, 0.08); color: {main}; }}
 button.toolbtn:checked {{ background: alpha({accent}, 0.22); color: {main}; }}
