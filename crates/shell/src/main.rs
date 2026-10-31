@@ -165,6 +165,16 @@ fn run() {
     bluetooth::start(&app);
     devices::start(&app);
     phone::refresh(&app);
+    // An update may bring new default shortcuts; regenerate digit's part of the Hyprland
+    // config and have Hyprland read it again if anything changed.
+    glib::spawn_future_local(async {
+        let changed = gtk::gio::spawn_blocking(|| kit::hyprconf::sync()).await;
+        match changed {
+            Ok(Ok(true)) => kit::hyprconf::reload(),
+            Ok(Err(e)) => eprintln!("digit: {e}"),
+            _ => {}
+        }
+    });
     idle::start(&app);
     night::start(&app);
     sni::start(&app);

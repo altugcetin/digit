@@ -400,47 +400,35 @@ pub fn build() -> gtk::Widget {
     let win = ui::card();
     let wm = kit::wm::which();
     if wm == kit::wm::Wm::Hyprland {
-        let (file, text, include) = (glib::user_config_dir().join("hypr").join("digit.conf"), include_str!("../../../data/hypr/digit.conf"), Some((glib::user_config_dir().join("hypr").join("hyprland.conf"), "source = ~/.config/hypr/digit.conf")));
-        let installed = file.exists();
-        let (row, end) = ui::row(Some("keyboard"), &format!("{} shortcuts", kit::wm::name()), &format!("Writes {} with digit's keys and starts digit with the session", file.display()));
-        let b = ui::button(if installed { "Reinstall" } else { "Install" }, "accent");
-        b.connect_clicked(move |b| {
-            let parent = ui::root(b);
-            let (file, text, include) = (file.clone(), text, include.clone());
-            let detail = match &include {
-                Some((conf, line)) => format!("digit will write {} and add “{line}” to {} if it isn't there yet.", file.display(), conf.display()),
-                None => format!("digit will write {}.", file.display()),
-            };
-            kit::ui::ask(parent.as_ref(), "Install shortcuts?", &detail, "Cancel", "Install", "accent", move || {
-                let write = |path: &std::path::Path, body: &str| -> std::io::Result<()> {
-                    if let Some(dir) = path.parent() {
-                        std::fs::create_dir_all(dir)?;
+        use kit::hyprconf::Mode;
+        let mode = kit::hyprconf::mode();
+        let sub = match mode {
+            Some(Mode::Full) => "Full setup: digit keeps its part in ~/.config/hypr/digit; your own settings go in hyprland.lua",
+            Some(Mode::Minimal) => "Minimal setup: digit's part loads at the end of your own config and its shortcuts win",
+            None => "Not set up. Full starts from digit's config (yours is backed up first); Minimal adds digit's part to the end of yours",
+        };
+        let (row, end) = ui::row(Some("tune"), "Hyprland setup", sub);
+        for (m, label, kind, detail) in [
+            (Mode::Full, "Full", "accent", "Your ~/.config/hypr is copied to a dated backup folder, then digit sets up the whole config with its shortcuts, window keys and looks. Your keyboard layout and displays are kept."),
+            (Mode::Minimal, "Minimal", "", "digit adds its folder and one line at the end of hyprland.lua (a backup is made). Your config stays; where a shortcut is bound twice, digit's wins."),
+        ] {
+            if mode == Some(m) {
+                continue;
+            }
+            let b = ui::button(label, kind);
+            b.connect_clicked(move |b| {
+                let parent = ui::root(b);
+                let title = format!("{} setup?", label);
+                kit::ui::ask(parent.as_ref(), &title, detail, "Cancel", label, "accent", move || match kit::hyprconf::setup(m) {
+                    Ok(note) => {
+                        ui::done(&note);
+                        crate::reload("desktop");
                     }
-                    let tmp = path.with_extension("digit-new");
-                    std::fs::write(&tmp, body)?;
-                    std::fs::rename(&tmp, path)
-                };
-                if let Err(e) = write(&file, text) {
-                    ui::fail(&format!("Could not write the shortcuts: {e}"));
-                    return;
-                }
-                if let Some((conf, line)) = include {
-                    let current = std::fs::read_to_string(&conf).unwrap_or_default();
-                    if !current.lines().any(|l| l.trim() == line) {
-                        let backup = conf.with_extension("conf.before-digit");
-                        if conf.exists() && !backup.exists() {
-                            let _ = std::fs::copy(&conf, &backup);
-                        }
-                        if let Err(e) = write(&conf, &format!("{}\n\n{line}\n", current.trim_end())) {
-                            ui::fail(&format!("Could not update {}: {e}", conf.display()));
-                            return;
-                        }
-                    }
-                }
-                ui::done("Shortcuts installed; they apply when the compositor reloads its config");
+                    Err(e) => ui::fail(&e),
+                });
             });
-        });
-        end.append(&b);
+            end.append(&b);
+        }
         win.append(&row);
         body.append(&win);
     } else {

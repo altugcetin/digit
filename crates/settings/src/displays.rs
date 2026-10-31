@@ -246,9 +246,26 @@ fn hypr_reload_if_needed() {
     }
 }
 
-/// Writes ~/.config/hypr/monitors.lua and makes hyprland.lua require it.
-/// Returns what monitors.lua held before, for Revert.
+/// Where displays are saved: digit's own monitors file once digit is set up on Hyprland,
+/// otherwise a monitors.lua next to hyprland.lua.
+fn monitors_path() -> std::path::PathBuf {
+    if kit::hyprconf::mode().is_some() {
+        kit::hyprconf::dir().join("digit-monitors.lua")
+    } else {
+        glib::user_config_dir().join("hypr").join("monitors.lua")
+    }
+}
+
+/// Writes the displays to Hyprland's config. Returns what the file held before, for Revert.
 fn hypr_write(outs: &[Out]) -> Result<Option<String>, String> {
+    if kit::hyprconf::mode().is_some() {
+        // digit's folder is already loaded by hyprland.lua; only its monitors file changes.
+        let monitors = monitors_path();
+        let old = std::fs::read_to_string(&monitors).ok();
+        save_atomic(&monitors, &hypr_lua(outs, old.as_deref().unwrap_or(""))).map_err(|e| e.to_string())?;
+        hypr_reload_if_needed();
+        return Ok(old);
+    }
     let dir = glib::user_config_dir().join("hypr");
     let main = dir.join("hyprland.lua");
     let current = std::fs::read_to_string(&main).map_err(|_| "Display settings need Hyprland's Lua config (~/.config/hypr/hyprland.lua)".to_string())?;
@@ -274,7 +291,7 @@ fn hypr_write(outs: &[Out]) -> Result<Option<String>, String> {
 }
 
 fn hypr_restore(old: Option<String>) {
-    let path = glib::user_config_dir().join("hypr").join("monitors.lua");
+    let path = monitors_path();
     match old {
         Some(text) => {
             let _ = save_atomic(&path, &text);
@@ -287,7 +304,7 @@ fn hypr_restore(old: Option<String>) {
 }
 
 fn hypr_error() -> Option<String> {
-    run(&["hyprctl", "configerrors"])?.lines().map(str::trim).find(|l| ["monitors.lua", "workspaces.lua", "hl.monitor", "\"monitors\"", "\"workspaces\""].iter().any(|k| l.contains(k))).map(str::to_string)
+    run(&["hyprctl", "configerrors"])?.lines().map(str::trim).find(|l| ["monitors.lua", "workspaces.lua", "digit-monitors", "hl.monitor", "\"monitors\"", "\"workspaces\""].iter().any(|k| l.contains(k))).map(str::to_string)
 }
 
 fn save_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
@@ -350,7 +367,7 @@ fn persist(wm: Wm, outs: &[Out]) -> Result<String, String> {
             }
             Ok("Saved to ~/.config/niri/digit-outputs.kdl".into())
         }
-        Wm::Hypr => Ok("Saved to ~/.config/hypr/monitors.lua".into()),
+        Wm::Hypr => Ok(if kit::hyprconf::mode().is_some() { "Saved to ~/.config/hypr/digit/digit-monitors.lua".into() } else { "Saved to ~/.config/hypr/monitors.lua".into() }),
         Wm::Other => Err("Display settings work on niri and Hyprland".into()),
     }
 }

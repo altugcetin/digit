@@ -4,6 +4,8 @@ pub mod calc;
 pub mod color;
 pub mod distro;
 pub mod fuzzy;
+pub mod hyprconf;
+pub mod keybinds;
 pub mod motion;
 pub mod paint;
 pub mod palette;
