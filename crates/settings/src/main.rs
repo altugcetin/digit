@@ -266,6 +266,7 @@ fn watch(window: &gtk::ApplicationWindow) {
 
 fn window(app: &gtk::Application) -> gtk::ApplicationWindow {
     let window = gtk::ApplicationWindow::builder().application(app).title("Settings").default_width(1080).default_height(720).build();
+    kit::scroll::smooth(&window);
     window.set_decorated(false);
     // Settings opens as a full-screen overlay unless it is set to open as a window.
     let overlay = !prefs::get_bool(&prefs::read(), "settings_window", false);

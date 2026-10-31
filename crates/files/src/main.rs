@@ -1278,6 +1278,7 @@ checkbutton check:checked {{ background: {accent}; color: {on_accent}; }}
 
 fn build(app: &gtk::Application, start: &gio::File) -> Rc<Files> {
     let window = gtk::ApplicationWindow::builder().application(app).title("Files").default_width(1180).default_height(760).build();
+    kit::scroll::smooth(&window);
     window.set_decorated(false);
     window.add_css_class("digit-settings");
     window.add_css_class("digit-files");

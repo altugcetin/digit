@@ -311,6 +311,7 @@ pub fn open(app: &gtk::Application) {
     }
     let t = prefs::read();
     let window = gtk::ApplicationWindow::new(app);
+    kit::scroll::smooth(&window);
     window.set_title(Some("Welcome to Digit"));
     window.add_css_class("digit-dialog");
     window.add_css_class("welcome");
