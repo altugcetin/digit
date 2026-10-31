@@ -216,10 +216,18 @@ fn header(window: &gtk::ApplicationWindow) -> gtk::Widget {
     });
     let w = window.clone();
     close.connect_clicked(move |_| w.close());
-    bar.append(&min);
-    bar.append(&max);
+    // An overlay can't be minimized or maximized; it only closes.
+    if !gtk4_layer_shell::LayerShell::is_layer_window(window) {
+        bar.append(&min);
+        bar.append(&max);
+    }
     bar.append(&close);
     bar.upcast()
+}
+
+/// The main Settings window, while it is open.
+pub fn main_window() -> Option<gtk::ApplicationWindow> {
+    SHELL.with(|s| s.borrow().as_ref().map(|s| s.window.clone()))
 }
 
 fn reload(name: &str) {
@@ -258,8 +266,23 @@ fn watch(window: &gtk::ApplicationWindow) {
 
 fn window(app: &gtk::Application) -> gtk::ApplicationWindow {
     let window = gtk::ApplicationWindow::builder().application(app).title("Settings").default_width(1080).default_height(720).build();
-    window.add_css_class("digit-settings");
     window.set_decorated(false);
+    // Settings opens as a full-screen overlay unless it is set to open as a window.
+    let overlay = !prefs::get_bool(&prefs::read(), "settings_window", false);
+    if overlay {
+        use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+        window.add_css_class("digit-dialog");
+        window.init_layer_shell();
+        window.set_namespace(Some("digit-settings"));
+        window.set_layer(Layer::Overlay);
+        window.set_keyboard_mode(KeyboardMode::Exclusive);
+        for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+            window.set_anchor(edge, true);
+        }
+        window.set_exclusive_zone(-1);
+    } else {
+        window.add_css_class("digit-settings");
+    }
     let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     let side = gtk::Box::new(gtk::Orientation::Vertical, 0);
     side.add_css_class("side");
@@ -305,10 +328,34 @@ fn window(app: &gtk::Application) -> gtk::ApplicationWindow {
     content.append(&ui::activity());
     root.append(&side);
     root.append(&content);
-    window.set_child(Some(&root));
+    if overlay {
+        let mon = gtk::gdk::Display::default().and_then(|d| d.monitors().item(0)).and_downcast::<gtk::gdk::Monitor>().map(|m| m.geometry());
+        let (mw, mh) = mon.map(|g| (g.width(), g.height())).unwrap_or((1600, 900));
+        root.set_size_request(1080.min(mw * 92 / 100), 720.min(mh * 88 / 100));
+        let (layer, backdrop) = ui::overlay_card(&root);
+        window.set_child(Some(&layer));
+        backdrop.set_opacity(0.0);
+        ui::settle(&backdrop, &root, 0, true, || {});
+        let closing = std::rc::Rc::new(std::cell::Cell::new(false));
+        let root = root.clone();
+        window.connect_close_request(move |w| {
+            if closing.replace(true) {
+                return glib::Propagation::Proceed;
+            }
+            let w = w.clone();
+            ui::settle(&backdrop, &root, 0, false, move || w.close());
+            glib::Propagation::Stop
+        });
+    } else {
+        window.set_child(Some(&root));
+    }
     let keys = gtk::EventControllerKey::new();
     let w = window.clone();
     keys.connect_key_pressed(move |_, key, _, mods| {
+        if overlay && key == gtk::gdk::Key::Escape {
+            w.close();
+            return glib::Propagation::Stop;
+        }
         if key == gtk::gdk::Key::w && mods.contains(gtk::gdk::ModifierType::CONTROL_MASK) || key == gtk::gdk::Key::q && mods.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
             w.close();
             return glib::Propagation::Stop;

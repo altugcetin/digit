@@ -377,6 +377,7 @@ pub fn build() -> gtk::Widget {
     accent(&apps, &t);
     corners(&apps, "rounded_corner", "Corners", "Cards, menus, buttons and dialogs", "ui_round", prefs::get_f64(&t, "ui_round", 1.0));
     choice(&apps, "density_medium", "Density", "", "ui_density", &[("comfortable", "Comfortable"), ("compact", "Compact")], &prefs::get_str(&t, "ui_density", "comfortable"));
+    toggle(&apps, "select_window", "Open Settings as a window", "Settings opens over everything by default; turn this on for an ordinary window. Takes effect the next time Settings opens", "settings_window", prefs::get_bool(&t, "settings_window", false));
     body.append(&apps);
 
     body.append(&ui::heading("Dock"));
@@ -578,6 +579,7 @@ pub fn build() -> gtk::Widget {
         let d = gtk::FileDialog::new();
         d.set_title("Save Screenshots To");
         let parent = ui::root(b);
+        ui::aside();
         d.select_folder(parent.as_ref(), gio::Cancellable::NONE, |r| {
             if let Ok(f) = r {
                 if let Some(p) = f.path() {

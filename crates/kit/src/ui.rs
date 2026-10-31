@@ -202,6 +202,7 @@ pub fn ask(parent: Option<&gtk::Window>, title: &str, detail: &str, cancel: &str
     window.set_title(Some(title));
     window.add_css_class("digit-dialog");
     window.set_child(Some(&content));
+    float_over(&window, parent);
     let w = window.clone();
     no.connect_clicked(move |_| w.close());
     let w = window.clone();
@@ -224,6 +225,41 @@ pub fn ask(parent: Option<&gtk::Window>, title: &str, detail: &str, cancel: &str
     window.add_controller(keys);
     window.present();
     no.grab_focus();
+}
+
+/// Makes a small dialog window float over `parent` when the parent is a layer-shell overlay;
+/// as an ordinary toplevel it would open underneath it. Call before presenting the dialog.
+pub fn float_over(dialog: &gtk::Window, parent: Option<&gtk::Window>) {
+    use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
+    if !parent.is_some_and(|p| p.is_layer_window()) || dialog.is_layer_window() {
+        return;
+    }
+    dialog.init_layer_shell();
+    dialog.set_namespace(Some("digit-dialog"));
+    dialog.set_layer(Layer::Overlay);
+    dialog.set_keyboard_mode(KeyboardMode::Exclusive);
+}
+
+/// Lets an overlay step below ordinary windows while something it opened (a file chooser,
+/// a terminal, a browser) is in use; it comes back on top once it gets focus again.
+pub fn step_aside(w: &gtk::Window) {
+    use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
+    if !w.is_layer_window() {
+        return;
+    }
+    w.set_layer(Layer::Bottom);
+    w.set_keyboard_mode(KeyboardMode::OnDemand);
+    unsafe {
+        if w.data::<bool>("digit-aside").is_none() {
+            w.connect_is_active_notify(|w| {
+                if w.is_active() && w.layer() == Layer::Bottom {
+                    w.set_layer(Layer::Overlay);
+                    w.set_keyboard_mode(KeyboardMode::Exclusive);
+                }
+            });
+            w.set_data("digit-aside", true);
+        }
+    }
 }
 
 /// Builds the inside of a full-screen layer surface: a dimmed backdrop with `card` centred on it,

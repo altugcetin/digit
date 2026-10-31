@@ -109,6 +109,7 @@ pub fn confirm(parent: Option<gtk::Window>, title: &str, body: &str, items: &[St
     let window = gtk::Window::builder().modal(true).decorated(false).resizable(false).default_width(480).build();
     window.set_transient_for(parent.as_ref());
     window.add_css_class("digit-dialog");
+    float_over(&window, parent.as_ref());
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
     content.add_css_class("dialog");
     let t = text(title, "name");
@@ -184,10 +185,19 @@ pub fn terminal(argv: &[&str]) -> Result<(), String> {
     }
     full.extend(argv.iter().map(|s| s.to_string()));
     let os: Vec<&std::ffi::OsStr> = full.iter().map(std::ffi::OsStr::new).collect();
+    aside();
     gtk::gio::Subprocess::newv(&os, gtk::gio::SubprocessFlags::NONE).map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// Moves the Settings overlay out of the way of a window it is about to open.
+pub fn aside() {
+    if let Some(w) = crate::main_window() {
+        step_aside(w.upcast_ref());
+    }
+}
+
 pub fn open_uri(uri: &str) {
+    aside();
     let _ = gtk::gio::AppInfo::launch_default_for_uri(uri, gtk::gio::AppLaunchContext::NONE);
 }
 
@@ -198,6 +208,7 @@ pub fn prompt(parent: Option<gtk::Window>, title: &str, detail: &str, field: Opt
     window.set_transient_for(parent.as_ref());
     window.set_title(Some(title));
     window.add_css_class("digit-dialog");
+    float_over(&window, parent.as_ref());
     let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
     content.add_css_class("dialog");
     content.set_size_request(420, -1);
