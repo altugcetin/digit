@@ -280,6 +280,7 @@ dependencies = [
  "futures-util",
  "gio-unix",
  "gtk4",
+ "gtk4-layer-shell",
  "kit",
  "libc",
  "serde",

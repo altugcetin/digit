@@ -120,11 +120,11 @@ pub fn root(w: &impl IsA<gtk::Widget>) -> Option<gtk::Window> {
 }
 
 
-pub fn ask(parent: Option<&gtk::Window>, title: &str, detail: &str, cancel: &str, action: &str, kind: &str, ok: impl FnOnce() + 'static) {
-    let window = gtk::Window::builder().modal(true).decorated(false).resizable(false).build();
-    window.set_transient_for(parent);
-    window.set_title(Some(title));
-    window.add_css_class("digit-dialog");
+/// The overlay a layer-shell surface keeps over its content, where its dialogs sit
+/// (a separate toplevel would open underneath the overlay layer).
+pub const SHEET_LAYER: &str = "sheet-layer";
+
+fn ask_card(title: &str, detail: &str, cancel: &str, action: &str, kind: &str) -> (gtk::Box, gtk::Button, gtk::Button) {
     let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
     content.add_css_class("dialog");
     content.set_size_request(420, -1);
@@ -147,6 +147,60 @@ pub fn ask(parent: Option<&gtk::Window>, title: &str, detail: &str, cancel: &str
     buttons.append(&no);
     buttons.append(&go);
     content.append(&buttons);
+    (content, no, go)
+}
+
+pub fn ask(parent: Option<&gtk::Window>, title: &str, detail: &str, cancel: &str, action: &str, kind: &str, ok: impl FnOnce() + 'static) {
+    let (content, no, go) = ask_card(title, detail, cancel, action, kind);
+    if let Some(layer) = parent.and_then(|p| p.child()).and_downcast::<gtk::Overlay>().filter(|o| o.widget_name() == SHEET_LAYER) {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.add_css_class("sheet-backdrop");
+        root.set_hexpand(true);
+        root.set_vexpand(true);
+        content.set_halign(gtk::Align::Center);
+        content.set_valign(gtk::Align::Center);
+        content.set_vexpand(true);
+        root.append(&content);
+        root.set_opacity(0.0);
+        layer.add_overlay(&root);
+        settle(&root, &content, 0, true, || {});
+        let closing = std::rc::Rc::new(std::cell::Cell::new(false));
+        let close: std::rc::Rc<dyn Fn()> = {
+            let (root, content) = (root.clone(), content.clone());
+            std::rc::Rc::new(move || {
+                if closing.replace(true) {
+                    return;
+                }
+                let (layer, gone) = (layer.clone(), root.clone());
+                settle(&root, &content, 0, false, move || layer.remove_overlay(&gone));
+            })
+        };
+        let c = close.clone();
+        no.connect_clicked(move |_| c());
+        let c = close.clone();
+        let ok = std::cell::RefCell::new(Some(ok));
+        go.connect_clicked(move |_| {
+            c();
+            if let Some(f) = ok.borrow_mut().take() {
+                f();
+            }
+        });
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape {
+                close();
+                return gtk::glib::Propagation::Stop;
+            }
+            gtk::glib::Propagation::Proceed
+        });
+        root.add_controller(keys);
+        no.grab_focus();
+        return;
+    }
+    let window = gtk::Window::builder().modal(true).decorated(false).resizable(false).build();
+    window.set_transient_for(parent);
+    window.set_title(Some(title));
+    window.add_css_class("digit-dialog");
     window.set_child(Some(&content));
     let w = window.clone();
     no.connect_clicked(move |_| w.close());
@@ -170,6 +224,24 @@ pub fn ask(parent: Option<&gtk::Window>, title: &str, detail: &str, cancel: &str
     window.add_controller(keys);
     window.present();
     no.grab_focus();
+}
+
+/// Builds the inside of a full-screen layer surface: a dimmed backdrop with `card` centred on it,
+/// under an overlay that `ask` puts its dialogs into. Returns the overlay and the backdrop.
+pub fn overlay_card(card: &impl IsA<gtk::Widget>) -> (gtk::Overlay, gtk::Box) {
+    let layer = gtk::Overlay::new();
+    layer.set_widget_name(SHEET_LAYER);
+    let backdrop = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    backdrop.add_css_class("overlay-backdrop");
+    let card = card.as_ref();
+    card.add_css_class("overlay-card");
+    card.set_halign(gtk::Align::Center);
+    card.set_valign(gtk::Align::Center);
+    card.set_vexpand(true);
+    card.set_overflow(gtk::Overflow::Hidden);
+    backdrop.append(card);
+    layer.set_child(Some(&backdrop));
+    (layer, backdrop)
 }
 
 fn plain_popovers(w: &impl IsA<gtk::Widget>) {

@@ -171,6 +171,8 @@ window.digit-dialog, window.digit-dialog.background {{ background: transparent; 
 .dialog {{ background: @d_pop; border-radius: var(--r-dialog); padding: 24px; box-shadow: 0 0 0 1px alpha({main}, 0.06); }}
 .dialog label.dialog-title {{ font-size: 18px; font-weight: 650; }}
 .sheet-backdrop {{ background: rgba(0,0,0,0.42); }}
+.overlay-backdrop {{ background: rgba(0,0,0,0.5); }}
+.overlay-card {{ background: @d_base; color: {main}; font-family: "Readex Pro", sans-serif; border-radius: var(--r-dialog); box-shadow: 0 24px 60px rgba(0,0,0,0.55), 0 0 0 1px alpha({main}, 0.07); }}
 .side {{ background: @d_base; padding: 16px 12px; }}
 .controls {{ margin: 10px 12px 0 0; }}
 button.ctl {{ background: transparent; border: none; box-shadow: none; outline: none; border-radius: 999px; min-width: 32px; min-height: 32px; padding: 0; color: {meta}; }}
