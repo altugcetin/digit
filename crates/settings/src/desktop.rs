@@ -359,7 +359,7 @@ pub fn build() -> gtk::Widget {
     }
     toggle(&notch, "north_west", "Workspace corner", "Move the pointer to the top-left corner to see workspaces", "hot_corner", prefs::get_bool(&t, "hot_corner", true));
     toggle(&notch, "south_east", "Control Center corner", "Move the pointer to the bottom-right corner to open Control Center", "control_corner", prefs::get_bool(&t, "control_corner", true));
-    toggle(&notch, "fullscreen", "Over fullscreen apps", "Let the dock edge and screen corners open panels while an app is fullscreen. Spotlight always opens", "fullscreen_edges", prefs::get_bool(&t, "fullscreen_edges", false));
+    toggle(&notch, "fullscreen", "Over fullscreen apps", "Let the dock edge and screen corners open panels while an app or game is fullscreen. Spotlight always opens", "fullscreen_edges", prefs::get_bool(&t, "fullscreen_edges", false));
     body.append(&notch);
 
     body.append(&ui::heading("Panels"));

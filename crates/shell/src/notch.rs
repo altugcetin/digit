@@ -563,7 +563,7 @@ impl Notch {
                 if edge && !cornered.replace(true) {
                     if let Some(v) = weak.upgrade() {
                         let (app, output) = { let v = v.borrow(); (v.app.clone(), v.output.clone()) };
-                        if app.prefs.borrow().hot_corner {
+                        if app.prefs.borrow().hot_corner && app.edges_live(&output) {
                             crate::spaces::toggle(&app, Some(output));
                         }
                     }
