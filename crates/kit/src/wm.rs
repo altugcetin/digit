@@ -295,17 +295,32 @@ pub fn move_to_space(id: u64, space: u64) -> bool {
     }
 }
 
-/// Whether the workspace shown on `output` has a fullscreen window (Hyprland only).
+/// Whether the workspace shown on `output` has a fullscreen window.
 pub fn fullscreen_on(output: &str) -> bool {
-    if which() != Wm::Hyprland {
-        return false;
+    match which() {
+        Wm::Niri => niri_fullscreen(output).unwrap_or(false),
+        Wm::Hyprland => {
+            let Some(id) = hypr_outputs().iter().find(|m| text(m, "name") == output).and_then(|m| m.get("activeWorkspace")?.get("id")?.as_i64()) else { return false };
+            hypr_json("workspaces")
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .any(|w| w.get("id").and_then(Value::as_i64) == Some(id) && w.get("hasfullscreen").and_then(Value::as_bool).unwrap_or(false))
+        }
+        Wm::Other => false,
     }
-    let Some(id) = hypr_outputs().iter().find(|m| text(m, "name") == output).and_then(|m| m.get("activeWorkspace")?.get("id")?.as_i64()) else { return false };
-    hypr_json("workspaces")
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
-        .iter()
-        .any(|w| w.get("id").and_then(Value::as_i64) == Some(id) && w.get("hasfullscreen").and_then(Value::as_bool).unwrap_or(false))
+}
+
+fn niri_fullscreen(output: &str) -> Option<bool> {
+    let spaces = niri(json!("Workspaces"))?;
+    let active = spaces.get("Workspaces")?.as_array()?.iter().find(|w| text(w, "output") == output && w.get("is_active").and_then(Value::as_bool) == Some(true))?.get("active_window_id")?.as_u64()?;
+    let outputs = niri(json!("Outputs"))?;
+    let logical = outputs.get("Outputs")?.get(output)?.get("logical")?;
+    let (w, h) = (logical.get("width")?.as_f64()?, logical.get("height")?.as_f64()?);
+    let windows = niri(json!("Windows"))?;
+    let size = windows.get("Windows")?.as_array()?.iter().find(|v| v.get("id").and_then(Value::as_u64) == Some(active))?.get("layout")?.get("window_size")?.as_array()?.clone();
+    let (ww, wh) = (size.first()?.as_f64()?, size.get(1)?.as_f64()?);
+    Some(ww >= w - 1.0 && wh >= h - 1.0)
 }
 
 /// A Hyprland special workspace (scratchpad) that currently holds windows.

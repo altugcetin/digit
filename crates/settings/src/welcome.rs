@@ -278,6 +278,7 @@ fn step(index: usize, t: &toml::Table) -> gtk::Widget {
             choice(&card, "visibility", "Visibility", "Auto-hide reveals it when the pointer touches the edge", "dock_mode", &[("on", "Always shown"), ("autohide", "Auto-hide"), ("smart", "Hide when windows are open"), ("off", "Off")], &prefs::get_str(t, "dock_mode", "on"));
             choice(&card, "style", "Icon style", "", "dock_icons", &[("light", "Big Sur"), ("graphite", "Big Sur graphite"), ("mono", "Mono"), ("tinted", "Tinted"), ("native", "Original")], &prefs::get_str(t, "dock_icons", "light"));
             slider(&card, "zoom_in", "Magnification", "1.0 turns it off", "dock_magnify", (1.0, 2.0, 0.05), prefs::get_f64(t, "dock_magnify", 1.5), 2);
+            crate::desktop::toggle(&card, "fullscreen", "Edges over fullscreen apps", "Let the dock, workspaces and Control Center open from screen edges while a game or video is fullscreen", "fullscreen_edges", prefs::get_bool(t, "fullscreen_edges", false));
             page.append(&card);
         }
         5 => {
