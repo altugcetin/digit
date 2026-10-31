@@ -476,7 +476,58 @@ fn new_column() -> Rc<Column> {
     c
 }
 
+/// Slides the split's divider from `from` to `to` (in px), then runs `done`.
+fn slide_split(split: &gtk::Paned, from: i32, to: i32, opening: bool, done: impl FnOnce() + 'static) {
+    use kit::motion::{Curve, Tween};
+    let now = glib::monotonic_time();
+    let mut t = Tween::still(from as f64);
+    if opening {
+        t.go(to as f64, now, 340, Curve::new(0.16, 1.0, 0.3, 1.0));
+    } else {
+        t.go(to as f64, now, 220, Curve::new(0.4, 0.0, 0.9, 0.6));
+    }
+    // Let the side that comes and goes shrink to nothing while it slides.
+    split.set_shrink_end_child(true);
+    split.set_position(from);
+    let end = split.end_child();
+    let done = Cell::new(Some(done));
+    split.add_tick_callback(move |split, clock| {
+        let now = clock.frame_time();
+        let at = t.value(now);
+        split.set_position(at.round() as i32);
+        let span = (from - to).abs().max(1) as f64;
+        let shown = if opening { (from as f64 - at) / span } else { (at - to as f64).abs() / span };
+        if let Some(e) = &end {
+            e.set_opacity(if opening { shown.clamp(0.0, 1.0) } else { (1.0 - shown).clamp(0.0, 1.0) });
+        }
+        if !t.settled(now) {
+            return glib::ControlFlow::Continue;
+        }
+        split.set_shrink_end_child(false);
+        if let Some(e) = &end {
+            e.set_opacity(1.0);
+        }
+        if let Some(f) = done.take() {
+            f();
+        }
+        glib::ControlFlow::Break
+    });
+}
+
 fn close_column(c: &Rc<Column>) {
+    let Some(f) = files() else { return };
+    // Closing the right side slides it away first; the left one hands its place over at once.
+    let right = f.columns.borrow().get(1).is_some_and(|x| Rc::ptr_eq(x, c));
+    let w = f.split.width();
+    if right && w > 0 && f.split.end_child().is_some() {
+        let c = c.clone();
+        slide_split(&f.split, f.split.position(), w, false, move || remove_column(&c));
+        return;
+    }
+    remove_column(c);
+}
+
+fn remove_column(c: &Rc<Column>) {
     let Some(f) = files() else { return };
     let Some(i) = f.columns.borrow().iter().position(|x| Rc::ptr_eq(x, c)) else { return };
     f.columns.borrow_mut().remove(i);
@@ -506,7 +557,7 @@ fn toggle_split() {
     f.split.set_end_child(Some(&c.notebook));
     let w = f.split.width();
     if w > 0 {
-        f.split.set_position(w / 2);
+        slide_split(&f.split, w, w / 2, true, || {});
     }
     f.columns.borrow_mut().push(c.clone());
     f.current.set(1);
@@ -1203,7 +1254,6 @@ list.places row:selected {{ background: alpha({main}, 0.12); color: {main}; }}
 .place-icon {{ font-size: 18px; color: {accent}; }}
 list.places row button.ctl {{ min-width: 24px; min-height: 24px; }}
 .pane {{ background: mix(@d_base, @d_card, 0.35); border-radius: 16px; margin: 0 8px 8px 0; }}
-.pane.focused {{ box-shadow: inset 0 0 0 1px alpha({accent}, 0.35); }}
 gridview.grid, columnview.list, columnview.list listview {{ background: transparent; color: {main}; }}
 gridview.grid {{ padding: 12px; }}
 gridview.grid > child {{ border-radius: 0; padding: 8px 4px; margin: 2px; background: transparent; outline: none; box-shadow: none; }}
@@ -1263,7 +1313,7 @@ notebook > stack {{ background: transparent; }}
 notebook {{ background: transparent; }}
 button.tab-close {{ min-width: 20px; min-height: 20px; }}
 button.tab-close .sym {{ font-size: 14px; }}
-paned > separator {{ background: transparent; min-width: 4px; }}
+paned > separator {{ background: none; background-image: none; border: none; box-shadow: none; outline: none; min-width: 8px; }}
 list.picker {{ background: transparent; }}
 list.picker row {{ border-radius: 12px; }}
 button.flat-row {{ background: transparent; border: none; box-shadow: none; padding: 0; border-radius: 14px; }}
