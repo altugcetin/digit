@@ -1020,6 +1020,7 @@ dependencies = [
  "futures-util",
  "gio-unix",
  "gtk4",
+ "gtk4-layer-shell",
  "libc",
  "material-colors",
  "serde",
