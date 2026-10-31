@@ -121,6 +121,10 @@ pub fn defaults() -> Vec<Bind> {
         bind("wallpaper", "Shell", "Wallpapers", "SUPER + W", ctl("key wallpaper"), n, false),
         bind("settings", "Shell", "Settings", "ALT + COMMA", ctl("key settings"), n, false),
         bind("files", "Shell", "Files", "SUPER + E", run("digit-files"), n, false),
+        // Off until the user picks keys for them.
+        bind("dnd", "Shell", "Do not disturb", "", ctl("dnd toggle"), n, false),
+        bind("awake", "Shell", "Keep awake", "", ctl("awake toggle"), n, false),
+        bind("pick", "Shell", "Color picker", "", ctl("pick"), n, false),
         bind("lock", "Session", "Lock the screen", "SUPER + L", ctl("key lock"), n, false),
         bind("session", "Session", "Lock, sleep, restart or shut down", "SUPER + SHIFT + E", ctl("key session"), n, false),
         bind("snap", "Screenshots", "Screenshot of an area", "PRINT", run("digit-snap"), n, false),
