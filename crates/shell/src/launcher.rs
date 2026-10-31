@@ -24,8 +24,11 @@ const PANEL_R: f64 = 24.0;
 const ROW: f64 = 44.0;
 const HEAD: f64 = 30.0;
 const MAX_PANEL: f64 = 448.0;
+const CARD_H: f64 = 56.0;
+/// The small round button under the clipboard list that clears it.
+const CLEAR: f64 = BUBBLE;
 const SURFACE_W: f64 = WIDTH + 2.0 * PAD;
-const SURFACE_H: f64 = PAD + BAR + GAP + MAX_PANEL + PAD;
+const SURFACE_H: f64 = PAD + BAR + GAP + MAX_PANEL + GAP + CLEAR + PAD;
 const PANEL_TOP: f64 = PAD + BAR + GAP;
 const FIELD_X: f64 = PAD + 54.0;
 const NARROW: f64 = WIDTH - MODES.len() as f64 * (BUBBLE + BUBBLE_GAP);
@@ -138,6 +141,8 @@ struct Item {
 enum Line {
     Head(String),
     Item(usize),
+    /// A copied color, with chips that copy it in other formats.
+    Palette(usize),
 }
 
 impl Line {
@@ -145,8 +150,29 @@ impl Line {
         match self {
             Line::Head(_) => HEAD,
             Line::Item(_) => ROW,
+            Line::Palette(_) => CARD_H,
         }
     }
+
+    /// Lines the keyboard selection can land on.
+    fn pickable(&self) -> bool {
+        matches!(self, Line::Item(_) | Line::Palette(_))
+    }
+}
+
+/// A part of the color card under the pointer.
+#[derive(Clone, Copy, PartialEq)]
+enum CardHit {
+    Format(usize),
+    Body,
+}
+
+/// A copied color: the color, the text that was copied, and when.
+#[derive(Clone)]
+struct Copied {
+    color: kit::color::Color,
+    text: String,
+    at: i64,
 }
 
 struct State {
@@ -163,6 +189,13 @@ struct State {
     items: Vec<Item>,
     lines: Vec<Line>,
     selected: usize,
+    /// Copied colors, newest first, and the color row part under the pointer.
+    colors: Vec<Copied>,
+    card_hot: Option<(usize, CardHit)>,
+    clear_hot: bool,
+    /// The clear button shows under the clipboard list while nothing is typed.
+    clear_on: bool,
+    clear_glow: Tween,
     windows: Vec<compositor::Window>,
     fade: Tween,
     panel: Tween,
@@ -253,10 +286,11 @@ fn color_items(items: &mut Vec<Item>, c: kit::color::Color, original: &str, top:
     }
 }
 
-fn clip_items(items: &mut Vec<Item>, query: &str) {
+/// Fills the clipboard list. Colors go to `colors` instead, each with the item index it comes
+/// before, so they keep their place in the history.
+fn clip_items(items: &mut Vec<Item>, colors: &mut Vec<(usize, Copied)>, query: &str) {
     let q = fold(query);
     let all = crate::clip::history();
-    let mut shown_colors = 0;
     for (n, c) in all.iter().enumerate() {
         let score = 10_000 - n as i32 * 10;
         match &c.data {
@@ -267,16 +301,8 @@ fn clip_items(items: &mut Vec<Item>, query: &str) {
                 let line: String = text.trim().lines().next().unwrap_or("").chars().take(90).collect();
                 let lines = text.lines().count();
                 if let Some(color) = kit::color::parse(text) {
-                    items.push(Item { kind: Kind::Clip, act: Act::Copy(text.clone()), title: line.clone(), detail: format!("Color · {}", ago(c.at)), look: Look::Swatch(color), score });
-                    if shown_colors < 2 {
-                        shown_colors += 1;
-                        let mut extra = Vec::new();
-                        color_items(&mut extra, color, text, score - 1);
-                        for mut e in extra.into_iter().skip(1) {
-                            e.kind = Kind::Clip;
-                            e.score = score - 1;
-                            items.push(e);
-                        }
+                    if !colors.iter().any(|(_, k)| k.color.hex() == color.hex()) {
+                        colors.push((items.len(), Copied { color, text: text.trim().to_string(), at: c.at }));
                     }
                     continue;
                 }
@@ -296,8 +322,6 @@ fn clip_items(items: &mut Vec<Item>, query: &str) {
     }
     if all.is_empty() {
         items.push(Item { kind: Kind::Clip, act: Act::Clear, title: "Nothing copied yet".into(), detail: "Copies appear here; kept only in memory".into(), look: Look::Symbol("content_paste_off"), score: 0 });
-    } else if q.is_empty() {
-        items.push(Item { kind: Kind::Clip, act: Act::Clear, title: "Clear clipboard history".into(), detail: format!("{} items, kept only in memory", all.len()), look: Look::Symbol("delete_sweep"), score: -1 });
     }
 }
 
@@ -372,6 +396,11 @@ impl Launcher {
             items: Vec::new(),
             lines: Vec::new(),
             selected: 0,
+            colors: Vec::new(),
+            card_hot: None,
+            clear_hot: false,
+            clear_on: false,
+            clear_glow: Tween::still(0.0),
             windows: Vec::new(),
             fade: Tween::still(0.0),
             panel: Tween::still(0.0),
@@ -458,6 +487,12 @@ impl Launcher {
             if let Some(m) = me.bubble_at(x, y) {
                 let mode = me.0.borrow().mode;
                 me.set_mode(if mode == m { Mode::All } else { m });
+            } else if let Some(hit) = me.card_hit(x, y) {
+                me.click_card(hit);
+            } else if me.clear_hit(x, y) {
+                me.0.borrow_mut().lines.clear();
+                me.close();
+                crate::clip::clear();
             } else if let Some(line) = me.line_at(x, y) {
                 me.activate(Some(line));
             } else if !me.inside(x, y) {
@@ -477,6 +512,29 @@ impl Launcher {
             let me = Launcher(s);
             let bubble = me.bubble_at(x, y).and_then(|m| MODES.iter().position(|e| e.0 == m));
             me.hover_bubble(bubble);
+            let (card, clear) = (me.card_hit(x, y), me.clear_hit(x, y));
+            let redraw = {
+                let mut s = me.0.borrow_mut();
+                let changed = s.card_hot != card || s.clear_hot != clear;
+                if s.clear_hot != clear {
+                    // Same hover as the mode bubbles beside the search bar.
+                    let now = glib::monotonic_time();
+                    if clear {
+                        s.clear_glow.go(1.0, now, 160, motion::STANDARD);
+                    } else {
+                        s.clear_glow.go(0.0, now, 240, motion::STANDARD);
+                    }
+                }
+                s.card_hot = card;
+                s.clear_hot = clear;
+                changed
+            };
+            if redraw {
+                me.kick();
+                let canvas = me.0.borrow().canvas.clone();
+                canvas.set_cursor_from_name(matches!(card, Some((_, CardHit::Format(_)))).then_some("pointer").or(clear.then_some("pointer")));
+                canvas.queue_draw();
+            }
             let moved = last.replace(Some((x, y))).is_none_or(|(px, py)| (px - x).abs() + (py - y).abs() > 0.5);
             if !moved {
                 return;
@@ -496,6 +554,14 @@ impl Launcher {
         let weak = Rc::downgrade(&self.0);
         hover.connect_leave(move |_| {
             if let Some(s) = weak.upgrade() {
+                {
+                    let mut st = s.borrow_mut();
+                    st.card_hot = None;
+                    if st.clear_hot {
+                        st.clear_glow.go(0.0, glib::monotonic_time(), 240, motion::STANDARD);
+                    }
+                    st.clear_hot = false;
+                }
                 Launcher(s).hover_bubble(None);
             }
         });
@@ -664,7 +730,7 @@ impl Launcher {
 
     fn step_selection(&self, by: i32) {
         let mut s = self.0.borrow_mut();
-        let picks: Vec<usize> = s.lines.iter().enumerate().filter(|(_, l)| matches!(l, Line::Item(_))).map(|(i, _)| i).collect();
+        let picks: Vec<usize> = s.lines.iter().enumerate().filter(|(_, l)| l.pickable()).map(|(i, _)| i).collect();
         if picks.is_empty() {
             return;
         }
@@ -710,7 +776,7 @@ impl Launcher {
         for (i, line) in s.lines.iter().enumerate() {
             let h = line.height();
             if y >= top && y < top + h {
-                return matches!(line, Line::Item(_)).then_some(i);
+                return line.pickable().then_some(i);
             }
             top += h;
         }
@@ -840,8 +906,9 @@ impl Launcher {
                 items.push(Item { kind: Kind::Web, act: Act::Open(url), title: query.clone(), detail: "Search the web".into(), look: Look::Symbol("travel_explore"), score: top });
             }
         }
+        let mut colors = Vec::new();
         if mode == Mode::Clip {
-            clip_items(&mut items, &query);
+            clip_items(&mut items, &mut colors, &query);
         } else if !query.is_empty() && matches!(mode, Mode::All | Mode::Calc) {
             if let Some(c) = kit::color::parse(&query) {
                 color_items(&mut items, c, &query, 2100);
@@ -872,6 +939,18 @@ impl Launcher {
                 let cap = if k == Kind::Scope { 4 } else { 6 };
                 lines.extend(items.iter().enumerate().skip(1).filter(|(_, it)| it.kind == k).take(cap).map(|(i, _)| Line::Item(i)));
             }
+        } else if mode == Mode::Clip {
+            // Each color takes its own row, at its place among the other copies.
+            let n = items.len().min(200);
+            let mut next = colors.iter().enumerate().peekable();
+            for i in 0..=n {
+                while let Some((c, _)) = next.next_if(|(_, (at, _))| *at <= i) {
+                    lines.push(Line::Palette(c));
+                }
+                if i < n {
+                    lines.push(Line::Item(i));
+                }
+            }
         } else {
             lines.extend((0..items.len().min(200)).map(Line::Item));
         }
@@ -887,7 +966,10 @@ impl Launcher {
         s.shown = mode;
         s.items = items;
         s.lines = lines;
-        s.selected = s.lines.iter().position(|l| matches!(l, Line::Item(_))).unwrap_or(0);
+        s.colors = colors.into_iter().map(|(_, c)| c).collect();
+        s.card_hot = None;
+        s.clear_on = mode == Mode::Clip && q.is_empty() && !crate::clip::history().is_empty();
+        s.selected = s.lines.iter().position(Line::pickable).unwrap_or(0);
         let now = glib::monotonic_time();
         let height = if s.lines.is_empty() { 0.0 } else { (s.content() + 2.0 * INSET).min(MAX_PANEL) };
         let first = s.panel.target() < 1.0;
@@ -959,10 +1041,70 @@ impl Launcher {
         }
     }
 
+    fn copy_and_close(&self, text: &str) {
+        self.0.borrow_mut().lines.clear();
+        self.close();
+        if let Some(display) = gdk::Display::default() {
+            display.clipboard().set_text(text);
+        }
+    }
+
+    /// The color row under the pointer, and which part of it.
+    fn card_hit(&self, x: f64, y: f64) -> Option<(usize, CardHit)> {
+        let s = self.0.borrow();
+        if !s.open || y < PANEL_TOP || y > PANEL_TOP + s.panel.target() {
+            return None;
+        }
+        let mut top = PANEL_TOP + INSET - s.scroll.target();
+        for line in &s.lines {
+            if let Line::Palette(c) = line {
+                let g = CardGeometry::new(top);
+                if g.card.contains(x, y) {
+                    let part = g.formats.iter().position(|r| r.contains(x, y)).map_or(CardHit::Body, CardHit::Format);
+                    return Some((*c, part));
+                }
+            }
+            top += line.height();
+        }
+        None
+    }
+
+    fn clear_center(panel: f64) -> (f64, f64) {
+        (PAD + CLEAR / 2.0, PANEL_TOP + panel + GAP + CLEAR / 2.0)
+    }
+
+    fn clear_hit(&self, x: f64, y: f64) -> bool {
+        let s = self.0.borrow();
+        let (cx, cy) = Self::clear_center(s.panel.target());
+        s.open && s.clear_on && (x - cx).hypot(y - cy) <= CLEAR / 2.0 + 2.0
+    }
+
+    /// A click on a color row copies the color, or the format whose chip was hit.
+    fn click_card(&self, (at, hit): (usize, CardHit)) {
+        let text = {
+            let s = self.0.borrow();
+            let Some(c) = s.colors.get(at) else { return };
+            match hit {
+                CardHit::Format(i) => c.color.formats().get(i).map(|f| f.1.clone()),
+                CardHit::Body => Some(c.text.clone()),
+            }
+        };
+        if let Some(t) = text {
+            self.copy_and_close(&t);
+        }
+    }
+
     fn activate(&self, line: Option<usize>) {
         let (act, app) = {
             let mut s = self.0.borrow_mut();
             let at = line.unwrap_or(s.selected);
+            if let Some(Line::Palette(c)) = s.lines.get(at) {
+                let Some(c) = s.colors.get(*c) else { return };
+                let text = c.text.clone();
+                drop(s);
+                self.copy_and_close(&text);
+                return;
+            }
             let Some(Line::Item(i)) = s.lines.get(at) else { return };
             let i = *i;
             if i >= s.items.len() {
@@ -1113,8 +1255,11 @@ impl State {
         let lead = if header { HEAD } else { 0.0 };
         if top - lead < to {
             to = top - lead;
-        } else if top + ROW > to + view {
-            to = top + ROW - view;
+        } else {
+            let h = self.lines.get(self.selected).map_or(ROW, Line::height);
+            if top + h > to + view {
+                to = top + h - view;
+            }
         }
         self.scroll.go(to.max(0.0), glib::monotonic_time(), 140, motion::STANDARD);
     }
@@ -1156,6 +1301,7 @@ impl State {
         }
         let moving = [&self.fade, &self.rise, &self.panel, &self.bar, &self.bubbles, &self.scroll, &self.tip].iter().any(|t| !t.settled(now))
             || self.glow.iter().any(|t| !t.settled(now))
+            || !self.clear_glow.settled(now)
             // The caret keeps breathing while Spotlight is open.
             || caret_on
             || self.app.palette_moving(now);
@@ -1246,6 +1392,16 @@ impl State {
             s.push_rounded_clip(&panel);
             self.draw_lines(s, &pal, now, height);
             s.pop();
+            if self.clear_on {
+                // Drawn like the mode bubbles: same size, shadow, hover growth and tint.
+                let (cx, cy) = Launcher::clear_center(height);
+                let glow = self.clear_glow.value(now).clamp(0.0, 1.0);
+                let grow = 1.5 * glow;
+                let (x, y) = (cx - BUBBLE / 2.0, cy - BUBBLE / 2.0);
+                shadow(s, &rounded(x, y, BUBBLE, BUBBLE, BUBBLE / 2.0));
+                face(s, &rounded(x - grow, y - grow, BUBBLE + 2.0 * grow, BUBBLE + 2.0 * grow, BUBBLE / 2.0 + grow), pal.ink_main.mix(pal.body, 0.09 * glow));
+                draw::icon(s, &canvas, &cfg, "delete_sweep", 24.0, false, pal.ink_main.mix(pal.ink_sec, glow), cx, cy);
+            }
         }
         let tip = self.tip.value(now).clamp(0.0, 1.0) * shown;
         if tip > 0.01 {
@@ -1267,6 +1423,49 @@ impl State {
         s.pop();
     }
 
+    fn draw_card(&mut self, s: &gtk::Snapshot, pal: &Palette, top: f64, at: usize, on: bool) {
+        let cfg = self.app.cfg.clone();
+        let canvas = self.canvas.clone();
+        let Some(c) = self.colors.get(at).cloned() else { return };
+        let g = CardGeometry::new(top);
+        let hot = self.card_hot.filter(|(i, _)| *i == at).map(|(_, h)| h);
+        // Selected like any other row: an accent fill with its own ink on top.
+        if on {
+            let row = rounded(g.card.x, g.card.y, g.card.w, g.card.h, PANEL_R - INSET);
+            s.push_rounded_clip(&row);
+            s.append_color(&pal.accent.rgba(), row.bounds());
+            s.pop();
+        }
+        let (title_ink, detail_ink) = if on { (pal.on_accent, pal.on_accent.mix(pal.accent, 0.72)) } else { (pal.ink_main, pal.ink_meta) };
+        let chip_ink = if on { pal.on_accent } else { pal.ink_main };
+        let sw = rounded(g.swatch.x, g.swatch.y, g.swatch.w, g.swatch.h, 8.0);
+        s.push_rounded_clip(&sw);
+        s.append_color(&gdk::RGBA::new(c.color.r as f32, c.color.g as f32, c.color.b as f32, c.color.a as f32), sw.bounds());
+        s.pop();
+        let edge = if on { pal.on_accent.alpha(0.3).rgba() } else { gdk::RGBA::new(1.0, 1.0, 1.0, 0.22) };
+        s.append_border(&sw, &[1.0; 4], &[edge, edge, edge, edge]);
+        let mid = g.card.y + g.card.h / 2.0;
+        let x = PAD + INSET + 52.0;
+        let text_w = g.formats[0].x - x - 12.0;
+        draw::text(s, &canvas, &cfg, &c.color.hex(), 15.0, Face::Text(if on { 560 } else { 480 }), title_ink, x, mid - 9.0, text_w, pango::Alignment::Left);
+        // The second line shows what a chip would copy, else what was copied and when.
+        let formats = c.color.formats();
+        let line = match hot {
+            Some(CardHit::Format(i)) => formats.get(i).map(|f| f.1.clone()).unwrap_or_default(),
+            _ => format!("{} · {}", c.text, ago(c.at)),
+        };
+        draw::text(s, &canvas, &cfg, &line, 12.5, Face::Text(420), detail_ink, x, mid + 10.0, text_w, pango::Alignment::Left);
+        for (i, r) in g.formats.iter().enumerate() {
+            let lit = hot == Some(CardHit::Format(i));
+            let chip = rounded(r.x, r.y, r.w, r.h, r.h / 2.0);
+            s.push_rounded_clip(&chip);
+            s.append_color(&chip_ink.alpha(if lit { 0.2 } else { 0.08 }).rgba(), chip.bounds());
+            s.pop();
+            let label = formats.get(i).map(|f| f.0).unwrap_or("");
+            draw::text(s, &canvas, &cfg, label, 12.0, Face::Text(520), chip_ink, r.x, r.y + r.h / 2.0, r.w, pango::Alignment::Center);
+        }
+    }
+
     fn draw_lines(&mut self, s: &gtk::Snapshot, pal: &Palette, now: i64, height: f64) {
         let cfg = self.app.cfg.clone();
         let canvas = self.canvas.clone();
@@ -1279,6 +1478,7 @@ impl State {
                 continue;
             }
             match self.lines[li] {
+                Line::Palette(c) => self.draw_card(s, pal, top, c, li == self.selected),
                 Line::Head(ref title) => {
                     let title = title.clone();
                     draw::text(s, &canvas, &cfg, &title, 12.5, Face::Text(560), pal.ink_meta, PAD + INSET + 14.0, top + HEAD / 2.0 + 3.0, WIDTH - 60.0, pango::Alignment::Left);
@@ -1347,6 +1547,49 @@ impl State {
             }
             top += h;
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Area {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+impl Area {
+    fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
+}
+
+/// Where everything on a color row goes, shared by drawing and clicking.
+struct CardGeometry {
+    card: Area,
+    swatch: Area,
+    formats: Vec<Area>,
+}
+
+impl CardGeometry {
+    fn new(top: f64) -> Self {
+        let card = Area { x: PAD + INSET, y: top, w: WIDTH - 2.0 * INSET, h: CARD_H };
+        let mid = card.y + card.h / 2.0;
+        // The swatch sits where other rows keep their icon.
+        let swatch = Area { x: PAD + INSET + 12.0, y: mid - 14.0, w: 28.0, h: 28.0 };
+        // Format chips line up on the right, where other rows keep their detail.
+        let widths = [44.0, 44.0, 44.0, 44.0, 58.0, 56.0];
+        let total: f64 = widths.iter().sum::<f64>() + 6.0 * (widths.len() - 1) as f64;
+        let mut x = card.x + card.w - 12.0 - total;
+        let formats = widths
+            .iter()
+            .map(|w| {
+                let r = Area { x, y: mid - 12.0, w: *w, h: 24.0 };
+                x += w + 6.0;
+                r
+            })
+            .collect();
+        CardGeometry { card, swatch, formats }
     }
 }
 
