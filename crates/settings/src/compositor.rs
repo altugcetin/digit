@@ -65,6 +65,14 @@ pub fn build() -> gtk::Widget {
     slider(&win, "fit_screen", "Gaps at the screen edges", "", "hypr_gaps_out", (0.0, 48.0, 1.0), f("hypr_gaps_out", 8.0), 0);
     slider(&win, "border_style", "Border width", "", "hypr_border", (0.0, 6.0, 1.0), f("hypr_border", 2.0), 0);
     body.append(&win);
+
+    body.append(&ui::heading("Effects"));
+    let fx = ui::card();
+    toggle(&fx, "shadow", "Window shadows", "", "hypr_shadow", b("hypr_shadow", true));
+    choice(&fx, "blur_circular", "Shadow size", "", "hypr_shadow_size", &[("soft", "Soft"), ("medium", "Medium"), ("large", "Large")], &s("hypr_shadow_size", "medium"));
+    toggle(&fx, "blur_on", "Blur behind windows", "Frosts what's behind see-through windows; costs some GPU time", "hypr_blur", b("hypr_blur", false));
+    choice(&fx, "deblur", "Blur strength", "", "hypr_blur_strength", &[("light", "Light"), ("medium", "Medium"), ("strong", "Strong")], &s("hypr_blur_strength", "medium"));
+    body.append(&fx);
     scroll.upcast()
 }
 
@@ -97,6 +105,8 @@ fn option(key: &str) -> Option<&'static str> {
         "hypr_gaps_in" => "general:gaps_in",
         "hypr_gaps_out" => "general:gaps_out",
         "hypr_border" => "general:border_size",
+        "hypr_shadow" => "decoration:shadow:enabled",
+        "hypr_blur" => "decoration:blur:enabled",
         _ => return None,
     })
 }

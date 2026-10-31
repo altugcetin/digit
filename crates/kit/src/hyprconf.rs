@@ -311,6 +311,23 @@ fn compositor(mode: Mode) -> String {
     if let Some(v) = num("border", 2.0) {
         general.push(format!("border_size = {}", int(v)));
     }
+    let mut decoration = Vec::new();
+    if let Some(on) = flag("shadow", true) {
+        let range = match text("shadow_size", "medium").as_deref() {
+            Some("soft") => 8,
+            Some("large") => 24,
+            _ => 14,
+        };
+        decoration.push(format!("shadow = {{ enabled = {on}, range = {range}, render_power = 3, color = 0x66000000 }}"));
+    }
+    if let Some(on) = flag("blur", false) {
+        let (size, passes) = match text("blur_strength", "medium").as_deref() {
+            Some("light") => (4, 2),
+            Some("strong") => (12, 4),
+            _ => (8, 3),
+        };
+        decoration.push(format!("blur = {{ enabled = {on}, size = {size}, passes = {passes} }}"));
+    }
     let mut out = String::from("-- Settings > Compositor\n");
     let mut sections = Vec::new();
     if !input.is_empty() {
@@ -318,6 +335,9 @@ fn compositor(mode: Mode) -> String {
     }
     if !general.is_empty() {
         sections.push(format!("    general = {{\n{}\n    }},", general.iter().map(|l| format!("        {l},")).collect::<Vec<_>>().join("\n")));
+    }
+    if !decoration.is_empty() {
+        sections.push(format!("    decoration = {{\n{}\n    }},", decoration.iter().map(|l| format!("        {l},")).collect::<Vec<_>>().join("\n")));
     }
     if !sections.is_empty() {
         out.push_str(&format!("hl.config({{\n{}\n}})\n", sections.join("\n")));
