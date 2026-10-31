@@ -36,6 +36,7 @@ pub enum Act {
 pub enum Win {
     Close,
     Float,
+    Maximize,
     Fullscreen,
     Focus(Dir),
     Move(Dir),
@@ -140,7 +141,8 @@ pub fn defaults() -> Vec<Bind> {
         bind("terminal", "Windows", "Terminal", "SUPER + RETURN", Act::Terminal, n, true),
         bind("close", "Windows", "Close the window", "SUPER + Q", Act::Window(Win::Close), n, true),
         bind("float", "Windows", "Float or tile the window", "SUPER + V", Act::Window(Win::Float), n, true),
-        bind("fullscreen", "Windows", "Fullscreen", "SUPER + F", Act::Window(Win::Fullscreen), n, true),
+        bind("maximize", "Windows", "Maximize", "SUPER + F", Act::Window(Win::Maximize), n, true),
+        bind("fullscreen", "Windows", "Fullscreen", "SUPER + SHIFT + F", Act::Window(Win::Fullscreen), n, true),
         bind("drag", "Windows", "Move a window with the mouse", "SUPER + mouse:272", Act::Window(Win::Drag), MOUSE, true),
         bind("resize", "Windows", "Resize a window with the mouse", "SUPER + mouse:273", Act::Window(Win::Resize), MOUSE, true),
         bind("pin", "Windows", "Keep a floating window on every workspace", "SUPER + P", Act::Window(Win::Pin), n, true),
