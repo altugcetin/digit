@@ -98,8 +98,22 @@ fn action(b: &Bind) -> String {
             Win::Move(d) => format!("hl.dsp.window.move({{ direction = \"{}\" }})", d.name()),
             Win::Workspace(i) => format!("hl.dsp.focus({{ workspace = {i} }})"),
             Win::ToWorkspace(i) => format!("hl.dsp.window.move({{ workspace = {i} }})"),
+            Win::StepWorkspace(i) => format!("hl.dsp.focus({{ workspace = \"e{i:+}\" }})"),
             Win::Drag => "hl.dsp.window.drag()".into(),
             Win::Resize => "hl.dsp.window.resize()".into(),
+            Win::Grow(d) => {
+                let (x, y) = match d {
+                    keybinds::Dir::Left => (-40, 0),
+                    keybinds::Dir::Right => (40, 0),
+                    keybinds::Dir::Up => (0, -40),
+                    keybinds::Dir::Down => (0, 40),
+                };
+                format!("hl.dsp.window.resize({{ x = {x}, y = {y}, relative = true }})")
+            }
+            Win::Pin => "hl.dsp.window.pin()".into(),
+            Win::Group => "hl.dsp.group.toggle()".into(),
+            Win::Scratchpad => "hl.dsp.workspace.toggle_special(\"scratchpad\")".into(),
+            Win::ToScratchpad => "hl.dsp.window.move({ workspace = \"special:scratchpad\" })".into(),
         },
     }
 }
@@ -143,54 +157,161 @@ pub fn render_keybinds(binds: &[Bind], conflicts: &[(String, String)]) -> String
     out
 }
 
-const INIT: &str = "\
--- digit's part of the Hyprland config, loaded by require(\"digit\") in hyprland.lua.
--- digit writes every file in this folder; changes made here are replaced.
-require(\"digit.digit-autostart\")
-require(\"digit.digit-rules\")
-require(\"digit.digit-decorations\")
-require(\"digit.digit-workspaces\")
-require(\"digit.digit-monitors\")
-require(\"digit.digit-keybinds\")
-";
+/// The default files, kept as plain Lua in data/hypr. `{{name}}` marks a value filled in when
+/// the file is written.
+const INIT: &str = include_str!("../../../data/hypr/init.lua");
+const AUTOSTART: &str = include_str!("../../../data/hypr/digit-autostart.lua");
+const RULES: &str = include_str!("../../../data/hypr/digit-rules.lua");
+const BASE: &str = include_str!("../../../data/hypr/digit-base.lua");
+const DECORATIONS: &str = include_str!("../../../data/hypr/digit-decorations.lua");
+const WORKSPACES: &str = include_str!("../../../data/hypr/digit-workspaces.lua");
+const MONITORS: &str = include_str!("../../../data/hypr/digit-monitors.lua");
+const MAIN: &str = include_str!("../../../data/hypr/hyprland.lua");
+const BASE_MINIMAL: &str = include_str!("../../../data/hypr/minimal/digit-base.lua");
+const DECORATIONS_MINIMAL: &str = include_str!("../../../data/hypr/minimal/digit-decorations.lua");
 
-fn autostart() -> String {
-    format!(
-        "-- Starts digit with Hyprland. Written by digit.\nhl.on(\"hyprland.start\", function()\n    hl.exec_cmd({})\nend)\n",
-        lua_str(&bin().join("digit").display().to_string())
-    )
+fn fill(template: &str, values: &[(&str, &str)]) -> String {
+    let mut out = template.to_string();
+    for (k, v) in values {
+        out = out.replace(&format!("{{{{{k}}}}}"), v);
+    }
+    out
 }
 
-const RULES: &str = "\
--- Window and layer rules digit needs. Written by digit.
-hl.layer_rule({ name = \"digit-no-anim\", match = { namespace = \"^(digit|digit-wallpapers)$\" }, no_anim = true })
-";
+fn autostart() -> String {
+    fill(AUTOSTART, &[("digit", &lua_str(&bin().join("digit").display().to_string()))])
+}
 
-const DECORATIONS_FULL: &str = "\
--- Look and feel of windows. Written by digit; digit Settings will change it from here.
-hl.config({
-    general = {
-        gaps_in = 4,
-        gaps_out = 8,
-        border_size = 2,
-        layout = \"dwindle\",
-        col = { active_border = \"rgba(ffffff40)\", inactive_border = \"rgba(ffffff12)\" },
-    },
-    decoration = {
-        rounding = 14,
-        shadow = { enabled = true, range = 14, render_power = 3, color = 0x66000000 },
-        blur = { enabled = false },
-    },
-    animations = { enabled = true },
-    dwindle = { preserve_split = true },
-    input = { follow_mouse = 1 },
-    misc = { force_default_wallpaper = 0, disable_hyprland_logo = true },
-})
-";
+/// Corner radius for windows, following Settings > Desktop > Corners like the rest of digit.
+fn rounding() -> i64 {
+    let round = crate::prefs::number(&crate::prefs::read(), "ui_round", 1.0).clamp(0.1, 1.8);
+    (14.0 * round).round() as i64
+}
 
-const DECORATIONS_MINIMAL: &str = "-- Look and feel of windows. Your own config keeps deciding it in a minimal setup.\n";
-const WORKSPACES: &str = "-- Workspace rules from digit Settings, e.g. hl.workspace_rule({ workspace = \"1\", monitor = \"DP-1\" })\n";
-const MONITORS: &str = "-- Displays from digit Settings. Changes made there replace this file.\n";
+
+/// digit-base.lua: what a full setup needs to be usable on its own: input, layouts, gestures,
+/// environment. A minimal setup leaves all of it to the user's config.
+fn base(mode: Mode) -> String {
+    let template = if mode == Mode::Minimal { BASE_MINIMAL } else { BASE };
+    fill(template, &[("settings", &compositor(mode))])
+}
+
+/// Settings > Compositor, as Lua. A full setup writes every value, with digit's defaults for
+/// the ones never changed; a minimal one writes only what was changed, so the rest of the
+/// user's own config keeps deciding.
+fn compositor(mode: Mode) -> String {
+    let t = crate::prefs::read();
+    let full = mode == Mode::Full;
+    let pick = |key: &str| t.get(&format!("hypr_{key}")).cloned();
+    let text = |key: &str, def: &str| pick(key).and_then(|v| v.as_str().map(str::to_string)).or_else(|| full.then(|| def.to_string()));
+    let num = |key: &str, def: f64| pick(key).and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))).or_else(|| full.then_some(def));
+    let flag = |key: &str, def: bool| pick(key).and_then(|v| v.as_bool()).or_else(|| full.then_some(def));
+    let int = |v: f64| format!("{}", v.round() as i64);
+    let mut input = Vec::new();
+    let mut touch = Vec::new();
+    let mut general = Vec::new();
+    if let Some(v) = text("kb_layout", "us") {
+        input.push(format!("kb_layout = {}", lua_str(&v)));
+    }
+    if let Some(v) = text("kb_variant", "") {
+        input.push(format!("kb_variant = {}", lua_str(&v)));
+    }
+    let switch = text("layout_switch", "none");
+    let caps = text("caps", "normal");
+    if switch.is_some() || caps.is_some() {
+        // A minimal setup keeps the user's other options; only the part changed is replaced.
+        let mut opts: Vec<String> = if full {
+            Vec::new()
+        } else {
+            live_option("input:kb_options")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|o| !o.is_empty())
+                .filter(|o| !(caps.is_some() && (o.starts_with("caps:") || *o == "ctrl:nocaps")) && !(switch.is_some() && o.starts_with("grp:")))
+                .map(str::to_string)
+                .collect()
+        };
+        let caps = match caps.as_deref() {
+            Some("escape") => Some("caps:escape"),
+            Some("ctrl") => Some("ctrl:nocaps"),
+            Some("swapescape") => Some("caps:swapescape"),
+            _ => None,
+        };
+        let switch = match switch.as_deref() {
+            Some("alt_shift") => Some("grp:alt_shift_toggle"),
+            Some("ctrl_shift") => Some("grp:ctrl_shift_toggle"),
+            Some("win_space") => Some("grp:win_space_toggle"),
+            Some("caps") => Some("grp:caps_toggle"),
+            _ => None,
+        };
+        opts.extend(caps.into_iter().chain(switch).map(str::to_string));
+        input.push(format!("kb_options = {}", lua_str(&opts.join(","))));
+    }
+    if let Some(v) = num("repeat_delay", 300.0) {
+        input.push(format!("repeat_delay = {}", int(v)));
+    }
+    if let Some(v) = num("repeat_rate", 30.0) {
+        input.push(format!("repeat_rate = {}", int(v)));
+    }
+    if let Some(v) = num("sensitivity", 0.0) {
+        input.push(format!("sensitivity = {:.2}", v.clamp(-1.0, 1.0)));
+    }
+    if let Some(v) = text("accel", "adaptive") {
+        input.push(format!("accel_profile = {}", lua_str(&v)));
+    }
+    if let Some(v) = flag("mouse_natural", false) {
+        input.push(format!("natural_scroll = {v}"));
+    }
+    if let Some(v) = flag("follow_mouse", true) {
+        input.push(format!("follow_mouse = {}", if v { 1 } else { 0 }));
+    }
+    if let Some(v) = flag("touch_natural", true) {
+        touch.push(format!("natural_scroll = {v}"));
+    }
+    if let Some(v) = flag("tap", true) {
+        touch.push(format!("tap_to_click = {v}"));
+    }
+    if !touch.is_empty() {
+        input.push(format!("touchpad = {{ {} }}", touch.join(", ")));
+    }
+    if let Some(v) = text("tiling", "dwindle") {
+        general.push(format!("layout = {}", lua_str(&v)));
+    }
+    if let Some(v) = num("gaps_in", 4.0) {
+        general.push(format!("gaps_in = {}", int(v)));
+    }
+    if let Some(v) = num("gaps_out", 8.0) {
+        general.push(format!("gaps_out = {}", int(v)));
+    }
+    if let Some(v) = num("border", 2.0) {
+        general.push(format!("border_size = {}", int(v)));
+    }
+    let mut out = String::from("-- Settings > Compositor\n");
+    let mut sections = Vec::new();
+    if !input.is_empty() {
+        sections.push(format!("    input = {{\n{}\n    }},", input.iter().map(|l| format!("        {l},")).collect::<Vec<_>>().join("\n")));
+    }
+    if !general.is_empty() {
+        sections.push(format!("    general = {{\n{}\n    }},", general.iter().map(|l| format!("        {l},")).collect::<Vec<_>>().join("\n")));
+    }
+    if !sections.is_empty() {
+        out.push_str(&format!("hl.config({{\n{}\n}})\n", sections.join("\n")));
+    }
+    if flag("gesture", true) == Some(true) {
+        out.push_str("-- Three fingers sideways switch workspaces.\nhl.gesture({ fingers = 3, direction = \"horizontal\", action = \"workspace\" })\n");
+    }
+    out
+}
+
+/// digit-decorations.lua: gaps, borders, corners, shadows and motion of windows. The corner
+/// radius follows digit's Corners setting.
+fn decorations(mode: Mode) -> String {
+    if mode == Mode::Minimal {
+        return DECORATIONS_MINIMAL.into();
+    }
+    fill(DECORATIONS, &[("rounding", &rounding().to_string())])
+}
 
 fn write_if_changed(path: &Path, body: &str) -> std::io::Result<bool> {
     if std::fs::read_to_string(path).is_ok_and(|old| old == body) {
@@ -205,8 +326,8 @@ fn write_if_changed(path: &Path, body: &str) -> std::io::Result<bool> {
     Ok(true)
 }
 
-/// Rewrites digit's folder from digit's settings. Files Settings owns (displays, workspaces,
-/// looks) are only created when missing. Returns whether anything changed.
+/// Rewrites digit's folder from digit's settings. Displays and workspaces, which Settings
+/// writes itself, are only created when missing. Returns whether anything changed.
 pub fn sync() -> Result<bool, String> {
     let Some(mode) = mode() else { return Ok(false) };
     let d = dir();
@@ -218,8 +339,9 @@ pub fn sync() -> Result<bool, String> {
     changed |= write_if_changed(&d.join("digit-autostart.lua"), &autostart()).map_err(e)?;
     changed |= write_if_changed(&d.join("digit-rules.lua"), RULES).map_err(e)?;
     changed |= write_if_changed(&d.join("digit-keybinds.lua"), &render_keybinds(&binds, &conflicts)).map_err(e)?;
+    changed |= write_if_changed(&d.join("digit-base.lua"), &base(mode)).map_err(e)?;
+    changed |= write_if_changed(&d.join("digit-decorations.lua"), &decorations(mode)).map_err(e)?;
     for (name, body) in [
-        ("digit-decorations.lua", if mode == Mode::Full { DECORATIONS_FULL } else { DECORATIONS_MINIMAL }),
         ("digit-workspaces.lua", WORKSPACES),
         ("digit-monitors.lua", MONITORS),
     ] {
@@ -247,25 +369,12 @@ fn run(argv: &[&str]) -> Option<String> {
     std::process::Command::new(argv[0]).args(&argv[1..]).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
-/// The keyboard layout Hyprland runs with now, so a full setup doesn't take it away.
-fn current_input() -> String {
-    let opt = |name: &str| {
-        run(&["hyprctl", "-j", "getoption", name])
-            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-            .and_then(|v| v.get("str").and_then(|s| s.as_str()).map(str::to_string))
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty() && s != "[[EMPTY]]")
-    };
-    let mut fields = Vec::new();
-    for (key, name) in [("kb_layout", "input:kb_layout"), ("kb_variant", "input:kb_variant"), ("kb_options", "input:kb_options")] {
-        if let Some(v) = opt(name) {
-            fields.push(format!("        {key} = {},", lua_str(&v)));
-        }
-    }
-    if fields.is_empty() {
-        return String::new();
-    }
-    format!("hl.config({{\n    input = {{\n{}\n    }},\n}})\n", fields.join("\n"))
+/// A text option as Hyprland runs it now.
+fn live_option(name: &str) -> Option<String> {
+    run(&["hyprctl", "-j", "getoption", name])
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("str").and_then(|s| s.as_str()).map(str::to_string))
+        .filter(|s| s != "[[EMPTY]]")
 }
 
 /// The displays as Hyprland runs them now, so a full setup keeps the screen arrangement.
@@ -320,18 +429,12 @@ pub fn setup(mode: Mode) -> Result<String, String> {
                 copy_dir(&hypr, &backup).map_err(|e| format!("Could not back up {}: {e}", hypr.display()))?;
                 kept = Some(backup);
             }
-            let input = current_input();
             let monitors = current_monitors();
             if hypr.exists() {
                 std::fs::remove_dir_all(&hypr).map_err(|e| format!("Could not clear {}: {e}", hypr.display()))?;
             }
             std::fs::create_dir_all(dir()).map_err(|e| e.to_string())?;
-            let body = format!(
-                "-- Hyprland config, set up by digit.\n\
-                 -- digit keeps its part in ~/.config/hypr/digit and never edits this file again.\n\
-                 -- Add your own settings below; they load after digit's and can change anything.\n\n\
-                 {REQUIRE}\n\n-- Your settings:\n{input}"
-            );
+            let body = MAIN.to_string();
             std::fs::write(&main, body).map_err(|e| e.to_string())?;
             if let Some(m) = monitors {
                 std::fs::write(dir().join("digit-monitors.lua"), m).map_err(|e| e.to_string())?;
