@@ -104,7 +104,7 @@ fn action(b: &Bind) -> String {
         Act::Window(w) => match w {
             Win::Close => "hl.dsp.window.close()".into(),
             Win::Float => "hl.dsp.window.float({ action = \"toggle\" })".into(),
-            Win::Maximize => "hl.dsp.window.fullscreen({ mode = 1 })".into(),
+            Win::Maximize => "per_layout({ default = hl.dsp.window.fullscreen({ mode = 1 }), scrolling = column_maximize })".into(),
             Win::Fullscreen => "hl.dsp.window.fullscreen({ mode = 0 })".into(),
             Win::Focus(d) => scrolling(*d, format!("hl.dsp.focus({{ direction = \"{}\" }})", d.name()), "focus"),
             Win::Move(d) => scrolling(*d, format!("hl.dsp.window.move({{ direction = \"{}\" }})", d.name()), "swapcol"),
@@ -145,7 +145,10 @@ pub fn render_keybinds(binds: &[Bind], conflicts: &[(String, String)]) -> String
          local function bind(keys, action, opts)\n    hl.unbind(keys)\n    hl.bind(keys, action, opts)\nend\n\n\
          -- Picks the action for the layout of the workspace in front when the keys are pressed,\n\
          -- so one shortcut can mean different things in dwindle and scrolling.\n\
-         local function per_layout(actions)\n    return function()\n        local ws = hl.get_active_special_workspace() or hl.get_active_workspace()\n        local action = ws and actions[ws.tiled_layout] or actions.default\n        if action then\n            hl.dispatch(action)\n        end\n    end\nend\n\n\
+         local function per_layout(actions)\n    return function()\n        local ws = hl.get_active_special_workspace() or hl.get_active_workspace()\n        local action = ws and actions[ws.tiled_layout] or actions.default\n        if type(action) == \"function\" then\n            action()\n        elseif action then\n            hl.dispatch(action)\n        end\n    end\nend\n\n\
+         -- In scrolling, maximize widens the column to the whole screen and back to the width it had.\n\
+         local widths = {}\n\
+         local function column_maximize()\n    local w = hl.get_active_window()\n    local m = hl.get_active_monitor()\n    if not w or not m then\n        return\n    end\n    local share = w.size.x / (m.width / m.scale)\n    if share < 0.9 then\n        -- Remember the width to the nearest 5%, as the window itself is a little narrower than its column.\n        widths[w.address] = string.format(\"%.2f\", math.floor(share * 20 + 0.5) / 20)\n        hl.dispatch(hl.dsp.layout(\"colresize 1.0\"))\n    else\n        local back = widths[w.address] or tostring(hl.get_config(\"scrolling.column_width\") or 0.5)\n        widths[w.address] = nil\n        hl.dispatch(hl.dsp.layout(\"colresize \" .. back))\n    end\nend\n\n\
          -- Settings lets keys through to itself while you record a new shortcut; Escape leaves.\n\
          hl.define_submap(\"digit-capture\", function()\n    hl.bind(\"ESCAPE\", hl.dsp.submap(\"reset\"))\nend)\n\n",
     );
