@@ -373,6 +373,10 @@ fn write_if_changed(path: &Path, body: &str) -> std::io::Result<bool> {
 /// Rewrites digit's folder from digit's settings. Displays and workspaces, which Settings
 /// writes itself, are only created when missing. Returns whether anything changed.
 pub fn sync() -> Result<bool, String> {
+    // One change can save two settings at once (blur on + its strength), each starting a
+    // sync on its own thread; they must not write the same files at the same time.
+    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = WRITING.lock().unwrap_or_else(|e| e.into_inner());
     let Some(mode) = mode() else { return Ok(false) };
     let d = dir();
     let e = |e: std::io::Error| format!("Could not write {}: {e}", d.display());

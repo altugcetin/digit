@@ -78,7 +78,7 @@ pub(crate) fn choice(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &
 const CORNERS: [(f64, &str); 4] = [(0.15, "Square"), (0.55, "Subtle"), (1.0, "Rounded"), (1.6, "Round")];
 
 /// A row followed by a strip of picture tiles, one per option; returns the whole block.
-fn tiles(card: &gtk::Box, icon: &str, title: &str, sub: &str, items: Vec<(&str, gtk::Widget)>, at: usize, pick: impl Fn(usize) + 'static) -> gtk::Box {
+pub(crate) fn tiles(card: &gtk::Box, icon: &str, title: &str, sub: &str, items: Vec<(&str, gtk::Widget)>, at: usize, pick: impl Fn(usize) + 'static) -> gtk::Box {
     let block = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let (row, _) = ui::row(Some(icon), title, sub);
     block.append(&row);
