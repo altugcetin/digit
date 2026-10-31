@@ -31,6 +31,8 @@ const FIELD_X: f64 = PAD + 54.0;
 const NARROW: f64 = WIDTH - MODES.len() as f64 * (BUBBLE + BUBBLE_GAP);
 const SETTLE: motion::Curve = motion::Curve::new(0.16, 1.0, 0.3, 1.0);
 const LEAVE: motion::Curve = motion::Curve::new(0.4, 0.0, 0.9, 0.6);
+/// How the drawn caret glides to its new spot, quick to start and soft to land.
+const CARET: motion::Curve = motion::Curve::new(0.2, 0.0, 0.0, 1.0);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -171,6 +173,10 @@ struct State {
     hovered: Option<usize>,
     tip: Tween,
     tip_at: usize,
+    /// The drawn caret's position, and when it last moved (it stays solid while typing).
+    caret: Tween,
+    caret_moved: i64,
+    caret_shown: bool,
     tip_wait: u64,
     field_w: i32,
     icons: HashMap<String, gtk::IconPaintable>,
@@ -376,6 +382,9 @@ impl Launcher {
             hovered: None,
             tip: Tween::still(0.0),
             tip_at: 0,
+            caret: Tween::still(0.0),
+            caret_moved: 0,
+            caret_shown: false,
             tip_wait: 0,
             field_w: 0,
             icons: HashMap::new(),
@@ -571,6 +580,7 @@ impl Launcher {
             s.fade.go(0.0, now, 200, motion::STANDARD);
             s.rise.go(0.0, now, 240, LEAVE);
             s.window.set_keyboard_mode(KeyboardMode::None);
+            s.caret_shown = false;
             if let Some(scrim) = s.scrim.take() {
                 scrim.destroy();
             }
@@ -637,13 +647,15 @@ impl Launcher {
     fn style(&self) {
         let s = self.0.borrow();
         let pal = s.app.palette.get();
+        // With the smooth caret on, GTK's own caret hides and the launcher draws one that glides.
+        let caret = if s.app.prefs.borrow().smooth_caret { "transparent".to_string() } else { draw::css(pal.accent) };
         s.css.load_from_string(&format!(
             "text.digit-field {{ background: none; border: none; box-shadow: none; padding: 0; min-height: 34px; font-family: \"{}\"; font-size: 22px; font-weight: 420; color: {}; caret-color: {}; }}
              text.digit-field > placeholder {{ color: {}; }}
              text.digit-field > selection {{ background-color: {}; color: {}; }}",
             s.app.cfg.font,
             draw::css(pal.ink_main),
-            draw::css(pal.accent),
+            caret,
             draw::css(pal.ink_meta),
             draw::css(pal.accent.alpha(0.32)),
             draw::css(pal.ink_main),
@@ -1118,6 +1130,23 @@ impl State {
             self.field.set_size_request(want, 34);
             self.field_w = want;
         }
+        let caret_on = self.open && self.app.prefs.borrow().smooth_caret;
+        if caret_on {
+            let text = self.field.text();
+            let at = self.field.position().max(0) as usize;
+            let before: String = text.chars().take(at).collect();
+            let w = self.field.create_pango_layout(Some(&before)).pixel_size().0 as f64;
+            // Long text scrolls inside the field; the caret then rides its right edge.
+            let x = FIELD_X + w.min((self.field_w as f64 - 2.0).max(0.0));
+            if !self.caret_shown {
+                self.caret = Tween::still(x);
+                self.caret_shown = true;
+                self.caret_moved = now;
+            } else if (x - self.caret.target()).abs() > 0.1 {
+                self.caret.go(x, now, 110, CARET);
+                self.caret_moved = now;
+            }
+        }
         let rect = if self.open { (0, 0, SURFACE_W as i32, SURFACE_H as i32) } else { (0, 0, 1, 1) };
         if rect != self.region {
             if let Some(surface) = self.window.surface() {
@@ -1127,6 +1156,8 @@ impl State {
         }
         let moving = [&self.fade, &self.rise, &self.panel, &self.bar, &self.bubbles, &self.scroll, &self.tip].iter().any(|t| !t.settled(now))
             || self.glow.iter().any(|t| !t.settled(now))
+            // The caret keeps breathing while Spotlight is open.
+            || caret_on
             || self.app.palette_moving(now);
         if !moving && !self.open && self.window.is_visible() {
             let window = self.window.clone();
@@ -1171,6 +1202,16 @@ impl State {
         match MODES.iter().find(|m| m.0 == self.shown) {
             Some(m) => draw::icon(s, &canvas, &cfg, m.1, 24.0, true, pal.accent, PAD + 30.0, mid),
             None => draw::icon(s, &canvas, &cfg, "search", 24.0, false, pal.ink_meta, PAD + 30.0, mid),
+        }
+        if self.caret_shown && self.open && self.field.has_focus() {
+            // Solid right after a move, then a slow fade in and out like VS Code's smooth blink.
+            let idle = (now - self.caret_moved) as f64 / 1e6 - 0.5;
+            let alpha = if idle <= 0.0 { 1.0 } else { 0.5 + 0.5 * (idle * std::f64::consts::TAU / 1.1).cos() };
+            let x = self.caret.value(now);
+            let h = 26.0;
+            s.push_rounded_clip(&rounded(x - 1.0, mid - h / 2.0, 2.0, h, 1.0));
+            s.append_color(&pal.accent.alpha(alpha.clamp(0.0, 1.0)).rgba(), &graphene::Rect::new((x - 1.0) as f32, (mid - h / 2.0) as f32, 2.0, h as f32));
+            s.pop();
         }
         let shown = self.bubbles.value(now).clamp(0.0, 1.0);
         if shown > 0.01 {
