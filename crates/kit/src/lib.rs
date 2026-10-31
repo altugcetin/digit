@@ -10,6 +10,7 @@ pub mod palette;
 pub mod pixel;
 pub mod pk;
 pub mod prefs;
+pub mod scroll;
 pub mod search;
 pub mod send;
 pub mod shape;

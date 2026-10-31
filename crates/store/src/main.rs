@@ -493,6 +493,7 @@ fn target(arg: &str) -> Page {
 
 fn build(app: &gtk::Application) -> Rc<Store> {
     let window = gtk::ApplicationWindow::builder().application(app).title("Store").default_width(1240).default_height(820).build();
+    kit::scroll::smooth(&window);
     window.set_decorated(false);
     window.add_css_class("digit-settings");
     let (head, back, tabs, search) = header(&window);

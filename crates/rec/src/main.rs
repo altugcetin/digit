@@ -113,6 +113,7 @@ fn shortcut(card: &gtk::Box, icon: &str, title: &str, command: &str) {
 
 fn build(app: &gtk::Application) -> gtk::ApplicationWindow {
     let window = gtk::ApplicationWindow::builder().application(app).title("Recorder Settings").default_width(640).default_height(780).build();
+    kit::scroll::smooth(&window);
     window.set_decorated(false);
     window.add_css_class("digit-settings");
     let col = gtk::Box::new(gtk::Orientation::Vertical, 0);
