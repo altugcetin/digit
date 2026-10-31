@@ -59,7 +59,6 @@ struct Menu {
     hover: Option<usize>,
     width: f64,
     fade: Tween,
-    seen: bool,
     limit: f64,
     scroll: f64,
 }
@@ -70,6 +69,8 @@ thread_local! {
     static OPEN: RefCell<Option<Rc<RefCell<Menu>>>> = const { RefCell::new(None) };
     static NEXT: RefCell<Option<Hook>> = const { RefCell::new(None) };
     static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    /// Catches a click beside the open menu, which closes it.
+    static SCRIM: RefCell<Option<gtk::Window>> = const { RefCell::new(None) };
 }
 
 pub fn then(f: impl FnOnce() + 'static) {
@@ -91,6 +92,9 @@ pub fn is_open() -> bool {
 }
 
 pub fn close() {
+    if let Some(s) = SCRIM.with(|s| s.borrow_mut().take()) {
+        s.destroy();
+    }
     let Some(m) = OPEN.with(|o| o.borrow_mut().take()) else { return };
     let window = m.borrow().window.clone();
     glib::idle_add_local_once(move || window.destroy());
@@ -201,11 +205,19 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, x: f64, y: f64, title:
     window.set_layer(Layer::Overlay);
     window.set_namespace(Some("digit-menu"));
     window.set_exclusive_zone(-1);
-    window.set_keyboard_mode(KeyboardMode::OnDemand);
+    // The keyboard stays with the menu while it is open, so focus-follows-mouse can't move
+    // focus to a window under the pointer on the way to the menu; a click beside it closes it.
+    window.set_keyboard_mode(KeyboardMode::Exclusive);
     window.set_monitor(monitor.as_ref());
     window.add_css_class("digit");
     window.set_anchor(Edge::Top, true);
     window.set_anchor(Edge::Left, true);
+    let scrim = crate::paint::scrim(monitor.as_ref(), close);
+    // A menu from the menu bar leaves the bar uncovered, so moving to the next menu still works.
+    if y < 80.0 {
+        scrim.set_margin(Edge::Top, y.max(0.0) as i32);
+    }
+    SCRIM.with(|s| *s.borrow_mut() = Some(scrim));
     let paint = Paint::new(1, 1);
     let mut width: f64 = 200.0;
     for r in &rows {
@@ -221,7 +233,7 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, x: f64, y: f64, title:
     let screen_w = monitor.as_ref().map(|m| m.geometry().width() as f64).unwrap_or(1920.0);
     let screen_h = monitor.as_ref().map(|m| m.geometry().height() as f64).unwrap_or(1080.0);
     let limit = (screen_h - y - 16.0).max(160.0);
-    let menu = Rc::new(RefCell::new(Menu { app: app.clone(), window: window.clone(), paint: paint.clone(), title: title.to_string(), rows, hover: None, width, fade, seen: false, limit, scroll: 0.0 }));
+    let menu = Rc::new(RefCell::new(Menu { app: app.clone(), window: window.clone(), paint: paint.clone(), title: title.to_string(), rows, hover: None, width, fade, limit, scroll: 0.0 }));
     let h = menu.borrow().shown();
     window.set_margin(Edge::Left, x.clamp(6.0, (screen_w - width - 6.0).max(6.0)) as i32);
     window.set_margin(Edge::Top, y as i32);
@@ -322,17 +334,6 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, x: f64, y: f64, title:
         glib::Propagation::Stop
     });
     window.add_controller(keys);
-    let weak = Rc::downgrade(&menu);
-    window.connect_is_active_notify(move |w| {
-        let Some(m) = weak.upgrade() else { return };
-        let Ok(mut mm) = m.try_borrow_mut() else { return };
-        if w.is_active() {
-            mm.seen = true;
-        } else if mm.seen {
-            drop(mm);
-            glib::idle_add_local_once(close);
-        }
-    });
     OPEN.with(|o| *o.borrow_mut() = Some(menu.clone()));
     HOOK.with(|h| *h.borrow_mut() = hook);
     window.present();
