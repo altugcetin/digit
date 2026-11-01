@@ -192,6 +192,10 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
                     crate::layouts::toggle(app);
                     "ok".into()
                 }
+                "workspace-layout" => {
+                    crate::layouts::workspace_next(app);
+                    "ok".into()
+                }
                 "snap-max" | "snap-left" | "snap-right" | "snap-restore" => {
                     crate::free::snap(app, &action[5..]);
                     "ok".into()
