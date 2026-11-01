@@ -368,8 +368,8 @@ fn free_windows() -> bool {
 
 fn set_windows(free: bool) {
     // digit's niri rules include this file, so writing it is enough.
-    if kit::niriconf::mode().is_none() {
-        ui::fail("Set digit up on niri first (Full or Minimal, above)");
+    if !kit::niriconf::installed() {
+        ui::fail("Set digit up on niri first, above");
         return;
     }
     let file = niri_dir().join("digit-windows.kdl");
@@ -400,7 +400,7 @@ pub fn sections(page: &str) -> &'static [Section] {
         "dock" => &[dock],
         "notch" => &[notch, menu_bar, panels, screen_edges],
         "desktop" => &[desktop, weather],
-        "spotlight" => &[search, clipboard],
+        "spotlight" => &[search, scopes, clipboard],
         "compositor" => &[setup],
         "displays" => &[night_light],
         "power" => &[power],
@@ -427,6 +427,24 @@ pub fn build(page: &str, title: &str, lead: &str) -> gtk::Widget {
         }
     }
     scroll.upcast()
+}
+
+/// The keys a shortcut is on now (Settings > Keyboard), or None when it is off.
+fn keys(id: &str) -> Option<String> {
+    kit::keybinds::shown(id)
+}
+
+/// A shortcut's keys as a badge that opens it in Settings > Keyboard.
+pub(crate) fn shortcut(id: &'static str) -> gtk::Button {
+    let b = ui::button(&keys(id).unwrap_or_else(|| "Off".into()), "");
+    b.add_css_class("keycap");
+    b.set_valign(gtk::Align::Center);
+    b.set_tooltip_text(Some("Change in Keyboard"));
+    b.connect_clicked(move |_| {
+        let label = kit::keybinds::all().into_iter().find(|b| b.id == id).map(|b| b.label).unwrap_or_default();
+        crate::show(&format!("keyboard/{}", crate::search::slug(&label)));
+    });
+    b
 }
 
 fn section(body: &gtk::Box, title: &str) -> gtk::Box {
@@ -492,7 +510,8 @@ fn effects(body: &gtk::Box, t: &toml::Table) {
 
 fn dock(body: &gtk::Box, t: &toml::Table) {
     let dock = section(body, "Dock");
-    choice(&dock, "dock_to_bottom", "Visibility", "Alt+D shows or hides it at any time", "dock_mode", &[("on", "Always shown"), ("autohide", "Auto-hide"), ("smart", "Hide when windows are open"), ("off", "Off")], &prefs::get_str(&t, "dock_mode", "on"));
+    let shows = keys("dock").map(|k| format!("{k} shows or hides it at any time")).unwrap_or_default();
+    choice(&dock, "dock_to_bottom", "Visibility", &shows, "dock_mode", &[("on", "Always shown"), ("autohide", "Auto-hide"), ("smart", "Hide when windows are open"), ("off", "Off")], &prefs::get_str(&t, "dock_mode", "on"));
     choice(&dock, "side_navigation", "Position", "", "dock_side", &[("bottom", "Bottom"), ("left", "Left"), ("right", "Right")], &prefs::get_str(&t, "dock_side", "bottom"));
     slider(&dock, "photo_size_select_small", "Icon size", "", "dock_size", (32.0, 80.0, 2.0), prefs::get_f64(&t, "dock_size", 50.0), 0);
     slider(&dock, "zoom_in", "Magnification", "1.0 turns it off", "dock_magnify", (1.0, 2.0, 0.05), prefs::get_f64(&t, "dock_magnify", 1.5), 2);
@@ -511,29 +530,23 @@ pub fn setup(body: &gtk::Box, _: &toml::Table) {
     }
     let win = section(body, "Setup");
     if let Some(kind) = kit::setup::kind() {
-        use kit::hyprconf::Mode;
-        let mode = kit::setup::mode();
+        let installed = kit::setup::installed();
         let (folder, main) = match kind {
             kit::setup::Kind::Hyprland => ("~/.config/hypr", "hyprland.lua"),
             kit::setup::Kind::Niri => ("~/.config/niri", "config.kdl"),
         };
-        let sub = match mode {
-            Some(Mode::Full) => format!("Full setup: digit keeps its part in {folder}/digit; your own settings go in {main}"),
-            Some(Mode::Minimal) => "Minimal setup: digit's part loads at the end of your own config and its shortcuts win".into(),
-            None => "Not set up. Full starts from digit's config (yours is backed up first); Minimal adds digit's part to the end of yours".into(),
+        let sub = if installed {
+            format!("digit keeps its part in {folder}/digit; your own settings go in {main}")
+        } else {
+            format!("Not set up. Your {folder} is backed up first, then digit sets up its shortcuts, window keys and looks")
         };
         let (row, end) = ui::row(Some("tune"), &format!("{} setup", kind.name()), &sub);
-        let full = format!("Your {folder} is copied to a dated backup folder, then digit sets up the whole config with its shortcuts, window keys and looks.");
-        let minimal = format!("digit adds its folder and one line at the end of {main} (a backup is made). Your config stays; where a shortcut is bound twice, digit's wins.");
-        for (m, label, style, detail) in [(Mode::Full, "Full", "accent", full), (Mode::Minimal, "Minimal", "", minimal)] {
-            if mode == Some(m) {
-                continue;
-            }
-            let b = ui::button(label, style);
+        if !installed {
+            let b = ui::button("Set up", "accent");
+            let detail = format!("Your {folder} is copied to a dated backup folder, then digit sets up the whole config. Your own shortcuts from the old config need to be set again, in Settings > Keyboard or in {main}.");
             b.connect_clicked(move |b| {
                 let parent = ui::root(b);
-                let title = format!("{label} setup?");
-                kit::ui::ask(parent.as_ref(), &title, &detail, "Cancel", label, "accent", move || match kit::setup::setup(m) {
+                kit::ui::ask(parent.as_ref(), &format!("Set up {}?", kind.name()), &detail, "Cancel", "Set up", "accent", move || match kit::setup::setup() {
                     Ok(note) => {
                         ui::done(&note);
                         crate::reload("compositor");
@@ -554,8 +567,8 @@ pub fn setup(body: &gtk::Box, _: &toml::Table) {
         pick.connect_selected_notify(|p| set_windows(p.selected() == 1));
         end.append(&pick);
         win.append(&row);
-        let (row, end) = ui::row(Some("dashboard"), "Window layouts", "Super+Z arranges the focused window: halves, thirds, corners and more");
-        end.append(&ui::badge("Super Z", ""));
+        let (row, end) = ui::row(Some("dashboard"), "Window layouts", "Arranges the focused window: halves, thirds, corners and more");
+        end.append(&shortcut("layouts"));
         win.append(&row);
     }
 }
@@ -618,7 +631,15 @@ fn power(body: &gtk::Box, t: &toml::Table) {
     slider(&power, "monitor", "Turn off displays", "Minutes without input. The screen dims softly for a few seconds first; any input cancels", "idle_off", (0.0, 60.0, 1.0), prefs::get_f64(&t, "idle_off", 10.0), 0);
     slider(&power, "bedtime", "Sleep after idle", "Minutes without input before the computer sleeps. 0 never sleeps on its own", "idle_sleep", (0.0, 180.0, 5.0), prefs::get_f64(&t, "idle_sleep", 0.0), 0);
     toggle(&power, "lock", "Lock before sleep", "The lock screen is ready before the computer suspends, so waking needs your password", "lock_on_sleep", prefs::get_bool(&t, "lock_on_sleep", true));
-    let (row, end) = ui::row(Some("preview"), "Lock screen", "Super+L locks, Super+Shift+E opens Lock, Sleep, Restart, Shut Down and Log Out. Passwords are checked by PAM in a separate process");
+    let mut said = Vec::new();
+    if let Some(k) = keys("lock") {
+        said.push(format!("{k} locks"));
+    }
+    if let Some(k) = keys("session") {
+        said.push(format!("{k} opens Lock, Sleep, Restart, Shut Down and Log Out"));
+    }
+    said.push("Passwords are checked by PAM in a separate process".into());
+    let (row, end) = ui::row(Some("preview"), "Lock screen", &said.join(". "));
     let look = gtk::Button::with_label("Preview");
     look.set_valign(gtk::Align::Center);
     look.connect_clicked(|_| {
@@ -680,20 +701,66 @@ fn search(body: &gtk::Box, t: &toml::Table) {
         end.append(&sw);
         find.append(&row);
     }
-    let (row, end) = ui::row(Some("keyboard_command_key"), "Search shortcuts", "Type a key and a space: dc searches Discord, yt YouTube, gh GitHub, w Wikipedia, app Digit Store. Add your own as [[search_scopes]] with key, name and url ({} is the query) in config.toml");
-    end.append(&ui::badge("dc …", ""));
-    find.append(&row);
+}
+
+/// Spotlight's search shortcuts: key, name and when they're offered. Keep in step with
+/// `providers::scopes` in the shell.
+const SCOPES: [(&str, &str, &str, &str); 8] = [
+    ("set", "Settings", "settings", "Finds a setting and opens it"),
+    ("dc", "Discord", "forum", "When Discord is installed"),
+    ("sp", "Spotify", "music_note", "When Spotify is installed"),
+    ("st", "Steam store", "sports_esports", "When Steam is installed"),
+    ("app", "Digit Store", "storefront", ""),
+    ("yt", "YouTube", "smart_display", ""),
+    ("gh", "GitHub", "code", ""),
+    ("w", "Wikipedia", "menu_book", ""),
+];
+
+fn scopes(body: &gtk::Box, t: &toml::Table) {
+    let card = section(body, "Search shortcuts");
+    let (row, end) = ui::row(Some("keyboard_command_key"), "How they work", "Type a key and a space in Spotlight, then your search");
+    end.append(&ui::badge("yt cats", ""));
+    card.append(&row);
+    let off: Rc<std::cell::RefCell<Vec<String>>> = Rc::new(std::cell::RefCell::new(
+        t.get("search_scopes_off").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+    ));
+    for (key, name, icon, note) in SCOPES {
+        let (row, end) = ui::row(Some(icon), name, note);
+        end.append(&ui::badge(key, ""));
+        let sw = gtk::Switch::new();
+        sw.set_valign(gtk::Align::Center);
+        sw.set_active(!off.borrow().iter().any(|k| k == key));
+        let off = off.clone();
+        sw.connect_active_notify(move |s| {
+            let mut list = off.borrow_mut();
+            list.retain(|k| k != key);
+            if !s.is_active() {
+                list.push(key.to_string());
+            }
+            save("search_scopes_off", toml::Value::Array(list.iter().cloned().map(toml::Value::String).collect()));
+        });
+        end.append(&sw);
+        card.append(&row);
+    }
 }
 
 fn clipboard(body: &gtk::Box, t: &toml::Table) {
     let clip = section(body, "Clipboard");
-    toggle(&clip, "content_paste", "Clipboard history", "Alt+V lists recent copies with color conversions. Kept only in memory; password managers' copies are skipped. Applies after digit restarts", "clipboard", prefs::get_bool(&t, "clipboard", true));
+    let lists = keys("clipboard").map(|k| format!("{k} lists")).unwrap_or_else(|| "Lists".into());
+    toggle(&clip, "content_paste", "Clipboard history", &format!("{lists} recent copies with color conversions. Kept only in memory; password managers' copies are skipped. Applies after digit restarts"), "clipboard", prefs::get_bool(&t, "clipboard", true));
 }
 
 fn screenshots(body: &gtk::Box, t: &toml::Table) {
     let snap = section(body, "Screenshots");
-    let (row, end) = ui::row(Some("screenshot_region"), "Shortcuts", "Print: area · Ctrl+Print: screen · Alt+Print: window · Shift+Print: 3 s timer · Super+Shift+S: area");
-    end.append(&ui::badge("Print", ""));
+    let said: Vec<String> = [("snap", "area"), ("snap-area", "area"), ("snap-screen", "screen"), ("snap-window", "window"), ("snap-delay", "3 s timer")]
+        .iter()
+        .filter_map(|(id, what)| keys(id).map(|k| format!("{k}: {what}")))
+        .collect();
+    let said = if said.is_empty() { "None set".to_string() } else { said.join(" · ") };
+    let (row, end) = ui::row(Some("screenshot_region"), "Shortcuts", &said);
+    let change = ui::button("Change…", "");
+    change.connect_clicked(|_| crate::show("keyboard/screenshots"));
+    end.append(&change);
     snap.append(&row);
     choice(&snap, "keyboard_return", "Enter after selecting", "Double-click inside the selection does the same", "snap_after", &[("copy", "Copy"), ("save", "Save"), ("edit", "Mark up"), ("pin", "Pin to screen")], &prefs::get_str(&t, "snap_after", "copy"));
     toggle(&snap, "save", "Also save copies", "Keep a file every time a screenshot is copied", "snap_save_on_copy", prefs::get_bool(&t, "snap_save_on_copy", true));
@@ -726,7 +793,8 @@ fn screenshots(body: &gtk::Box, t: &toml::Table) {
 
 fn files(body: &gtk::Box, t: &toml::Table) {
     let files = section(body, "Files");
-    let (row, end) = ui::row(Some("folder_open"), "Open Files", "Super+E · Space previews · F3 splits · type to jump");
+    let tips = keys("files").into_iter().chain(["Space previews".into(), "F3 splits".into(), "type to jump".into()]).collect::<Vec<_>>().join(" · ");
+    let (row, end) = ui::row(Some("folder_open"), "Open Files", &tips);
     let open_files = ui::button("Open", "");
     open_files.connect_clicked(|_| {
         let argv: [&std::ffi::OsStr; 1] = ["digit-files".as_ref()];

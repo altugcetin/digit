@@ -13,30 +13,19 @@ pub fn build() -> gtk::Widget {
         body.append(&card);
         return scroll.upcast();
     };
-    let Some(mode) = kit::setup::mode() else {
+    if !kit::setup::installed() {
         let card = ui::card();
-        let (row, end) = ui::row(Some("warning"), "Shortcuts aren't set up", &format!("Choose a {} setup first: Full or Minimal, under Windows > Setup", kind.name()));
+        let (row, end) = ui::row(Some("warning"), "Shortcuts aren't set up", &format!("Set {} up first, under Windows > Setup", kind.name()));
         let b = ui::button("Open Windows", "accent");
         b.connect_clicked(|_| crate::show("compositor"));
         end.append(&b);
         card.append(&row);
         body.append(&card);
         return scroll.upcast();
-    };
-    let full = mode == kit::hyprconf::Mode::Full;
-    let (live, conflicts) = kit::setup::shortcuts();
-    if !conflicts.is_empty() {
-        let card = ui::card();
-        let list: Vec<String> = conflicts.iter().map(|(k, f)| format!("{k} ({f})")).collect();
-        let n = conflicts.len();
-        let title = if n == 1 { "1 shortcut is also bound in your config".to_string() } else { format!("{n} shortcuts are also bound in your config") };
-        let (row, _) = ui::row(Some("warning"), &title, &format!("digit's binding wins: {}", list.join(", ")));
-        unwrap_sub(&row);
-        card.append(&row);
-        body.append(&card);
     }
+    let live = kit::setup::shortcuts();
     // Only what the compositor can do: niri has no scratchpad or pinned windows, for one.
-    let all: Vec<Bind> = keybinds::all(full).into_iter().filter(kit::setup::supports).collect();
+    let all: Vec<Bind> = keybinds::all().into_iter().filter(kit::setup::supports).collect();
     let mut group = "";
     let mut card = ui::card();
     for b in &all {
@@ -80,13 +69,6 @@ thread_local! {
 }
 
 /// Lets a row's subtitle wrap instead of being cut off.
-fn unwrap_sub(row: &gtk::Box) {
-    if let Some(sub) = row.last_child().and_then(|c| c.prev_sibling()).and_then(|col| col.last_child()).and_downcast::<gtk::Label>() {
-        sub.set_ellipsize(gtk::pango::EllipsizeMode::None);
-        sub.set_wrap(true);
-    }
-}
-
 fn key_button(keys: &str) -> gtk::Button {
     let b = ui::button(if keys.is_empty() { "Off" } else { keys }, "");
     b.add_css_class("keycap");
@@ -117,7 +99,7 @@ fn default_row(b: &Bind, _live: &[Bind]) -> gtk::Box {
         let (id, btn2, reset_btn) = (id.clone(), btn.clone(), reset_btn.clone());
         record(btn.upcast_ref(), move |picked| {
             if !picked.is_empty() {
-                if let Some(o) = taken(&kit::setup::shortcuts().0, &picked, &id) {
+                if let Some(o) = taken(&kit::setup::shortcuts(), &picked, &id) {
                     ui::fail(&format!("{picked} already opens {o}"));
                     return;
                 }

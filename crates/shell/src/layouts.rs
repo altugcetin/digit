@@ -369,7 +369,7 @@ impl State {
         s.push_opacity(fade);
         draw::fill(s, &draw::round(0.0, 0.0, W, H, 26.0), pal.body.alpha(1.0));
         draw::text(s, &self.paint, cfg, "Window layout", 15.0, Face::Text(600), pal.ink_main, PAD + 2.0, PAD + 12.0, 240.0, pango::Alignment::Left);
-        draw::text(s, &self.paint, cfg, "Super Z", 12.0, Face::Text(450), pal.ink_faint, W - PAD - 120.0, PAD + 12.0, 120.0, pango::Alignment::Right);
+        draw::text(s, &self.paint, cfg, &kit::keybinds::shown("layouts").unwrap_or_default(), 12.0, Face::Text(450), pal.ink_faint, W - PAD - 120.0, PAD + 12.0, 120.0, pango::Alignment::Right);
         for (i, l) in LAYOUTS.iter().enumerate() {
             let (x, y) = tile_rect(i);
             let glow = self.glow[i].value(now).clamp(0.0, 1.0);

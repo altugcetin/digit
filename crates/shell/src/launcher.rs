@@ -120,6 +120,89 @@ const PAGES: [(&str, &str, &str, &str, &str); 17] = [
     ("screenshots", "Screenshots", "Settings", "screenshot_region", "screenshot screenshots capture print folder format"),
 ];
 
+/// A row in digit Settings, from the index Settings writes for Spotlight.
+#[derive(Clone, serde::Deserialize)]
+struct Setting {
+    title: String,
+    place: String,
+    words: String,
+    icon: String,
+    link: String,
+    /// A whole page; those already come from `PAGES`.
+    page: bool,
+    #[serde(skip)]
+    symbol: &'static str,
+}
+
+impl Setting {
+    fn item(&self, score: i32) -> Item {
+        Item { kind: Kind::Settings, act: Act::Spawn(vec!["digit-settings".into(), self.link.clone()]), title: self.title.clone(), detail: self.place.clone(), look: Look::Symbol(self.symbol), score }
+    }
+}
+
+/// The settings index, asking Settings to write it again when it is missing or older than
+/// the installed Settings. A fresh one shows up the next time Spotlight opens.
+fn settings_index() -> Vec<Setting> {
+    let path = gtk::glib::user_cache_dir().join("digit/settings-index.json");
+    let made = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    let built = gtk::glib::find_program_in_path("digit-settings").and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+    if made.is_none() || built.is_some_and(|b| made.is_some_and(|m| b > m)) {
+        let argv: [&std::ffi::OsStr; 2] = ["digit-settings".as_ref(), "--index".as_ref()];
+        let _ = gio::Subprocess::newv(&argv, gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE);
+    }
+    let list: Vec<Setting> = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    list.into_iter()
+        .filter(|s| !s.page)
+        .map(|mut s| {
+            s.symbol = symbol(&s.icon);
+            s
+        })
+        .collect()
+}
+
+/// Icon names live as long as the shell; each distinct one is kept once.
+fn symbol(name: &str) -> &'static str {
+    thread_local! {
+        static NAMES: RefCell<HashMap<String, &'static str>> = RefCell::new(HashMap::new());
+    }
+    NAMES.with(|n| *n.borrow_mut().entry(name.to_string()).or_insert_with(|| Box::leak(name.to_string().into_boxed_str())))
+}
+
+/// The best `limit` settings for a folded query: every word must start a word of the title,
+/// or of where it lives and what it says.
+fn find_settings<'a>(list: &'a [Setting], q: &str, limit: usize) -> Vec<(i32, &'a Setting)> {
+    let words: Vec<&str> = q.split_whitespace().collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let mut hits: Vec<(i32, &Setting)> = list
+        .iter()
+        .filter_map(|s| {
+            let title = fold(&s.title);
+            let rest = fold(&format!("{} {}", s.place, s.words));
+            let starts = |text: &str, w: &str| text.split(|c: char| !c.is_alphanumeric()).any(|t| t.starts_with(w));
+            let mut total = 0;
+            for w in &words {
+                total += if title.starts_with(w) {
+                    300
+                } else if starts(&title, w) {
+                    220
+                } else if starts(&rest, w) {
+                    80
+                } else {
+                    return None;
+                };
+            }
+            Some((total / words.len() as i32, s))
+        })
+        .collect();
+    hits.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut seen = std::collections::HashSet::new();
+    hits.retain(|(_, s)| seen.insert((s.title.clone(), s.place.clone())));
+    hits.truncate(limit);
+    hits
+}
+
 const POWER: [(&str, &str, &str, &str); 6] = [
     ("lock", "Lock Screen", "lock", "lock screen away secure"),
     ("sleep", "Sleep", "bedtime", "sleep suspend"),
@@ -226,6 +309,7 @@ struct State {
     scrim: Option<gtk::Window>,
     providers: Vec<providers::Provider>,
     scopes: Vec<providers::Scope>,
+    settings: Vec<Setting>,
     found: Vec<providers::Found>,
     found_q: String,
     asking: u64,
@@ -432,6 +516,7 @@ impl Launcher {
             scrim: None,
             providers: Vec::new(),
             scopes: Vec::new(),
+            settings: Vec::new(),
             found: Vec::new(),
             found_q: String::new(),
             asking: 0,
@@ -599,10 +684,12 @@ impl Launcher {
         let table = kit::prefs::read();
         let found_in = providers::discover(&app, &table);
         let scopes = providers::scopes(&app, &table);
+        let settings = settings_index();
         {
             let mut s = self.0.borrow_mut();
             s.providers = found_in;
             s.scopes = scopes;
+            s.settings = settings;
             s.found.clear();
             s.found_q.clear();
             if !s.window.is_visible() {
@@ -871,6 +958,12 @@ impl Launcher {
                 if let Some((i, rest)) = keyed.filter(|(_, r)| !r.is_empty()) {
                     let sc = &s.scopes[i];
                     let look = sc.icon.clone().map(Look::Icon).unwrap_or(Look::Symbol(sc.symbol));
+                    // "set …" lists the settings that match, above the search in Settings.
+                    if matches!(sc.reach, providers::Reach::Settings) {
+                        for (rank, (_, set)) in find_settings(&s.settings, &fold(&rest), 12).into_iter().enumerate() {
+                            items.push(set.item(2700 - rank as i32));
+                        }
+                    }
                     items.push(Item { kind: Kind::Scope, act: Act::Scope(i, rest.clone()), title: format!("Search {} for “{}”", sc.name, rest), detail: sc.key.clone(), look, score: 2600 });
                 } else if query.chars().count() >= 2 {
                     for (i, sc) in s.scopes.iter().enumerate().filter(|(_, sc)| sc.app || matches!(sc.reach, providers::Reach::Store)) {
@@ -882,6 +975,12 @@ impl Launcher {
                     let hit = keys.split_whitespace().filter_map(|k| score(&q, k)).max().or_else(|| score(&q, &fold(title)));
                     if let Some(hit) = hit.filter(|_| q.chars().count() >= 3) {
                         items.push(Item { kind: Kind::Settings, act: Act::Spawn(vec!["digitctl".into(), "key".into(), key.into()]), title: title.into(), detail: "System".into(), look: Look::Symbol(symbol), score: hit - 180 });
+                    }
+                }
+                // Single settings too, under the actions and apps they share words with.
+                if q.chars().count() >= 3 {
+                    for (hit, set) in find_settings(&s.settings, &q, 3) {
+                        items.push(set.item(hit - 350));
                     }
                 }
                 for (page, title, detail, symbol, keys) in PAGES {
@@ -1150,6 +1249,11 @@ impl Launcher {
                     }
                 }
                 Some(providers::Reach::Switcher { ids, entry }) => providers::switcher(app.clone(), ids, entry, query),
+                Some(providers::Reach::Settings) => {
+                    let arg = format!("?{}", query.chars().filter(|c| !c.is_control()).take(80).collect::<String>());
+                    let argv: [&std::ffi::OsStr; 2] = ["digit-settings".as_ref(), arg.as_ref()];
+                    let _ = gio::Subprocess::newv(&argv, gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE);
+                }
                 Some(providers::Reach::Store) => {
                     let arg = format!("search:{}", query.chars().filter(|c| !c.is_control()).take(80).collect::<String>());
                     let argv: [&std::ffi::OsStr; 2] = ["digit-store".as_ref(), arg.as_ref()];

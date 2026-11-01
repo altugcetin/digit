@@ -443,7 +443,10 @@ impl Overlay {
         let c = kit::color::Color { r: rgb.0 as f64 / 255.0, g: rgb.1 as f64 / 255.0, b: rgb.2 as f64 / 255.0, a: 1.0 };
         let body: Vec<String> = c.formats().into_iter().skip(1).take(3).map(|(_, v)| v).collect();
         let swatch = out::swatch(rgb);
-        out::notify(&format!("{hex} copied"), &format!("{}\nAlt+V shows every format", body.join("  ·  ")), swatch.as_deref());
+        out::notify(&format!("{hex} copied"), &match kit::keybinds::shown("clipboard") {
+                Some(k) => format!("{}\n{k} shows every format", body.join("  ·  ")),
+                None => body.join("  ·  "),
+            }, swatch.as_deref());
     }
 
     pub fn close(&self) {

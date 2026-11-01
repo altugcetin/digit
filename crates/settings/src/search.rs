@@ -113,7 +113,41 @@ fn index() -> Vec<Hit> {
         }
     }
     INDEX.with(|i| *i.borrow_mut() = Some(out.clone()));
+    export(&out);
     out
+}
+
+/// Where Spotlight finds the index, to search settings without starting Settings.
+pub fn cache() -> std::path::PathBuf {
+    glib::user_cache_dir().join("digit/settings-index.json")
+}
+
+/// Writes the index for Spotlight: each row with the link that opens it.
+fn export(hits: &[Hit]) {
+    let list: Vec<serde_json::Value> = hits
+        .iter()
+        .map(|h| {
+            let link = if h.section.is_empty() { h.page.to_string() } else { format!("{}/{}/{}", h.page, slug(&h.title), slug(&h.section)) };
+            let page = crate::page_name(h.page);
+            let place = if h.section.is_empty() || h.section == page { page.to_string() } else { format!("{page} › {}", h.section) };
+            let icon = if h.icon.is_empty() { crate::page_icon(h.page) } else { h.icon.as_str() };
+            serde_json::json!({ "title": h.title, "place": place, "words": format!("{} {} {}", h.section, h.sub, h.keys), "icon": icon, "link": link, "page": h.section.is_empty() })
+        })
+        .collect();
+    let path = cache();
+    if let Some(d) = path.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let tmp = path.with_extension("json.new");
+    if std::fs::write(&tmp, serde_json::Value::Array(list).to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+/// Builds the index and writes it for Spotlight (`digit-settings --index`).
+pub fn refresh() {
+    forget();
+    index();
 }
 
 /// Settings change what pages show (setup rows, niri-only rows), so the index is rebuilt
@@ -242,25 +276,39 @@ pub fn slug(s: &str) -> String {
 }
 
 /// Scrolls the visible page to the row titled `title` (or whose slug is `title`) and flashes it.
+/// A slug that names a section instead ("keyboard/screenshots") goes to the section's rows.
 pub fn reveal(page: &str, section: Option<&str>, title: &str) {
     let (section, title, page) = (section.map(str::to_string), title.to_string(), page.to_string());
-    // Wait a frame or two so the new page has its size.
-    glib::timeout_add_local_once(Duration::from_millis(60), move || {
-        let Some(scroll) = crate::page_widget(&page).and_then(|w| w.downcast::<gtk::ScrolledWindow>().ok()) else { return };
+    let tries = std::rc::Rc::new(std::cell::Cell::new(0));
+    // The new page needs a frame or two before its rows have a place.
+    glib::timeout_add_local(Duration::from_millis(40), move || {
+        tries.set(tries.get() + 1);
+        let Some(scroll) = crate::page_widget(&page).and_then(|w| w.downcast::<gtk::ScrolledWindow>().ok()) else { return glib::ControlFlow::Break };
         let mut rows = Vec::new();
         collect(scroll.upcast_ref(), &mut String::new(), &mut rows);
         let want = slug(&title);
-        let found = rows.iter().find(|(sec, t, _)| t == &title && section.as_ref().is_none_or(|s| s == sec)).or_else(|| rows.iter().find(|(_, t, _)| slug(t) == want));
-        let Some((_, _, row)) = found else { return };
-        let Some(child) = scroll.child() else { return };
-        if let Some(p) = row.compute_point(&child, &gtk::graphene::Point::new(0.0, 0.0)) {
-            let adj = scroll.vadjustment();
-            let target = (p.y() as f64 - 96.0).clamp(adj.lower(), (adj.upper() - adj.page_size()).max(adj.lower()));
-            glide(&adj, target);
+        // The section tells two rows of the same name apart; it may be given as a slug.
+        let in_section = |sec: &String| section.as_ref().is_none_or(|s| s == sec || slug(s) == slug(sec));
+        let one = rows.iter().find(|(sec, t, _)| t == &title && in_section(sec)).or_else(|| rows.iter().find(|(sec, t, _)| slug(t) == want && in_section(sec))).or_else(|| rows.iter().find(|(_, t, _)| slug(t) == want));
+        let hits: Vec<gtk::Widget> = match one {
+            Some((_, _, row)) => vec![row.clone()],
+            None => rows.iter().filter(|(sec, _, _)| slug(sec) == want).map(|(_, _, r)| r.clone()).collect(),
+        };
+        let (Some(first), Some(child)) = (hits.first(), scroll.child()) else { return glib::ControlFlow::Break };
+        // A Settings that is just starting isn't on screen yet; wait for it.
+        let placed = first.is_mapped() && first.height() > 0;
+        let Some(p) = first.compute_point(&child, &gtk::graphene::Point::new(0.0, 0.0)).filter(|_| placed) else {
+            return if tries.get() < 50 { glib::ControlFlow::Continue } else { glib::ControlFlow::Break };
+        };
+        let adj = scroll.vadjustment();
+        // Rows near the end can't come up to the top; the page stops at its bottom.
+        let room = (adj.upper() - adj.page_size()).max(adj.lower());
+        glide(&adj, (p.y() as f64 - 96.0).clamp(adj.lower(), room));
+        for row in hits {
+            row.add_css_class("found");
+            glib::timeout_add_local_once(Duration::from_millis(1400), move || row.remove_css_class("found"));
         }
-        row.add_css_class("found");
-        let row = row.clone();
-        glib::timeout_add_local_once(Duration::from_millis(1400), move || row.remove_css_class("found"));
+        glib::ControlFlow::Break
     });
 }
 
