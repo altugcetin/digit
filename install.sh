@@ -266,7 +266,9 @@ deps() {
     if confirm "Install them with your package manager (asks for your sudo password)?"; then
         install_pkgs "${build[@]}" "${run_pkgs[@]}"
         # Digit Store tells apps, tools and libraries apart from each package's file list.
-        [ "$FAMILY" = arch ] && run sudo pacman -Fy
+        if [ "$FAMILY" = arch ]; then
+            run sudo pacman -Fy
+        fi
     else
         warn "Skipped. The build may fail if something is missing."
     fi
@@ -414,7 +416,9 @@ uninstall() {
     fi
     local a
     for a in "${APPS[@]}"; do
-        [ -e "$BIN/$a" ] && run rm -f "$BIN/$a"
+        if [ -e "$BIN/$a" ]; then
+            run rm -f "$BIN/$a"
+        fi
     done
     drop_dbus
     local f
@@ -464,7 +468,9 @@ main() {
         info "Log into $WM and digit starts by itself."
     fi
     info "Super+Space notch · Alt+Space Spotlight · Alt+, Settings · Super+L lock"
-    [ -n "$LOG" ] && info "Install log: $LOG"
+    if [ -n "$LOG" ]; then
+        info "Install log: $LOG"
+    fi
 }
 
 main
