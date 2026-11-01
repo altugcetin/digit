@@ -418,7 +418,31 @@ pub fn sync() -> Result<bool, String> {
 }
 
 /// Sets digit up on niri. Returns a line saying what happened, or why it couldn't.
+/// Asks niri whether the config parses, when niri is installed.
+fn check(main: &std::path::Path) -> Result<(), String> {
+    if gtk::glib::find_program_in_path("niri").is_none() {
+        return Ok(());
+    }
+    match crate::hyprconf::run_for(&["niri", "validate", "-c", &main.display().to_string()], 30) {
+        Some((false, out)) => Err(format!("niri didn't accept the new config, so nothing was changed:\n{}", out.lines().filter(|l| !l.contains("DEBUG") && !l.trim().is_empty()).take(8).collect::<Vec<_>>().join("\n"))),
+        _ => Ok(()),
+    }
+}
+
 pub fn setup(mode: Mode) -> Result<String, String> {
+    let main = niri().join("config.kdl");
+    if self::mode() == Some(mode) && dir().exists() {
+        sync()?;
+        check(&main)?;
+        return Ok(format!("Already set up ({}); digit's files are up to date", mode.name()));
+    }
+    let fresh = !main.exists();
+    let mode = if mode == Mode::Minimal && fresh { Mode::Full } else { mode };
+    let note = crate::hyprconf::guarded(&niri(), "niri_setup", || setup_now(mode), || check(&main))?;
+    Ok(if fresh && mode == Mode::Full { format!("{note} (there was no config to keep, so this is a full setup)") } else { note })
+}
+
+fn setup_now(mode: Mode) -> Result<String, String> {
     let niri = niri();
     let main = niri.join("config.kdl");
     let note = match mode {

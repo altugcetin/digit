@@ -34,8 +34,17 @@ pub fn get_f64(t: &toml::Table, key: &str, fallback: f64) -> f64 {
     t.get(key).and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))).unwrap_or(fallback)
 }
 
+/// The settings file for changing it; an error when it exists but doesn't parse, so a typo
+/// never gets every setting overwritten.
+fn for_writing() -> Result<toml::Table, String> {
+    match std::fs::read_to_string(path()) {
+        Ok(text) => text.parse::<toml::Table>().map_err(|e| format!("{} has an error, so nothing was saved: {e}", path().display())),
+        Err(_) => Ok(toml::Table::new()),
+    }
+}
+
 pub fn set(key: &str, value: toml::Value) -> Result<(), String> {
-    let mut table = read();
+    let mut table = for_writing()?;
     if table.get(key) == Some(&value) {
         return Ok(());
     }
@@ -52,7 +61,7 @@ pub fn set(key: &str, value: toml::Value) -> Result<(), String> {
 }
 
 pub fn unset(key: &str) -> Result<(), String> {
-    let mut table = read();
+    let mut table = for_writing()?;
     if table.remove(key).is_none() {
         return Ok(());
     }
