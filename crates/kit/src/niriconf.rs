@@ -100,10 +100,11 @@ fn action(b: &Bind) -> Option<String> {
             Win::Focus(Dir::Right) => "focus-column-right;".into(),
             Win::Focus(Dir::Up) => "focus-window-up;".into(),
             Win::Focus(Dir::Down) => "focus-window-down;".into(),
-            Win::Move(Dir::Left) => "move-column-left;".into(),
-            Win::Move(Dir::Right) => "move-column-right;".into(),
-            Win::Move(Dir::Up) => "move-window-up;".into(),
-            Win::Move(Dir::Down) => "move-window-down;".into(),
+            // At the edge of the screen a move carries on to the next monitor or workspace.
+            Win::Move(Dir::Left) => "move-column-left-or-to-monitor-left;".into(),
+            Win::Move(Dir::Right) => "move-column-right-or-to-monitor-right;".into(),
+            Win::Move(Dir::Up) => "move-window-up-or-to-workspace-up;".into(),
+            Win::Move(Dir::Down) => "move-window-down-or-to-workspace-down;".into(),
             Win::Grow(Dir::Left) => "set-column-width \"-10%\";".into(),
             Win::Grow(Dir::Right) => "set-column-width \"+10%\";".into(),
             Win::Grow(Dir::Up) => "set-window-height \"-10%\";".into(),
@@ -113,6 +114,9 @@ fn action(b: &Bind) -> Option<String> {
             Win::StepWorkspace(i) if *i > 0 => "focus-workspace-down;".into(),
             Win::StepWorkspace(_) => "focus-workspace-up;".into(),
             Win::Group => "toggle-column-tabbed-display;".into(),
+            Win::PresetWidth => "switch-preset-column-width;".into(),
+            Win::Overview => "toggle-overview;".into(),
+            Win::Center => "center-column;".into(),
             // Moving and resizing with Super and the mouse is built into niri; it has no pinned
             // windows or scratchpad.
             Win::Drag | Win::Resize | Win::Pin | Win::Scratchpad | Win::ToScratchpad => return None,
@@ -133,9 +137,27 @@ pub fn render_keybinds(binds: &[Bind]) -> String {
          // Changes here are replaced: change shortcuts in digit Settings, or add your own in config.kdl.\n\n\
          binds {\n",
     );
+    // niri refuses two binds on the same keys in one file. When a default lands on keys the
+    // user gave to something else (or two defaults meet), the user's choice keeps them.
+    let mut taken: Vec<String> = binds
+        .iter()
+        .filter(|b| keybinds::changed(&b.id) || b.id.starts_with("custom-"))
+        .filter(|b| action(b).is_some())
+        .map(|b| keybinds::normalize(&b.keys))
+        .collect();
+    let mut placed: Vec<String> = Vec::new();
     let mut group = "";
     for b in binds {
         let Some(act) = action(b) else { continue };
+        let k = keybinds::normalize(&b.keys);
+        let own = keybinds::changed(&b.id) || b.id.starts_with("custom-");
+        if placed.contains(&k) || (!own && taken.contains(&k)) {
+            continue;
+        }
+        placed.push(k.clone());
+        if !own {
+            taken.push(k);
+        }
         if b.group != group {
             group = b.group;
             out.push_str(&format!("    // {group}\n"));
@@ -171,6 +193,9 @@ fn compositor(mode: Mode) -> String {
     let text = |key: &str, def: &str| pick(key).and_then(|v| v.as_str().map(str::to_string)).or_else(|| full.then(|| def.to_string()));
     let num = |key: &str, def: f64| pick(key).and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))).or_else(|| full.then_some(def));
     let flag = |key: &str, def: bool| pick(key).and_then(|v| v.as_bool()).or_else(|| full.then_some(def));
+    // niri's own settings, with no Hyprland counterpart.
+    let niri_text = |key: &str, def: &str| t.get(&format!("niri_{key}")).and_then(|v| v.as_str().map(str::to_string)).or_else(|| full.then(|| def.to_string()));
+    let niri_flag = |key: &str, def: bool| t.get(&format!("niri_{key}")).and_then(|v| v.as_bool()).or_else(|| full.then_some(def));
     let mut out = String::new();
     let mut xkb = Vec::new();
     if let Some(v) = text("kb_layout", "us") {
@@ -215,6 +240,12 @@ fn compositor(mode: Mode) -> String {
     if flag("tap", true) == Some(true) {
         touchpad.push("tap".into());
     }
+    if niri_flag("dwt", true) == Some(true) {
+        touchpad.push("dwt".into());
+    }
+    if let Some(sp) = niri_text("scroll", "normal") {
+        touchpad.push(format!("scroll-factor {}", match sp.as_str() { "slow" => "0.5", "fast" => "1.5", _ => "1.0" }));
+    }
     if flag("touch_natural", true) == Some(true) {
         touchpad.push("natural-scroll".into());
     }
@@ -247,12 +278,49 @@ fn compositor(mode: Mode) -> String {
     if let Some(v) = num("gaps_in", 4.0) {
         layout.push(format!("    gaps {}", (v * 2.0).round() as i64));
     }
-    if let Some(v) = num("border", 2.0) {
-        layout.push(if v < 0.5 {
-            "    border {\n        off\n    }".to_string()
-        } else {
-            format!("    border {{\n        width {}\n        active-color \"#ffffff47\"\n        inactive-color \"#ffffff14\"\n    }}", v.round() as i64)
-        });
+    if let Some(w) = niri_text("column_width", "half") {
+        let p = match w.as_str() {
+            "third" => "0.33333",
+            "two_thirds" => "0.66667",
+            "full" => "1.0",
+            _ => "0.5",
+        };
+        layout.push(format!("    default-column-width {{ proportion {p}; }}"));
+    }
+    if let Some(c) = niri_text("center", "never") {
+        layout.push(format!("    center-focused-column {}", kdl_str(&c)));
+    }
+    if let Some(p) = niri_text("presets", "thirds") {
+        let widths: &[&str] = if p == "halves" { &["0.5", "1.0"] } else { &["0.33333", "0.5", "0.66667"] };
+        layout.push(format!("    preset-column-widths {{\n{}\n    }}", widths.iter().map(|w| format!("        proportion {w}")).collect::<Vec<_>>().join("\n")));
+    }
+    // The focused window is marked by a border or a ring around it, in digit's accent.
+    let highlight = niri_text("highlight", "border");
+    let width = num("border", 2.0);
+    if highlight.is_some() || width.is_some() {
+        let w = width.unwrap_or(2.0).round().max(1.0) as i64;
+        let (active, inactive) = border_colors();
+        // niri's border is off until a file turns it on, so say "on" explicitly.
+        let on = |name: &str| format!("    {name} {{\n        on\n        width {w}\n        active-color {}\n        inactive-color {}\n    }}", kdl_str(&active), kdl_str(&inactive));
+        let off = |name: &str| format!("    {name} {{\n        off\n    }}");
+        match highlight.as_deref().unwrap_or("border") {
+            _ if width.is_some_and(|v| v < 0.5) => {
+                layout.push(off("border"));
+                layout.push(off("focus-ring"));
+            }
+            "ring" => {
+                layout.push(off("border"));
+                layout.push(on("focus-ring"));
+            }
+            "none" => {
+                layout.push(off("border"));
+                layout.push(off("focus-ring"));
+            }
+            _ => {
+                layout.push(on("border"));
+                layout.push(off("focus-ring"));
+            }
+        }
     }
     if let Some(on) = flag("shadow", true) {
         let softness = match text("shadow_size", "medium").as_deref() {
@@ -269,6 +337,25 @@ fn compositor(mode: Mode) -> String {
     if !layout.is_empty() {
         out.push_str(&format!("layout {{\n{}\n}}\n\n", layout.join("\n")));
     }
+    let mut cursor = Vec::new();
+    if let Some(size) = niri_text("cursor_size", "small") {
+        cursor.push(format!("    xcursor-size {}", match size.as_str() { "large" => 48, "medium" => 32, _ => 24 }));
+    }
+    if niri_flag("hide_cursor", false) == Some(true) {
+        cursor.push("    hide-when-typing".into());
+    }
+    if !cursor.is_empty() {
+        out.push_str(&format!("cursor {{\n{}\n}}\n\n", cursor.join("\n")));
+    }
+    if let Some(z) = niri_text("overview_zoom", "medium") {
+        let zoom = match z.as_str() { "small" => "0.35", "large" => "0.65", _ => "0.5" };
+        out.push_str(&format!("overview {{\n    zoom {zoom}\n}}\n\n"));
+    }
+    match niri_text("motion", "normal").as_deref() {
+        Some("slow") => out.push_str("animations {\n    slowdown 2.0\n}\n\n"),
+        Some("off") => out.push_str("animations {\n    off\n}\n\n"),
+        _ => {}
+    }
     if flag("blur", false) == Some(true) {
         let (passes, offset) = match text("blur_strength", "medium").as_deref() {
             Some("light") => (2, 2),
@@ -278,6 +365,24 @@ fn compositor(mode: Mode) -> String {
         out.push_str(&format!("blur {{\n    passes {passes}\n    offset {offset}\n}}\n\nwindow-rule {{\n    background-effect {{\n        blur true\n    }}\n}}\n"));
     }
     out
+}
+
+/// digit's accent as a color: the one picked in Settings, else the wallpaper's.
+pub(crate) fn accent() -> String {
+    let picked = crate::prefs::text(&crate::prefs::read(), "ui_accent", "wallpaper");
+    if picked.starts_with('#') && picked.len() == 7 {
+        return picked;
+    }
+    crate::theme::load().map(|t| t.hex("primary")).filter(|h| h.starts_with('#')).unwrap_or_else(|| "#d0bcff".into())
+}
+
+/// The focused window's border: digit's accent, or the plain grey of digit's default look.
+fn border_colors() -> (String, String) {
+    if crate::prefs::text(&crate::prefs::read(), "border_color", "accent") == "default" {
+        ("#595959".into(), "#5959591a".into())
+    } else {
+        (accent(), "#ffffff14".into())
+    }
 }
 
 fn base(mode: Mode) -> String {

@@ -9,8 +9,9 @@ pub(crate) fn save(key: &str, value: toml::Value) {
         ui::fail(&format!("Could not save: {e}"));
         return;
     }
-    // Compositor settings go straight into digit's part of the Hyprland config.
-    if key.starts_with("hypr_") {
+    // Compositor settings (and the accent, which colors niri's window border) go straight into
+    // digit's part of the compositor config.
+    if key.starts_with("hypr_") || key.starts_with("niri_") || key == "ui_accent" || key == "border_color" {
         glib::spawn_future_local(async {
             if let Ok(Err(e)) = gio::spawn_blocking(kit::setup::apply).await {
                 ui::fail(&e);

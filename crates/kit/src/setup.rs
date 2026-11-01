@@ -70,13 +70,19 @@ pub fn shortcuts() -> (Vec<Bind>, Vec<(String, String)>) {
             let full = niriconf::mode() == Some(Mode::Full);
             (crate::keybinds::effective(full).into_iter().filter(niriconf::supports).collect(), Vec::new())
         }
-        _ => hyprconf::shortcuts(),
+        _ => {
+            let (binds, conflicts) = hyprconf::shortcuts();
+            (binds.into_iter().filter(hyprconf::supports).collect(), conflicts)
+        }
     }
 }
 
 /// Whether the running compositor can do what this shortcut does.
 pub fn supports(b: &Bind) -> bool {
-    kind() != Some(Kind::Niri) || niriconf::supports(b)
+    match kind() {
+        Some(Kind::Niri) => niriconf::supports(b),
+        _ => hyprconf::supports(b),
+    }
 }
 
 /// Lets keys that are already shortcuts reach Settings while it records one (Hyprland only).
