@@ -78,6 +78,12 @@ pub fn build() -> gtk::Widget {
     slider(&win, "border_style", "Border width", "", "hypr_border", (0.0, 6.0, 1.0), f("hypr_border", 2.0), 0);
     body.append(&win);
 
+    body.append(&ui::heading("Animations"));
+    let motion = ui::card();
+    choice(&motion, "open_in_full", "Windows open and close", "", "hypr_window_anim", &[("popin", "Pop in"), ("slide", "Slide")], &s("hypr_window_anim", "popin"));
+    choice(&motion, "view_carousel", "Switching workspaces", "", "hypr_workspace_anim", &[("vertical", "Vertical"), ("horizontal", "Horizontal")], &s("hypr_workspace_anim", "vertical"));
+    body.append(&motion);
+
     body.append(&ui::heading("Effects"));
     let fx = ui::card();
     {

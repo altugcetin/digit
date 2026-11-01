@@ -342,6 +342,23 @@ fn compositor(mode: Mode) -> String {
     if !sections.is_empty() {
         out.push_str(&format!("hl.config({{\n{}\n}})\n", sections.join("\n")));
     }
+    // Motion: how windows open and close, and which way workspaces slide.
+    let windows = text("window_anim", "popin");
+    let spaces = text("workspace_anim", "vertical");
+    if windows.is_some() || spaces.is_some() {
+        out.push_str("hl.curve(\"md3_standard\", { type = \"bezier\", points = { { 0.2, 0 }, { 0, 1.0 } } })\n");
+        out.push_str("hl.curve(\"md3_decel\", { type = \"bezier\", points = { { 0.05, 0.7 }, { 0.1, 1 } } })\n");
+        out.push_str("hl.curve(\"md3_accel\", { type = \"bezier\", points = { { 0.3, 0 }, { 0.8, 0.15 } } })\n");
+    }
+    if let Some(w) = windows {
+        let style = if w == "slide" { "slide" } else { "popin 85%" };
+        out.push_str(&format!("hl.animation({{ leaf = \"windowsIn\", enabled = true, speed = 3, bezier = \"md3_decel\", style = \"{style}\" }})\n"));
+        out.push_str(&format!("hl.animation({{ leaf = \"windowsOut\", enabled = true, speed = 3, bezier = \"md3_accel\", style = \"{style}\" }})\n"));
+    }
+    if let Some(sp) = spaces {
+        let style = if sp == "horizontal" { "slidefade 20%" } else { "slidefadevert 20%" };
+        out.push_str(&format!("hl.animation({{ leaf = \"workspaces\", enabled = true, speed = 3, bezier = \"md3_standard\", style = \"{style}\" }})\n"));
+    }
     if flag("gesture", true) == Some(true) {
         out.push_str("-- Three fingers sideways switch workspaces.\nhl.gesture({ fingers = 3, direction = \"horizontal\", action = \"workspace\" })\n");
     }
