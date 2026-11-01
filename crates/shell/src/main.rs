@@ -94,6 +94,27 @@ fn main() {
     }
 }
 
+/// When digit was started from a terminal that later closes, stdout/stderr point at a dead
+/// pty. Apps we launch inherit them, and Rust apps (LACT, …) panic on their first log line,
+/// so once the terminal hangs up both go to ~/.cache/digit/shell.log instead.
+fn outlive_terminal() {
+    for fd in [1, 2] {
+        if unsafe { libc::isatty(fd) } != 1 {
+            continue;
+        }
+        glib_unix::unix_fd_add_local(fd, glib::IOCondition::HUP | glib::IOCondition::ERR, move |fd, _| {
+            let dir = glib::user_cache_dir().join("digit");
+            let _ = std::fs::create_dir_all(&dir);
+            let file = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("shell.log"));
+            let file = file.or_else(|_| std::fs::OpenOptions::new().write(true).open("/dev/null"));
+            if let Ok(file) = file {
+                unsafe { libc::dup2(std::os::fd::AsRawFd::as_raw_fd(&file), fd) };
+            }
+            glib::ControlFlow::Break
+        });
+    }
+}
+
 fn run() {
     if ipc::running() {
         eprintln!("digit is already running");
@@ -208,6 +229,7 @@ fn run() {
         previous(info);
     }));
 
+    outlive_terminal();
     let main_loop = glib::MainLoop::new(None, false);
     for signal in [libc_signal::TERM, libc_signal::INT] {
         let main_loop = main_loop.clone();
