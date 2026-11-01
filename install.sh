@@ -48,6 +48,7 @@ Arch-based systems (CachyOS, EndeavourOS, Manjaro, Garuda, ...).
 EOF
 }
 
+ARGS="$*"
 while [ $# -gt 0 ]; do
     case "$1" in
         --wm) WM=${2:-}; shift ;;
@@ -65,6 +66,33 @@ while [ $# -gt 0 ]; do
 done
 
 [ "$(id -u)" -ne 0 ] || die "Run this as your normal user. sudo is used only to install packages."
+
+# Everything the installer prints also goes to a log (without colors), kept for support.
+# The previous run's log stays next to it as install.log.1.
+LOG_DIR=${XDG_CACHE_HOME:-$HOME/.cache}/digit
+LOG="$LOG_DIR/install.log"
+if mkdir -p "$LOG_DIR" 2>/dev/null && touch "$LOG" 2>/dev/null; then
+    [ -s "$LOG" ] && mv -f "$LOG" "$LOG.1"
+    exec > >(tee >(sed -u 's/\x1b\[[0-9;]*m//g' >>"$LOG")) 2>&1
+    {
+        echo "digit installer · $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "args: ${ARGS:-none} · user: $(id -un) · session: ${XDG_SESSION_TYPE:-?} ${XDG_CURRENT_DESKTOP:-?}"
+        echo "repo: $ROOT · $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo 'not a git checkout')"
+        echo "kernel: $(uname -r) · $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown system}")"
+        echo
+    } >>"$LOG"
+else
+    LOG=""
+fi
+on_exit() {
+    local status=$?
+    if [ "$status" -ne 0 ] && [ -n "$LOG" ]; then
+        printf '\033[31m✗ The installer stopped (exit %s). The full log is in %s\033[0m\n' "$status" "$LOG" >&2
+    fi
+    # Give tee a moment to flush the last lines into the log.
+    sleep 0.2
+}
+trap on_exit EXIT
 
 confirm() {
     $YES && return 0
@@ -181,6 +209,16 @@ pick_setup() {
     fi
     local dir=hypr main=hyprland.lua
     [ "$WM" = niri ] && dir=niri main=config.kdl
+    # Unattended runs keep the setup digit already has, and never replace a config the user
+    # already has.
+    if $YES; then
+        local had
+        had=$(sed -n "s/^${dir}_setup = \"\([a-z]*\)\"$/\1/p" "$CONF/digit/config.toml" 2>/dev/null | head -n1)
+        if [ -n "$had" ]; then SETUP=$had
+        elif [ -e "$CONF/$dir/$main" ] || { [ "$WM" = hyprland ] && [ -e "$CONF/hypr/hyprland.conf" ]; }; then SETUP=minimal; else SETUP=full; fi
+        info "Setting $WM up: $SETUP."
+        return
+    fi
     choose "How should digit set up $WM?" \
         "full     (recommended) digit's whole config: shortcuts, window keys, looks; ~/.config/$dir is backed up first" \
         "minimal  keep your config and add digit's part to the end of $main"
@@ -209,14 +247,20 @@ deps() {
     case $FAMILY in
         suse)
             build=(gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel wayland-devel)
-            run_pkgs=(wtype curl upower polkit flatpak) ;;
+            run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct) ;;
         fedora)
             build=(gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel wayland-devel)
-            run_pkgs=(wtype curl upower polkit flatpak) ;;
+            run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct) ;;
         arch)
             build=(base-devel pkgconf gtk4 gtk4-layer-shell wayland)
-            run_pkgs=(wtype curl upower polkit flatpak archlinux-appstream-data) ;;
+            run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct archlinux-appstream-data) ;;
     esac
+    # Super+Return opens a terminal; bring a small one along if there is none yet.
+    local t has_term=false
+    for t in xdg-terminal-exec kitty foot alacritty wezterm ghostty konsole gnome-terminal ptyxis; do
+        command -v "$t" >/dev/null 2>&1 && has_term=true
+    done
+    $has_term || run_pkgs+=(foot)
     bold "System packages"
     info "${build[*]} ${run_pkgs[*]}"
     if confirm "Install them with your package manager (asks for your sudo password)?"; then
@@ -279,7 +323,9 @@ build() {
     run mkdir -p "$BIN"
     local a
     for a in "${APPS[@]}"; do
-        run install -m 755 "$ROOT/target/release/$a" "$BIN/$a"
+        # Copy next to the old one and swap, so a running digit doesn't make the copy fail.
+        run install -m 755 "$ROOT/target/release/$a" "$BIN/$a.new"
+        run mv -f "$BIN/$a.new" "$BIN/$a"
     done
     for a in digit-settings digit-store digit-files digit-snap digit-rec; do
         run "$BIN/$a" --register >/dev/null 2>&1 || true
@@ -298,7 +344,8 @@ flathub() {
 fetch() {
     local url=$1 out=$2
     [ -s "$out" ] && return 0
-    run curl -fsSL --proto '=https' --tlsv1.2 -o "$out" "$url"
+    # Download to a side file so a broken download never looks like a finished one.
+    run curl -fsSL --proto '=https' --tlsv1.2 -o "$out.part" "$url" && run mv -f "$out.part" "$out"
 }
 
 fonts() {
@@ -310,12 +357,14 @@ fonts() {
     run mkdir -p "$dir"
     local g=https://raw.githubusercontent.com/google/fonts/main/ofl
     local m=https://raw.githubusercontent.com/google/material-design-icons/master
-    fetch "$g/readexpro/ReadexPro%5BHEXP%2Cwght%5D.ttf" "$dir/ReadexPro[HEXP,wght].ttf"
-    fetch "$g/readexpro/OFL.txt" "$dir/OFL-ReadexPro.txt"
-    fetch "$g/rubik/Rubik%5Bwght%5D.ttf" "$dir/Rubik[wght].ttf"
-    fetch "$g/rubik/OFL.txt" "$dir/OFL-Rubik.txt"
-    fetch "$m/variablefont/MaterialSymbolsRounded%5BFILL,GRAD,opsz,wght%5D.ttf" "$dir/MaterialSymbolsRounded.ttf"
-    fetch "$m/LICENSE" "$dir/LICENSE-MaterialSymbols.txt"
+    # A failed download only costs the fonts; run the installer again when online.
+    fetch "$g/readexpro/ReadexPro%5BHEXP%2Cwght%5D.ttf" "$dir/ReadexPro[HEXP,wght].ttf" &&
+    fetch "$g/readexpro/OFL.txt" "$dir/OFL-ReadexPro.txt" &&
+    fetch "$g/rubik/Rubik%5Bwght%5D.ttf" "$dir/Rubik[wght].ttf" &&
+    fetch "$g/rubik/OFL.txt" "$dir/OFL-Rubik.txt" &&
+    fetch "$m/variablefont/MaterialSymbolsRounded%5BFILL,GRAD,opsz,wght%5D.ttf" "$dir/MaterialSymbolsRounded.ttf" &&
+    fetch "$m/LICENSE" "$dir/LICENSE-MaterialSymbols.txt" ||
+        warn "Could not download the fonts; digit uses fallbacks until you run ./install.sh again online."
     run fc-cache -f "$dir" >/dev/null 2>&1 || true
 }
 
@@ -391,10 +440,12 @@ main() {
     rust
     libs
     build
-    flathub
-    fonts
+    # The compositor config needs nothing from the network, so it is written before the
+    # downloads below can stop the run.
     hook
     drop_dbus
+    flathub
+    fonts
     case ":$PATH:" in
         *":$BIN:"*) ;;
         *) warn "$BIN is not in your PATH. Add it to run digitctl from a terminal (the compositor config already uses full paths)." ;;
@@ -413,6 +464,7 @@ main() {
         info "Log into $WM and digit starts by itself."
     fi
     info "Super+Space notch · Alt+Space Spotlight · Alt+, Settings · Super+L lock"
+    [ -n "$LOG" ] && info "Install log: $LOG"
 }
 
 main

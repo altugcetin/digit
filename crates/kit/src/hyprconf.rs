@@ -494,7 +494,86 @@ pub(crate) fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// Sets digit up on Hyprland. Returns a line saying what happened, or why it couldn't.
+/// Runs a command for at most `secs`, giving whether it succeeded and what it printed.
+pub(crate) fn run_for(argv: &[&str], secs: u64) -> Option<(bool, String)> {
+    let mut child = std::process::Command::new(argv[0])
+        .args(&argv[1..])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    let start = std::time::Instant::now();
+    loop {
+        if let Ok(Some(_)) = child.try_wait() {
+            let out = child.wait_with_output().ok()?;
+            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            return Some((out.status.success(), text));
+        }
+        if start.elapsed().as_secs() >= secs {
+            let _ = child.kill();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Changes a compositor config folder with a way back: if `change` or the check after it
+/// fails, the folder and the setup choice go back to how they were.
+pub(crate) fn guarded(root: &Path, pref: &str, change: impl FnOnce() -> Result<String, String>, check: impl FnOnce() -> Result<(), String>) -> Result<String, String> {
+    let before = crate::prefs::read().get(pref).cloned();
+    let keep = root.with_file_name(format!(".digit-undo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&keep);
+    let had = root.exists();
+    if had {
+        copy_dir(root, &keep).map_err(|e| format!("Could not keep a copy of {}: {e}", root.display()))?;
+    }
+    let result = change().and_then(|note| check().map(|_| note));
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(root);
+        if had {
+            let _ = copy_dir(&keep, root);
+        }
+        let _ = match before {
+            Some(v) => crate::prefs::set(pref, v),
+            None => crate::prefs::unset(pref),
+        };
+    }
+    let _ = std::fs::remove_dir_all(&keep);
+    result
+}
+
+/// Asks Hyprland whether the config parses, when Hyprland is installed.
+fn check(main: &Path) -> Result<(), String> {
+    if gtk::glib::find_program_in_path("Hyprland").is_none() {
+        return Ok(());
+    }
+    match run_for(&["Hyprland", "--verify-config", "-c", &main.display().to_string()], 30) {
+        Some((_, out)) if out.contains("config ok") => Ok(()),
+        Some((_, out)) => Err(format!("Hyprland didn't accept the new config, so nothing was changed:\n{}", out.lines().filter(|l| !l.contains("DEBUG")).rev().take(6).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))),
+        None => Ok(()),
+    }
+}
+
 pub fn setup(mode: Mode) -> Result<String, String> {
+    let hypr = hypr();
+    let main = hypr.join("hyprland.lua");
+    // Running the installer again refreshes digit's files instead of starting over, so the
+    // user's own additions in hyprland.lua stay.
+    if self::mode() == Some(mode) && dir().exists() {
+        sync()?;
+        check(&main)?;
+        reload();
+        return Ok(format!("Already set up ({}); digit's files are up to date", mode.name()));
+    }
+    // A minimal setup keeps an existing config; with none there is nothing to keep.
+    let fresh = !main.exists() && !hypr.join("hyprland.conf").exists();
+    let mode = if mode == Mode::Minimal && fresh { Mode::Full } else { mode };
+    let note = guarded(&hypr, "hypr_setup", || setup_now(mode), || check(&main))?;
+    reload();
+    Ok(if fresh && mode == Mode::Full { format!("{note} (there was no config to keep, so this is a full setup)") } else { note })
+}
+
+fn setup_now(mode: Mode) -> Result<String, String> {
     let hypr = hypr();
     let main = hypr.join("hyprland.lua");
     let note = match mode {
@@ -545,7 +624,6 @@ pub fn setup(mode: Mode) -> Result<String, String> {
     };
     crate::prefs::set("hypr_setup", toml::Value::String(mode.name().into()))?;
     sync()?;
-    reload();
     Ok(note)
 }
 

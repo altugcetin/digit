@@ -24,13 +24,17 @@ pub fn list(t: &toml::Table, key: &str) -> Vec<String> {
     t.get(key).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
 }
 
-pub fn set(key: &str, value: toml::Value) -> Result<(), String> {
-    let mut table = read();
-    if table.get(key) == Some(&value) {
-        return Ok(());
+/// The settings file for changing it: an error rather than an empty table when it exists but
+/// doesn't parse, so a typo never gets every setting overwritten.
+fn for_writing() -> Result<toml::Table, String> {
+    match std::fs::read_to_string(path()) {
+        Ok(text) => text.parse::<toml::Table>().map_err(|e| format!("{} has an error, so nothing was saved: {e}", path().display())),
+        Err(_) => Ok(toml::Table::new()),
     }
-    table.insert(key.to_string(), value);
-    let body = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
+}
+
+fn write(table: &toml::Table) -> Result<(), String> {
+    let body = toml::to_string_pretty(table).map_err(|e| e.to_string())?;
     let file = path();
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -38,6 +42,23 @@ pub fn set(key: &str, value: toml::Value) -> Result<(), String> {
     let tmp = file.with_extension("toml.new");
     std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &file).map_err(|e| e.to_string())
+}
+
+pub fn unset(key: &str) -> Result<(), String> {
+    let mut table = for_writing()?;
+    if table.remove(key).is_some() {
+        write(&table)?;
+    }
+    Ok(())
+}
+
+pub fn set(key: &str, value: toml::Value) -> Result<(), String> {
+    let mut table = for_writing()?;
+    if table.get(key) == Some(&value) {
+        return Ok(());
+    }
+    table.insert(key.to_string(), value);
+    write(&table)
 }
 
 pub fn home(path: &str) -> PathBuf {
