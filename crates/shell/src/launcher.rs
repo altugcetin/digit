@@ -345,7 +345,9 @@ fn slab(s: &gtk::Snapshot, shape: &gsk::RoundedRect, fill: Rgb) {
 }
 
 fn shadow(s: &gtk::Snapshot, shape: &gsk::RoundedRect) {
-    s.append_outset_shadow(shape, &gdk::RGBA::new(0.0, 0.0, 0.0, 0.34), 0.0, 10.0, 0.0, 30.0);
+    if !kit::effects::reduced() {
+        s.append_outset_shadow(shape, &gdk::RGBA::new(0.0, 0.0, 0.0, 0.34), 0.0, 10.0, 0.0, 30.0);
+    }
 }
 
 fn face(s: &gtk::Snapshot, shape: &gsk::RoundedRect, fill: Rgb) {

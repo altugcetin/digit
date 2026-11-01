@@ -27,7 +27,7 @@ fn nvidia_vendor() -> Option<String> {
 }
 
 pub fn prepare() {
-    let renderer = std::env::var("DIGIT_RENDERER").unwrap_or_else(|_| "gl".into());
+    let renderer = kit::effects::renderer("DIGIT_RENDERER");
     let inherited = [("GSK_RENDERER", std::env::var("GSK_RENDERER").ok()), (VENDOR, std::env::var(VENDOR).ok())];
     unsafe {
         for (key, value) in &inherited {

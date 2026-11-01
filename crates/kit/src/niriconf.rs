@@ -322,6 +322,9 @@ fn compositor(mode: Mode) -> String {
             }
         }
     }
+    // Reduced effects switch the compositor's shadows and blur off too.
+    let reduced = crate::effects::reduced();
+    let flag = |key: &str, def: bool| if reduced && (key == "shadow" || key == "blur") { Some(false) } else { flag(key, def) };
     if let Some(on) = flag("shadow", true) {
         let softness = match text("shadow_size", "medium").as_deref() {
             Some("soft") => 16,

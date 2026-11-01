@@ -203,7 +203,9 @@ fn compose(s: &gtk::Snapshot, icon: Option<&gdk::Paintable>, look: Look, size: f
     let (x0, y0) = ((size - tile) / 2.0, size * 0.055);
     let white = Rgb::new(1.0, 1.0, 1.0);
     let rounded = gsk::RoundedRect::from_rect(graphene::Rect::new(x0 as f32, y0 as f32, tile as f32, tile as f32), (tile * 0.225) as f32);
-    s.append_outset_shadow(&rounded, &gdk::RGBA::new(0.0, 0.0, 0.0, 0.34), 0.0, (size * 0.02) as f32, 0.0, (size * 0.035) as f32);
+    if !kit::effects::reduced() {
+        s.append_outset_shadow(&rounded, &gdk::RGBA::new(0.0, 0.0, 0.0, 0.34), 0.0, (size * 0.02) as f32, 0.0, (size * 0.035) as f32);
+    }
     let path = squircle(x0, y0, tile);
     let bounds = graphene::Rect::new(x0 as f32, y0 as f32, tile as f32, tile as f32);
     s.push_fill(&path, gsk::FillRule::Winding);

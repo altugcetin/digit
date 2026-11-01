@@ -119,6 +119,15 @@ pub fn css() -> String {
         .collect();
     let (r_card, r_row, r_ctl, r_pop, r_dialog, r_hero) = (px(20.0), px(15.0), px(12.0), px(18.0), px(26.0), px(26.0));
     let row_y = if lk.dense { "7px" } else { "11px" };
+    // Reduced effects: flat cards and popovers, no soft shadows to draw.
+    let reduced = if crate::effects::reduced() {
+        format!(
+            "popover > contents, popover.menu > contents, popover.menu-pop > contents, .dialog, .overlay-card, .toast, .look, .pinned, .snapbar, .lifted {{ box-shadow: 0 0 0 1px alpha({main}, 0.10); animation: none; }}\n\
+             .seg > button:checked {{ box-shadow: inset 0 0 0 1px alpha({main}, 0.10); }}\n"
+        )
+    } else {
+        String::new()
+    };
     format!(
         r#"
 @define-color d_base {base};
@@ -278,6 +287,7 @@ scrollbar.vertical:hover slider {{ min-width: 8px; margin: 3px 3px; }}
 scrollbar.horizontal:hover slider {{ min-height: 8px; margin: 3px 3px; }}
 scrollbar slider:hover {{ background: alpha({main}, 0.36); }}
 scrollbar slider:active {{ background: alpha({main}, 0.5); }}
+{reduced}
 "#
     )
 }

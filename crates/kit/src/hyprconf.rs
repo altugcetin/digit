@@ -329,6 +329,9 @@ fn compositor(mode: Mode) -> String {
         general.push(format!("col = {{ active_border = {}, inactive_border = {} }}", lua_str(&active), lua_str(&inactive)));
     }
     let mut decoration = Vec::new();
+    // Reduced effects switch the compositor's shadows and blur off too.
+    let reduced = crate::effects::reduced();
+    let flag = |key: &str, def: bool| if reduced && (key == "shadow" || key == "blur") { Some(false) } else { flag(key, def) };
     if let Some(on) = flag("shadow", true) {
         let range = match text("shadow_size", "medium").as_deref() {
             Some("soft") => 8,

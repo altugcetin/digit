@@ -11,7 +11,7 @@ pub(crate) fn save(key: &str, value: toml::Value) {
     }
     // Compositor settings (and the accent, which colors niri's window border) go straight into
     // digit's part of the compositor config.
-    if key.starts_with("hypr_") || key.starts_with("niri_") || key == "ui_accent" || key == "border_color" {
+    if key.starts_with("hypr_") || key.starts_with("niri_") || matches!(key, "ui_accent" | "border_color" | "reduced_effects") {
         glib::spawn_future_local(async {
             if let Ok(Err(e)) = gio::spawn_blocking(kit::setup::apply).await {
                 ui::fail(&e);
@@ -428,6 +428,8 @@ pub fn build() -> gtk::Widget {
     });
     end.append(&pick);
     look.append(&row);
+    toggle(&look, "speed", "Reduce effects", "No shadows, blur or frosted panels in digit and the compositor; smoother on older laptops", "reduced_effects", prefs::get_bool(&t, "reduced_effects", false));
+    choice(&look, "memory", "Rendering", "How digit and its apps draw. Takes effect when they next start", "renderer", &[("auto", "Automatic"), ("gl", "GPU (OpenGL)"), ("vulkan", "GPU (Vulkan)"), ("cairo", "Software")], &prefs::get_str(&t, "renderer", "auto"));
     toggle(&look, "auto_awesome", "Startup animation", "Greet each start of the shell with a short full-screen animation", "intro", prefs::get_bool(&t, "intro", true));
     body.append(&look);
 

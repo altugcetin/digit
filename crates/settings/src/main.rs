@@ -473,7 +473,7 @@ fn main() -> glib::ExitCode {
             }
         };
     }
-    let renderer = std::env::var("DIGIT_SETTINGS_RENDERER").ok().filter(|r| matches!(r.as_str(), "cairo" | "gl" | "ngl" | "vulkan")).unwrap_or_else(|| "gl".into());
+    let renderer = kit::effects::renderer("DIGIT_SETTINGS_RENDERER");
     unsafe {
         std::env::set_var("GSK_RENDERER", renderer);
         libc::mallopt(libc::M_MMAP_THRESHOLD, 256 * 1024);
