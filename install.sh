@@ -12,7 +12,6 @@ MIN_GTK=4.18
 MIN_LAYER=1.2
 
 WM=""
-SETUP=""
 YES=false
 DRY=false
 DEPS=true
@@ -37,7 +36,6 @@ digit installer
 
   ./install.sh                  detect everything and install
   ./install.sh --wm hyprland    pick the compositor (hyprland | niri)
-  ./install.sh --setup minimal  Hyprland setup: full (default) | minimal
   ./install.sh --yes            do not ask, take the defaults
   ./install.sh --no-deps        skip system packages
   ./install.sh --dry-run        show what would happen
@@ -53,8 +51,9 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --wm) WM=${2:-}; shift ;;
         --wm=*) WM=${1#--wm=} ;;
-        --setup) SETUP=${2:-}; shift ;;
-        --setup=*) SETUP=${1#--setup=} ;;
+        # Older installers had a full and a minimal setup; there is one now.
+        --setup) shift ;;
+        --setup=*) ;;
         -y|--yes) YES=true ;;
         --no-deps) DEPS=false ;;
         --dry-run) DRY=true ;;
@@ -200,29 +199,27 @@ pick_wm() {
     WM=${REPLY%% *}
 }
 
-# A full setup starts from digit's config (the old one is backed up), a minimal
-# one adds digit's part to the end of the existing config.
-pick_setup() {
-    if [ -n "$SETUP" ]; then
-        case $SETUP in full|minimal) ;; *) die "--setup must be full or minimal" ;; esac
-        return
-    fi
+# digit sets the compositor up from its own config. Say what that means before anything
+# changes; a run on a setup digit already made only refreshes digit's files.
+explain_setup() {
     local dir=hypr main=hyprland.lua
     [ "$WM" = niri ] && dir=niri main=config.kdl
-    # Unattended runs keep the setup digit already has, and never replace a config the user
-    # already has.
-    if $YES; then
-        local had
-        had=$(sed -n "s/^${dir}_setup = \"\([a-z]*\)\"$/\1/p" "$CONF/digit/config.toml" 2>/dev/null | head -n1)
-        if [ -n "$had" ]; then SETUP=$had
-        elif [ -e "$CONF/$dir/$main" ] || { [ "$WM" = hyprland ] && [ -e "$CONF/hypr/hyprland.conf" ]; }; then SETUP=minimal; else SETUP=full; fi
-        info "Setting $WM up: $SETUP."
+    if grep -qs "^${dir}_setup = \"full\"$" "$CONF/digit/config.toml" && [ -d "$CONF/$dir/digit" ]; then
+        info "digit has set up $WM before; its files there will be refreshed."
         return
     fi
-    choose "How should digit set up $WM?" \
-        "full     (recommended) digit's whole config: shortcuts, window keys, looks; ~/.config/$dir is backed up first" \
-        "minimal  keep your config and add digit's part to the end of $main"
-    SETUP=${REPLY%% *}
+    echo
+    bold "About your $WM config"
+    if [ -e "$CONF/$dir" ]; then
+        info "~/.config/$dir is copied to ~/.config/$dir.backup-<date>, then digit writes its own config."
+        info "Shortcuts you made yourself need to be set again: in digit Settings > Keyboard, or in"
+        info "~/.config/$dir/$main, which stays yours. Your old file is in the backup to copy from."
+    else
+        info "digit writes a new config to ~/.config/$dir."
+    fi
+    info "Nothing else is touched: only the $WM config changes, your other configs stay as they are."
+    echo
+    confirm "Continue?" || die "Nothing was changed."
 }
 
 install_wm() {
@@ -381,16 +378,16 @@ hook() {
     case $WM in
         niri)
             if $DRY; then
-                info "[dry-run] $BIN/digit-settings --niri-setup $SETUP"
-            elif ! "$BIN/digit-settings" --niri-setup "$SETUP" | sed 's/^/  /'; then
-                warn "The niri setup did not finish; run it again from digit Settings > Desktop > Windows."
+                info "[dry-run] $BIN/digit-settings --niri-setup"
+            elif ! "$BIN/digit-settings" --niri-setup | sed 's/^/  /'; then
+                warn "The niri setup did not finish; run it again from digit Settings > Windows."
             fi ;;
         hyprland)
             # digit-settings does the Hyprland setup, the same code its Settings page uses.
             if $DRY; then
-                info "[dry-run] $BIN/digit-settings --hypr-setup $SETUP"
-            elif ! "$BIN/digit-settings" --hypr-setup "$SETUP" | sed 's/^/  /'; then
-                warn "The Hyprland setup did not finish; run it again from digit Settings > Desktop > Windows."
+                info "[dry-run] $BIN/digit-settings --hypr-setup"
+            elif ! "$BIN/digit-settings" --hypr-setup | sed 's/^/  /'; then
+                warn "The Hyprland setup did not finish; run it again from digit Settings > Windows."
             fi ;;
     esac
 }
@@ -436,7 +433,7 @@ main() {
     fi
     bold "digit installer · $NAME_SHOWN"
     pick_wm
-    pick_setup
+    explain_setup
     if $DEPS; then
         install_wm
         deps

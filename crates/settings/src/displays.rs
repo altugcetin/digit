@@ -249,7 +249,7 @@ fn hypr_reload_if_needed() {
 /// Where displays are saved: digit's own monitors file once digit is set up on Hyprland,
 /// otherwise a monitors.lua next to hyprland.lua.
 fn monitors_path() -> std::path::PathBuf {
-    if kit::hyprconf::mode().is_some() {
+    if kit::hyprconf::installed() {
         kit::hyprconf::dir().join("digit-monitors.lua")
     } else {
         glib::user_config_dir().join("hypr").join("monitors.lua")
@@ -258,7 +258,7 @@ fn monitors_path() -> std::path::PathBuf {
 
 /// Writes the displays to Hyprland's config. Returns what the file held before, for Revert.
 fn hypr_write(outs: &[Out]) -> Result<Option<String>, String> {
-    if kit::hyprconf::mode().is_some() {
+    if kit::hyprconf::installed() {
         // digit's folder is already loaded by hyprland.lua; only its monitors file changes.
         let monitors = monitors_path();
         let old = std::fs::read_to_string(&monitors).ok();
@@ -367,7 +367,7 @@ fn persist(wm: Wm, outs: &[Out]) -> Result<String, String> {
             }
             Ok("Saved to ~/.config/niri/digit-outputs.kdl".into())
         }
-        Wm::Hypr => Ok(if kit::hyprconf::mode().is_some() { "Saved to ~/.config/hypr/digit/digit-monitors.lua".into() } else { "Saved to ~/.config/hypr/monitors.lua".into() }),
+        Wm::Hypr => Ok(if kit::hyprconf::installed() { "Saved to ~/.config/hypr/digit/digit-monitors.lua".into() } else { "Saved to ~/.config/hypr/monitors.lua".into() }),
         Wm::Other => Err("Display settings work on niri and Hyprland".into()),
     }
 }

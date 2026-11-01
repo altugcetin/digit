@@ -31,6 +31,8 @@ pub enum Reach {
     Url(String),
     Switcher { ids: Vec<String>, entry: Option<usize> },
     Store,
+    /// digit Settings, searched for what is typed.
+    Settings,
 }
 
 #[derive(Clone)]
@@ -187,6 +189,9 @@ pub fn scopes(app: &App, table: &toml::Table) -> Vec<Scope> {
             out.push(Scope { key: key.into(), name: e.name.clone(), reach: Reach::Url(url.into()), icon: e.icon.clone(), symbol: "search", app: true });
         }
     }
+    if glib::find_program_in_path("digit-settings").is_some() {
+        out.push(Scope { key: "set".into(), name: "Settings".into(), reach: Reach::Settings, icon: None, symbol: "settings", app: false });
+    }
     if glib::find_program_in_path("digit-store").is_some() {
         out.push(Scope { key: "app".into(), name: "Digit Store".into(), reach: Reach::Store, icon: None, symbol: "storefront", app: false });
     }
@@ -209,6 +214,9 @@ pub fn scopes(app: &App, table: &toml::Table) -> Vec<Scope> {
             out.push(Scope { key, name, reach: Reach::Url(url), icon: None, symbol: "travel_explore", app: false });
         }
     }
+    // The ones turned off in Settings > Spotlight.
+    let off: Vec<&str> = table.get("search_scopes_off").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+    out.retain(|s| !off.contains(&s.key.as_str()));
     out
 }
 

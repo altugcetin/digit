@@ -127,6 +127,7 @@ pub fn defaults() -> Vec<Bind> {
         bind("wallpaper", "Shell", "Wallpapers", "SUPER + W", ctl("key wallpaper"), n, false),
         bind("settings", "Shell", "Settings", "ALT + COMMA", ctl("key settings"), n, false),
         bind("files", "Shell", "Files", "SUPER + E", run("digit-files"), n, false),
+        bind("layouts", "Shell", "Window layouts", "SUPER + Z", ctl("key layouts"), n, false),
         // Off until the user picks keys for them.
         bind("dnd", "Shell", "Do not disturb", "", ctl("dnd toggle"), n, false),
         bind("awake", "Shell", "Keep awake", "", ctl("awake toggle"), n, false),
@@ -199,14 +200,13 @@ fn overrides() -> toml::Table {
     std::fs::read_to_string(path()).ok().and_then(|t| t.parse::<toml::Table>().ok()).unwrap_or_default()
 }
 
-/// The shortcuts in effect: the defaults with the user's changes and own shortcuts. Window
-/// management is left out unless `window` (a full setup) asks for it. Turned-off ones are dropped.
-pub fn effective(window: bool) -> Vec<Bind> {
+/// The shortcuts in effect: the defaults with the user's changes and own shortcuts. Turned-off
+/// ones are dropped.
+pub fn effective() -> Vec<Bind> {
     let t = overrides();
     let keys = t.get("keys").and_then(|v| v.as_table()).cloned().unwrap_or_default();
     let mut out: Vec<Bind> = defaults()
         .into_iter()
-        .filter(|b| window || !b.window)
         .map(|mut b| {
             if let Some(k) = keys.get(&b.id).and_then(|v| v.as_str()) {
                 b.keys = k.trim().to_string();
@@ -252,56 +252,6 @@ pub fn normalize(keys: &str) -> String {
     mods.join(" + ")
 }
 
-/// Whether a string reads like a shortcut, such as "SUPER + E" or "PRINT".
-fn looks_like_keys(s: &str) -> bool {
-    let n = normalize(s);
-    let parts: Vec<&str> = n.split(" + ").collect();
-    let mods = ["SUPER", "CTRL", "ALT", "SHIFT"];
-    parts.len() >= 2 && parts[..parts.len() - 1].iter().all(|p| mods.contains(p)) && !parts.last().is_some_and(|k| mods.contains(k))
-        || (parts.len() == 1 && (n == "PRINT" || n.starts_with("XF86")))
-}
-
-/// Shortcuts the user's own Hyprland config binds as well, with the file that does it.
-/// It reads the literal key strings in their Lua files (and binds in a hyprland.conf); keys
-/// built at runtime are missed.
-pub fn conflicts(binds: &[Bind]) -> Vec<(String, String)> {
-    let dir = gtk::glib::user_config_dir().join("hypr");
-    let mut found: Vec<(String, String)> = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else { return found };
-    // With a hyprland.lua, Hyprland never reads .conf files, so leftovers there don't count.
-    let lua = dir.join("hyprland.lua").exists();
-    for e in entries.flatten() {
-        let path = e.path();
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        let mut keys = Vec::new();
-        if name.ends_with(".lua") {
-            for line in text.lines().filter(|l| !l.trim_start().starts_with("--")) {
-                for (i, chunk) in line.split('"').enumerate() {
-                    if i % 2 == 1 && looks_like_keys(chunk) {
-                        keys.push(normalize(chunk));
-                    }
-                }
-            }
-        } else if !lua && name == "hyprland.conf" {
-            for line in text.lines().map(str::trim).filter(|l| l.starts_with("bind")) {
-                let Some((_, rhs)) = line.split_once('=') else { continue };
-                let mut parts = rhs.split(',');
-                let (Some(mods), Some(key)) = (parts.next(), parts.next()) else { continue };
-                keys.push(normalize(&format!("{mods} + {key}")));
-            }
-        }
-        for b in binds {
-            let k = normalize(&b.keys);
-            if keys.contains(&k) && !found.iter().any(|(fk, ff)| *fk == b.keys && *ff == name) {
-                found.push((b.keys.clone(), name.clone()));
-            }
-        }
-    }
-    found.sort();
-    found
-}
-
 fn save(t: &toml::Table) -> Result<(), String> {
     let file = path();
     if let Some(d) = file.parent() {
@@ -338,12 +288,11 @@ pub fn changed(id: &str) -> bool {
 }
 
 /// Default shortcuts including turned-off ones, with the keys in effect ("" when off).
-pub fn all(window: bool) -> Vec<Bind> {
+pub fn all() -> Vec<Bind> {
     let t = overrides();
     let keys = t.get("keys").and_then(|v| v.as_table()).cloned().unwrap_or_default();
     defaults()
         .into_iter()
-        .filter(|b| window || !b.window)
         .map(|mut b| {
             if let Some(k) = keys.get(&b.id).and_then(|v| v.as_str()) {
                 b.keys = k.trim().to_string();
@@ -351,6 +300,57 @@ pub fn all(window: bool) -> Vec<Bind> {
             b
         })
         .collect()
+}
+
+/// The keys a shortcut is on now, written for people: "Super+Shift+E". None when it is
+/// turned off. Shown wherever digit mentions a shortcut, so it follows what the user set.
+pub fn shown(id: &str) -> Option<String> {
+    // Panels ask while drawing; read keybinds.toml at most every two seconds.
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<Bind>)>> = std::sync::Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if cache.as_ref().is_none_or(|(at, _)| at.elapsed() > std::time::Duration::from_secs(2)) {
+        *cache = Some((std::time::Instant::now(), all()));
+    }
+    let b = cache.as_ref()?.1.iter().find(|b| b.id == id)?.clone();
+    drop(cache);
+    if b.keys.trim().is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = b
+        .keys
+        .split('+')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| match p.to_ascii_uppercase().as_str() {
+            "SUPER" => "Super".into(),
+            "CTRL" | "CONTROL" => "Ctrl".into(),
+            "ALT" => "Alt".into(),
+            "SHIFT" => "Shift".into(),
+            "COMMA" => ",".into(),
+            "PERIOD" => ".".into(),
+            "RETURN" | "ENTER" => "Enter".into(),
+            "GRAVE" => "`".into(),
+            "MINUS" => "-".into(),
+            "EQUAL" => "=".into(),
+            "SLASH" => "/".into(),
+            "BACKSLASH" => "\\".into(),
+            "SEMICOLON" => ";".into(),
+            "APOSTROPHE" => "'".into(),
+            "BRACKETLEFT" => "[".into(),
+            "BRACKETRIGHT" => "]".into(),
+            k if k.len() == 1 => k.into(),
+            _ => {
+                let mut c = p.chars();
+                c.next().map(|f| f.to_uppercase().chain(c.flat_map(char::to_lowercase)).collect()).unwrap_or_default()
+            }
+        })
+        .collect();
+    Some(parts.join("+"))
+}
+
+/// `shown`, or a word saying the shortcut is off.
+pub fn shown_or(id: &str, off: &str) -> String {
+    shown(id).unwrap_or_else(|| off.to_string())
 }
 
 /// The user's own shortcuts: keys, command and label.

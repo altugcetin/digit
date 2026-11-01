@@ -16,18 +16,20 @@ fn blocking(f: impl FnOnce() + Send + 'static) {
 }
 
 pub fn system(app: &Rc<App>, monitor: Option<gdk::Monitor>, x: f64, y: f64) {
+    // The keys each one is on now, as set in Settings > Keyboard.
+    let keys = |id: &str| kit::keybinds::shown(id).unwrap_or_default();
     let rows = vec![
         Row::item("About This Computer", || spawn(&["digit-settings", "overview"])),
         Row::Sep,
-        Row::item("System Settings…", || spawn(&["digit-settings"])).hint("Alt+,"),
+        Row::item("System Settings…", || spawn(&["digit-settings"])).hint(&keys("settings")),
         Row::item("App Store…", || spawn(&["digit-store"])),
-        Row::item("Files", || spawn(&["digit-files"])).hint("Super+E"),
-        Row::item("Show All Windows", || blocking(crate::compositor::overview)).off(kit::wm::which() == kit::wm::Wm::Hyprland),
+        Row::item("Files", || spawn(&["digit-files"])).hint(&keys("files")),
+        Row::item("Show All Windows", || blocking(crate::compositor::overview)).hint(&keys("overview")).off(kit::wm::which() == kit::wm::Wm::Hyprland),
         Row::Sep,
         Row::item("Welcome Tour…", || spawn(&["digit-settings", "welcome"])),
         Row::Sep,
-        Row::item("Lock Screen", || spawn(&["digitctl", "key", "lock"])).hint("Super+L"),
-        Row::item("Log Out…", || spawn(&["digitctl", "key", "session"])).hint("Super+Shift+E"),
+        Row::item("Lock Screen", || spawn(&["digitctl", "key", "lock"])).hint(&keys("lock")),
+        Row::item("Log Out…", || spawn(&["digitctl", "key", "session"])).hint(&keys("session")),
     ];
     popmenu::show(app, monitor, x, y, &kit::distro::name(), rows);
 }

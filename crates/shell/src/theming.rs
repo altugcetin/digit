@@ -135,7 +135,7 @@ pub fn write(t: &Theme) {
         write_if_changed(&parent.join("digit.conf"), &qt_scheme(t));
     }
     // The compositor's window border follows the accent, which can come from the wallpaper.
-    if kit::setup::mode().is_some() {
+    if kit::setup::installed() {
         std::thread::spawn(|| {
             let _ = kit::setup::apply();
         });

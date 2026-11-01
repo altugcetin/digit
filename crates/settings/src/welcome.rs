@@ -186,22 +186,25 @@ fn styles(t: &toml::Table) -> gtk::Widget {
 
 fn shortcuts() -> gtk::Widget {
     let card = ui::card();
-    for (keys, what) in [
-        ("Super Space", "Open the notch"),
-        ("Alt Space", "Spotlight: apps, files, windows, math"),
-        ("Super W", "Wallpapers"),
-        ("Alt C", "Control center"),
-        ("Alt V", "Clipboard history"),
-        ("Alt Tab", "Switch windows"),
-        ("Super Tab", "Workspaces"),
-        ("Super Z", "Window layouts"),
-        ("Print", "Screenshot an area"),
-        ("Super E", "Files"),
-        ("Super L", "Lock the screen"),
-        ("Super Shift E", "Sleep, restart, shut down or log out"),
+    for (id, what) in [
+        ("notch", "Open the notch"),
+        ("launcher", "Spotlight: apps, files, windows, math"),
+        ("wallpaper", "Wallpapers"),
+        ("control", "Control center"),
+        ("clipboard", "Clipboard history"),
+        ("windows", "Switch windows"),
+        ("spaces", "Workspaces"),
+        ("layouts", "Window layouts"),
+        ("snap", "Screenshot an area"),
+        ("files", "Files"),
+        ("lock", "Lock the screen"),
+        ("session", "Sleep, restart, shut down or log out"),
     ] {
+        // Only the ones that are on, with the keys the user set.
+        let Some(keys) = kit::keybinds::shown(id) else { continue };
+        let keys = keys.replace('+', " ");
         let (row, end) = ui::row(None, what, "");
-        end.append(&ui::badge(keys, ""));
+        end.append(&ui::badge(&keys, ""));
         card.append(&row);
     }
     let scroll = gtk::ScrolledWindow::new();
@@ -254,7 +257,10 @@ fn step(index: usize, t: &toml::Table) -> gtk::Widget {
         3 => {
             page.append(&header("wallpaper", "Wallpaper and colors", "Colors are generated from your wallpaper. Pick one you love and Digit repaints itself around it."));
             let card = ui::card();
-            let (row, end) = ui::row(Some("image"), "Wallpaper", "Opens the wallpaper picker on this screen (Super+W)");
+            let (row, end) = ui::row(Some("image"), "Wallpaper", &match kit::keybinds::shown("wallpaper") {
+                Some(k) => format!("Opens the wallpaper picker on this screen ({k})"),
+                None => "Opens the wallpaper picker on this screen".into(),
+            });
             let b = ui::button("Choose…", "accent");
             b.connect_clicked(|_| spawn(&["digitctl", "key", "wallpaper"]));
             end.append(&b);

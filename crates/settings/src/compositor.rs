@@ -14,29 +14,19 @@ pub fn build() -> gtk::Widget {
     };
     let niri = kind == kit::setup::Kind::Niri;
     // Without a setup, only the Setup row above has anything to offer.
-    let Some(mode) = kit::setup::mode() else {
+    if !kit::setup::installed() {
         return scroll.upcast();
-    };
-    if mode == kit::hyprconf::Mode::Minimal {
-        let card = ui::card();
-        let (row, _) = ui::row(Some("info"), "Minimal setup", "Your own config decides everything here until you change it; what you change wins over your config");
-        card.append(&row);
-        body.append(&card);
     }
     let t = prefs::read();
-    // Unchanged values show digit's defaults in a full setup, and what Hyprland runs with now
-    // in a minimal one, since the user's own config decides those.
-    // Hyprland can say what it runs with now; niri's config is only read from files.
-    let minimal = mode == kit::hyprconf::Mode::Minimal && !niri;
-    let s = |k: &str, d: &str| prefs::get_str(&t, k, &(if minimal { live_text(k) } else { None }).unwrap_or_else(|| d.to_string()));
-    let f = |k: &str, d: f64| prefs::get_f64(&t, k, (if minimal { live_num(k) } else { None }).unwrap_or(d));
-    let b = |k: &str, d: bool| prefs::get_bool(&t, k, (if minimal { live_num(k).map(|v| v != 0.0) } else { None }).unwrap_or(d));
+    let s = |k: &str, d: &str| prefs::get_str(&t, k, d);
+    let f = |k: &str, d: f64| prefs::get_f64(&t, k, d);
+    let b = |k: &str, d: bool| prefs::get_bool(&t, k, d);
 
     body.append(&ui::heading("Keyboard"));
     let kb = ui::card();
     field(&kb, "keyboard", "Layouts", "Comma-separated, first is the default: us, tr, de…", "hypr_kb_layout", &s("hypr_kb_layout", "us"), "us", layouts);
     field(&kb, "tune", "Variants", "One per layout, or empty: intl, f, dvorak…", "hypr_kb_variant", &s("hypr_kb_variant", ""), "", variants);
-    choice(&kb, "swap_horiz", "Switch layouts with", "Super+Space also opens the notch", "hypr_layout_switch", &[("none", "Nothing"), ("alt_shift", "Alt+Shift"), ("ctrl_shift", "Ctrl+Shift"), ("win_space", "Super+Space"), ("caps", "Caps Lock")], &s("hypr_layout_switch", "none"));
+    choice(&kb, "swap_horiz", "Switch layouts with", &kit::keybinds::shown("notch").map(|k| format!("{k} also opens the notch")).unwrap_or_default(), "hypr_layout_switch", &[("none", "Nothing"), ("alt_shift", "Alt+Shift"), ("ctrl_shift", "Ctrl+Shift"), ("win_space", "Super+Space"), ("caps", "Caps Lock")], &s("hypr_layout_switch", "none"));
     choice(&kb, "keyboard_capslock", "Caps Lock", "", "hypr_caps", &[("normal", "Caps Lock"), ("escape", "Escape"), ("ctrl", "Ctrl"), ("swapescape", "Swap with Escape")], &s("hypr_caps", "normal"));
     slider(&kb, "timer", "Repeat delay", "Milliseconds before a held key repeats", "hypr_repeat_delay", (150.0, 800.0, 10.0), f("hypr_repeat_delay", 300.0), 0);
     slider(&kb, "speed", "Repeat rate", "Repeats per second", "hypr_repeat_rate", (10.0, 60.0, 1.0), f("hypr_repeat_rate", 30.0), 0);
@@ -152,58 +142,6 @@ fn variants(s: &str) -> bool {
 }
 
 /// The Hyprland option behind a setting.
-fn option(key: &str) -> Option<&'static str> {
-    Some(match key {
-        "hypr_kb_layout" => "input:kb_layout",
-        "hypr_kb_variant" => "input:kb_variant",
-        "hypr_layout_switch" | "hypr_caps" => "input:kb_options",
-        "hypr_repeat_delay" => "input:repeat_delay",
-        "hypr_repeat_rate" => "input:repeat_rate",
-        "hypr_sensitivity" => "input:sensitivity",
-        "hypr_accel" => "input:accel_profile",
-        "hypr_mouse_natural" => "input:natural_scroll",
-        "hypr_touch_natural" => "input:touchpad:natural_scroll",
-        "hypr_tap" => "input:touchpad:tap-to-click",
-        "hypr_follow_mouse" => "input:follow_mouse",
-        "hypr_tiling" => "general:layout",
-        "hypr_gaps_in" => "general:gaps_in",
-        "hypr_gaps_out" => "general:gaps_out",
-        "hypr_border" => "general:border_size",
-        "hypr_shadow" => "decoration:shadow:enabled",
-        "hypr_blur" => "decoration:blur:enabled",
-        _ => return None,
-    })
-}
-
-fn live(key: &str) -> Option<serde_json::Value> {
-    let out = std::process::Command::new("hyprctl").args(["-j", "getoption", option(key)?]).output().ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    ["str", "int", "float", "bool", "css"].iter().find_map(|k| v.get(*k).cloned())
-}
-
-fn live_text(key: &str) -> Option<String> {
-    let v = live(key)?;
-    let s = v.as_str()?.to_string();
-    let s = if s == "[[EMPTY]]" { String::new() } else { s };
-    // Caps Lock and the layout switch both live in kb_options.
-    Some(match key {
-        "hypr_caps" => (if s.contains("caps:swapescape") { "swapescape" } else if s.contains("caps:escape") { "escape" } else if s.contains("ctrl:nocaps") { "ctrl" } else { "normal" }).into(),
-        "hypr_layout_switch" => (if s.contains("grp:alt_shift_toggle") { "alt_shift" } else if s.contains("grp:ctrl_shift_toggle") { "ctrl_shift" } else if s.contains("grp:win_space_toggle") { "win_space" } else if s.contains("grp:caps_toggle") { "caps" } else { "none" }).into(),
-        "hypr_accel" if s.is_empty() => "adaptive".into(),
-        _ => s,
-    })
-}
-
-fn live_num(key: &str) -> Option<f64> {
-    match live(key)? {
-        serde_json::Value::Number(n) => n.as_f64(),
-        serde_json::Value::Bool(b) => Some(if b { 1.0 } else { 0.0 }),
-        // Gaps come as "top right bottom left".
-        serde_json::Value::String(s) => s.split_whitespace().next()?.parse().ok(),
-        _ => None,
-    }
-}
-
 const TILING: [(&str, &str); 3] = [("dwindle", "Dwindle"), ("master", "Master"), ("scrolling", "Scrolling")];
 const GAPS: [(&str, f64, f64); 4] = [("None", 0.0, 0.0), ("Tight", 2.0, 4.0), ("Comfortable", 4.0, 8.0), ("Wide", 8.0, 16.0)];
 const SHADOWS: [(&str, &str, f64); 4] = [("off", "Off", 0.0), ("soft", "Soft", 5.0), ("medium", "Medium", 9.0), ("large", "Large", 14.0)];

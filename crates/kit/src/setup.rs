@@ -1,7 +1,7 @@
 //! The compositor config digit manages, whichever compositor is running: Hyprland through
 //! `hyprconf`, niri through `niriconf`. Settings and the shell talk to this.
 
-use crate::hyprconf::{self, Mode};
+use crate::hyprconf;
 use crate::keybinds::Bind;
 use crate::niriconf;
 
@@ -29,17 +29,19 @@ pub fn kind() -> Option<Kind> {
     }
 }
 
-pub fn mode() -> Option<Mode> {
-    match kind()? {
-        Kind::Hyprland => hyprconf::mode(),
-        Kind::Niri => niriconf::mode(),
+/// Whether digit has set up the running compositor.
+pub fn installed() -> bool {
+    match kind() {
+        Some(Kind::Hyprland) => hyprconf::installed(),
+        Some(Kind::Niri) => niriconf::installed(),
+        None => false,
     }
 }
 
-pub fn setup(mode: Mode) -> Result<String, String> {
+pub fn setup() -> Result<String, String> {
     match kind() {
-        Some(Kind::Hyprland) => hyprconf::setup(mode),
-        Some(Kind::Niri) => niriconf::setup(mode),
+        Some(Kind::Hyprland) => hyprconf::setup(),
+        Some(Kind::Niri) => niriconf::setup(),
         None => Err("digit can set up Hyprland and niri only".into()),
     }
 }
@@ -63,17 +65,11 @@ pub fn sync_all() -> Result<bool, String> {
     Ok(hypr || niri)
 }
 
-/// Shortcuts in effect that the compositor can do, and those the user's config binds too.
-pub fn shortcuts() -> (Vec<Bind>, Vec<(String, String)>) {
+/// Shortcuts in effect that the compositor can do.
+pub fn shortcuts() -> Vec<Bind> {
     match kind() {
-        Some(Kind::Niri) => {
-            let full = niriconf::mode() == Some(Mode::Full);
-            (crate::keybinds::effective(full).into_iter().filter(niriconf::supports).collect(), Vec::new())
-        }
-        _ => {
-            let (binds, conflicts) = hyprconf::shortcuts();
-            (binds.into_iter().filter(hyprconf::supports).collect(), conflicts)
-        }
+        Some(Kind::Niri) => crate::keybinds::effective().into_iter().filter(niriconf::supports).collect(),
+        _ => hyprconf::shortcuts(),
     }
 }
 

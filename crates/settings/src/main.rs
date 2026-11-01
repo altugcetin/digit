@@ -80,7 +80,10 @@ fn build_page(name: &str) -> gtk::Widget {
         "dock" => desktop::build(name, "Dock", ""),
         "notch" => desktop::build(name, "Notch and menu bar", "The notch, the bar beside it, the panels they open and the screen corners."),
         "desktop" => desktop::build(name, "Desktop", "What sits on the wallpaper, behind your windows."),
-        "spotlight" => desktop::build(name, "Spotlight", "Alt+Space searches apps, files, settings and the web."),
+        "spotlight" => desktop::build(name, "Spotlight", &match kit::keybinds::shown("launcher") {
+            Some(k) => format!("{k} searches apps, files, settings and the web."),
+            None => "Searches apps, files, settings and the web.".into(),
+        }),
         "power" => desktop::build(name, "Lock and power", ""),
         "screenshots" => desktop::build(name, "Screenshots", ""),
         "files" => desktop::build(name, "Files", ""),
@@ -88,9 +91,13 @@ fn build_page(name: &str) -> gtk::Widget {
     }
 }
 
-/// Opens a page by id, or a row on it by `page/row-name` ("dock/icon-size").
+/// Opens a page by id, or a row on it by `page/row-name` ("dock/icon-size"), with the
+/// section after another slash when two rows share a name ("appearance/surfaces/apps").
 pub(crate) fn show(name: &str) {
-    let (name, row) = name.split_once('/').unwrap_or((name, ""));
+    let mut parts = name.splitn(3, '/');
+    let name = parts.next().unwrap_or_default();
+    let row = parts.next().unwrap_or_default();
+    let within = parts.next().filter(|s| !s.is_empty());
     // Pages that moved keep their old links working.
     let (name, row) = match name {
         "night" => ("displays", "night-light"),
@@ -138,7 +145,7 @@ pub(crate) fn show(name: &str) {
         }
     });
     if !row.is_empty() {
-        search::reveal(name, None, row);
+        search::reveal(name, within, row);
     }
 }
 
@@ -521,7 +528,17 @@ fn present(app: &gtk::Application, page: Option<&str>) {
         }
         window(app)
     });
-    show(page.unwrap_or("overview"));
+    // "?words" opens Settings searching for them, as Spotlight's "set" key does.
+    match page.and_then(|p| p.strip_prefix('?')) {
+        Some(words) => {
+            if let Some(find) = SHELL.with(|s| s.borrow().as_ref().map(|s| s.find.clone())) {
+                find.set_text(words);
+                find.grab_focus();
+                find.set_position(-1);
+            }
+        }
+        None => show(page.unwrap_or("overview")),
+    }
     window.present();
 }
 
@@ -530,13 +547,9 @@ fn main() -> glib::ExitCode {
         install();
         return glib::ExitCode::SUCCESS;
     }
-    // The installer sets digit up on Hyprland through here, sharing the code Settings uses.
+    // The installer sets digit up through here, sharing the code Settings uses.
     if std::env::args().nth(1).as_deref() == Some("--hypr-setup") {
-        let Some(mode) = std::env::args().nth(2).as_deref().and_then(kit::hyprconf::Mode::parse) else {
-            eprintln!("usage: digit-settings --hypr-setup full|minimal");
-            return glib::ExitCode::FAILURE;
-        };
-        return match kit::hyprconf::setup(mode) {
+        return match kit::hyprconf::setup() {
             Ok(note) => {
                 println!("{note}");
                 glib::ExitCode::SUCCESS
@@ -547,12 +560,9 @@ fn main() -> glib::ExitCode {
             }
         };
     }
+    // The installer sets digit up through here, sharing the code Settings uses.
     if std::env::args().nth(1).as_deref() == Some("--niri-setup") {
-        let Some(mode) = std::env::args().nth(2).as_deref().and_then(kit::hyprconf::Mode::parse) else {
-            eprintln!("usage: digit-settings --niri-setup full|minimal");
-            return glib::ExitCode::FAILURE;
-        };
-        return match kit::niriconf::setup(mode) {
+        return match kit::niriconf::setup() {
             Ok(note) => {
                 println!("{note}");
                 glib::ExitCode::SUCCESS
@@ -571,6 +581,14 @@ fn main() -> glib::ExitCode {
                 glib::ExitCode::FAILURE
             }
         };
+    }
+    // Spotlight asks for the settings index this way when it has none or it is out of date.
+    if std::env::args().nth(1).as_deref() == Some("--index") {
+        if gtk::init().is_err() {
+            return glib::ExitCode::FAILURE;
+        }
+        search::refresh();
+        return glib::ExitCode::SUCCESS;
     }
     if std::env::args().nth(1).as_deref() == Some("--sync") {
         return match kit::setup::sync_all() {
