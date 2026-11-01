@@ -134,6 +134,12 @@ pub fn write(t: &Theme) {
     if let Some(parent) = qt_colors().parent().filter(|p| p.is_dir()) {
         write_if_changed(&parent.join("digit.conf"), &qt_scheme(t));
     }
+    // The compositor's window border follows the accent, which can come from the wallpaper.
+    if kit::setup::mode().is_some() {
+        std::thread::spawn(|| {
+            let _ = kit::setup::apply();
+        });
+    }
 }
 
 pub fn take(qt: bool) {

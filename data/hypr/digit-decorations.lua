@@ -5,7 +5,6 @@
 hl.config({
     general = {
         resize_on_border = true,
-        col = { active_border = "rgba(ffffff47)", inactive_border = "rgba(ffffff14)" },
     },
     decoration = {
         rounding = {{rounding}},

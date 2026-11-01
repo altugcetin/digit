@@ -446,6 +446,15 @@ fn main() -> glib::ExitCode {
             }
         };
     }
+    if std::env::args().nth(1).as_deref() == Some("--sync") {
+        return match kit::setup::sync_all() {
+            Ok(_) => glib::ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e}");
+                glib::ExitCode::FAILURE
+            }
+        };
+    }
     if std::env::args().nth(1).as_deref() == Some("--hypr-sync") {
         return match kit::hyprconf::apply() {
             Ok(()) => glib::ExitCode::SUCCESS,

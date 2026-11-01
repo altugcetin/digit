@@ -58,6 +58,12 @@ pub fn build() -> gtk::Widget {
     if !niri {
         toggle(&mouse, "swipe", "Swipe between workspaces", "Three fingers sideways on the touchpad", "hypr_gesture", b("hypr_gesture", true));
     }
+    if niri {
+        toggle(&mouse, "keyboard_hide", "Ignore the touchpad while typing", "", "niri_dwt", b("niri_dwt", true));
+        choice(&mouse, "swap_vert", "Touchpad scroll speed", "", "niri_scroll", &[("slow", "Slow"), ("normal", "Normal"), ("fast", "Fast")], &s("niri_scroll", "normal"));
+        choice(&mouse, "arrow_selector_tool", "Pointer size", "", "niri_cursor_size", &[("small", "Small"), ("medium", "Medium"), ("large", "Large")], &s("niri_cursor_size", "small"));
+        toggle(&mouse, "visibility_off", "Hide the pointer while typing", "", "niri_hide_cursor", b("niri_hide_cursor", false));
+    }
     body.append(&mouse);
 
     body.append(&ui::heading("Windows"));
@@ -80,7 +86,29 @@ pub fn build() -> gtk::Widget {
         });
     }
     slider(&win, "border_style", "Border width", "", "hypr_border", (0.0, 6.0, 1.0), f("hypr_border", 2.0), 0);
+    if niri {
+        choice(&win, "highlight", "Mark the focused window", "", "niri_highlight", &[("border", "Border"), ("ring", "Ring"), ("none", "Nothing")], &s("niri_highlight", "border"));
+    }
+    choice(&win, "palette", "Border color", "The focused window's border", "border_color", &[("accent", "Accent"), ("default", "Grey")], &s("border_color", "accent"));
     body.append(&win);
+
+    if niri {
+        body.append(&ui::heading("Columns"));
+        let cols = ui::card();
+        let current = s("niri_column_width", "half");
+        let at = WIDTHS.iter().position(|w| w.0 == current).unwrap_or(1);
+        let items = WIDTHS.iter().map(|(_, name, share)| (*name, width_picture(*share))).collect();
+        tiles(&cols, "view_column", "New windows open", "As a column this wide", items, at, |i| save("niri_column_width", toml::Value::String(WIDTHS[i].0.into())));
+        choice(&cols, "center_focus_strong", "Center the focused column", "", "niri_center", &[("never", "Never"), ("on-overflow", "When it doesn't fit"), ("always", "Always")], &s("niri_center", "never"));
+        choice(&cols, "width", "Widths to step through", "With the Cycle the column width shortcut", "niri_presets", &[("thirds", "⅓ · ½ · ⅔"), ("halves", "½ · Full")], &s("niri_presets", "thirds"));
+        body.append(&cols);
+
+        body.append(&ui::heading("Overview and motion"));
+        let more = ui::card();
+        choice(&more, "zoom_out_map", "Overview size", "How small workspaces get in the overview", "niri_overview_zoom", &[("small", "Small"), ("medium", "Medium"), ("large", "Large")], &s("niri_overview_zoom", "medium"));
+        choice(&more, "animation", "Animations", "", "niri_motion", &[("normal", "Normal"), ("slow", "Slow"), ("off", "Off")], &s("niri_motion", "normal"));
+        body.append(&more);
+    }
 
     // niri's workspaces only stack vertically and its windows only pop in.
     if !niri {
@@ -316,5 +344,24 @@ fn blur_picture(strength: f64) -> gtk::Widget {
         cr.set_source_rgba(ink.0, ink.1, ink.2, 0.6);
         cr.set_line_width(1.0);
         let _ = cr.stroke();
+    })
+}
+
+const WIDTHS: [(&str, &str, f64); 4] = [("third", "Third", 1.0 / 3.0), ("half", "Half", 0.5), ("two_thirds", "Two thirds", 2.0 / 3.0), ("full", "Full", 1.0)];
+
+fn width_picture(share: f64) -> gtk::Widget {
+    picture(move |cr, w, h, ink| {
+        // The screen, with the new column at its width and the next one peeking in.
+        let (x0, y0, sw, sh) = (12.0, 10.0, w - 24.0, h - 20.0);
+        cr.set_source_rgba(ink.0, ink.1, ink.2, 0.35);
+        cr.set_line_width(1.0);
+        rrect(cr, x0, y0, sw, sh, 5.0);
+        let _ = cr.stroke();
+        let cw = (sw - 6.0) * share;
+        window(cr, x0 + 3.0, y0 + 3.0, cw, sh - 6.0, ink, true);
+        let nx = x0 + 3.0 + cw + 3.0;
+        if nx < x0 + sw - 6.0 {
+            window(cr, nx, y0 + 3.0, x0 + sw - 3.0 - nx, sh - 6.0, ink, false);
+        }
     })
 }

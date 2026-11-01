@@ -51,6 +51,12 @@ pub enum Win {
     Group,
     Scratchpad,
     ToScratchpad,
+    /// niri: step the column through its preset widths.
+    PresetWidth,
+    /// niri: zoom out to every workspace at once.
+    Overview,
+    /// niri: bring the focused column to the middle of the screen.
+    Center,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -153,6 +159,9 @@ pub fn defaults() -> Vec<Bind> {
         bind("group", "Windows", "Group windows into tabs", "SUPER + G", Act::Window(Win::Group), n, true),
         bind("scratchpad", "Workspaces", "Show or hide the scratchpad", "SUPER + GRAVE", Act::Window(Win::Scratchpad), n, true),
         bind("to-scratchpad", "Workspaces", "Move window to the scratchpad", "SUPER + SHIFT + GRAVE", Act::Window(Win::ToScratchpad), n, true),
+        bind("column-width", "Windows", "Cycle the column width", "SUPER + R", Act::Window(Win::PresetWidth), n, true),
+        bind("overview", "Workspaces", "Overview of all workspaces", "SUPER + O", Act::Window(Win::Overview), n, true),
+        bind("center", "Windows", "Center the column", "", Act::Window(Win::Center), n, true),
         bind("workspace-next", "Workspaces", "Next workspace", "SUPER + mouse_down", Act::Window(Win::StepWorkspace(1)), n, true),
         bind("workspace-prev", "Workspaces", "Previous workspace", "SUPER + mouse_up", Act::Window(Win::StepWorkspace(-1)), n, true),
         bind("play", "Media keys", "Play or pause", "XF86AudioPlay", Act::Shell("playerctl play-pause".into()), LOCKED, true),
@@ -171,6 +180,14 @@ pub fn defaults() -> Vec<Bind> {
         out.push(bind(&format!("workspace-{i}"), "Workspaces", &format!("Go to workspace {i}"), &format!("SUPER + {key}"), Act::Window(Win::Workspace(i)), n, true));
         out.push(bind(&format!("to-workspace-{i}"), "Workspaces", &format!("Move window to workspace {i}"), &format!("SUPER + SHIFT + {key}"), Act::Window(Win::ToWorkspace(i)), n, true));
     }
+    // Keep each group together (lists show one heading per group), in the order groups first appear.
+    let mut order: Vec<&'static str> = Vec::new();
+    for b in &out {
+        if !order.contains(&b.group) {
+            order.push(b.group);
+        }
+    }
+    out.sort_by_key(|b| order.iter().position(|g| *g == b.group));
     out
 }
 

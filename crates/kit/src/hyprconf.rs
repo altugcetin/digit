@@ -93,6 +93,11 @@ fn scrolling(d: keybinds::Dir, tiled: String, column: &str) -> String {
     format!("per_layout({{ default = {tiled}, scrolling = hl.dsp.layout(\"{column} {side}\") }})")
 }
 
+/// Whether Hyprland can do what this shortcut does.
+pub fn supports(b: &Bind) -> bool {
+    !matches!(b.act, Act::Window(Win::PresetWidth | Win::Overview | Win::Center))
+}
+
 fn action(b: &Bind) -> String {
     let bin = bin();
     let exec = |cmd: String| format!("hl.dsp.exec_cmd({})", lua_str(&cmd));
@@ -132,6 +137,8 @@ fn action(b: &Bind) -> String {
             Win::Group => "hl.dsp.group.toggle()".into(),
             Win::Scratchpad => "hl.dsp.workspace.toggle_special(\"scratchpad\")".into(),
             Win::ToScratchpad => "hl.dsp.window.move({ workspace = \"special:scratchpad\" })".into(),
+            // niri only; `supports` keeps these out of Hyprland's file.
+            Win::PresetWidth | Win::Overview | Win::Center => String::new(),
         },
     }
 }
@@ -160,7 +167,7 @@ pub fn render_keybinds(binds: &[Bind], conflicts: &[(String, String)]) -> String
         out.push('\n');
     }
     let mut group = "";
-    for b in binds {
+    for b in binds.iter().filter(|b| supports(b)) {
         if b.group != group {
             group = b.group;
             out.push_str(&format!("-- {group}\n"));
@@ -311,6 +318,16 @@ fn compositor(mode: Mode) -> String {
     if let Some(v) = num("border", 2.0) {
         general.push(format!("border_size = {}", int(v)));
     }
+    // The focused window's border: digit's accent, or the plain grey of digit's default look.
+    let colors = t.get("border_color").and_then(|v| v.as_str().map(str::to_string)).or_else(|| full.then(|| "accent".to_string()));
+    if let Some(c) = colors {
+        let (active, inactive) = if c == "default" {
+            ("rgba(595959ff)".to_string(), "rgba(5959591a)".to_string())
+        } else {
+            (format!("rgba({}ff)", crate::niriconf::accent().trim_start_matches('#')), "rgba(ffffff14)".to_string())
+        };
+        general.push(format!("col = {{ active_border = {}, inactive_border = {} }}", lua_str(&active), lua_str(&inactive)));
+    }
     let mut decoration = Vec::new();
     if let Some(on) = flag("shadow", true) {
         let range = match text("shadow_size", "medium").as_deref() {
@@ -397,7 +414,7 @@ pub fn sync() -> Result<bool, String> {
     let Some(mode) = mode() else { return Ok(false) };
     let d = dir();
     let e = |e: std::io::Error| format!("Could not write {}: {e}", d.display());
-    let binds = keybinds::effective(mode == Mode::Full);
+    let binds: Vec<Bind> = keybinds::effective(mode == Mode::Full).into_iter().filter(supports).collect();
     let conflicts = if mode == Mode::Minimal { keybinds::conflicts(&binds) } else { Vec::new() };
     let mut changed = false;
     changed |= write_if_changed(&d.join("init.lua"), INIT).map_err(e)?;
@@ -421,7 +438,7 @@ pub fn sync() -> Result<bool, String> {
 /// Shortcuts in effect for the current setup and the ones the user's config binds too.
 pub fn shortcuts() -> (Vec<Bind>, Vec<(String, String)>) {
     let mode = mode();
-    let binds = keybinds::effective(mode == Some(Mode::Full));
+    let binds: Vec<Bind> = keybinds::effective(mode == Some(Mode::Full)).into_iter().filter(supports).collect();
     let conflicts = if mode == Some(Mode::Minimal) { keybinds::conflicts(&binds) } else { Vec::new() };
     (binds, conflicts)
 }
