@@ -390,11 +390,54 @@ fn set_windows(free: bool) {
     });
 }
 
-pub fn build() -> gtk::Widget {
-    let (scroll, body) = ui::page("Desktop", "digit applies these instantly.");
+/// A settings page: which sections it shows, in order. Search builds the same sections to
+/// index their rows, so a section is the unit both share.
+pub type Section = fn(&gtk::Box, &toml::Table);
+
+pub fn sections(page: &str) -> &'static [Section] {
+    match page {
+        "appearance" => &[shell_look, app_look, effects],
+        "dock" => &[dock],
+        "notch" => &[notch, menu_bar, panels, screen_edges],
+        "desktop" => &[desktop, weather],
+        "spotlight" => &[search, clipboard],
+        "compositor" => &[setup],
+        "displays" => &[night_light],
+        "power" => &[power],
+        "screenshots" => &[screenshots],
+        "files" => &[files],
+        "overview" => &[advanced],
+        _ => &[],
+    }
+}
+
+/// Builds a page made only of sections.
+pub fn build(page: &str, title: &str, lead: &str) -> gtk::Widget {
+    let (scroll, body) = ui::page(title, lead);
     let t = prefs::read();
-    body.append(&ui::heading("Appearance"));
-    let look = ui::card();
+    for section in sections(page) {
+        section(&body, &t);
+    }
+    // A page of one section doesn't repeat its name under the title.
+    let mut child = body.first_child();
+    while let Some(c) = child {
+        child = c.next_sibling();
+        if c.has_css_class("heading") && c.downcast_ref::<gtk::Label>().is_some_and(|l| l.text() == title) {
+            c.set_visible(false);
+        }
+    }
+    scroll.upcast()
+}
+
+fn section(body: &gtk::Box, title: &str) -> gtk::Box {
+    body.append(&ui::heading(title));
+    let card = ui::card();
+    body.append(&card);
+    card
+}
+
+fn shell_look(body: &gtk::Box, t: &toml::Table) {
+    let look = section(body, "Shell");
     choice(&look, "dark_mode", "Surfaces", "Notch, dock, menus and panels", "surface", &[("black", "Pure black"), ("tinted", "Tinted by wallpaper")], &prefs::get_str(&t, "surface", "black"));
     let (row, end) = ui::row(Some("palette"), "Color scheme", "Colors generated from your wallpaper");
     let current = kit::theme::load().map(|t| t.scheme).unwrap_or_else(|| prefs::get_str(&t, "scheme", "content"));
@@ -428,23 +471,27 @@ pub fn build() -> gtk::Widget {
     });
     end.append(&pick);
     look.append(&row);
-    toggle(&look, "speed", "Reduce effects", "No shadows, blur or frosted panels in digit and the compositor; smoother on older laptops", "reduced_effects", prefs::get_bool(&t, "reduced_effects", false));
-    choice(&look, "memory", "Rendering", "How digit and its apps draw. Takes effect when they next start", "renderer", &[("auto", "Automatic"), ("gl", "GPU (OpenGL)"), ("vulkan", "GPU (Vulkan)"), ("cairo", "Software")], &prefs::get_str(&t, "renderer", "auto"));
-    toggle(&look, "auto_awesome", "Startup animation", "Greet each start of the shell with a short full-screen animation", "intro", prefs::get_bool(&t, "intro", true));
-    body.append(&look);
+}
 
-    body.append(&ui::heading("Apps"));
-    let apps = ui::card();
+fn app_look(body: &gtk::Box, t: &toml::Table) {
+    let apps = section(body, "Apps");
     surfaces(&apps, "layers", "Surfaces", "Background of Settings, Store, Files and the Game Bar", &prefs::get_str(&t, "ui_surface", "black"));
     accent(&apps, &t);
     corners(&apps, "rounded_corner", "Corners", "Cards, menus, buttons and dialogs", "ui_round", prefs::get_f64(&t, "ui_round", 1.0));
     choice(&apps, "density_medium", "Density", "", "ui_density", &[("comfortable", "Comfortable"), ("compact", "Compact")], &prefs::get_str(&t, "ui_density", "comfortable"));
-    toggle(&apps, "swipe_vertical", "Smooth scrolling", "Mouse wheel steps glide instead of jumping. Touchpads always scroll smoothly", "smooth_scroll", prefs::get_bool(&t, "smooth_scroll", true));
     toggle(&apps, "select_window", "Open Settings as a window", "Settings opens over everything by default; turn this on for an ordinary window. Takes effect the next time Settings opens", "settings_window", prefs::get_bool(&t, "settings_window", false));
-    body.append(&apps);
+}
 
-    body.append(&ui::heading("Dock"));
-    let dock = ui::card();
+fn effects(body: &gtk::Box, t: &toml::Table) {
+    let look = section(body, "Motion and effects");
+    toggle(&look, "swipe_vertical", "Smooth scrolling", "Mouse wheel steps glide instead of jumping. Touchpads always scroll smoothly", "smooth_scroll", prefs::get_bool(&t, "smooth_scroll", true));
+    toggle(&look, "speed", "Reduce effects", "No shadows, blur or frosted panels in digit and the compositor; smoother on older laptops", "reduced_effects", prefs::get_bool(&t, "reduced_effects", false));
+    choice(&look, "memory", "Rendering", "How digit and its apps draw. Takes effect when they next start", "renderer", &[("auto", "Automatic"), ("gl", "GPU (OpenGL)"), ("vulkan", "GPU (Vulkan)"), ("cairo", "Software")], &prefs::get_str(&t, "renderer", "auto"));
+    toggle(&look, "auto_awesome", "Startup animation", "Greet each start of the shell with a short full-screen animation", "intro", prefs::get_bool(&t, "intro", true));
+}
+
+fn dock(body: &gtk::Box, t: &toml::Table) {
+    let dock = section(body, "Dock");
     choice(&dock, "dock_to_bottom", "Visibility", "Alt+D shows or hides it at any time", "dock_mode", &[("on", "Always shown"), ("autohide", "Auto-hide"), ("smart", "Hide when windows are open"), ("off", "Off")], &prefs::get_str(&t, "dock_mode", "on"));
     choice(&dock, "side_navigation", "Position", "", "dock_side", &[("bottom", "Bottom"), ("left", "Left"), ("right", "Right")], &prefs::get_str(&t, "dock_side", "bottom"));
     slider(&dock, "photo_size_select_small", "Icon size", "", "dock_size", (32.0, 80.0, 2.0), prefs::get_f64(&t, "dock_size", 50.0), 0);
@@ -456,10 +503,13 @@ pub fn build() -> gtk::Widget {
         other => other.to_string(),
     };
     choice(&dock, "style", "Icon style", "Big Sur shaped icons for every app", "dock_icons", &[("light", "Big Sur"), ("graphite", "Big Sur graphite"), ("mono", "Mono"), ("tinted", "Tinted"), ("native", "Original")], &style);
-    body.append(&dock);
+}
 
-    body.append(&ui::heading("Windows"));
-    let win = ui::card();
+pub fn setup(body: &gtk::Box, _: &toml::Table) {
+    if kit::setup::kind().is_none() {
+        return;
+    }
+    let win = section(body, "Setup");
     if let Some(kind) = kit::setup::kind() {
         use kit::hyprconf::Mode;
         let mode = kit::setup::mode();
@@ -486,7 +536,8 @@ pub fn build() -> gtk::Widget {
                 kit::ui::ask(parent.as_ref(), &title, &detail, "Cancel", label, "accent", move || match kit::setup::setup(m) {
                     Ok(note) => {
                         ui::done(&note);
-                        crate::reload("desktop");
+                        crate::reload("compositor");
+                        crate::reload("keyboard");
                     }
                     Err(e) => ui::fail(&e),
                 });
@@ -507,40 +558,62 @@ pub fn build() -> gtk::Widget {
         end.append(&ui::badge("Super Z", ""));
         win.append(&row);
     }
-    body.append(&win);
+}
 
-    body.append(&ui::heading("Notch and corners"));
-    let notch = ui::card();
-    choice(&notch, "toolbar", "Style", "Notch hugs the top edge, Dynamic Island floats as a pill, Bar spans the whole edge with the app, status and date", "notch_style", &[("island", "Notch"), ("dynamic", "Dynamic Island"), ("bar", "Bar")], &prefs::get_str(&t, "notch_style", "island"));
-    toggle(&notch, "menu", "Menu bar", "Distro menu, the focused app's menus, status and date beside the notch", "menubar", prefs::get_bool(&t, "menubar", true));
-    choice(&notch, "blur_on", "Menu bar backdrop", "Adaptive stays clear over the wallpaper and turns to frosted glass when windows are open", "menubar_look", &[("adaptive", "Adaptive"), ("clear", "Clear"), ("glass", "Glass")], &prefs::get_str(&t, "menubar_look", "adaptive"));
-    slider(&notch, "height", "Bar height", "Used by the full-width bar", "wide_height", (28.0, 56.0, 1.0), prefs::get_f64(&t, "wide_height", 34.0), 0);
+fn notch(body: &gtk::Box, t: &toml::Table) {
+    let notch = section(body, "Notch");
+    // The same pictures as the setup screen.
+    const STYLES: [(&str, &str); 3] = [("island", "Notch"), ("dynamic", "Dynamic Island"), ("bar", "Bar")];
+    let current = prefs::get_str(t, "notch_style", "island");
+    let at = STYLES.iter().position(|s| s.0 == current).unwrap_or(0);
+    let items = STYLES
+        .iter()
+        .map(|(key, name)| {
+            let picture = crate::welcome::preview(key);
+            picture.set_content_width(136);
+            picture.set_content_height(72);
+            (*name, picture.upcast())
+        })
+        .collect();
+    tiles(&notch, "toolbar", "Style", "Notch hugs the top edge, Dynamic Island floats as a pill, Bar spans the whole edge with the app, status and date", items, at, |i| save("notch_style", toml::Value::String(STYLES[i].0.into())));
     choice(&notch, "call", "Call activity", "A live pill with the call timer and voice waveform while an app uses the microphone", "notch_call", &[("voice", "Voice and video apps"), ("any", "Any app using the microphone"), ("off", "Off")], &prefs::get_str(&t, "notch_call", "voice"));
     toggle(&notch, "mic_off", "Block idle microphone", "Voice apps like Discord can keep listening after a call ends. Digit silences only their microphone stream until a real call starts, then gives it back instantly", "mic_guard", prefs::get_bool(&t, "mic_guard", true));
-        toggle(&notch, "touch_app", "Open on hover", "Expand the notch when the pointer rests on it", "hover", prefs::get_bool(&t, "hover", true));
-    toggle(&notch, "rounded_corner", "Match app roundness", "The notch's corners follow Corners under Apps", "notch_round_follow", prefs::get_bool(&t, "notch_round_follow", true));
+    toggle(&notch, "touch_app", "Open on hover", "Expand the notch when the pointer rests on it", "hover", prefs::get_bool(&t, "hover", true));
+    toggle(&notch, "rounded_corner", "Match app roundness", "The notch's corners follow Corners in Appearance", "notch_round_follow", prefs::get_bool(&t, "notch_round_follow", true));
     corners(&notch, "rounded_corner", "Notch corners", "Used when the notch doesn't match the apps", "notch_round", prefs::get_f64(&t, "notch_round", 1.0));
     // The notch's own roundness only applies while it doesn't follow the apps.
     if let (Some(own), Some(follow)) = (notch.last_child(), notch.last_child().and_then(|w| w.prev_sibling()).and_then(|row| find_switch(&row))) {
         own.set_sensitive(!follow.is_active());
         follow.connect_active_notify(move |s| own.set_sensitive(!s.is_active()));
     }
-    toggle(&notch, "north_west", "Workspace corner", "Move the pointer to the top-left corner to see workspaces", "hot_corner", prefs::get_bool(&t, "hot_corner", true));
-    toggle(&notch, "south_east", "Control Center corner", "Move the pointer to the bottom-right corner to open Control Center", "control_corner", prefs::get_bool(&t, "control_corner", true));
-    toggle(&notch, "fullscreen", "Over fullscreen apps", "Let the dock edge and screen corners open panels while an app or game is fullscreen. Spotlight always opens", "fullscreen_edges", prefs::get_bool(&t, "fullscreen_edges", false));
-    body.append(&notch);
+}
 
-    body.append(&ui::heading("Panels"));
-    let panels = ui::card();
+fn menu_bar(body: &gtk::Box, t: &toml::Table) {
+    let bar = section(body, "Menu bar");
+    toggle(&bar, "menu", "Menu bar", "Distro menu, the focused app's menus, status and date beside the notch", "menubar", prefs::get_bool(&t, "menubar", true));
+    choice(&bar, "blur_on", "Menu bar backdrop", "Adaptive stays clear over the wallpaper and turns to frosted glass when windows are open", "menubar_look", &[("adaptive", "Adaptive"), ("clear", "Clear"), ("glass", "Glass")], &prefs::get_str(&t, "menubar_look", "adaptive"));
+    slider(&bar, "height", "Bar height", "Used by the full-width bar", "wide_height", (28.0, 56.0, 1.0), prefs::get_f64(&t, "wide_height", 34.0), 0);
+    toggle(&bar, "widgets", "Menu bar app icons", "Shows the icons apps like Discord or Steam put in the system tray. Applies after digit restarts", "tray", prefs::get_bool(&t, "tray", true));
+}
+
+fn panels(body: &gtk::Box, t: &toml::Table) {
+    let panels = section(body, "Panels close");
     let close = [("leave", "When the pointer leaves"), ("click", "On a click elsewhere")];
     choice(&panels, "toolbar", "Notch", "When the open notch folds away", "notch_close", &close, &prefs::get_str(&t, "notch_close", "leave"));
     choice(&panels, "grid_view", "Workspaces", "When the workspaces panel in the top-left corner closes", "spaces_close", &close, &prefs::get_str(&t, "spaces_close", "leave"));
     choice(&panels, "tune", "Control Center", "When Control Center in the bottom-right corner closes", "control_close", &close, &prefs::get_str(&t, "control_close", "leave"));
     choice(&panels, "calendar_month", "Calendar", "When the calendar under the date closes", "calendar_close", &close, &prefs::get_str(&t, "calendar_close", "leave"));
-    body.append(&panels);
+}
 
-    body.append(&ui::heading("Lock and power"));
-    let power = ui::card();
+fn screen_edges(body: &gtk::Box, t: &toml::Table) {
+    let edge = section(body, "Screen corners");
+    toggle(&edge, "north_west", "Workspace corner", "Move the pointer to the top-left corner to see workspaces", "hot_corner", prefs::get_bool(&t, "hot_corner", true));
+    toggle(&edge, "south_east", "Control Center corner", "Move the pointer to the bottom-right corner to open Control Center", "control_corner", prefs::get_bool(&t, "control_corner", true));
+    toggle(&edge, "fullscreen", "Over fullscreen apps", "Let the dock edge and screen corners open panels while an app or game is fullscreen. Spotlight always opens", "fullscreen_edges", prefs::get_bool(&t, "fullscreen_edges", false));
+}
+
+fn power(body: &gtk::Box, t: &toml::Table) {
+    let power = section(body, "Lock and power");
     slider(&power, "lock_clock", "Lock after idle", "Minutes without input before the screen locks. 0 never locks on its own", "idle_lock", (0.0, 60.0, 1.0), prefs::get_f64(&t, "idle_lock", 0.0), 0);
     slider(&power, "monitor", "Turn off displays", "Minutes without input. The screen dims softly for a few seconds first; any input cancels", "idle_off", (0.0, 60.0, 1.0), prefs::get_f64(&t, "idle_off", 10.0), 0);
     slider(&power, "bedtime", "Sleep after idle", "Minutes without input before the computer sleeps. 0 never sleeps on its own", "idle_sleep", (0.0, 180.0, 5.0), prefs::get_f64(&t, "idle_sleep", 0.0), 0);
@@ -553,31 +626,30 @@ pub fn build() -> gtk::Widget {
     });
     end.append(&look);
     power.append(&row);
-    body.append(&power);
+}
 
-    body.append(&ui::heading("Night Light"));
-    let night = ui::card();
-    choice(&night, "nightlight", "Night Light", "Warms the screen in the evening to be easier on your eyes. Sunset uses the weather city below", "night_light", &[("off", "Off"), ("sunset", "Sunset to sunrise"), ("schedule", "Custom hours"), ("always", "Always on")], &prefs::get_str(&t, "night_light", "off"));
+pub fn night_light(body: &gtk::Box, t: &toml::Table) {
+    let night = section(body, "Night Light");
+    choice(&night, "nightlight", "Night Light", "Warms the screen in the evening to be easier on your eyes. Sunset uses the weather city set in Desktop", "night_light", &[("off", "Off"), ("sunset", "Sunset to sunrise"), ("schedule", "Custom hours"), ("always", "Always on")], &prefs::get_str(&t, "night_light", "off"));
     slider(&night, "thermostat", "Warmth", "Color temperature at night, in kelvin. Lower is warmer", "night_temp", (2500.0, 6000.0, 100.0), prefs::get_f64(&t, "night_temp", 4200.0), 0);
     field(&night, "schedule", "From", "Custom hours start, 24-hour HH:MM", "night_from", &prefs::get_str(&t, "night_from", "20:00"), "20:00", hhmm);
     field(&night, "wb_sunny", "Until", "Custom hours end, 24-hour HH:MM", "night_to", &prefs::get_str(&t, "night_to", "07:00"), "07:00", hhmm);
-    body.append(&night);
+}
 
-    body.append(&ui::heading("Desktop"));
-    let desk = ui::card();
+fn desktop(body: &gtk::Box, t: &toml::Table) {
+    let desk = section(body, "Desktop");
     choice(&desk, "schedule", "Desktop clock", "A large clock with the date and weather on the wallpaper, behind your windows", "desktop_widget", &[("off", "Off"), ("left", "Top left"), ("center", "Center")], &prefs::get_str(&t, "desktop_widget", "off"));
     slider(&desk, "rounded_corner", "Rounded screen corners", "Softens the corners of every display. 0 turns it off", "screen_corners", (0.0, 24.0, 1.0), prefs::get_f64(&t, "screen_corners", 0.0), 0);
-    toggle(&desk, "widgets", "Menu bar app icons", "Shows the icons apps like Discord or Steam put in the system tray. Applies after digit restarts", "tray", prefs::get_bool(&t, "tray", true));
-    body.append(&desk);
+}
 
-    body.append(&ui::heading("Weather"));
-    let sky = ui::card();
+fn weather(body: &gtk::Box, t: &toml::Table) {
+    let sky = section(body, "Weather");
     field(&sky, "location_on", "City", "Shown in Control Center and on the desktop clock. The city name goes to open-meteo.com over HTTPS; leave empty to keep weather off", "weather_city", &prefs::get_str(&t, "weather_city", ""), "Istanbul", |_| true);
     choice(&sky, "device_thermostat", "Units", "", "weather_unit", &[("celsius", "°C"), ("fahrenheit", "°F")], &prefs::get_str(&t, "weather_unit", "celsius"));
-    body.append(&sky);
+}
 
-    body.append(&ui::heading("Search"));
-    let find = ui::card();
+fn search(body: &gtk::Box, t: &toml::Table) {
+    let find = section(body, "Search");
     toggle(&find, "text_select_move_forward_character", "Smooth caret", "The caret in Spotlight glides as you type and blinks softly, like VS Code", "smooth_caret", prefs::get_bool(&t, "smooth_caret", true));
     toggle(&find, "manage_search", "Search inside apps", "Spotlight asks apps that offer results, such as Files, Firefox tabs and Characters", "search_apps", prefs::get_bool(&t, "search_apps", true));
     let listed = kit::search::listed();
@@ -611,15 +683,15 @@ pub fn build() -> gtk::Widget {
     let (row, end) = ui::row(Some("keyboard_command_key"), "Search shortcuts", "Type a key and a space: dc searches Discord, yt YouTube, gh GitHub, w Wikipedia, app Digit Store. Add your own as [[search_scopes]] with key, name and url ({} is the query) in config.toml");
     end.append(&ui::badge("dc …", ""));
     find.append(&row);
-    body.append(&find);
+}
 
-    body.append(&ui::heading("Clipboard"));
-    let clip = ui::card();
+fn clipboard(body: &gtk::Box, t: &toml::Table) {
+    let clip = section(body, "Clipboard");
     toggle(&clip, "content_paste", "Clipboard history", "Alt+V lists recent copies with color conversions. Kept only in memory; password managers' copies are skipped. Applies after digit restarts", "clipboard", prefs::get_bool(&t, "clipboard", true));
-    body.append(&clip);
+}
 
-    body.append(&ui::heading("Screenshots"));
-    let snap = ui::card();
+fn screenshots(body: &gtk::Box, t: &toml::Table) {
+    let snap = section(body, "Screenshots");
     let (row, end) = ui::row(Some("screenshot_region"), "Shortcuts", "Print: area · Ctrl+Print: screen · Alt+Print: window · Shift+Print: 3 s timer · Super+Shift+S: area");
     end.append(&ui::badge("Print", ""));
     snap.append(&row);
@@ -650,10 +722,10 @@ pub fn build() -> gtk::Widget {
     toggle(&snap, "zoom_in", "Magnifier", "Pixel loupe with coordinates while selecting (the color picker lives in the notch)", "snap_loupe", prefs::get_bool(&t, "snap_loupe", false));
     toggle(&snap, "arrow_selector_tool", "Include the pointer", "", "snap_cursor", prefs::get_bool(&t, "snap_cursor", false));
     toggle(&snap, "notifications", "Notify when done", "Shows the screenshot in the notch", "snap_notify", prefs::get_bool(&t, "snap_notify", true));
-    body.append(&snap);
+}
 
-    body.append(&ui::heading("Files"));
-    let files = ui::card();
+fn files(body: &gtk::Box, t: &toml::Table) {
+    let files = section(body, "Files");
     let (row, end) = ui::row(Some("folder_open"), "Open Files", "Super+E · Space previews · F3 splits · type to jump");
     let open_files = ui::button("Open", "");
     open_files.connect_clicked(|_| {
@@ -676,10 +748,10 @@ pub fn build() -> gtk::Widget {
         }
         choice(&files, "terminal", "Terminal", "Used by Open Terminal Here (F4)", "files_terminal", &opts, &prefs::get_str(&t, "files_terminal", ""));
     }
-    body.append(&files);
+}
 
-    body.append(&ui::heading("Advanced"));
-    let adv = ui::card();
+pub fn advanced(body: &gtk::Box, _: &toml::Table) {
+    let adv = section(body, "Advanced");
     let (row, end) = ui::row(Some("description"), "Configuration file", &prefs::path().display().to_string());
     let open = ui::button("Open", "");
     open.connect_clicked(|_| {
@@ -692,6 +764,4 @@ pub fn build() -> gtk::Widget {
     });
     end.append(&open);
     adv.append(&row);
-    body.append(&adv);
-    scroll.upcast()
 }

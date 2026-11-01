@@ -13,6 +13,7 @@ mod niri;
 mod overview;
 mod pk;
 mod prefs;
+mod search;
 mod style;
 mod system;
 mod ui;
@@ -23,23 +24,42 @@ mod wifi;
 use gtk::{gio, glib, prelude::*};
 use std::cell::RefCell;
 
-const PAGES: [(&str, &str, &str); 10] = [
-    ("overview", "Overview", "computer"),
-    ("wifi", "Wi-Fi", "wifi"),
-    ("bluetooth", "Bluetooth", "bluetooth"),
-    ("updates", "Updates", "system_update_alt"),
-    ("apps", "Apps", "apps"),
-    ("displays", "Displays", "monitor"),
-    ("drivers", "Drivers", "memory"),
-    ("desktop", "Desktop", "palette"),
-    ("keyboard", "Keyboard", "keyboard"),
-    ("compositor", "Compositor", "tune"),
+/// Sidebar pages: id, name, icon and the group they're listed under.
+pub(crate) const PAGES: [(&str, &str, &str, &str); 17] = [
+    ("wifi", "Wi-Fi", "wifi", "Connections"),
+    ("bluetooth", "Bluetooth", "bluetooth", "Connections"),
+    ("appearance", "Appearance", "palette", "Personalize"),
+    ("dock", "Dock", "dock_to_bottom", "Personalize"),
+    ("notch", "Notch and menu bar", "toolbar", "Personalize"),
+    ("desktop", "Desktop", "wallpaper", "Personalize"),
+    ("spotlight", "Spotlight", "search", "Personalize"),
+    ("compositor", "Windows", "select_window", "Workspace"),
+    ("keyboard", "Keyboard", "keyboard", "Workspace"),
+    ("displays", "Displays", "monitor", "Workspace"),
+    ("power", "Lock and power", "power_settings_new", "System"),
+    ("screenshots", "Screenshots", "screenshot_region", "System"),
+    ("files", "Files", "folder", "System"),
+    ("apps", "Apps", "apps", "System"),
+    ("updates", "Updates", "system_update_alt", "System"),
+    ("drivers", "Drivers", "memory", "System"),
+    ("overview", "About", "info", "System"),
 ];
+
+pub(crate) fn page_name(id: &str) -> &'static str {
+    PAGES.iter().find(|p| p.0 == id).map_or("", |p| p.1)
+}
+
+pub(crate) fn page_icon(id: &str) -> &'static str {
+    PAGES.iter().find(|p| p.0 == id).map_or("settings", |p| p.2)
+}
 
 struct Shell {
     window: gtk::ApplicationWindow,
     stack: gtk::Stack,
     list: gtk::ListBox,
+    find: gtk::SearchEntry,
+    /// The page shown before a search, to go back to when it is cleared.
+    current: RefCell<String>,
 }
 
 thread_local! {
@@ -54,18 +74,33 @@ fn build_page(name: &str) -> gtk::Widget {
         "apps" => apps::build(),
         "displays" => displays::build(),
         "drivers" => drivers::build(),
-        "desktop" => desktop::build(),
         "keyboard" => keyboard::build(),
         "compositor" => compositor::build(),
+        "appearance" => desktop::build(name, "Appearance", "How digit and its apps look. Changes apply right away."),
+        "dock" => desktop::build(name, "Dock", ""),
+        "notch" => desktop::build(name, "Notch and menu bar", "The notch, the bar beside it, the panels they open and the screen corners."),
+        "desktop" => desktop::build(name, "Desktop", "What sits on the wallpaper, behind your windows."),
+        "spotlight" => desktop::build(name, "Spotlight", "Alt+Space searches apps, files, settings and the web."),
+        "power" => desktop::build(name, "Lock and power", ""),
+        "screenshots" => desktop::build(name, "Screenshots", ""),
+        "files" => desktop::build(name, "Files", ""),
         _ => overview::build(),
     }
 }
 
+/// Opens a page by id, or a row on it by `page/row-name` ("dock/icon-size").
 pub(crate) fn show(name: &str) {
+    let (name, row) = name.split_once('/').unwrap_or((name, ""));
+    // Pages that moved keep their old links working.
+    let (name, row) = match name {
+        "night" => ("displays", "night-light"),
+        other => (other, row),
+    };
     SHELL.with(|s| {
-        let Some(s) = s.borrow().as_ref().map(|s| (s.stack.clone(), s.list.clone())) else { return };
-        let (stack, list) = s;
+        let Some(s) = s.borrow().as_ref().map(|s| (s.stack.clone(), s.list.clone(), s.current.clone())) else { return };
+        let (stack, list, current) = s;
         let name = if PAGES.iter().any(|p| p.0 == name) { name } else { "overview" };
+        *current.borrow_mut() = name.to_string();
         if stack.child_by_name(name).is_none() {
             stack.add_named(&build_page(name), Some(name));
             glib::timeout_add_local_once(std::time::Duration::from_millis(1500), || unsafe {
@@ -92,14 +127,51 @@ pub(crate) fn show(name: &str) {
                 });
             }
         });
-        if let Some(i) = PAGES.iter().position(|p| p.0 == name) {
-            if let Some(row) = list.row_at_index(i as i32) {
-                if !row.is_selected() {
+        let mut child = list.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            if let Ok(row) = c.downcast::<gtk::ListBoxRow>() {
+                if row.widget_name() == name && !row.is_selected() {
                     list.select_row(Some(&row));
                 }
             }
         }
     });
+    if !row.is_empty() {
+        search::reveal(name, None, row);
+    }
+}
+
+/// The built widget of a page, while it is in the stack.
+pub(crate) fn page_widget(name: &str) -> Option<gtk::Widget> {
+    SHELL.with(|s| s.borrow().as_ref().and_then(|s| s.stack.child_by_name(name)))
+}
+
+/// Empties the search field without going back to the page shown before it.
+pub(crate) fn clear_search() {
+    let find = SHELL.with(|s| s.borrow().as_ref().map(|s| s.find.clone()));
+    if let Some(f) = find {
+        unsafe { f.set_data("digit-quiet", true) };
+        f.set_text("");
+        unsafe { f.steal_data::<bool>("digit-quiet") };
+    }
+}
+
+fn searched(entry: &gtk::SearchEntry) {
+    if unsafe { entry.data::<bool>("digit-quiet") }.is_some() {
+        return;
+    }
+    let Some((stack, list, current)) = SHELL.with(|s| s.borrow().as_ref().map(|s| (s.stack.clone(), s.list.clone(), s.current.borrow().clone()))) else { return };
+    let query = entry.text();
+    if query.trim().is_empty() {
+        show(&current);
+        if let Some(old) = stack.child_by_name("search") {
+            stack.remove(&old);
+        }
+        return;
+    }
+    list.unselect_all();
+    search::update(&stack, &query);
 }
 
 const APP_ID: &str = "dev.digit.Settings";
@@ -237,6 +309,7 @@ pub fn main_window() -> Option<gtk::ApplicationWindow> {
 }
 
 pub(crate) fn reload(name: &str) {
+    search::forget();
     SHELL.with(|s| {
         let Some(stack) = s.borrow().as_ref().map(|s| s.stack.clone()) else { return };
         let Some(old) = stack.child_by_name(name) else { return };
@@ -263,7 +336,11 @@ fn watch(window: &gtk::ApplicationWindow) {
         glib::timeout_add_local_once(std::time::Duration::from_millis(300), move || {
             pending.set(false);
             if !prefs::ours() {
-                reload("desktop");
+                // Pages made of settings show the new values; the others don't read config.toml.
+                let visible = SHELL.with(|s| s.borrow().as_ref().map(|s| s.current.borrow().clone())).unwrap_or_default();
+                if !desktop::sections(&visible).is_empty() && visible != "displays" || visible == "compositor" {
+                    reload(&visible);
+                }
             }
         });
     });
@@ -297,9 +374,28 @@ fn window(app: &gtk::Application) -> gtk::ApplicationWindow {
     let top = gtk::WindowHandle::new();
     top.set_child(Some(&brand()));
     side.append(&top);
+    let find = gtk::SearchEntry::new();
+    find.add_css_class("search");
+    find.add_css_class("side-search");
+    find.set_placeholder_text(Some("Search settings"));
+    side.append(&find);
     let list = gtk::ListBox::new();
     list.set_selection_mode(gtk::SelectionMode::Single);
-    for (_, label, icon) in PAGES {
+    let mut group = "";
+    for (id, label, icon, g) in PAGES {
+        if g != group {
+            let head = gtk::ListBoxRow::new();
+            head.set_child(Some(&ui::text(g, "")));
+            head.add_css_class("group");
+            if group.is_empty() {
+                head.add_css_class("first");
+            }
+            head.set_selectable(false);
+            head.set_activatable(false);
+            head.set_can_focus(false);
+            list.append(&head);
+            group = g;
+        }
         let b = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         let t = ui::tile(icon);
         t.add_css_class("small");
@@ -307,16 +403,20 @@ fn window(app: &gtk::Application) -> gtk::ApplicationWindow {
         b.append(&ui::text(label, "name"));
         let row = gtk::ListBoxRow::new();
         row.set_child(Some(&b));
+        row.set_widget_name(id);
         list.append(&row);
     }
     list.connect_row_selected(|_, row| {
         if let Some(r) = row {
-            if let Some(p) = PAGES.get(r.index() as usize) {
-                show(p.0);
-            }
+            show(&r.widget_name());
         }
     });
-    side.append(&list);
+    let pages = gtk::ScrolledWindow::new();
+    // The list scrolls without a scrollbar.
+    pages.set_policy(gtk::PolicyType::Never, gtk::PolicyType::External);
+    pages.set_vexpand(true);
+    pages.set_child(Some(&list));
+    side.append(&pages);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.set_hexpand(true);
     let stack = gtk::Stack::new();
@@ -373,7 +473,33 @@ fn window(app: &gtk::Application) -> gtk::ApplicationWindow {
         glib::Propagation::Proceed
     });
     window.add_controller(keys);
-    SHELL.with(|s| *s.borrow_mut() = Some(Shell { window: window.clone(), stack, list }));
+    find.connect_search_changed(searched);
+    find.connect_activate(|_| search::activate_first());
+    // Esc empties the field first, then closes Settings like it does elsewhere.
+    let w = window.clone();
+    find.connect_stop_search(move |f| {
+        if f.text().is_empty() {
+            if overlay {
+                w.close();
+            }
+        } else {
+            f.set_text("");
+        }
+    });
+    // Typing anywhere that isn't a text field starts a search.
+    find.set_key_capture_widget(Some(&window));
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let f = find.clone();
+    keys.connect_key_pressed(move |_, key, _, mods| {
+        if key == gtk::gdk::Key::f && mods.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+            f.grab_focus();
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    window.add_controller(keys);
+    SHELL.with(|s| *s.borrow_mut() = Some(Shell { window: window.clone(), stack, list, find, current: RefCell::new("overview".into()) }));
     watch(&window);
     window
 }

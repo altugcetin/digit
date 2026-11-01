@@ -3,7 +3,8 @@ use crate::{prefs, ui};
 use gtk::prelude::*;
 
 pub fn build() -> gtk::Widget {
-    let (scroll, body) = ui::page("Compositor", "Keyboard, mouse and window settings for your compositor. They apply right away.");
+    let (scroll, body) = ui::page("Windows", "How digit sets up your compositor, and its keyboard, mouse and window settings. They apply right away.");
+    crate::desktop::setup(&body, &prefs::read());
     let Some(kind) = kit::setup::kind() else {
         let card = ui::card();
         let (row, _) = ui::row(Some("warning"), "digit can't change this compositor's settings", "These settings are written to Hyprland's or niri's config. Set them in your compositor's own config instead");
@@ -12,14 +13,8 @@ pub fn build() -> gtk::Widget {
         return scroll.upcast();
     };
     let niri = kind == kit::setup::Kind::Niri;
+    // Without a setup, only the Setup row above has anything to offer.
     let Some(mode) = kit::setup::mode() else {
-        let card = ui::card();
-        let (row, end) = ui::row(Some("warning"), &format!("{} isn't set up for digit", kind.name()), &format!("Choose a {} setup first: Full or Minimal, under Desktop > Windows", kind.name()));
-        let b = ui::button("Open Desktop", "accent");
-        b.connect_clicked(|_| crate::show("desktop"));
-        end.append(&b);
-        card.append(&row);
-        body.append(&card);
         return scroll.upcast();
     };
     if mode == kit::hyprconf::Mode::Minimal {

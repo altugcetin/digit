@@ -92,7 +92,7 @@ fn header(icon: &str, title: &str, lead: &str) -> gtk::Box {
     b
 }
 
-fn preview(style: &'static str) -> gtk::DrawingArea {
+pub(crate) fn preview(style: &'static str) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
     area.set_content_width(188);
     area.set_content_height(112);

@@ -1279,7 +1279,7 @@ impl Notch {
             }
             Some(Hot::Gear) => {
                 self.set_open(false);
-                crate::config::settings("desktop", &app.cfg);
+                crate::config::settings("notch", &app.cfg);
                 return;
             }
             Some(Hot::Tab(i)) => {

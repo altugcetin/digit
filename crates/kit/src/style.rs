@@ -192,6 +192,15 @@ button.ctl .sym {{ font-size: 18px; }}
 .side row {{ border-radius: var(--r-row); padding: 9px 12px; margin: 2px 0; background: transparent; color: {meta}; }}
 .side row:hover {{ background: alpha({main}, 0.06); }}
 .side row:selected {{ background: alpha({main}, 0.12); color: {main}; }}
+.side row.group, .side row.group:hover {{ background: transparent; padding: 14px 12px 4px 12px; margin: 0; font-size: 12px; font-weight: 600; color: alpha({meta}, 0.8); }}
+.side row.group.first {{ padding-top: 2px; }}
+entry.side-search {{ margin: 0 2px 10px 2px; }}
+.results, .results > row {{ background: transparent; padding: 0; margin: 0; }}
+.results > row:hover .row {{ background: alpha({main}, 0.06); }}
+.results > row:focus-visible .row {{ background: alpha({main}, 0.10); }}
+.results .row {{ transition: background-color 160ms ease; }}
+.row.found {{ background: alpha({accent}, 0.18); }}
+.card .row {{ transition: background-color 700ms cubic-bezier(0.2, 0, 0, 1); }}
 
 .sym {{ font-family: "Material Symbols Rounded"; font-size: 20px; font-weight: 400; }}
 .tile {{ color: #ffffff; border-radius: 8px; min-width: 28px; min-height: 28px; font-size: 18px; box-shadow: inset 0 1px alpha(#ffffff, 0.18); }}

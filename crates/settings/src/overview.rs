@@ -2,7 +2,7 @@ use crate::{pk, system, ui};
 use gtk::{glib, prelude::*};
 
 pub fn build() -> gtk::Widget {
-    let (scroll, body) = ui::page("Overview", "");
+    let (scroll, body) = ui::page("About", "");
     let hero = gtk::Box::new(gtk::Orientation::Horizontal, 20);
     hero.add_css_class("hero-card");
     let mark = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -81,5 +81,6 @@ pub fn build() -> gtk::Widget {
             Err(_) => status.set_text("Updates unknown"),
         }
     });
+    crate::desktop::advanced(&body, &crate::prefs::read());
     scroll.upcast()
 }

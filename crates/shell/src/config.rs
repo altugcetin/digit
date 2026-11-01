@@ -308,7 +308,7 @@ pub fn dir() -> PathBuf {
 }
 
 pub fn settings(page: &str, cfg: &Config) {
-    let page = if page.chars().all(|c| c.is_ascii_lowercase()) { page } else { "overview" };
+    let page = if page.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '/' | '-')) { page } else { "overview" };
     let argv: [&std::ffi::OsStr; 2] = ["digit-settings".as_ref(), page.as_ref()];
     if gtk::gio::Subprocess::newv(&argv, gtk::gio::SubprocessFlags::STDOUT_SILENCE | gtk::gio::SubprocessFlags::STDERR_SILENCE).is_err() {
         edit(cfg);

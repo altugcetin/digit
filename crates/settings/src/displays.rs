@@ -563,6 +563,7 @@ pub fn build() -> gtk::Widget {
         let (row, _) = ui::row(Some("monitor"), "Displays", "Display settings work on niri and Hyprland.");
         card.append(&row);
         body.append(&card);
+        crate::desktop::night_light(&body, &crate::prefs::read());
         return scroll.upcast();
     }
     let st = Rc::new(RefCell::new(State { wm, saved: outs.clone(), outs, pick: 0, drag: None, fit: (0.1, 0.0, 0.0), pending: None, undo: None }));
@@ -873,5 +874,6 @@ pub fn build() -> gtk::Widget {
             s2.borrow_mut().pending = Some(id);
         });
     }
+    crate::desktop::night_light(&body, &crate::prefs::read());
     scroll.upcast()
 }
