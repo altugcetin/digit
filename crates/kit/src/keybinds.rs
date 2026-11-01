@@ -127,7 +127,9 @@ pub fn defaults() -> Vec<Bind> {
         bind("wallpaper", "Shell", "Wallpapers", "SUPER + W", ctl("key wallpaper"), n, false),
         bind("settings", "Shell", "Settings", "ALT + COMMA", ctl("key settings"), n, false),
         bind("files", "Shell", "Files", "SUPER + E", run("digit-files"), n, false),
-        bind("layouts", "Shell", "Window layouts", "SUPER + Z", ctl("key layouts"), n, false),
+        // niri: the layout picker; Hyprland: the next tiling layout everywhere.
+        bind("layouts", "Shell", "Change the window layout", "SUPER + Z", ctl("key layouts"), n, false),
+        bind("workspace-layout", "Shell", "Change this workspace's layout", "SUPER + SHIFT + Z", ctl("key workspace-layout"), n, false),
         // Off until the user picks keys for them.
         bind("dnd", "Shell", "Do not disturb", "", ctl("dnd toggle"), n, false),
         bind("awake", "Shell", "Keep awake", "", ctl("awake toggle"), n, false),

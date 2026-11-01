@@ -83,6 +83,8 @@ fn action(b: &Bind) -> Option<String> {
         argv
     };
     Some(match &b.act {
+        // niri has no per-workspace layouts.
+        Act::Ctl(args) if args == "key workspace-layout" => return None,
         Act::Ctl(args) => spawn(program("digitctl", args)),
         Act::Run(cmd) => {
             let (name, rest) = cmd.split_once(' ').unwrap_or((cmd, ""));

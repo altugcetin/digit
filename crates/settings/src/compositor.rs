@@ -59,6 +59,7 @@ pub fn build() -> gtk::Widget {
         let at = TILING.iter().position(|t| t.0 == current).unwrap_or(0);
         let items = TILING.iter().map(|(v, name)| (*name, tiling_picture(v))).collect();
         tiles(&win, "dashboard", "Tiling", "How new windows share the screen", items, at, |i| save("hypr_tiling", toml::Value::String(TILING[i].0.into())));
+        cycle(&win, &t);
     }
     toggle(&win, "arrow_selector_tool", "Focus follows the mouse", "The window under the pointer takes the keyboard", "hypr_follow_mouse", b("hypr_follow_mouse", true));
     {
@@ -142,6 +143,49 @@ fn variants(s: &str) -> bool {
 }
 
 /// The Hyprland option behind a setting.
+/// Which layouts the layout shortcuts step through; at least two stay on.
+fn cycle(card: &gtk::Box, t: &toml::Table) {
+    let said = ["layouts", "workspace-layout"].iter().filter_map(|id| kit::keybinds::shown(id)).collect::<Vec<_>>().join(" and ");
+    let sub = if said.is_empty() { "The layout shortcuts step through these".to_string() } else { format!("{said} step through these") };
+    let (row, end) = ui::row(Some("swap_horiz"), "Layout shortcuts", &sub);
+    let off: std::rc::Rc<std::cell::RefCell<Vec<String>>> = std::rc::Rc::new(std::cell::RefCell::new(
+        t.get("hypr_tiling_cycle_off").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+    ));
+    let seg = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    seg.add_css_class("seg");
+    seg.set_valign(gtk::Align::Center);
+    for (key, name) in TILING {
+        let b = gtk::ToggleButton::with_label(name);
+        b.set_active(!off.borrow().iter().any(|k| k == key));
+        let off = off.clone();
+        b.connect_toggled(move |b| {
+            let left_on = TILING.len() - off.borrow().iter().filter(|k| *k != key).count();
+            if !b.is_active() && left_on <= 2 {
+                // Stepping needs two layouts to step between. Switching it back runs this
+                // again, so nothing may be borrowed here.
+                b.set_active(true);
+                ui::fail("Keep at least two layouts to switch between");
+                return;
+            }
+            let list = {
+                let mut list = off.borrow_mut();
+                list.retain(|k| k != key);
+                if !b.is_active() {
+                    list.push(key.to_string());
+                }
+                list.clone()
+            };
+            // Not a compositor setting, so it's saved without rewriting the config.
+            if let Err(e) = prefs::set("hypr_tiling_cycle_off", toml::Value::Array(list.into_iter().map(toml::Value::String).collect())) {
+                ui::fail(&e);
+            }
+        });
+        seg.append(&b);
+    }
+    end.append(&seg);
+    card.append(&row);
+}
+
 const TILING: [(&str, &str); 3] = [("dwindle", "Dwindle"), ("master", "Master"), ("scrolling", "Scrolling")];
 const GAPS: [(&str, f64, f64); 4] = [("None", 0.0, 0.0), ("Tight", 2.0, 4.0), ("Comfortable", 4.0, 8.0), ("Wide", 8.0, 16.0)];
 const SHADOWS: [(&str, &str, f64); 4] = [("off", "Off", 0.0), ("soft", "Soft", 5.0), ("medium", "Medium", 9.0), ("large", "Large", 14.0)];

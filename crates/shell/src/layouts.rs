@@ -100,9 +100,74 @@ pub fn apply_named(app: &App, name: &str) -> bool {
     true
 }
 
+/// Hyprland's tiling layouts, in the order the shortcuts step through them.
+const TILINGS: [(&str, &str); 3] = [("dwindle", "Dwindle"), ("master", "Master"), ("scrolling", "Scrolling")];
+
+/// The layout after `now`, skipping the ones left out in Settings > Windows.
+fn next_tiling(now: &str) -> (&'static str, &'static str) {
+    let t = kit::prefs::read();
+    let off: Vec<&str> = t.get("hypr_tiling_cycle_off").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+    let on: Vec<(&'static str, &'static str)> = TILINGS.iter().copied().filter(|l| !off.contains(&l.0)).collect();
+    let on = if on.len() < 2 { TILINGS.to_vec() } else { on };
+    let start = TILINGS.iter().position(|l| l.0 == now).unwrap_or(0);
+    (1..=TILINGS.len()).map(|k| TILINGS[(start + k) % TILINGS.len()]).find(|l| on.contains(l)).unwrap_or(on[0])
+}
+
+/// A short notch flash for a layout change, like the keyboard layout's.
+fn flash(app: &Rc<App>, key: &str, text: String) {
+    let icon = match key {
+        "master" => "view_quilt",
+        "scrolling" => "view_column",
+        _ => "auto_awesome_mosaic",
+    };
+    app.request(crate::app::Peek::Osd { icon, text, level: None });
+}
+
+/// Hyprland: every workspace moves to the next tiling layout, saved like Settings > Windows
+/// > Tiling. Workspaces given their own layout keep it until Hyprland reloads.
+fn hypr_next(app: &Rc<App>) {
+    let now = kit::prefs::text(&kit::prefs::read(), "hypr_tiling", "dwindle");
+    let (key, name) = next_tiling(&now);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let saved = gio::spawn_blocking(move || kit::prefs::set("hypr_tiling", toml::Value::String(key.into())).and_then(|_| kit::setup::apply())).await;
+        match saved {
+            Ok(Ok(())) => flash(&app, key, name.into()),
+            Ok(Err(e)) => app.request(crate::app::Peek::Note { text: e }),
+            Err(_) => app.request(crate::app::Peek::Note { text: "Could not change the layout".into() }),
+        }
+    });
+}
+
+/// Hyprland only: the workspace in front moves to the next tiling layout; the others stay.
+pub fn workspace_next(app: &Rc<App>) {
+    if kit::wm::which() != kit::wm::Wm::Hyprland {
+        return;
+    }
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let done = gio::spawn_blocking(|| {
+            let out = std::process::Command::new("hyprctl").args(["-j", "activeworkspace"]).output().ok()?;
+            let ws: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+            let id = ws.get("id")?.as_i64()?;
+            let (key, name) = next_tiling(ws.get("tiledLayout").and_then(|v| v.as_str()).unwrap_or("dwindle"));
+            let rule = format!("hl.workspace_rule({{ workspace = \"{id}\", layout = \"{key}\" }})");
+            std::process::Command::new("hyprctl").args(["eval", &rule]).output().ok().filter(|o| o.status.success())?;
+            Some((key, name))
+        })
+        .await;
+        match done.ok().flatten() {
+            Some((key, name)) => flash(&app, key, format!("{name} here")),
+            None => app.request(crate::app::Peek::Note { text: "Could not change this workspace's layout".into() }),
+        }
+    });
+}
+
 pub fn toggle(app: &Rc<App>) {
     if !crate::compositor::niri_running() {
-        app.request(crate::app::Peek::Note { text: format!("Window layouts need niri; {} arranges windows itself", kit::wm::name()) });
+        if kit::wm::which() == kit::wm::Wm::Hyprland {
+            hypr_next(app);
+        }
         return;
     }
     if let Some(st) = ONE.with(|one| one.borrow().clone()) {
