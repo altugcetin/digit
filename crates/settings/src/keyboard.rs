@@ -15,9 +15,9 @@ pub fn build() -> gtk::Widget {
     };
     let Some(mode) = kit::setup::mode() else {
         let card = ui::card();
-        let (row, end) = ui::row(Some("warning"), "Shortcuts aren't set up", &format!("Choose a {} setup first: Full or Minimal, under Desktop > Windows", kind.name()));
-        let b = ui::button("Open Desktop", "accent");
-        b.connect_clicked(|_| crate::show("desktop"));
+        let (row, end) = ui::row(Some("warning"), "Shortcuts aren't set up", &format!("Choose a {} setup first: Full or Minimal, under Windows > Setup", kind.name()));
+        let b = ui::button("Open Windows", "accent");
+        b.connect_clicked(|_| crate::show("compositor"));
         end.append(&b);
         card.append(&row);
         body.append(&card);

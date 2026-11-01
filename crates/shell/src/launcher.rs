@@ -100,7 +100,7 @@ enum Act {
     Spawn(Vec<String>),
 }
 
-const PAGES: [(&str, &str, &str, &str, &str); 9] = [
+const PAGES: [(&str, &str, &str, &str, &str); 17] = [
     ("wifi", "Wi-Fi", "Settings", "wifi", "wifi wi-fi wireless wlan network internet hotspot password ssid"),
     ("bluetooth", "Bluetooth", "Settings", "bluetooth", "bluetooth pair pairing headphones headset mouse keyboard controller adapter blueman"),
     ("displays", "Displays", "Settings", "monitor", "display displays monitor monitors screen resolution refresh rate hz scale rotation arrange"),
@@ -109,7 +109,15 @@ const PAGES: [(&str, &str, &str, &str, &str); 9] = [
     ("updates", "Software updates", "Settings", "system_update_alt", "update updates upgrade security patch packages"),
     ("apps", "Default and startup apps", "Settings", "apps", "apps applications default startup autostart browser"),
     ("drivers", "Drivers and firmware", "Settings", "memory", "driver drivers nvidia amd intel gpu firmware graphics"),
-    ("desktop", "Desktop and dock", "Settings", "palette", "desktop dock notch bar island call wallpaper theme icons screenshot clipboard window placement tiling free"),
+    ("appearance", "Appearance", "Settings", "palette", "appearance theme accent color colors scheme icons corners roundness surfaces dark density effects blur shadow rendering"),
+    ("dock", "Dock", "Settings", "dock_to_bottom", "dock icons magnification autohide badges"),
+    ("notch", "Notch and menu bar", "Settings", "toolbar", "notch island bar menubar menu tray call panels hot corner"),
+    ("desktop", "Desktop", "Settings", "wallpaper", "desktop clock widget weather city screen corners"),
+    ("spotlight", "Spotlight", "Settings", "search", "spotlight search launcher caret clipboard history"),
+    ("compositor", "Windows", "Settings", "select_window", "windows compositor hyprland niri setup gaps layout tiling floating placement mouse touchpad animations"),
+    ("keyboard", "Keyboard shortcuts", "Settings", "keyboard", "keyboard shortcuts keybinds hotkeys keys"),
+    ("power", "Lock and power", "Settings", "power_settings_new", "lock power idle sleep suspend screen off"),
+    ("screenshots", "Screenshots", "Settings", "screenshot_region", "screenshot screenshots capture print folder format"),
 ];
 
 const POWER: [(&str, &str, &str, &str); 6] = [
