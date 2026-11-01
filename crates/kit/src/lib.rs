@@ -3,6 +3,7 @@ pub mod bluez;
 pub mod calc;
 pub mod color;
 pub mod distro;
+pub mod effects;
 pub mod fuzzy;
 pub mod hyprconf;
 pub mod niriconf;

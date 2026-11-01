@@ -1216,7 +1216,9 @@ impl State {
         let cfg = &self.app.cfg;
         let shape = draw::round(0.0, 0.0, w, h, RADIUS * self.app.round());
         // Same surface as the shell's panels: solid body, no outline, a soft shadow to lift it off windows.
-        s.append_outset_shadow(&shape, &Rgb::new(0.0, 0.0, 0.0).alpha(0.24).rgba(), 0.0, 10.0, 0.0, 30.0);
+        if !kit::effects::reduced() {
+            s.append_outset_shadow(&shape, &Rgb::new(0.0, 0.0, 0.0).alpha(0.24).rgba(), 0.0, 10.0, 0.0, 30.0);
+        }
         draw::fill(s, &shape, pal.body.alpha(1.0));
         let mid = HEAD / 2.0 + 2.0;
         draw::icon(s, &self.paint, cfg, c.kind.glyph(), 18.0, false, pal.ink_meta, PAD + 9.0, mid);
@@ -1238,7 +1240,9 @@ impl State {
         let cfg = &self.app.cfg;
         let (x0, w, slots) = self.bar();
         let shape = draw::round(x0, BAR_TOP, w, BAR_H, BAR_H / 2.0);
-        s.append_outset_shadow(&shape, &Rgb::new(0.0, 0.0, 0.0).alpha(0.24).rgba(), 0.0, 10.0, 0.0, 30.0);
+        if !kit::effects::reduced() {
+            s.append_outset_shadow(&shape, &Rgb::new(0.0, 0.0, 0.0).alpha(0.24).rgba(), 0.0, 10.0, 0.0, 30.0);
+        }
         draw::fill(s, &shape, pal.body.alpha(1.0));
         let mid = BAR_TOP + BAR_H / 2.0;
         for (kind, sx) in &slots {

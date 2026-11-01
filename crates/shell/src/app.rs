@@ -261,7 +261,7 @@ pub struct App {
 
 impl App {
     pub fn new(cfg: Config, blur: Option<blur::Blur>) -> Rc<Self> {
-        let frosted = blur.as_ref().is_some_and(|b| b.able());
+        let frosted = blur.as_ref().is_some_and(|b| b.able()) && !kit::effects::reduced();
         let prefs = crate::config::Prefs::from(&cfg);
         let body = Self::body_for(&cfg, &cfg.surface, Roles::default(), frosted, prefs.wide(&cfg));
         let app = Rc::new(Self {
@@ -342,7 +342,7 @@ impl App {
     }
 
     pub fn set_roles(&self, roles: Roles) {
-        let frosted = self.blur.as_ref().is_some_and(|b| b.able());
+        let frosted = self.blur.as_ref().is_some_and(|b| b.able()) && !kit::effects::reduced();
         self.roles.set(roles);
         let (surface, wide) = {
             let p = self.prefs.borrow();

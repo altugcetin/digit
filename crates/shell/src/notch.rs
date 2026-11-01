@@ -2029,6 +2029,14 @@ impl View {
     }
 
     fn update_frost(&mut self, now: i64) {
+        // Reduced effects draw the menu bar and panels solid, without the compositor's blur.
+        if kit::effects::reduced() {
+            if let (Some((effect, _)), Some(blur)) = (self.effect.take(), self.app.blur.as_ref()) {
+                blur.detach(effect);
+                self.frost.clear();
+            }
+            return;
+        }
         let band = self.glass.value(now) > 0.02 || self.glass.target() > 0.5;
         if self.app.dock() != Dock::Screen || (!self.frosted() && !band && self.frost.is_empty()) {
             return;

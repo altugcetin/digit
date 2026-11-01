@@ -109,7 +109,7 @@ pub fn trim_later(ms: u64) {
 }
 
 pub fn lean(env: &str) {
-    let renderer = std::env::var(env).ok().filter(|r| matches!(r.as_str(), "cairo" | "gl" | "ngl" | "vulkan")).unwrap_or_else(|| "cairo".into());
+    let renderer = crate::effects::renderer(env);
     unsafe extern "C" {
         fn mallopt(param: i32, value: i32) -> i32;
     }
