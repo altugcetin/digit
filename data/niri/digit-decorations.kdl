@@ -1,0 +1,19 @@
+// Look and feel of windows. Written by digit: Settings > Desktop > Corners sets the rounding,
+// Settings > Compositor the gaps, borders, shadows and blur.
+// Change the rest in config.kdl, which loads after this.
+
+window-rule {
+    geometry-corner-radius {{rounding}}
+    clip-to-geometry true
+}
+
+animations {
+    window-open {
+        duration-ms 250
+        curve "ease-out-expo"
+    }
+    window-close {
+        duration-ms 180
+        curve "ease-out-quad"
+    }
+}

@@ -1,0 +1,8 @@
+// niri config, set up by digit.
+// digit keeps its part in ~/.config/niri/digit and never edits this file again.
+// Keyboard, mouse and window settings are in digit Settings > Compositor.
+// Add your own settings below; they load after digit's and can change anything.
+
+include "digit/init.kdl"
+
+// Your settings:

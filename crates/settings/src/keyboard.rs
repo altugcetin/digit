@@ -6,18 +6,16 @@ use std::rc::Rc;
 
 pub fn build() -> gtk::Widget {
     let (scroll, body) = ui::page("Keyboard", "digit's shortcuts. Click a shortcut to record new keys; changes apply right away.");
-    let wm = kit::wm::which();
-    if wm != kit::wm::Wm::Hyprland {
+    let Some(kind) = kit::setup::kind() else {
         let card = ui::card();
-        let name = if wm == kit::wm::Wm::Other { "this compositor".to_string() } else { kit::wm::name().to_string() };
-        let (row, _) = ui::row(Some("warning"), &format!("digit can't set shortcuts on {name}"), "digit manages its shortcuts on Hyprland only. Bind digit's commands, such as \"digitctl key launcher\", in your compositor's own config");
+        let (row, _) = ui::row(Some("warning"), "digit can't set shortcuts on this compositor", "digit manages its shortcuts on Hyprland and niri. Bind digit's commands, such as \"digitctl key launcher\", in your compositor's own config");
         card.append(&row);
         body.append(&card);
         return scroll.upcast();
-    }
-    let Some(mode) = kit::hyprconf::mode() else {
+    };
+    let Some(mode) = kit::setup::mode() else {
         let card = ui::card();
-        let (row, end) = ui::row(Some("warning"), "Shortcuts aren't set up", "Choose a Hyprland setup first: Full or Minimal, under Desktop > Windows");
+        let (row, end) = ui::row(Some("warning"), "Shortcuts aren't set up", &format!("Choose a {} setup first: Full or Minimal, under Desktop > Windows", kind.name()));
         let b = ui::button("Open Desktop", "accent");
         b.connect_clicked(|_| crate::show("desktop"));
         end.append(&b);
@@ -26,7 +24,7 @@ pub fn build() -> gtk::Widget {
         return scroll.upcast();
     };
     let full = mode == kit::hyprconf::Mode::Full;
-    let (live, conflicts) = kit::hyprconf::shortcuts();
+    let (live, conflicts) = kit::setup::shortcuts();
     if !conflicts.is_empty() {
         let card = ui::card();
         let list: Vec<String> = conflicts.iter().map(|(k, f)| format!("{k} ({f})")).collect();
@@ -37,7 +35,8 @@ pub fn build() -> gtk::Widget {
         card.append(&row);
         body.append(&card);
     }
-    let all = keybinds::all(full);
+    // Only what the compositor can do: niri has no scratchpad or pinned windows, for one.
+    let all: Vec<Bind> = keybinds::all(full).into_iter().filter(kit::setup::supports).collect();
     let mut group = "";
     let mut card = ui::card();
     for b in &all {
@@ -118,7 +117,7 @@ fn default_row(b: &Bind, _live: &[Bind]) -> gtk::Box {
         let (id, btn2, reset_btn) = (id.clone(), btn.clone(), reset_btn.clone());
         record(btn.upcast_ref(), move |picked| {
             if !picked.is_empty() {
-                if let Some(o) = taken(&kit::hyprconf::shortcuts().0, &picked, &id) {
+                if let Some(o) = taken(&kit::setup::shortcuts().0, &picked, &id) {
                     ui::fail(&format!("{picked} already opens {o}"));
                     return;
                 }
@@ -206,7 +205,7 @@ fn custom_card(live: &[Bind]) -> gtk::Box {
 /// Saves a change, regenerates digit's Hyprland files and redraws the page.
 /// Saves a change and regenerates digit's Hyprland files, without redrawing the page.
 fn save(r: Result<(), String>) -> bool {
-    match r.and_then(|_| kit::hyprconf::apply()) {
+    match r.and_then(|_| kit::setup::apply()) {
         Ok(()) => true,
         Err(e) => {
             ui::fail(&e);
@@ -216,7 +215,7 @@ fn save(r: Result<(), String>) -> bool {
 }
 
 fn commit(r: Result<(), String>) {
-    if let Err(e) = r.and_then(|_| kit::hyprconf::apply()) {
+    if let Err(e) = r.and_then(|_| kit::setup::apply()) {
         ui::fail(&e);
         return;
     }
@@ -268,10 +267,10 @@ fn record(anchor: &gtk::Widget, done: impl Fn(String) + 'static) {
     }
     pop.add_controller(keys);
     pop.connect_closed(move |p| {
-        kit::hyprconf::capture(false);
+        kit::setup::capture(false);
         p.unparent();
     });
-    kit::hyprconf::capture(true);
+    kit::setup::capture(true);
     pop.popup();
     col.grab_focus();
     // Never leave the shortcuts off for long if something goes wrong.

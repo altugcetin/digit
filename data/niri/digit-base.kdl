@@ -1,0 +1,31 @@
+// The base of a full setup: environment, layout and small fixes. Written by digit;
+// change any of it in config.kdl, which loads after this.
+
+environment {
+    QT_QPA_PLATFORMTHEME "qt6ct"
+}
+
+cursor {
+    xcursor-size 24
+}
+
+prefer-no-csd
+
+hotkey-overlay {
+    skip-at-startup
+}
+
+// digit's own screen corners open the workspaces and Control Center.
+gestures {
+    hot-corners {
+        off
+    }
+}
+
+layout {
+    center-focused-column "never"
+    default-column-width { proportion 0.5; }
+    focus-ring {
+        off
+    }
+}

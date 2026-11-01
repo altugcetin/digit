@@ -12,7 +12,7 @@ pub(crate) fn save(key: &str, value: toml::Value) {
     // Compositor settings go straight into digit's part of the Hyprland config.
     if key.starts_with("hypr_") {
         glib::spawn_future_local(async {
-            if let Ok(Err(e)) = gio::spawn_blocking(kit::hyprconf::apply).await {
+            if let Ok(Err(e)) = gio::spawn_blocking(kit::setup::apply).await {
                 ui::fail(&e);
             }
         });
@@ -366,19 +366,10 @@ fn free_windows() -> bool {
 }
 
 fn set_windows(free: bool) {
-    let include = "include optional=true \"digit-windows.kdl\"";
-    let digit = niri_dir().join("digit.kdl");
-    let current = std::fs::read_to_string(&digit).unwrap_or_default();
-    if current.is_empty() {
-        ui::fail("digit's niri file is missing, so the window mode can't be applied");
+    // digit's niri rules include this file, so writing it is enough.
+    if kit::niriconf::mode().is_none() {
+        ui::fail("Set digit up on niri first (Full or Minimal, above)");
         return;
-    }
-    if !current.contains(include) {
-        let tmp = digit.with_extension("kdl.new");
-        if std::fs::write(&tmp, format!("{}\n{include}\n", current.trim_end())).and_then(|_| std::fs::rename(&tmp, &digit)).is_err() {
-            ui::fail("Could not update digit's niri file");
-            return;
-        }
     }
     let file = niri_dir().join("digit-windows.kdl");
     let body = if free {
@@ -466,28 +457,30 @@ pub fn build() -> gtk::Widget {
 
     body.append(&ui::heading("Windows"));
     let win = ui::card();
-    let wm = kit::wm::which();
-    if wm == kit::wm::Wm::Hyprland {
+    if let Some(kind) = kit::setup::kind() {
         use kit::hyprconf::Mode;
-        let mode = kit::hyprconf::mode();
-        let sub = match mode {
-            Some(Mode::Full) => "Full setup: digit keeps its part in ~/.config/hypr/digit; your own settings go in hyprland.lua",
-            Some(Mode::Minimal) => "Minimal setup: digit's part loads at the end of your own config and its shortcuts win",
-            None => "Not set up. Full starts from digit's config (yours is backed up first); Minimal adds digit's part to the end of yours",
+        let mode = kit::setup::mode();
+        let (folder, main) = match kind {
+            kit::setup::Kind::Hyprland => ("~/.config/hypr", "hyprland.lua"),
+            kit::setup::Kind::Niri => ("~/.config/niri", "config.kdl"),
         };
-        let (row, end) = ui::row(Some("tune"), "Hyprland setup", sub);
-        for (m, label, kind, detail) in [
-            (Mode::Full, "Full", "accent", "Your ~/.config/hypr is copied to a dated backup folder, then digit sets up the whole config with its shortcuts, window keys and looks. Your keyboard layout and displays are kept."),
-            (Mode::Minimal, "Minimal", "", "digit adds its folder and one line at the end of hyprland.lua (a backup is made). Your config stays; where a shortcut is bound twice, digit's wins."),
-        ] {
+        let sub = match mode {
+            Some(Mode::Full) => format!("Full setup: digit keeps its part in {folder}/digit; your own settings go in {main}"),
+            Some(Mode::Minimal) => "Minimal setup: digit's part loads at the end of your own config and its shortcuts win".into(),
+            None => "Not set up. Full starts from digit's config (yours is backed up first); Minimal adds digit's part to the end of yours".into(),
+        };
+        let (row, end) = ui::row(Some("tune"), &format!("{} setup", kind.name()), &sub);
+        let full = format!("Your {folder} is copied to a dated backup folder, then digit sets up the whole config with its shortcuts, window keys and looks.");
+        let minimal = format!("digit adds its folder and one line at the end of {main} (a backup is made). Your config stays; where a shortcut is bound twice, digit's wins.");
+        for (m, label, style, detail) in [(Mode::Full, "Full", "accent", full), (Mode::Minimal, "Minimal", "", minimal)] {
             if mode == Some(m) {
                 continue;
             }
-            let b = ui::button(label, kind);
+            let b = ui::button(label, style);
             b.connect_clicked(move |b| {
                 let parent = ui::root(b);
-                let title = format!("{} setup?", label);
-                kit::ui::ask(parent.as_ref(), &title, detail, "Cancel", label, "accent", move || match kit::hyprconf::setup(m) {
+                let title = format!("{label} setup?");
+                kit::ui::ask(parent.as_ref(), &title, &detail, "Cancel", label, "accent", move || match kit::setup::setup(m) {
                     Ok(note) => {
                         ui::done(&note);
                         crate::reload("desktop");
@@ -498,8 +491,8 @@ pub fn build() -> gtk::Widget {
             end.append(&b);
         }
         win.append(&row);
-        body.append(&win);
-    } else {
+    }
+    if kit::setup::kind() == Some(kit::setup::Kind::Niri) {
         let (row, end) = ui::row(Some("select_window"), "Window placement", "Free: windows open side by side; drag by the title bar or Super + drag, resize with Super + right drag. Super+Up maximizes, Super+Left/Right fills a half, Super+Down restores");
         let modes = ["Tiling columns", "Free placement"];
         let pick = kit::ui::dropdown(&modes, 0);
@@ -510,8 +503,8 @@ pub fn build() -> gtk::Widget {
         let (row, end) = ui::row(Some("dashboard"), "Window layouts", "Super+Z arranges the focused window: halves, thirds, corners and more");
         end.append(&ui::badge("Super Z", ""));
         win.append(&row);
-        body.append(&win);
     }
+    body.append(&win);
 
     body.append(&ui::heading("Notch and corners"));
     let notch = ui::card();

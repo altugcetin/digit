@@ -598,7 +598,7 @@ impl App {
         if before.ui_round != next.ui_round {
             // Window corners in a full Hyprland setup follow the same Corners setting.
             glib::spawn_future_local(async {
-                if let Ok(Err(e)) = gtk::gio::spawn_blocking(kit::hyprconf::apply).await {
+                if let Ok(Err(e)) = gtk::gio::spawn_blocking(kit::setup::apply).await {
                     eprintln!("digit: {e}");
                 }
             });

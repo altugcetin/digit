@@ -3,19 +3,18 @@ use crate::{prefs, ui};
 use gtk::prelude::*;
 
 pub fn build() -> gtk::Widget {
-    let (scroll, body) = ui::page("Compositor", "Keyboard, mouse and window settings for Hyprland. They apply right away.");
-    let wm = kit::wm::which();
-    if wm != kit::wm::Wm::Hyprland {
+    let (scroll, body) = ui::page("Compositor", "Keyboard, mouse and window settings for your compositor. They apply right away.");
+    let Some(kind) = kit::setup::kind() else {
         let card = ui::card();
-        let name = if wm == kit::wm::Wm::Other { "this compositor".to_string() } else { kit::wm::name().to_string() };
-        let (row, _) = ui::row(Some("warning"), &format!("digit can't change {name}'s settings"), "These settings are written to Hyprland's config. Set them in your compositor's own config instead");
+        let (row, _) = ui::row(Some("warning"), "digit can't change this compositor's settings", "These settings are written to Hyprland's or niri's config. Set them in your compositor's own config instead");
         card.append(&row);
         body.append(&card);
         return scroll.upcast();
-    }
-    let Some(mode) = kit::hyprconf::mode() else {
+    };
+    let niri = kind == kit::setup::Kind::Niri;
+    let Some(mode) = kit::setup::mode() else {
         let card = ui::card();
-        let (row, end) = ui::row(Some("warning"), "Hyprland isn't set up for digit", "Choose a Hyprland setup first: Full or Minimal, under Desktop > Windows");
+        let (row, end) = ui::row(Some("warning"), &format!("{} isn't set up for digit", kind.name()), &format!("Choose a {} setup first: Full or Minimal, under Desktop > Windows", kind.name()));
         let b = ui::button("Open Desktop", "accent");
         b.connect_clicked(|_| crate::show("desktop"));
         end.append(&b);
@@ -32,7 +31,8 @@ pub fn build() -> gtk::Widget {
     let t = prefs::read();
     // Unchanged values show digit's defaults in a full setup, and what Hyprland runs with now
     // in a minimal one, since the user's own config decides those.
-    let minimal = mode == kit::hyprconf::Mode::Minimal;
+    // Hyprland can say what it runs with now; niri's config is only read from files.
+    let minimal = mode == kit::hyprconf::Mode::Minimal && !niri;
     let s = |k: &str, d: &str| prefs::get_str(&t, k, &(if minimal { live_text(k) } else { None }).unwrap_or_else(|| d.to_string()));
     let f = |k: &str, d: f64| prefs::get_f64(&t, k, (if minimal { live_num(k) } else { None }).unwrap_or(d));
     let b = |k: &str, d: bool| prefs::get_bool(&t, k, (if minimal { live_num(k).map(|v| v != 0.0) } else { None }).unwrap_or(d));
@@ -54,12 +54,16 @@ pub fn build() -> gtk::Widget {
     toggle(&mouse, "swap_vert", "Natural scrolling for mice", "Content follows the wheel, like a touchpad", "hypr_mouse_natural", b("hypr_mouse_natural", false));
     toggle(&mouse, "touch_app", "Natural scrolling for touchpads", "", "hypr_touch_natural", b("hypr_touch_natural", true));
     toggle(&mouse, "ads_click", "Tap to click", "A light tap on the touchpad clicks", "hypr_tap", b("hypr_tap", true));
-    toggle(&mouse, "swipe", "Swipe between workspaces", "Three fingers sideways on the touchpad", "hypr_gesture", b("hypr_gesture", true));
+    // niri swipes between workspaces on its own.
+    if !niri {
+        toggle(&mouse, "swipe", "Swipe between workspaces", "Three fingers sideways on the touchpad", "hypr_gesture", b("hypr_gesture", true));
+    }
     body.append(&mouse);
 
     body.append(&ui::heading("Windows"));
     let win = ui::card();
-    {
+    // niri always scrolls; there is no other tiling to pick.
+    if !niri {
         let current = s("hypr_tiling", "dwindle");
         let at = TILING.iter().position(|t| t.0 == current).unwrap_or(0);
         let items = TILING.iter().map(|(v, name)| (*name, tiling_picture(v))).collect();
@@ -78,11 +82,14 @@ pub fn build() -> gtk::Widget {
     slider(&win, "border_style", "Border width", "", "hypr_border", (0.0, 6.0, 1.0), f("hypr_border", 2.0), 0);
     body.append(&win);
 
-    body.append(&ui::heading("Animations"));
-    let motion = ui::card();
-    choice(&motion, "open_in_full", "Windows open and close", "", "hypr_window_anim", &[("popin", "Pop in"), ("slide", "Slide")], &s("hypr_window_anim", "popin"));
-    choice(&motion, "view_carousel", "Switching workspaces", "", "hypr_workspace_anim", &[("vertical", "Vertical"), ("horizontal", "Horizontal")], &s("hypr_workspace_anim", "vertical"));
-    body.append(&motion);
+    // niri's workspaces only stack vertically and its windows only pop in.
+    if !niri {
+        body.append(&ui::heading("Animations"));
+        let motion = ui::card();
+        choice(&motion, "open_in_full", "Windows open and close", "", "hypr_window_anim", &[("popin", "Pop in"), ("slide", "Slide")], &s("hypr_window_anim", "popin"));
+        choice(&motion, "view_carousel", "Switching workspaces", "", "hypr_workspace_anim", &[("vertical", "Vertical"), ("horizontal", "Horizontal")], &s("hypr_workspace_anim", "vertical"));
+        body.append(&motion);
+    }
 
     body.append(&ui::heading("Effects"));
     let fx = ui::card();

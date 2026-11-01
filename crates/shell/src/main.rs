@@ -168,11 +168,8 @@ fn run() {
     // An update may bring new default shortcuts; regenerate digit's part of the Hyprland
     // config and have Hyprland read it again if anything changed.
     glib::spawn_future_local(async {
-        let changed = gtk::gio::spawn_blocking(|| kit::hyprconf::sync()).await;
-        match changed {
-            Ok(Ok(true)) => kit::hyprconf::reload(),
-            Ok(Err(e)) => eprintln!("digit: {e}"),
-            _ => {}
+        if let Ok(Err(e)) = gtk::gio::spawn_blocking(kit::setup::sync_all).await {
+            eprintln!("digit: {e}");
         }
     });
     idle::start(&app);

@@ -421,6 +421,31 @@ fn main() -> glib::ExitCode {
             }
         };
     }
+    if std::env::args().nth(1).as_deref() == Some("--niri-setup") {
+        let Some(mode) = std::env::args().nth(2).as_deref().and_then(kit::hyprconf::Mode::parse) else {
+            eprintln!("usage: digit-settings --niri-setup full|minimal");
+            return glib::ExitCode::FAILURE;
+        };
+        return match kit::niriconf::setup(mode) {
+            Ok(note) => {
+                println!("{note}");
+                glib::ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                glib::ExitCode::FAILURE
+            }
+        };
+    }
+    if std::env::args().nth(1).as_deref() == Some("--niri-remove") {
+        return match kit::niriconf::remove() {
+            Ok(()) => glib::ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e}");
+                glib::ExitCode::FAILURE
+            }
+        };
+    }
     if std::env::args().nth(1).as_deref() == Some("--hypr-sync") {
         return match kit::hyprconf::apply() {
             Ok(()) => glib::ExitCode::SUCCESS,
