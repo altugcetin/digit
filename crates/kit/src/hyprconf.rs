@@ -49,11 +49,11 @@ pub fn mode() -> Option<Mode> {
 }
 
 /// Where digit's programs live, so the config can start them by full path.
-fn bin() -> PathBuf {
+pub(crate) fn bin() -> PathBuf {
     std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_else(|| gtk::glib::home_dir().join(".local/bin"))
 }
 
-fn lua_str(s: &str) -> String {
+pub(crate) fn lua_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -68,7 +68,7 @@ fn lua_str(s: &str) -> String {
     out
 }
 
-fn terminal() -> String {
+pub(crate) fn terminal() -> String {
     if let Ok(t) = std::env::var("TERMINAL") {
         if !t.trim().is_empty() {
             return t;
@@ -194,7 +194,7 @@ const MAIN: &str = include_str!("../../../data/hypr/hyprland.lua");
 const BASE_MINIMAL: &str = include_str!("../../../data/hypr/minimal/digit-base.lua");
 const DECORATIONS_MINIMAL: &str = include_str!("../../../data/hypr/minimal/digit-decorations.lua");
 
-fn fill(template: &str, values: &[(&str, &str)]) -> String {
+pub(crate) fn fill(template: &str, values: &[(&str, &str)]) -> String {
     let mut out = template.to_string();
     for (k, v) in values {
         out = out.replace(&format!("{{{{{k}}}}}"), v);
@@ -207,7 +207,7 @@ fn autostart() -> String {
 }
 
 /// Corner radius for windows, following Settings > Desktop > Corners like the rest of digit.
-fn rounding() -> i64 {
+pub(crate) fn rounding() -> i64 {
     let round = crate::prefs::number(&crate::prefs::read(), "ui_round", 1.0).clamp(0.1, 1.8);
     (14.0 * round).round() as i64
 }
@@ -374,7 +374,7 @@ fn decorations(mode: Mode) -> String {
     fill(DECORATIONS, &[("rounding", &rounding().to_string())])
 }
 
-fn write_if_changed(path: &Path, body: &str) -> std::io::Result<bool> {
+pub(crate) fn write_if_changed(path: &Path, body: &str) -> std::io::Result<bool> {
     if std::fs::read_to_string(path).is_ok_and(|old| old == body) {
         return Ok(false);
     }
@@ -426,7 +426,7 @@ pub fn shortcuts() -> (Vec<Bind>, Vec<(String, String)>) {
     (binds, conflicts)
 }
 
-fn stamp() -> String {
+pub(crate) fn stamp() -> String {
     gtk::glib::DateTime::now_local().ok().and_then(|t| t.format("%Y%m%d-%H%M%S").ok()).map(|s| s.to_string()).unwrap_or_else(|| "backup".into())
 }
 
@@ -458,7 +458,7 @@ fn current_monitors() -> Option<String> {
     Some(out)
 }
 
-fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for e in std::fs::read_dir(from)? {
         let e = e?;

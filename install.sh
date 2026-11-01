@@ -172,17 +172,18 @@ pick_wm() {
     WM=${REPLY%% *}
 }
 
-# Hyprland only: a full setup starts from digit's config (the old one is backed up), a minimal
+# A full setup starts from digit's config (the old one is backed up), a minimal
 # one adds digit's part to the end of the existing config.
 pick_setup() {
-    [ "$WM" = hyprland ] || return 0
     if [ -n "$SETUP" ]; then
         case $SETUP in full|minimal) ;; *) die "--setup must be full or minimal" ;; esac
         return
     fi
-    choose "How should digit set up Hyprland?" \
-        "full     (recommended) digit's whole config: shortcuts, window keys, looks; ~/.config/hypr is backed up first" \
-        "minimal  keep your config and add digit's part to the end of hyprland.lua"
+    local dir=hypr main=hyprland.lua
+    [ "$WM" = niri ] && dir=niri main=config.kdl
+    choose "How should digit set up $WM?" \
+        "full     (recommended) digit's whole config: shortcuts, window keys, looks; ~/.config/$dir is backed up first" \
+        "minimal  keep your config and add digit's part to the end of $main"
     SETUP=${REPLY%% *}
 }
 
@@ -318,55 +319,21 @@ fonts() {
     run fc-cache -f "$dir" >/dev/null 2>&1 || true
 }
 
-absolute() {
-    sed -e "s#\"digitctl\"#\"$BIN/digitctl\"#g" -e "s#\"digit-\\([a-z]*\\)\"#\"$BIN/digit-\\1\"#g" -e "s#\"digit\"#\"$BIN/digit\"#g" \
-        -e "s#exec-once = digit\$#exec-once = $BIN/digit#" -e "s#exec-once=digit\$#exec-once=$BIN/digit#" \
-        -e "s#\\(exec\\|spawn\\), digitctl #\\1, $BIN/digitctl #" -e "s#\\(exec\\|spawn\\), digit-#\\1, $BIN/digit-#" \
-        -e "s#\\(spawn\\),digitctl #\\1,$BIN/digitctl #" -e "s#\\(spawn\\),digit-#\\1,$BIN/digit-#"
-}
 
 stamp() {
     date +%Y%m%d-%H%M%S
 }
 
-hook_niri() {
-    local dir="$CONF/niri" main="$CONF/niri/config.kdl" tmp
-    run mkdir -p "$dir"
-    if [ ! -f "$main" ]; then
-        local def
-        def=$(ls /usr/share/doc/niri/default-config.kdl /usr/share/doc/packages/niri/default-config.kdl /usr/share/niri/default-config.kdl 2>/dev/null | head -n1 || true)
-        if [ -n "$def" ]; then
-            run cp "$def" "$main"
-        else
-            warn "niri has no config yet. Log into niri once (it writes ~/.config/niri/config.kdl), then run ./install.sh again."
-            return 0
-        fi
-    fi
-    tmp=$(mktemp -d)
-    cp -r "$dir"/. "$tmp"/ 2>/dev/null || true
-    absolute <"$ROOT/data/niri/digit.kdl" >"$tmp/digit.kdl"
-    if ! grep -q 'include .*"digit.kdl"' "$tmp/config.kdl"; then
-        printf '\ninclude optional=true "digit.kdl"\n' >>"$tmp/config.kdl"
-    fi
-    if command -v niri >/dev/null 2>&1 && ! niri validate -c "$tmp/config.kdl" >/dev/null 2>&1; then
-        niri validate -c "$tmp/config.kdl" 2>&1 | tail -n 8 >&2 || true
-        rm -rf "$tmp"
-        die "The niri config did not validate with digit added. Nothing was changed."
-    fi
-    local s
-    s=$(stamp)
-    [ -f "$dir/digit.kdl" ] && run cp "$dir/digit.kdl" "$dir/digit.kdl.bak-$s"
-    run cp "$main" "$main.bak-$s"
-    run cp "$tmp/digit.kdl" "$dir/digit.kdl"
-    run cp "$tmp/config.kdl" "$main"
-    rm -rf "$tmp"
-    info "niri: ~/.config/niri/digit.kdl added and included (backup *.bak-$s)."
-}
 
 hook() {
     bold "Connecting digit to $WM"
     case $WM in
-        niri) hook_niri ;;
+        niri)
+            if $DRY; then
+                info "[dry-run] $BIN/digit-settings --niri-setup $SETUP"
+            elif ! "$BIN/digit-settings" --niri-setup "$SETUP" | sed 's/^/  /'; then
+                warn "The niri setup did not finish; run it again from digit Settings > Desktop > Windows."
+            fi ;;
         hyprland)
             # digit-settings does the Hyprland setup, the same code its Settings page uses.
             if $DRY; then
@@ -393,6 +360,9 @@ uninstall() {
     if [ -d "$CONF/hypr/digit" ] && [ -x "$BIN/digit-settings" ]; then
         run "$BIN/digit-settings" --hypr-remove
     fi
+    if [ -d "$CONF/niri/digit" ] && [ -x "$BIN/digit-settings" ]; then
+        run "$BIN/digit-settings" --niri-remove
+    fi
     local a
     for a in "${APPS[@]}"; do
         [ -e "$BIN/$a" ] && run rm -f "$BIN/$a"
@@ -402,10 +372,6 @@ uninstall() {
     for f in Settings Store Files Snap Rec; do
         run rm -f "$DATA/applications/dev.digit.$f.desktop" "$DATA/icons/hicolor/scalable/apps/dev.digit.$f.svg"
     done
-    if [ -f "$CONF/niri/config.kdl" ]; then
-        run sed -i '/include optional=true "digit.kdl"/d' "$CONF/niri/config.kdl"
-        run rm -f "$CONF/niri/digit.kdl"
-    fi
     info "Done. Your settings in ~/.config/digit and the fonts were kept."
 }
 

@@ -1,0 +1,10 @@
+// Window rules digit needs. Written by digit.
+
+window-rule {
+    match app-id="steam" title=r#"^notificationtoasts_\d+_desktop$"#
+    default-floating-position x=16 y=16 relative-to="bottom-right"
+    open-focused false
+}
+
+// Free window placement, from Settings > Desktop > Windows.
+include optional=true "../digit-windows.kdl"

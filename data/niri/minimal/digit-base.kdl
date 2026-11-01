@@ -1,0 +1,2 @@
+// Input, layout and the environment stay with your own config in a minimal setup;
+// what you change in Settings > Compositor goes to digit-compositor.kdl and wins over it.
