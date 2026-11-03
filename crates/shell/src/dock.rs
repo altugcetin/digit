@@ -1282,6 +1282,7 @@ enum Act {
 struct Menu {
     dock: std::rc::Weak<RefCell<State>>,
     window: gtk::Window,
+    scrim: gtk::Window,
     paint: Paint,
     title: String,
     key: String,
@@ -1289,15 +1290,15 @@ struct Menu {
     rows: Vec<(String, Act, bool)>,
     hover: Option<usize>,
     fade: Tween,
-    seen: bool,
 }
 
 fn close_menu() {
     let Some(m) = MENU.with(|m| m.borrow_mut().take()) else { return };
-    let (window, dock) = {
+    let (window, scrim, dock) = {
         let m = m.borrow();
-        (m.window.clone(), m.dock.upgrade())
+        (m.window.clone(), m.scrim.clone(), m.dock.upgrade())
     };
+    scrim.destroy();
     window.destroy();
     if let Some(st) = dock {
         st.borrow_mut().menu = false;
@@ -1346,7 +1347,7 @@ fn open_menu(st: &Shared, i: usize) {
     window.set_layer(Layer::Overlay);
     window.set_namespace(Some("digit-dock-menu"));
     window.set_exclusive_zone(-1);
-    window.set_keyboard_mode(KeyboardMode::OnDemand);
+    window.set_keyboard_mode(KeyboardMode::Exclusive);
     window.set_monitor(monitor.as_ref());
     window.add_css_class("digit");
     window.set_anchor(anchor, true);
@@ -1359,7 +1360,8 @@ fn open_menu(st: &Shared, i: usize) {
     window.set_child(Some(&paint));
     let mut fade = Tween::still(0.0);
     fade.go(1.0, glib::monotonic_time(), 160, motion::STANDARD);
-    let menu = Rc::new(RefCell::new(Menu { dock: Rc::downgrade(st), window: window.clone(), paint: paint.clone(), title, key, index: i, rows, hover: None, fade, seen: false }));
+    let scrim = crate::paint::scrim(monitor.as_ref(), close_menu);
+    let menu = Rc::new(RefCell::new(Menu { dock: Rc::downgrade(st), window: window.clone(), scrim, paint: paint.clone(), title, key, index: i, rows, hover: None, fade }));
     let weak = Rc::downgrade(&menu);
     paint.on_draw(move |s| {
         if let Some(m) = weak.upgrade() {
@@ -1424,17 +1426,6 @@ fn open_menu(st: &Shared, i: usize) {
         glib::Propagation::Stop
     });
     window.add_controller(keys);
-    let weak = Rc::downgrade(&menu);
-    window.connect_is_active_notify(move |w| {
-        let Some(m) = weak.upgrade() else { return };
-        let Ok(mut mm) = m.try_borrow_mut() else { return };
-        if w.is_active() {
-            mm.seen = true;
-        } else if mm.seen {
-            drop(mm);
-            glib::idle_add_local_once(close_menu);
-        }
-    });
     MENU.with(|slot| *slot.borrow_mut() = Some(menu.clone()));
     st.borrow_mut().menu = true;
     {

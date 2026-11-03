@@ -41,7 +41,6 @@ struct Pop {
     fade: Tween,
     open: bool,
     scrim: Option<gtk::Window>,
-    seen: bool,
     agenda: bool,
 }
 
@@ -314,7 +313,7 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, _right: f64, _y: f64) 
     window.set_layer(Layer::Overlay);
     window.set_namespace(Some("digit-menu"));
     window.set_exclusive_zone(-1);
-    window.set_keyboard_mode(KeyboardMode::OnDemand);
+    window.set_keyboard_mode(KeyboardMode::Exclusive);
     window.set_monitor(monitor.as_ref());
     window.add_css_class("digit");
     window.set_anchor(Edge::Top, true);
@@ -339,7 +338,6 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, _right: f64, _y: f64) 
         fade,
         open: true,
         scrim: None,
-        seen: false,
         agenda,
     }));
     window.set_default_size(sw as i32, sh as i32);
@@ -446,21 +444,7 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, _right: f64, _y: f64) 
         glib::Propagation::Stop
     });
     window.add_controller(keys);
-    let weak = Rc::downgrade(&pop);
-    window.connect_is_active_notify(move |w| {
-        let Some(p) = weak.upgrade() else { return };
-        let Ok(mut pp) = p.try_borrow_mut() else { return };
-        // Focus follows the pointer on many compositors, so only "leave" mode closes when focus goes.
-        if w.is_active() {
-            pp.seen = true;
-        } else if pp.seen && pp.app.prefs.borrow().calendar_close == "leave" {
-            drop(pp);
-            glib::idle_add_local_once(close);
-        }
-    });
-    if app.prefs.borrow().calendar_close == "click" {
-        pop.borrow_mut().scrim = Some(crate::paint::scrim(monitor.as_ref(), || close()));
-    }
+    pop.borrow_mut().scrim = Some(crate::paint::scrim(monitor.as_ref(), close));
     OPEN.with(|o| *o.borrow_mut() = Some(pop.clone()));
     DONE.with(|d| *d.borrow_mut() = hook);
     window.present();
