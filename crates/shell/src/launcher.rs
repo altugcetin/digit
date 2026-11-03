@@ -120,7 +120,7 @@ const PAGES: [(&str, &str, &str, &str, &str); 17] = [
     ("screenshots", "Screenshots", "Settings", "screenshot_region", "screenshot screenshots capture print folder format"),
 ];
 
-/// A row in digit Settings, from the index Settings writes for Spotlight.
+/// A page or row in digit Settings, from the index Settings writes for Spotlight.
 #[derive(Clone, serde::Deserialize)]
 struct Setting {
     title: String,
@@ -128,7 +128,7 @@ struct Setting {
     words: String,
     icon: String,
     link: String,
-    /// A whole page; those already come from `PAGES`.
+    /// A whole page, rather than a row on it.
     page: bool,
     #[serde(skip)]
     symbol: &'static str,
@@ -136,7 +136,7 @@ struct Setting {
 
 impl Setting {
     fn item(&self, score: i32) -> Item {
-        Item { kind: Kind::Settings, act: Act::Spawn(vec!["digit-settings".into(), self.link.clone()]), title: self.title.clone(), detail: self.place.clone(), look: Look::Symbol(self.symbol), score }
+        Item { kind: Kind::Settings, act: Act::Spawn(vec!["digit-settings".into(), self.link.clone()]), title: self.title.clone(), detail: if self.page { "Settings".into() } else { self.place.clone() }, look: Look::Symbol(self.symbol), score }
     }
 }
 
@@ -152,7 +152,6 @@ fn settings_index() -> Vec<Setting> {
     }
     let list: Vec<Setting> = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     list.into_iter()
-        .filter(|s| !s.page)
         .map(|mut s| {
             s.symbol = symbol(&s.icon);
             s
@@ -170,13 +169,13 @@ fn symbol(name: &str) -> &'static str {
 
 /// The best `limit` settings for a folded query: every word must start a word of the title,
 /// or of where it lives and what it says.
-fn find_settings<'a>(list: &'a [Setting], q: &str, limit: usize) -> Vec<(i32, &'a Setting)> {
+fn find_settings<'a>(list: impl IntoIterator<Item = &'a Setting>, q: &str, limit: usize) -> Vec<(i32, &'a Setting)> {
     let words: Vec<&str> = q.split_whitespace().collect();
     if words.is_empty() {
         return Vec::new();
     }
     let mut hits: Vec<(i32, &Setting)> = list
-        .iter()
+        .into_iter()
         .filter_map(|s| {
             let title = fold(&s.title);
             let rest = fold(&format!("{} {}", s.place, s.words));
@@ -193,12 +192,13 @@ fn find_settings<'a>(list: &'a [Setting], q: &str, limit: usize) -> Vec<(i32, &'
                     return None;
                 };
             }
-            Some((total / words.len() as i32, s))
+            // Prefer a category when it matches as well as one of its controls.
+            Some((total / words.len() as i32 + if s.page { 20 } else { 0 }, s))
         })
         .collect();
     hits.sort_by(|a, b| b.0.cmp(&a.0));
     let mut seen = std::collections::HashSet::new();
-    hits.retain(|(_, s)| seen.insert((s.title.clone(), s.place.clone())));
+    hits.retain(|(_, s)| seen.insert((s.page, s.title.clone(), s.place.clone())));
     hits.truncate(limit);
     hits
 }
@@ -958,7 +958,7 @@ impl Launcher {
                 if let Some((i, rest)) = keyed.filter(|(_, r)| !r.is_empty()) {
                     let sc = &s.scopes[i];
                     let look = sc.icon.clone().map(Look::Icon).unwrap_or(Look::Symbol(sc.symbol));
-                    // "set …" lists the settings that match, above the search in Settings.
+                    // "set …" lists matching categories and controls above the search in Settings.
                     if matches!(sc.reach, providers::Reach::Settings) {
                         for (rank, (_, set)) in find_settings(&s.settings, &fold(&rest), 12).into_iter().enumerate() {
                             items.push(set.item(2700 - rank as i32));
@@ -979,7 +979,7 @@ impl Launcher {
                 }
                 // Single settings too, under the actions and apps they share words with.
                 if q.chars().count() >= 3 {
-                    for (hit, set) in find_settings(&s.settings, &q, 3) {
+                    for (hit, set) in find_settings(s.settings.iter().filter(|s| !s.page), &q, 3) {
                         items.push(set.item(hit - 350));
                     }
                 }
@@ -1745,4 +1745,40 @@ glib::wrapper! {
     pub struct Canvas(ObjectSubclass<imp::Canvas>)
         @extends gtk::Widget,
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Act, Setting, find_settings};
+
+    fn dock_settings() -> Vec<Setting> {
+        serde_json::from_value(serde_json::json!([
+            { "title": "Dock", "place": "Dock", "words": "Show or hide the dock", "icon": "dock_to_bottom", "link": "dock/dock/dock", "page": false },
+            { "title": "Icon size", "place": "Dock", "words": "", "icon": "apps", "link": "dock/icon-size/dock", "page": false },
+            { "title": "Dock", "place": "Dock", "words": "", "icon": "dock_to_bottom", "link": "dock", "page": true }
+        ])).unwrap()
+    }
+
+    #[test]
+    fn category_precedes_its_matching_controls() {
+        let settings = dock_settings();
+        let hits = find_settings(&settings, "dock", 12);
+        assert_eq!(hits.len(), 3);
+        assert!(hits[0].1.page);
+        assert!(hits.iter().skip(1).all(|(_, s)| !s.page));
+        let item = hits[0].1.item(0);
+        assert_eq!(item.detail, "Settings");
+        match item.act {
+            Act::Spawn(args) => assert_eq!(args, ["digit-settings", "dock"]),
+            _ => panic!("a settings category should open its page"),
+        }
+    }
+
+    #[test]
+    fn specific_control_query_still_finds_the_control() {
+        let settings = dock_settings();
+        let hits = find_settings(&settings, "dock icon", 12);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].1.link, "dock/icon-size/dock");
+    }
 }
