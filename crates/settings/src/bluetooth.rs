@@ -23,7 +23,7 @@ struct Page {
 
 thread_local! {
     static AGENT: Cell<bool> = const { Cell::new(false) };
-    static DIALOG: RefCell<Option<gtk::Window>> = const { RefCell::new(None) };
+    static DIALOG: RefCell<Option<ui::Dialog>> = const { RefCell::new(None) };
 }
 
 pub fn build() -> gtk::Widget {

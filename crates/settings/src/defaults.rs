@@ -52,7 +52,10 @@ pub fn section(body: &gtk::Box) {
         let (row, end) = ui::row(Some(glyph), title, "");
         let pick = kit::ui::dropdown(&refs, at as u32);
         let apps = Rc::new(apps);
+        let accepted = std::cell::Cell::new(at as u32);
+        let restoring = std::cell::Cell::new(false);
         pick.connect_selected_notify(move |p| {
+            if restoring.get() { return; }
             let i = p.selected() as usize;
             let Some(i) = (if unset { i.checked_sub(1) } else { Some(i) }) else { return };
             let Some(app) = apps.get(i) else { return };
@@ -65,9 +68,25 @@ pub fn section(body: &gtk::Box) {
                 ok &= app.set_as_default_for_type(mime).is_ok();
             }
             if ok {
+                accepted.set(p.selected());
                 ui::done(&format!("{} opens {}", app.display_name(), title.to_lowercase()));
             } else {
                 ui::fail("Could not save the default app");
+                // Some MIME types may have succeeded. Show the actual primary association.
+                let actual = gio::AppInfo::default_for_type(main, false).and_then(|a| a.id());
+                if let Some(i) = apps.iter().position(|a| a.id() == actual) {
+                    restoring.set(true);
+                    p.set_selected((i + usize::from(unset)) as u32);
+                    restoring.set(false);
+                } else if unset {
+                    restoring.set(true);
+                    p.set_selected(0);
+                    restoring.set(false);
+                } else {
+                    restoring.set(true);
+                    p.set_selected(accepted.get());
+                    restoring.set(false);
+                }
             }
         });
         end.append(&pick);

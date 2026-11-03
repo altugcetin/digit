@@ -4,20 +4,27 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
-pub(crate) fn save(key: &str, value: toml::Value) {
-    if let Err(e) = prefs::set(key, value) {
+pub(crate) fn save(key: &str, value: toml::Value) -> bool {
+    save_many(&[(key, value)])
+}
+
+pub(crate) fn save_many(values: &[(&str, toml::Value)]) -> bool {
+    if let Err(e) = prefs::set_many(values) {
         ui::fail(&format!("Could not save: {e}"));
-        return;
+        return false;
     }
     // Compositor settings (and the accent, which colors niri's window border) go straight into
     // digit's part of the compositor config.
-    if key.starts_with("hypr_") || key.starts_with("niri_") || matches!(key, "ui_accent" | "border_color" | "reduced_effects") {
+    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "ui_accent" | "border_color" | "reduced_effects")) {
         glib::spawn_future_local(async {
-            if let Ok(Err(e)) = gio::spawn_blocking(kit::setup::apply).await {
-                ui::fail(&e);
+            match gio::spawn_blocking(kit::setup::apply).await {
+                Ok(Ok(())) => {},
+                Ok(Err(e)) => ui::fail(&format!("Saved, but could not apply to the compositor: {e}")),
+                Err(_) => ui::fail("Saved, but could not apply to the compositor"),
             }
         });
     }
+    true
 }
 
 pub(crate) fn accent(card: &gtk::Box, t: &toml::Table) {
@@ -35,7 +42,8 @@ pub(crate) fn accent(card: &gtk::Box, t: &toml::Table) {
     flow.set_min_children_per_line(3);
     flow.set_column_spacing(8);
     flow.set_row_spacing(8);
-    let mut first: Option<gtk::ToggleButton> = None;
+    let mut buttons = Vec::new();
+    let mut selected = None;
     for (value, name) in kit::style::ACCENTS {
         let hex = if value == "wallpaper" { wall.clone() } else { value.to_string() };
         let b = gtk::ToggleButton::new();
@@ -55,18 +63,11 @@ pub(crate) fn accent(card: &gtk::Box, t: &toml::Table) {
         col.append(&label);
         b.set_child(Some(&col));
         b.set_tooltip_text(Some(name));
-        match &first {
-            Some(f) => b.set_group(Some(f)),
-            None => first = Some(b.clone()),
-        }
-        b.set_active(current.eq_ignore_ascii_case(value));
-        b.connect_toggled(move |b| {
-            if b.is_active() {
-                save("ui_accent", toml::Value::String(value.to_string()));
-            }
-        });
+        if current.eq_ignore_ascii_case(value) { selected = Some(buttons.len()); }
         flow.insert(&b, -1);
+        buttons.push(b);
     }
+    ui::select_buttons(&buttons, selected, |i| save("ui_accent", toml::Value::String(kit::style::ACCENTS[i].0.into())));
     block.append(&flow);
     card.append(&block);
 }
@@ -110,35 +111,78 @@ fn accent_preview(a: &gtk::DrawingArea, cr: &gtk::cairo::Context, w: f64, h: f64
 }
 
 
-pub(crate) fn choice(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, options: &[(&'static str, &'static str)], current: &str) {
+pub(crate) struct Choice {
+    pub row: gtk::Box,
+    controls: Vec<gtk::Widget>,
+    values: Rc<Vec<&'static str>>,
+    selected: Rc<Cell<usize>>,
+}
+
+impl Choice {
+    pub fn enable_when(&self, target: &impl IsA<gtk::Widget>, enabled: impl Fn(&str) -> bool + 'static) {
+        let (target, values, selected) = (target.as_ref().downgrade(), self.values.clone(), self.selected.clone());
+        let update = Rc::new(move || {
+            if let Some(target) = target.upgrade() {
+                target.set_sensitive(values.get(selected.get()).is_some_and(|v| enabled(v)));
+            }
+        });
+        update();
+        for control in &self.controls {
+            let update = update.clone();
+            if let Some(button) = control.downcast_ref::<gtk::ToggleButton>() {
+                button.connect_toggled(move |_| update());
+            } else {
+                control.connect_notify_local(Some("selected"), move |_, _| update());
+            }
+        }
+    }
+}
+
+pub(crate) fn choice(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, options: &[(&'static str, &'static str)], current: &str) -> Choice {
     let (row, end) = ui::row(Some(icon), title, sub);
     let labels: Vec<&str> = options.iter().map(|o| o.1).collect();
     let at = options.iter().position(|o| o.0 == current).unwrap_or(0);
-    let values: Vec<&'static str> = options.iter().map(|o| o.0).collect();
+    let values: Rc<Vec<&'static str>> = Rc::new(options.iter().map(|o| o.0).collect());
+    let selected = Rc::new(Cell::new(at));
+    let mut controls = Vec::new();
     let short = options.len() <= 3 && labels.iter().map(|l| l.chars().count()).sum::<usize>() <= 26;
     if short {
-        end.append(&kit::ui::segmented(&labels, at, move |i| {
-            if let Some(v) = values.get(i) {
-                save(key, toml::Value::String(v.to_string()));
-            }
-        }));
+        let (values, selected) = (values.clone(), selected.clone());
+        let bar = ui::segmented(&labels, at, move |i| {
+            let ok = values.get(i).is_some_and(|v| save(key, toml::Value::String(v.to_string())));
+            if ok { selected.set(i); }
+            ok
+        });
+        let mut child = bar.first_child();
+        while let Some(c) = child { child = c.next_sibling(); controls.push(c); }
+        end.append(&bar);
     } else {
         let pick = kit::ui::dropdown(&labels, at as u32);
+        let (values, selected) = (values.clone(), selected.clone());
+        let restoring = Cell::new(false);
         pick.connect_selected_notify(move |p| {
-            if let Some(v) = values.get(p.selected() as usize) {
-                save(key, toml::Value::String(v.to_string()));
+            if restoring.get() { return; }
+            let i = p.selected() as usize;
+            if values.get(i).is_some_and(|v| save(key, toml::Value::String(v.to_string()))) {
+                selected.set(i);
+            } else {
+                restoring.set(true);
+                p.set_selected(selected.get() as u32);
+                restoring.set(false);
             }
         });
+        controls.push(pick.clone().upcast());
         end.append(&pick);
     }
     card.append(&row);
+    Choice { row, controls, values, selected }
 }
 
 /// Preset corner radii, as multiples of the standard roundness.
 const CORNERS: [(f64, &str); 4] = [(0.15, "Square"), (0.55, "Subtle"), (1.0, "Rounded"), (1.6, "Round")];
 
 /// A row followed by a strip of picture tiles, one per option; returns the whole block.
-pub(crate) fn tiles(card: &gtk::Box, icon: &str, title: &str, sub: &str, items: Vec<(&str, gtk::Widget)>, at: usize, pick: impl Fn(usize) + 'static) -> gtk::Box {
+pub(crate) fn tiles(card: &gtk::Box, icon: &str, title: &str, sub: &str, items: Vec<(&str, gtk::Widget)>, at: usize, pick: impl Fn(usize) -> bool + 'static) -> gtk::Box {
     let block = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let (row, _) = ui::row(Some(icon), title, sub);
     block.append(&row);
@@ -146,9 +190,8 @@ pub(crate) fn tiles(card: &gtk::Box, icon: &str, title: &str, sub: &str, items: 
     strip.add_css_class("corners");
     strip.set_homogeneous(true);
     strip.set_halign(gtk::Align::Start);
-    let pick = Rc::new(pick);
-    let mut first: Option<gtk::ToggleButton> = None;
-    for (i, (name, picture)) in items.into_iter().enumerate() {
+    let mut buttons = Vec::new();
+    for (name, picture) in items {
         let b = gtk::ToggleButton::new();
         b.add_css_class("corner");
         let col = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -160,19 +203,10 @@ pub(crate) fn tiles(card: &gtk::Box, icon: &str, title: &str, sub: &str, items: 
         label.add_css_class("corner-name");
         col.append(&label);
         b.set_child(Some(&col));
-        match &first {
-            Some(f) => b.set_group(Some(f)),
-            None => first = Some(b.clone()),
-        }
-        b.set_active(i == at);
-        let pick = pick.clone();
-        b.connect_toggled(move |b| {
-            if b.is_active() {
-                pick(i);
-            }
-        });
         strip.append(&b);
+        buttons.push(b);
     }
+    ui::select_buttons(&buttons, (at < buttons.len()).then_some(at), pick);
     block.append(&strip);
     card.append(&block);
     block
@@ -262,18 +296,28 @@ fn find_switch(w: &gtk::Widget) -> Option<gtk::Switch> {
     None
 }
 
-pub(crate) fn toggle(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, on: bool) {
+fn when_on(source: &gtk::Box, target: &impl IsA<gtk::Widget>) {
+    if let Some(sw) = find_switch(source.upcast_ref()) {
+        target.set_sensitive(sw.is_active());
+        let target = target.as_ref().downgrade();
+        sw.connect_active_notify(move |s| {
+            if let Some(target) = target.upgrade() { target.set_sensitive(s.is_active()); }
+        });
+    }
+}
+
+pub(crate) fn toggle(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, on: bool) -> gtk::Box {
     let (row, end) = ui::row(Some(icon), title, sub);
     let sw = gtk::Switch::new();
-    sw.set_active(on);
     sw.set_valign(gtk::Align::Center);
-    sw.connect_active_notify(move |s| save(key, toml::Value::Boolean(s.is_active())));
+    ui::bind_switch(&sw, on, move |on| save(key, toml::Value::Boolean(on)));
     end.append(&sw);
     card.append(&row);
+    row
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn slider(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, range: (f64, f64, f64), value: f64, digits: i32) {
+pub(crate) fn slider(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, range: (f64, f64, f64), value: f64, digits: i32) -> gtk::Box {
     let (row, end) = ui::row(Some(icon), title, sub);
     let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, range.0, range.1, range.2);
     scale.set_value(value);
@@ -282,14 +326,24 @@ pub(crate) fn slider(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &
     scale.set_value_pos(gtk::PositionType::Left);
     scale.set_size_request(240, -1);
     let generation = Rc::new(Cell::new(0u64));
+    let accepted = Rc::new(Cell::new(scale.value()));
+    let restoring = Rc::new(Cell::new(false));
     scale.connect_value_changed(move |s| {
+        if restoring.get() { return; }
         let g = generation.get() + 1;
         generation.set(g);
         let generation = generation.clone();
         let v = (s.value() * 100.0).round() / 100.0;
+        let (s, accepted, restoring) = (s.downgrade(), accepted.clone(), restoring.clone());
         glib::timeout_add_local_once(Duration::from_millis(220), move || {
             if generation.get() == g {
-                save(key, toml::Value::Float(v));
+                if save(key, toml::Value::Float(v)) {
+                    accepted.set(v);
+                } else if let Some(s) = s.upgrade() {
+                    restoring.set(true);
+                    s.set_value(accepted.get());
+                    restoring.set(false);
+                }
             }
         });
     });
@@ -306,9 +360,10 @@ pub(crate) fn slider(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &
     scale.add_controller(wheel);
     end.append(&scale);
     card.append(&row);
+    row
 }
 
-pub(crate) fn field(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, current: &str, hint: &str, check: fn(&str) -> bool) {
+pub(crate) fn field(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, current: &str, hint: &str, check: fn(&str) -> bool) -> gtk::Box {
     let (row, end) = ui::row(Some(icon), title, sub);
     let entry = gtk::Entry::new();
     entry.set_text(current);
@@ -316,22 +371,11 @@ pub(crate) fn field(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'
     entry.set_valign(gtk::Align::Center);
     entry.set_width_chars(14);
     entry.set_max_length(64);
-    let generation = Rc::new(Cell::new(0u64));
-    entry.connect_changed(move |e| {
-        let g = generation.get() + 1;
-        generation.set(g);
-        let generation = generation.clone();
-        let text = e.text().trim().to_string();
-        let ok = check(&text);
-        if ok { e.remove_css_class("error") } else { e.add_css_class("error") }
-        glib::timeout_add_local_once(Duration::from_millis(700), move || {
-            if generation.get() == g && ok {
-                save(key, toml::Value::String(text));
-            }
-        });
-    });
+    let help = if sub.is_empty() { format!("Enter a valid {}", title.to_lowercase()) } else { sub.to_string() };
+    ui::bind_entry(&entry, move |s| if check(s) { Ok(()) } else { Err(help.clone()) }, move |text| save(key, toml::Value::String(text.into())));
     end.append(&entry);
     card.append(&row);
+    row
 }
 
 fn hhmm(s: &str) -> bool {
@@ -366,11 +410,11 @@ fn free_windows() -> bool {
     std::fs::read_to_string(niri_dir().join("digit-windows.kdl")).is_ok_and(|t| t.contains("open-floating true"))
 }
 
-fn set_windows(free: bool) {
+fn set_windows(free: bool) -> bool {
     // digit's niri rules include this file, so writing it is enough.
     if !kit::niriconf::installed() {
         ui::fail("Set digit up on niri first, above");
-        return;
+        return false;
     }
     let file = niri_dir().join("digit-windows.kdl");
     let body = if free {
@@ -381,13 +425,17 @@ fn set_windows(free: bool) {
     let tmp = file.with_extension("kdl.new");
     if std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, &file)).is_err() {
         ui::fail("Could not write the window mode");
-        return;
+        return false;
     }
     glib::spawn_future_local(async move {
         glib::timeout_future(Duration::from_millis(400)).await;
-        let _ = gio::spawn_blocking(move || crate::niri::retile(free)).await;
-        ui::done(if free { "Windows now float freely" } else { "Windows are tiled in columns again" });
+        if gio::spawn_blocking(move || crate::niri::retile(free)).await.is_ok() {
+            ui::done(if free { "Windows now float freely" } else { "Windows are tiled in columns again" });
+        } else {
+            ui::fail("Window mode saved, but existing windows could not be rearranged");
+        }
     });
+    true
 }
 
 /// A settings page: which sections it shows, in order. Search builds the same sections to
@@ -461,14 +509,31 @@ fn shell_look(body: &gtk::Box, t: &toml::Table) {
     let current = kit::theme::load().map(|t| t.scheme).unwrap_or_else(|| prefs::get_str(&t, "scheme", "content"));
     let schemes: Vec<&str> = kit::theme::SCHEMES.to_vec();
     let pick = kit::ui::dropdown(&schemes, 0);
-    pick.set_selected(schemes.iter().position(|s| *s == current).unwrap_or(0) as u32);
+    let selected = schemes.iter().position(|s| *s == current).unwrap_or(0) as u32;
+    pick.set_selected(selected);
+    let accepted = Rc::new(Cell::new(selected));
+    let restoring = Rc::new(Cell::new(false));
     pick.connect_selected_notify(move |p| {
+        if restoring.get() { return; }
         let Some(name) = kit::theme::SCHEMES.get(p.selected() as usize) else { return };
+        let selected = p.selected();
+        p.set_sensitive(false);
         let argv: [&std::ffi::OsStr; 4] = ["digit".as_ref(), "theme".as_ref(), "--scheme".as_ref(), name.as_ref()];
-        match gio::Subprocess::newv(&argv, gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE) {
-            Ok(_) => ui::done(&format!("Color scheme: {name}")),
-            Err(e) => ui::fail(&e.to_string()),
-        }
+        let process = gio::Subprocess::newv(&argv, gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE);
+        let (pick, accepted, restoring) = (p.clone(), accepted.clone(), restoring.clone());
+        glib::spawn_future_local(async move {
+            let result = match process { Ok(p) => p.wait_check_future().await, Err(e) => Err(e) };
+            match result {
+                Ok(()) => { accepted.set(selected); ui::done(&format!("Color scheme: {name}")); }
+                Err(e) => {
+                    restoring.set(true);
+                    pick.set_selected(accepted.get());
+                    restoring.set(false);
+                    ui::fail(&format!("Could not apply the color scheme: {e}"));
+                }
+            }
+            pick.set_sensitive(true);
+        });
     });
     end.append(&pick);
     look.append(&row);
@@ -480,11 +545,19 @@ fn shell_look(body: &gtk::Box, t: &toml::Table) {
     let pick = kit::ui::dropdown(&refs, 0);
     let chosen = t.get("icon_theme").and_then(|v| v.as_str()).map(str::to_string);
     pick.set_selected(chosen.as_ref().and_then(|c| themes.iter().position(|n| n == c)).map_or(0, |i| i + 1) as u32);
+    let accepted = Cell::new(pick.selected());
+    let restoring = Cell::new(false);
     pick.connect_selected_notify(move |p| {
+        if restoring.get() { return; }
         let i = p.selected() as usize;
         let r = if i == 0 { prefs::unset("icon_theme") } else { themes.get(i - 1).map_or(Ok(()), |n| prefs::set("icon_theme", toml::Value::String(n.clone()))) };
         if let Err(e) = r {
             ui::fail(&e);
+            restoring.set(true);
+            p.set_selected(accepted.get());
+            restoring.set(false);
+        } else {
+            accepted.set(p.selected());
         }
     });
     end.append(&pick);
@@ -511,7 +584,7 @@ fn effects(body: &gtk::Box, t: &toml::Table) {
 fn dock(body: &gtk::Box, t: &toml::Table) {
     let dock = section(body, "Dock");
     let shows = keys("dock").map(|k| format!("{k} shows or hides it at any time")).unwrap_or_default();
-    choice(&dock, "dock_to_bottom", "Visibility", &shows, "dock_mode", &[("on", "Always shown"), ("autohide", "Auto-hide"), ("smart", "Hide when windows are open"), ("off", "Off")], &prefs::get_str(&t, "dock_mode", "on"));
+    let visibility = choice(&dock, "dock_to_bottom", "Visibility", &shows, "dock_mode", &[("on", "Always shown"), ("autohide", "Auto-hide"), ("smart", "Hide when windows are open"), ("off", "Off")], &prefs::get_str(&t, "dock_mode", "on"));
     choice(&dock, "side_navigation", "Position", "", "dock_side", &[("bottom", "Bottom"), ("left", "Left"), ("right", "Right")], &prefs::get_str(&t, "dock_side", "bottom"));
     slider(&dock, "photo_size_select_small", "Icon size", "", "dock_size", (32.0, 80.0, 2.0), prefs::get_f64(&t, "dock_size", 50.0), 0);
     slider(&dock, "zoom_in", "Magnification", "1.0 turns it off", "dock_magnify", (1.0, 2.0, 0.05), prefs::get_f64(&t, "dock_magnify", 1.5), 2);
@@ -522,6 +595,11 @@ fn dock(body: &gtk::Box, t: &toml::Table) {
         other => other.to_string(),
     };
     choice(&dock, "style", "Icon style", "Big Sur shaped icons for every app", "dock_icons", &[("light", "Big Sur"), ("graphite", "Big Sur graphite"), ("mono", "Mono"), ("tinted", "Tinted"), ("native", "Original")], &style);
+    let mut child = dock.first_child();
+    while let Some(row) = child {
+        child = row.next_sibling();
+        if row != visibility.row { visibility.enable_when(&row, |v| v != "off"); }
+    }
 }
 
 pub fn setup(body: &gtk::Box, _: &toml::Table) {
@@ -546,7 +624,7 @@ pub fn setup(body: &gtk::Box, _: &toml::Table) {
             let detail = format!("Your {folder} is copied to a dated backup folder, then digit sets up the whole config. Your own shortcuts from the old config need to be set again, in Settings > Keyboard or in {main}.");
             b.connect_clicked(move |b| {
                 let parent = ui::root(b);
-                kit::ui::ask(parent.as_ref(), &format!("Set up {}?", kind.name()), &detail, "Cancel", "Set up", "accent", move || match kit::setup::setup() {
+                ui::ask(parent.as_ref(), &format!("Set up {}?", kind.name()), &detail, "Cancel", "Set up", "accent", move || match kit::setup::setup() {
                     Ok(note) => {
                         ui::done(&note);
                         crate::reload("compositor");
@@ -564,7 +642,18 @@ pub fn setup(body: &gtk::Box, _: &toml::Table) {
         let modes = ["Tiling columns", "Free placement"];
         let pick = kit::ui::dropdown(&modes, 0);
         pick.set_selected(if free_windows() { 1 } else { 0 });
-        pick.connect_selected_notify(|p| set_windows(p.selected() == 1));
+        let accepted = Cell::new(pick.selected());
+        let restoring = Cell::new(false);
+        pick.connect_selected_notify(move |p| {
+            if restoring.get() { return; }
+            if set_windows(p.selected() == 1) {
+                accepted.set(p.selected());
+            } else {
+                restoring.set(true);
+                p.set_selected(accepted.get());
+                restoring.set(false);
+            }
+        });
         end.append(&pick);
         win.append(&row);
         let (row, end) = ui::row(Some("dashboard"), "Window layouts", "Arranges the focused window: halves, thirds, corners and more");
@@ -603,10 +692,12 @@ fn notch(body: &gtk::Box, t: &toml::Table) {
 
 fn menu_bar(body: &gtk::Box, t: &toml::Table) {
     let bar = section(body, "Menu bar");
-    toggle(&bar, "menu", "Menu bar", "Distro menu, the focused app's menus, status and date beside the notch", "menubar", prefs::get_bool(&t, "menubar", true));
-    choice(&bar, "blur_on", "Menu bar backdrop", "Adaptive stays clear over the wallpaper and turns to frosted glass when windows are open", "menubar_look", &[("adaptive", "Adaptive"), ("clear", "Clear"), ("glass", "Glass")], &prefs::get_str(&t, "menubar_look", "adaptive"));
+    let enabled = toggle(&bar, "menu", "Menu bar", "Distro menu, the focused app's menus, status and date beside the notch", "menubar", prefs::get_bool(&t, "menubar", true));
+    let backdrop = choice(&bar, "blur_on", "Menu bar backdrop", "Adaptive stays clear over the wallpaper and turns to frosted glass when windows are open", "menubar_look", &[("adaptive", "Adaptive"), ("clear", "Clear"), ("glass", "Glass")], &prefs::get_str(&t, "menubar_look", "adaptive"));
     slider(&bar, "height", "Bar height", "Used by the full-width bar", "wide_height", (28.0, 56.0, 1.0), prefs::get_f64(&t, "wide_height", 34.0), 0);
-    toggle(&bar, "widgets", "Menu bar app icons", "Shows the icons apps like Discord or Steam put in the system tray. Applies after digit restarts", "tray", prefs::get_bool(&t, "tray", true));
+    let tray = toggle(&bar, "widgets", "Menu bar app icons", "Shows the icons apps like Discord or Steam put in the system tray. Applies after digit restarts", "tray", prefs::get_bool(&t, "tray", true));
+    when_on(&enabled, &backdrop.row);
+    when_on(&enabled, &tray);
 }
 
 fn panels(body: &gtk::Box, t: &toml::Table) {
@@ -651,10 +742,13 @@ fn power(body: &gtk::Box, t: &toml::Table) {
 
 pub fn night_light(body: &gtk::Box, t: &toml::Table) {
     let night = section(body, "Night Light");
-    choice(&night, "nightlight", "Night Light", "Warms the screen in the evening to be easier on your eyes. Sunset uses the weather city set in Desktop", "night_light", &[("off", "Off"), ("sunset", "Sunset to sunrise"), ("schedule", "Custom hours"), ("always", "Always on")], &prefs::get_str(&t, "night_light", "off"));
-    slider(&night, "thermostat", "Warmth", "Color temperature at night, in kelvin. Lower is warmer", "night_temp", (2500.0, 6000.0, 100.0), prefs::get_f64(&t, "night_temp", 4200.0), 0);
-    field(&night, "schedule", "From", "Custom hours start, 24-hour HH:MM", "night_from", &prefs::get_str(&t, "night_from", "20:00"), "20:00", hhmm);
-    field(&night, "wb_sunny", "Until", "Custom hours end, 24-hour HH:MM", "night_to", &prefs::get_str(&t, "night_to", "07:00"), "07:00", hhmm);
+    let mode = choice(&night, "nightlight", "Night Light", "Warms the screen in the evening to be easier on your eyes. Sunset uses the weather city set in Desktop", "night_light", &[("off", "Off"), ("sunset", "Sunset to sunrise"), ("schedule", "Custom hours"), ("always", "Always on")], &prefs::get_str(&t, "night_light", "off"));
+    let warmth = slider(&night, "thermostat", "Warmth", "Color temperature at night, in kelvin. Lower is warmer", "night_temp", (2500.0, 6000.0, 100.0), prefs::get_f64(&t, "night_temp", 4200.0), 0);
+    let from = field(&night, "schedule", "From", "Custom hours start, 24-hour HH:MM", "night_from", &prefs::get_str(&t, "night_from", "20:00"), "20:00", hhmm);
+    let until = field(&night, "wb_sunny", "Until", "Custom hours end, 24-hour HH:MM", "night_to", &prefs::get_str(&t, "night_to", "07:00"), "07:00", hhmm);
+    mode.enable_when(&warmth, |v| v != "off");
+    mode.enable_when(&from, |v| v == "schedule");
+    mode.enable_when(&until, |v| v == "schedule");
 }
 
 fn desktop(body: &gtk::Box, t: &toml::Table) {
@@ -672,7 +766,7 @@ fn weather(body: &gtk::Box, t: &toml::Table) {
 fn search(body: &gtk::Box, t: &toml::Table) {
     let find = section(body, "Search");
     toggle(&find, "text_select_move_forward_character", "Smooth caret", "The caret in Spotlight glides as you type and blinks softly, like VS Code", "smooth_caret", prefs::get_bool(&t, "smooth_caret", true));
-    toggle(&find, "manage_search", "Search inside apps", "Spotlight asks apps that offer results, such as Files, Firefox tabs and Characters", "search_apps", prefs::get_bool(&t, "search_apps", true));
+    let enabled = toggle(&find, "manage_search", "Search inside apps", "Spotlight asks apps that offer results, such as Files, Firefox tabs and Characters", "search_apps", prefs::get_bool(&t, "search_apps", true));
     let listed = kit::search::listed();
     let off = kit::search::off_list(&t);
     let states: Rc<Vec<(String, Cell<bool>)>> = Rc::new(listed.iter().map(|l| (l.id.clone(), Cell::new(kit::search::enabled(l, &off)))).collect());
@@ -690,15 +784,17 @@ fn search(body: &gtk::Box, t: &toml::Table) {
         icon.set_valign(gtk::Align::Center);
         row.prepend(&icon);
         let sw = gtk::Switch::new();
-        sw.set_active(states[i].1.get());
         sw.set_valign(gtk::Align::Center);
+        let initial = states[i].1.get();
         let states = states.clone();
-        sw.connect_active_notify(move |s| {
-            states[i].1.set(s.is_active());
-            let list: Vec<toml::Value> = states.iter().filter(|(_, on)| !on.get()).map(|(id, _)| toml::Value::String(id.clone())).collect();
-            save("search_providers_off", toml::Value::Array(list));
+        ui::bind_switch(&sw, initial, move |on| {
+            let list: Vec<toml::Value> = states.iter().enumerate().filter(|(j, (_, state))| !if *j == i { on } else { state.get() }).map(|(_, (id, _))| toml::Value::String(id.clone())).collect();
+            let ok = save("search_providers_off", toml::Value::Array(list));
+            if ok { states[i].1.set(on); }
+            ok
         });
         end.append(&sw);
+        when_on(&enabled, &row);
         find.append(&row);
     }
 }
@@ -729,15 +825,15 @@ fn scopes(body: &gtk::Box, t: &toml::Table) {
         end.append(&ui::badge(key, ""));
         let sw = gtk::Switch::new();
         sw.set_valign(gtk::Align::Center);
-        sw.set_active(!off.borrow().iter().any(|k| k == key));
+        let initial = !off.borrow().iter().any(|k| k == key);
         let off = off.clone();
-        sw.connect_active_notify(move |s| {
-            let mut list = off.borrow_mut();
+        ui::bind_switch(&sw, initial, move |on| {
+            let mut list = off.borrow().clone();
             list.retain(|k| k != key);
-            if !s.is_active() {
-                list.push(key.to_string());
-            }
-            save("search_scopes_off", toml::Value::Array(list.iter().cloned().map(toml::Value::String).collect()));
+            if !on { list.push(key.to_string()); }
+            let ok = save("search_scopes_off", toml::Value::Array(list.iter().cloned().map(toml::Value::String).collect()));
+            if ok { *off.borrow_mut() = list; }
+            ok
         });
         end.append(&sw);
         card.append(&row);
@@ -765,20 +861,26 @@ fn screenshots(body: &gtk::Box, t: &toml::Table) {
     choice(&snap, "keyboard_return", "Enter after selecting", "Double-click inside the selection does the same", "snap_after", &[("copy", "Copy"), ("save", "Save"), ("edit", "Mark up"), ("pin", "Pin to screen")], &prefs::get_str(&t, "snap_after", "copy"));
     toggle(&snap, "save", "Also save copies", "Keep a file every time a screenshot is copied", "snap_save_on_copy", prefs::get_bool(&t, "snap_save_on_copy", true));
     let dir = prefs::get_str(&t, "snap_dir", "");
-    let shown = if dir.is_empty() { glib::user_special_dir(glib::UserDirectory::Pictures).unwrap_or_else(glib::home_dir).join("Screenshots").display().to_string() } else { dir };
-    let (row, end) = ui::row(Some("folder"), "Save to", &shown);
+    let default = glib::user_special_dir(glib::UserDirectory::Pictures).unwrap_or_else(glib::home_dir).join("Screenshots").display().to_string();
+    let shown = if dir.is_empty() { default.clone() } else { dir };
+    let (row, end) = ui::row(Some("folder"), "Save to", "");
+    let entry = gtk::Entry::new();
+    entry.set_text(&shown);
+    entry.set_width_chars(22);
+    entry.set_hexpand(true);
+    entry.set_placeholder_text(Some(&default));
+    ui::bind_entry(&entry, screenshot_folder, |text| save("snap_dir", toml::Value::String(text.into())));
+    end.append(&entry);
     let pickb = ui::button("Choose…", "");
-    pickb.connect_clicked(|b| {
-        let d = gtk::FileDialog::new();
-        d.set_title("Save Screenshots To");
-        let parent = ui::root(b);
-        ui::aside();
-        d.select_folder(parent.as_ref(), gio::Cancellable::NONE, |r| {
-            if let Ok(f) = r {
-                if let Some(p) = f.path() {
-                    save("snap_dir", toml::Value::String(p.display().to_string()));
-                    ui::done("Screenshot folder changed");
-                }
+    let target = entry.downgrade();
+    pickb.connect_clicked(move |b| {
+        let Some(entry) = target.upgrade() else { return };
+        let path = kit::prefs::home(entry.text().trim());
+        let target = target.clone();
+        ui::choose_folder(ui::root(b), &path, move |path| {
+            if let Some(entry) = target.upgrade() {
+                entry.set_text(&path.display().to_string());
+                entry.emit_activate();
             }
         });
     });
@@ -789,6 +891,18 @@ fn screenshots(body: &gtk::Box, t: &toml::Table) {
     toggle(&snap, "zoom_in", "Magnifier", "Pixel loupe with coordinates while selecting (the color picker lives in the notch)", "snap_loupe", prefs::get_bool(&t, "snap_loupe", false));
     toggle(&snap, "arrow_selector_tool", "Include the pointer", "", "snap_cursor", prefs::get_bool(&t, "snap_cursor", false));
     toggle(&snap, "notifications", "Notify when done", "Shows the screenshot in the notch", "snap_notify", prefs::get_bool(&t, "snap_notify", true));
+}
+
+fn screenshot_folder(text: &str) -> Result<(), String> {
+    if text.is_empty() { return Ok(()); }
+    let path = kit::prefs::home(text);
+    if !path.is_absolute() || text.chars().any(char::is_control) {
+        return Err("Enter an absolute path or a path starting with ~/".into());
+    }
+    if path.exists() && !path.is_dir() {
+        return Err("Choose a folder, not a file".into());
+    }
+    Ok(())
 }
 
 fn files(body: &gtk::Box, t: &toml::Table) {
@@ -832,4 +946,18 @@ pub fn advanced(body: &gtk::Box, _: &toml::Table) {
     });
     end.append(&open);
     adv.append(&row);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn screenshot_folder_accepts_paths_and_rejects_files() {
+        assert!(super::screenshot_folder("").is_ok());
+        assert!(super::screenshot_folder("~/Pictures/Screenshots").is_ok());
+        assert!(super::screenshot_folder("/tmp/digit-screenshots/new-folder").is_ok());
+        assert!(super::screenshot_folder("relative/folder").is_err());
+        assert!(super::screenshot_folder("/tmp/bad\nfolder").is_err());
+        let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        assert!(super::screenshot_folder(file.to_str().unwrap()).is_err());
+    }
 }

@@ -1,4 +1,4 @@
-use crate::desktop::{choice, field, save, slider, tiles, toggle};
+use crate::desktop::{choice, field, save, save_many, slider, tiles, toggle};
 use crate::{prefs, ui};
 use gtk::prelude::*;
 
@@ -67,8 +67,7 @@ pub fn build() -> gtk::Widget {
         let at = GAPS.iter().position(|g| g.1 == gi && g.2 == go).unwrap_or(usize::MAX);
         let items = GAPS.iter().map(|(name, i, o)| (*name, gaps_picture(*i, *o))).collect();
         tiles(&win, "padding", "Gaps", "Between windows and at the screen edges", items, at, |i| {
-            save("hypr_gaps_in", toml::Value::Float(GAPS[i].1));
-            save("hypr_gaps_out", toml::Value::Float(GAPS[i].2));
+            save_many(&[("hypr_gaps_in", toml::Value::Float(GAPS[i].1)), ("hypr_gaps_out", toml::Value::Float(GAPS[i].2))])
         });
     }
     slider(&win, "border_style", "Border width", "", "hypr_border", (0.0, 6.0, 1.0), f("hypr_border", 2.0), 0);
@@ -111,20 +110,18 @@ pub fn build() -> gtk::Widget {
         let at = if b("hypr_shadow", true) { SHADOWS.iter().position(|v| v.0 == s("hypr_shadow_size", "medium")).unwrap_or(2) } else { 0 };
         let items = SHADOWS.iter().map(|(v, name, r)| (*name, shadow_picture(if *v == "off" { 0.0 } else { *r }))).collect();
         tiles(&fx, "shadow", "Window shadows", "", items, at, |i| {
-            save("hypr_shadow", toml::Value::Boolean(i != 0));
-            if i != 0 {
-                save("hypr_shadow_size", toml::Value::String(SHADOWS[i].0.into()));
-            }
+            let mut values = vec![("hypr_shadow", toml::Value::Boolean(i != 0))];
+            if i != 0 { values.push(("hypr_shadow_size", toml::Value::String(SHADOWS[i].0.into()))); }
+            save_many(&values)
         });
     }
     {
         let at = if b("hypr_blur", false) { BLURS.iter().position(|v| v.0 == s("hypr_blur_strength", "medium")).unwrap_or(2) } else { 0 };
         let items = BLURS.iter().map(|(_, name, k)| (*name, blur_picture(*k))).collect();
         tiles(&fx, "blur_on", "Blur behind windows", "Frosts what's behind see-through windows; costs some GPU time", items, at, |i| {
-            save("hypr_blur", toml::Value::Boolean(i != 0));
-            if i != 0 {
-                save("hypr_blur_strength", toml::Value::String(BLURS[i].0.into()));
-            }
+            let mut values = vec![("hypr_blur", toml::Value::Boolean(i != 0))];
+            if i != 0 { values.push(("hypr_blur_strength", toml::Value::String(BLURS[i].0.into()))); }
+            save_many(&values)
         });
     }
     body.append(&fx);
@@ -158,12 +155,17 @@ fn cycle(card: &gtk::Box, t: &toml::Table) {
         let b = gtk::ToggleButton::with_label(name);
         b.set_active(!off.borrow().iter().any(|k| k == key));
         let off = off.clone();
+        let restoring = std::cell::Cell::new(false);
         b.connect_toggled(move |b| {
+            if restoring.get() { return; }
+            let previous = off.borrow().clone();
             let left_on = TILING.len() - off.borrow().iter().filter(|k| *k != key).count();
             if !b.is_active() && left_on <= 2 {
                 // Stepping needs two layouts to step between. Switching it back runs this
                 // again, so nothing may be borrowed here.
+                restoring.set(true);
                 b.set_active(true);
+                restoring.set(false);
                 ui::fail("Keep at least two layouts to switch between");
                 return;
             }
@@ -177,6 +179,10 @@ fn cycle(card: &gtk::Box, t: &toml::Table) {
             };
             // Not a compositor setting, so it's saved without rewriting the config.
             if let Err(e) = prefs::set("hypr_tiling_cycle_off", toml::Value::Array(list.into_iter().map(toml::Value::String).collect())) {
+                *off.borrow_mut() = previous.clone();
+                restoring.set(true);
+                b.set_active(!previous.iter().any(|k| k == key));
+                restoring.set(false);
                 ui::fail(&e);
             }
         });

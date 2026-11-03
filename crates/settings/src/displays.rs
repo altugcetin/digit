@@ -797,10 +797,9 @@ pub fn build() -> gtk::Widget {
             apply.set_sensitive(true);
             if keep {
                 match persist(wm, &outs) {
-                    Ok(msg) => ui::done(&msg),
+                    Ok(msg) => { s2.borrow_mut().saved = outs; ui::done(&msg); }
                     Err(e) => ui::fail(&e),
                 }
-                s2.borrow_mut().saved = outs;
             } else {
                 match (wm, undo) {
                     (Wm::Hypr, Some(old)) => hypr_restore(old),

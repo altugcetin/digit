@@ -20,6 +20,8 @@ mod ui;
 mod updates;
 mod welcome;
 mod wifi;
+#[cfg(test)]
+mod tests;
 
 use gtk::{gio, glib, prelude::*};
 use std::cell::RefCell;
@@ -315,6 +317,16 @@ pub fn main_window() -> Option<gtk::ApplicationWindow> {
     SHELL.with(|s| s.borrow().as_ref().map(|s| s.window.clone()))
 }
 
+/// A modal owns typing; the search field must not capture keys from behind it.
+pub(crate) fn search_enabled(window: &gtk::Window, enabled: bool) {
+    SHELL.with(|s| {
+        if let Some(s) = s.borrow().as_ref().filter(|s| s.window.upcast_ref::<gtk::Window>() == window) {
+            s.find.set_sensitive(enabled);
+            s.find.set_key_capture_widget(if enabled { Some(window.upcast_ref::<gtk::Widget>()) } else { None });
+        }
+    });
+}
+
 pub(crate) fn reload(name: &str) {
     search::forget();
     SHELL.with(|s| {
@@ -464,7 +476,10 @@ fn window(app: &gtk::Application) -> gtk::ApplicationWindow {
             glib::Propagation::Stop
         });
     } else {
-        window.set_child(Some(&root));
+        let layer = gtk::Overlay::new();
+        layer.set_widget_name(ui::SHEET_LAYER);
+        layer.set_child(Some(&root));
+        window.set_child(Some(&layer));
     }
     let keys = gtk::EventControllerKey::new();
     let w = window.clone();
