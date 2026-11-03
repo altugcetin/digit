@@ -447,17 +447,6 @@ impl Control {
             glib::Propagation::Stop
         });
         canvas.add_controller(wheel);
-        let weak = Rc::downgrade(&self.0);
-        window.connect_is_active_notify(move |w| {
-            if !w.is_active() {
-                if let Some(s) = weak.upgrade() {
-                    let Ok(open) = s.try_borrow().map(|s| s.open) else { return };
-                    if open {
-                        Control(s).close();
-                    }
-                }
-            }
-        });
     }
 
     pub fn changed(&self) {

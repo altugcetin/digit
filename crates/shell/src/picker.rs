@@ -62,6 +62,7 @@ struct State {
     window: gtk::Window,
     canvas: Canvas,
     open: bool,
+    scrim: Option<gtk::Window>,
     size: (f64, f64),
     source: Source,
     all: Vec<String>,
@@ -439,6 +440,7 @@ impl Picker {
             window,
             canvas: canvas.clone(),
             open: false,
+            scrim: None,
             size: (1920.0, 1080.0),
             source: Source::Yours,
             all: Vec::new(),
@@ -600,18 +602,6 @@ impl Picker {
             glib::Propagation::Stop
         });
         canvas.add_controller(wheel);
-        let weak = Rc::downgrade(&self.0);
-        window.connect_is_active_notify(move |w| {
-            if !w.is_active() {
-                if let Some(s) = weak.upgrade() {
-                    let Ok(open) = s.try_borrow().map(|s| s.open) else { return };
-                    if open {
-                        let p = Picker(s);
-                        glib::idle_add_local_once(move || p.close(false));
-                    }
-                }
-            }
-        });
     }
 
     fn columns(&self) -> usize {
@@ -651,7 +641,15 @@ impl Picker {
             s.fade.go(1.0, now, 220, motion::STANDARD);
             s.rise.set(0.0);
             s.rise.go(1.0, now, 520, motion::EMPHASIZED_DECEL);
-            s.window.set_keyboard_mode(KeyboardMode::OnDemand);
+            s.window.set_keyboard_mode(KeyboardMode::Exclusive);
+            if s.scrim.is_none() {
+                let weak = Rc::downgrade(&self.0);
+                s.scrim = Some(crate::paint::scrim(monitor.as_ref(), move || {
+                    if let Some(s) = weak.upgrade() {
+                        Picker(s).close(false);
+                    }
+                }));
+            }
         }
         let window = self.0.borrow().window.clone();
         window.present();
@@ -674,6 +672,9 @@ impl Picker {
             s.fade.go(0.0, now, 180, motion::FAST_EFFECTS);
             s.rise.go(0.0, now, 220, motion::Curve::new(0.3, 0.0, 0.8, 0.15));
             s.window.set_keyboard_mode(KeyboardMode::None);
+            if let Some(scrim) = s.scrim.take() {
+                scrim.destroy();
+            }
             s.queue.clear();
             (s.app.clone(), s.original.clone(), s.items.get(s.pointed).cloned())
         };

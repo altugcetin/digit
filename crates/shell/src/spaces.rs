@@ -198,18 +198,6 @@ fn build(app: &Rc<App>) -> Shared {
         glib::Propagation::Stop
     });
     window.add_controller(keys);
-    let weak = Rc::downgrade(&st);
-    window.connect_is_active_notify(move |w| {
-        let leave = weak.upgrade().is_some_and(|st| st.try_borrow().is_ok_and(|s| s.app.prefs.borrow().spaces_close == "leave"));
-        if !w.is_active() && leave {
-            let weak = weak.clone();
-            glib::idle_add_local_once(move || {
-                if let Some(st) = weak.upgrade() {
-                    close(&st);
-                }
-            });
-        }
-    });
     let motion = gtk::EventControllerMotion::new();
     let weak = Rc::downgrade(&st);
     motion.connect_motion(move |_, x, y| {
@@ -379,12 +367,15 @@ fn show(st: &Shared, output: Option<String>) {
         }
         s.open = true;
         s.inside = false;
+        s.leave += 1;
         s.hot = None;
         let now = glib::monotonic_time();
         s.rise.go(1.0, now, 420, motion::Curve::new(0.16, 1.0, 0.3, 1.0));
         s.fade.after(1.0, now, 60, 220, motion::STANDARD);
-        s.window.set_keyboard_mode(KeyboardMode::OnDemand);
-        if s.app.prefs.borrow().spaces_close == "click" && s.scrim.is_none() {
+        // As with the menu bar's menus, keep the keyboard here: Hyprland's
+        // focus-follows-mouse must not dismiss a panel opened by a shortcut.
+        s.window.set_keyboard_mode(KeyboardMode::Exclusive);
+        if s.scrim.is_none() {
             let weak = Rc::downgrade(st);
             s.scrim = Some(crate::paint::scrim(monitor.as_ref(), move || {
                 if let Some(st) = weak.upgrade() {
