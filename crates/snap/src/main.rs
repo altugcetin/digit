@@ -26,10 +26,10 @@ fn css() -> String {
 window.snap, window.snap.background {{ background: transparent; }}
 window.pin, window.pin.background {{ background: transparent; }}
 .pinned {{ border-radius: 14px; box-shadow: 0 10px 34px rgba(0,0,0,0.55), 0 0 0 1px alpha(#ffffff, 0.10); margin: 18px; }}
-.snapbar {{ background: rgba(14,14,14,0.94); border-radius: 999px; padding: 5px 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }}
+.snapbar {{ background: alpha(@d_pop, 0.94); border-radius: 999px; padding: 5px 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }}
 .snapbar button.ctl {{ color: {main}; min-width: 36px; min-height: 36px; }}
 .snapbar button.ctl .sym {{ font-size: 20px; }}
-.snaphint {{ background: rgba(10,10,10,0.86); color: {main}; border-radius: 999px; padding: 10px 18px; font-size: 13px; font-family: "Readex Pro", sans-serif; }}
+.snaphint {{ background: alpha(@d_pop, 0.86); color: {main}; border-radius: 999px; padding: 10px 18px; font-size: 13px; font-family: "Readex Pro", sans-serif; }}
 button.ctl.act {{ color: {main}; min-width: 36px; min-height: 36px; }}
 .editbar {{ padding: 8px 10px; }}
 .editfoot {{ padding: 10px 14px 12px 14px; }}
@@ -50,7 +50,7 @@ button.framebtn {{ background: transparent; border: none; box-shadow: none; bord
 button.framebtn:hover {{ background: alpha({main}, 0.08); }}
 menubutton.pillmenu > button {{ background: alpha({main}, 0.10); color: {main}; border-radius: 999px; padding: 6px 14px; border: none; box-shadow: none; }}
 .toast {{ background: @d_raised; color: {main}; border-radius: 999px; padding: 9px 18px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }}
-.countdown {{ background: rgba(10,10,10,0.9); color: {main}; border-radius: 999px; padding: 14px 30px; font-size: 42px; font-weight: 700; font-family: "Rubik", sans-serif; }}
+.countdown {{ background: alpha(@d_pop, 0.9); color: {main}; border-radius: 999px; padding: 14px 30px; font-size: 42px; font-weight: 700; font-family: "Rubik", sans-serif; }}
 button.pill.accent {{ background: {accent}; color: {on_accent}; }}
 "#,
         base = kit::style::css()

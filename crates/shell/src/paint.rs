@@ -53,6 +53,42 @@ impl Paint {
     }
 }
 
+/// Refresh open panel canvases through the palette transition, even while they are idle.
+pub fn refresh_palette(until: i64) {
+    use gtk::prelude::*;
+    use gtk4_layer_shell::LayerShell;
+    use std::cell::Cell;
+
+    thread_local! {
+        static GENERATION: Cell<u64> = const { Cell::new(0) };
+    }
+
+    let generation = GENERATION.get() + 1;
+    GENERATION.set(generation);
+    for window in gtk::Window::list_toplevels().into_iter().filter_map(|w| w.downcast::<gtk::Window>().ok()) {
+        if !window.is_mapped() || !window.is_layer_window() {
+            continue;
+        }
+        if !matches!(window.namespace().as_deref(), Some(
+            "digit-control" | "digit-dock" | "digit-dock-menu" | "digit-layouts" |
+            "digit-menu" | "digit-session" | "digit-spaces" | "digit-switcher" | "digit-wallpapers"
+        )) {
+            continue;
+        }
+        let Some(canvas) = window.child() else { continue };
+        canvas.queue_draw();
+        if until > glib::monotonic_time() {
+            canvas.add_tick_callback(move |canvas, clock| {
+                if GENERATION.get() != generation || !canvas.is_mapped() {
+                    return glib::ControlFlow::Break;
+                }
+                canvas.queue_draw();
+                if clock.frame_time() < until { glib::ControlFlow::Continue } else { glib::ControlFlow::Break }
+            });
+        }
+    }
+}
+
 pub fn scrim(monitor: Option<&gtk::gdk::Monitor>, on_click: impl Fn() + 'static) -> gtk::Window {
     use gtk::prelude::*;
     use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};

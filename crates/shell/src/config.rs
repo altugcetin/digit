@@ -43,6 +43,7 @@ pub struct Config {
     pub fullscreen_edges: bool,
     pub ui_round: f64,
     pub ui_surface: String,
+    pub ui_accent: String,
     pub notch_round_follow: bool,
     pub notch_round: f64,
     pub notch_close: String,
@@ -111,6 +112,7 @@ impl Default for Config {
             fullscreen_edges: false,
             ui_round: 1.0,
             ui_surface: "black".into(),
+            ui_accent: "wallpaper".into(),
             notch_round_follow: true,
             notch_round: 1.0,
             notch_close: "leave".into(),
@@ -193,6 +195,7 @@ pub struct Prefs {
     /// Settings > Apps: corner roundness and card surface, shared with the shell's panels.
     pub ui_round: f64,
     pub ui_surface: String,
+    pub ui_accent: String,
     /// The notch follows the app roundness unless told otherwise.
     pub notch_round_follow: bool,
     pub notch_round: f64,
@@ -246,6 +249,7 @@ impl From<&Config> for Prefs {
             smooth_caret: c.smooth_caret,
             ui_round: c.ui_round,
             ui_surface: c.ui_surface.clone(),
+            ui_accent: c.ui_accent.clone(),
             notch_round_follow: c.notch_round_follow,
             notch_round: c.notch_round,
             notch_close: c.notch_close.clone(),

@@ -1,3 +1,5 @@
+use crate::palette::Rgb;
+
 pub struct Ink {
     pub main: String,
     pub meta: String,
@@ -29,6 +31,15 @@ fn hex_ok(h: &str) -> bool {
     h.len() == 7 && h.starts_with('#') && h[1..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
+pub fn custom_accent(value: &str) -> Option<(Rgb, &'static str)> {
+    if !hex_ok(value) {
+        return None;
+    }
+    let accent = Rgb::hex(value)?;
+    let lum = 0.2126 * accent.r + 0.7152 * accent.g + 0.0722 * accent.b;
+    Some((accent, if lum > 0.55 { "#141414" } else { "#ffffff" }))
+}
+
 pub fn look() -> Look {
     let t = crate::prefs::read();
     let accent = crate::prefs::text(&t, "ui_accent", "wallpaper");
@@ -51,29 +62,50 @@ pub fn ink() -> Ink {
         risk: pick("error", "#f2b8b5"),
     };
     if let Some(a) = look().accent {
-        let v = |i: usize| u8::from_str_radix(&a[i..i + 2], 16).unwrap_or(0) as f64 / 255.0;
-        let lum = 0.2126 * v(1) + 0.7152 * v(3) + 0.0722 * v(5);
-        ink.on_accent = if lum > 0.55 { "#141414".into() } else { "#ffffff".into() };
-        ink.accent = a;
+        if let Some((_, on_accent)) = custom_accent(&a) {
+            ink.on_accent = on_accent.into();
+            ink.accent = a;
+        }
     }
     ink
 }
 
+const CARD_TINT: f64 = 0.085;
+
+fn card_base(surface: &str) -> &'static str {
+    match surface {
+        "graphite" => "#1b1b1f",
+        "tinted" => "#0e0e0e",
+        _ => "#0f0f0f",
+    }
+}
+
+pub fn card_color(surface: &str, accent: Rgb) -> Rgb {
+    let base = Rgb::hex(card_base(surface)).expect("valid card color");
+    if surface == "tinted" { accent.mix(base, CARD_TINT) } else { base }
+}
+
 fn surfaces(look: &Look, accent: &str) -> [String; 5] {
+    let card = card_base(&look.surface);
     match look.surface.as_str() {
-        "graphite" => ["#121214".into(), "#1b1b1f".into(), "#25252a".into(), "#1f1f24".into(), "#202025".into()],
+        "graphite" => ["#121214".into(), card.into(), "#25252a".into(), "#1f1f24".into(), "#202025".into()],
         "tinted" => [
             format!("mix(#050505, {accent}, 0.05)"),
-            format!("mix(#0e0e0e, {accent}, 0.085)"),
+            format!("mix({card}, {accent}, {CARD_TINT})"),
             format!("mix(#161616, {accent}, 0.12)"),
             format!("mix(#121212, {accent}, 0.09)"),
             format!("mix(#111111, {accent}, 0.08)"),
         ],
-        _ => ["#000000".into(), "#0f0f0f".into(), "#171717".into(), format!("mix(#101010, {accent}, 0.035)"), "#111111".into()],
+        _ => ["#000000".into(), card.into(), "#171717".into(), format!("mix(#101010, {accent}, 0.035)"), "#111111".into()],
     }
 }
 
 pub fn live(display: &gtk::gdk::Display, build: fn() -> String) {
+    live_with(display, build, || {});
+}
+
+/// Reload CSS and let custom artwork pick up the same colors.
+pub fn live_with(display: &gtk::gdk::Display, build: fn() -> String, changed: fn()) {
     use gtk::{gio, glib, prelude::*};
     let provider = gtk::CssProvider::new();
     provider.load_from_string(&build());
@@ -94,6 +126,7 @@ pub fn live(display: &gtk::gdk::Display, build: fn() -> String) {
             glib::timeout_add_local_once(std::time::Duration::from_millis(220), move || {
                 pending.set(false);
                 provider.load_from_string(&build());
+                changed();
             });
         });
         monitors.push(m);
@@ -130,6 +163,7 @@ pub fn css() -> String {
     };
     format!(
         r#"
+@define-color d_ink_main {main};
 @define-color d_base {base};
 @define-color d_card {card};
 @define-color d_raised {raised};

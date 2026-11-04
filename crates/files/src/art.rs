@@ -126,6 +126,49 @@ pub fn folder(glyph: &str, size: i32) -> Option<gdk::Texture> {
     Some(tex)
 }
 
+pub fn refresh_accent() {
+    let next = kit::style::ink().accent;
+    let changed = ACCENT.with(|a| {
+        let mut current = a.borrow_mut();
+        if current.as_ref() == Some(&next) {
+            return false;
+        }
+        *current = Some(next);
+        true
+    });
+    if !changed {
+        return;
+    }
+
+    let old = CACHE.with(|cache| std::mem::take(&mut *cache.borrow_mut()));
+    if old.is_empty() {
+        return;
+    }
+    // Keep existing file rows and selection intact. Only replace folder artwork
+    // still showing one of our old textures, including in the preview windows.
+    let icons: HashMap<gdk::Paintable, (String, i32)> = old.into_iter()
+        .map(|(key, texture)| (texture.upcast(), key))
+        .collect();
+    for window in gtk::Window::list_toplevels() {
+        recolor(&window, &icons);
+    }
+}
+
+fn recolor(widget: &gtk::Widget, icons: &HashMap<gdk::Paintable, (String, i32)>) {
+    if let Some(image) = widget.downcast_ref::<gtk::Image>()
+        && let Some(paintable) = image.paintable()
+        && let Some((glyph, size)) = icons.get(&paintable)
+        && let Some(texture) = folder(glyph, *size)
+    {
+        image.set_paintable(Some(&texture));
+    }
+    let mut child = widget.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        recolor(&widget, icons);
+    }
+}
+
 pub fn set(img: &gtk::Image, file: &gio::File, px: i32) {
     let sf = img.scale_factor().max(1);
     match folder(glyph(file), px * sf) {

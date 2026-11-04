@@ -255,6 +255,19 @@ pub fn changed() {
     }
 }
 
+pub fn appearance_changed() {
+    let Some(st) = current() else { return };
+    if let Ok(s) = st.try_borrow() {
+        if !s.window.is_visible() {
+            return;
+        }
+        restyle(&s);
+    } else {
+        return;
+    }
+    kick(&st);
+}
+
 /// Closes the overlay, then runs `then` once it is off the screen.
 pub fn after_close(then: impl FnOnce() + 'static) {
     match current() {
@@ -421,7 +434,7 @@ fn present(st: &Shared) {
 }
 
 fn restyle(s: &State) {
-    let pal = s.app.palette_at(App::now());
+    let pal = s.app.gamebar_palette(s.app.palette.get());
     s.css.load_from_string(&format!(
         "scrolledwindow.digit-notes, scrolledwindow.digit-notes > viewport, textview.digit-notes, textview.digit-notes > text {{ background: transparent; color: {}; caret-color: {}; font-family: \"{}\"; font-size: 14px; }} textview.digit-notes > text > selection {{ background: {}; }}",
         draw::css(pal.ink_main),
@@ -1000,7 +1013,7 @@ fn kick(st: &Shared) {
         let now = clock.frame_time();
         s.place_notes(now);
         w.queue_draw();
-        if !s.rise.settled(now) || s.cards.iter().any(|c| !c.vis.settled(now)) {
+        if !s.rise.settled(now) || s.cards.iter().any(|c| !c.vis.settled(now)) || (s.needed() && s.app.palette_moving(now)) {
             return glib::ControlFlow::Continue;
         }
         s.ticking = false;
@@ -1179,8 +1192,7 @@ impl State {
     fn draw(&self, s: &gtk::Snapshot) {
         let now = self.paint.frame_clock().map(|c| c.frame_time()).unwrap_or_else(glib::monotonic_time);
         // Cards sit on the surface chosen in Settings (Black, Graphite or Tinted), like the apps.
-        let mut pal = self.app.palette_at(now);
-        pal.body = self.app.card(&pal);
+        let pal = self.app.gamebar_palette(self.app.palette_at(now));
         let (sw, sh) = self.size();
         let rise = self.rise.value(now).clamp(0.0, 1.0);
         if rise > 0.003 {
@@ -1215,7 +1227,7 @@ impl State {
     fn draw_card(&self, s: &gtk::Snapshot, c: &Card, pal: &Palette, w: f64, h: f64) {
         let cfg = &self.app.cfg;
         let shape = draw::round(0.0, 0.0, w, h, RADIUS * self.app.round());
-        // Same surface as the shell's panels: solid body, no outline, a soft shadow to lift it off windows.
+        // App card surface with a soft shadow to lift it off windows.
         if !kit::effects::reduced() {
             s.append_outset_shadow(&shape, &Rgb::new(0.0, 0.0, 0.0).alpha(0.24).rgba(), 0.0, 10.0, 0.0, 30.0);
         }

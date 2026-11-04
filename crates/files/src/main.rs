@@ -1234,7 +1234,7 @@ fn window_of(w: &impl IsA<gtk::Widget>) -> Option<gtk::Window> {
 
 fn css() -> String {
     let i = kit::style::ink();
-    let (main, meta, accent, on_accent) = (&i.main, &i.meta, &i.accent, &i.on_accent);
+    let (main, meta, accent, on_accent, risk) = (&i.main, &i.meta, &i.accent, &i.on_accent, &i.risk);
     format!(
         r#"{base}
 .topbar {{ padding: 8px 10px 8px 10px; }}
@@ -1277,13 +1277,15 @@ button.pm-row .pm-glyph {{ font-size: 17px; color: {meta}; min-width: 20px; }}
 button.pm-row .pm-label {{ font-size: 13.5px; font-weight: 450; }}
 button.pm-row .pm-accel {{ font-size: 12px; font-weight: 400; color: {meta}; margin-left: 20px; }}
 button.pm-row .pm-trail {{ font-size: 17px; color: {meta}; margin-left: 8px; }}
-button.pm-row.pm-danger .pm-label, button.pm-row.pm-danger .pm-glyph {{ color: #ff6b6b; }}
+button.pm-row.pm-danger .pm-label, button.pm-row.pm-danger .pm-glyph {{ color: {risk}; }}
 button.pm-row.pm-back .pm-label {{ font-weight: 560; }}
 separator.pm-sep {{ margin: 4px 8px; background: alpha({main}, 0.08); min-height: 1px; }}
 .place-remove {{ opacity: 0; min-width: 22px; min-height: 22px; padding: 0; }}
 list.places row:hover .place-remove {{ opacity: 1; }}
 columnview.list > listview > row:hover {{ background: alpha({main}, 0.05); }}
-columnview.list > listview > row:selected, columnview.list > listview > row:active {{ background: alpha({accent}, 0.22); color: {main}; }}
+columnview.list > listview > row:active {{ background: alpha({accent}, 0.22); }}
+columnview.list > listview > row:selected {{ background: {accent}; color: {on_accent}; }}
+columnview.list > listview > row:selected label {{ color: {on_accent}; }}
 columnview.list > listview > row > cell {{ padding: 5px 10px; }}
 .cell:drop(active) .thumbbox {{ background: alpha({accent}, 0.20); box-shadow: inset 0 0 0 1.5px alpha({accent}, 0.70); }}
 .cell:drop(active) label.fname {{ background: alpha({accent}, 0.80); color: {on_accent}; }}
@@ -1570,7 +1572,7 @@ fn main() -> glib::ExitCode {
         gtk::Window::set_default_icon_name(APP_ID);
         install();
         if let Some(display) = gdk::Display::default() {
-            kit::style::live(&display, css);
+            kit::style::live_with(&display, css, art::refresh_accent);
         }
         accels(app);
         serve(app);

@@ -214,6 +214,8 @@ pub const LIFT: f64 = 7.0;
 pub const LEAVE_MS: u64 = 350;
 pub const MENU_LIFT: f64 = 4.0;
 
+const PALETTE_FADE_US: i64 = 900_000;
+
 pub struct App {
     pub cfg: Config,
     pub blur: Option<blur::Blur>,
@@ -354,6 +356,11 @@ impl App {
         self.palette_from.set(shown);
         self.palette_since.set(now);
         self.palette.set(next);
+        if let Some(launcher) = self.launcher.borrow().as_ref() {
+            launcher.refresh_palette();
+        }
+        crate::gamebar::appearance_changed();
+        crate::paint::refresh_palette(now + PALETTE_FADE_US);
         let notches: Vec<_> = self.notches.borrow().iter().cloned().collect();
         for n in notches {
             n.refresh();
@@ -362,12 +369,12 @@ impl App {
     }
 
     pub fn palette_at(&self, now: i64) -> Palette {
-        let t = ((now - self.palette_since.get()) as f64 / 900_000.0).clamp(0.0, 1.0);
+        let t = ((now - self.palette_since.get()) as f64 / PALETTE_FADE_US as f64).clamp(0.0, 1.0);
         self.palette_from.get().lerp(&self.palette.get(), kit::motion::IN_OUT_CUBIC.at(t))
     }
 
     pub fn palette_moving(&self, now: i64) -> bool {
-        now - self.palette_since.get() < 900_000
+        now - self.palette_since.get() < PALETTE_FADE_US
     }
 
     pub fn now() -> i64 {
@@ -475,15 +482,15 @@ impl App {
         if follow { self.round() } else { own.clamp(0.1, 1.8) }
     }
 
-    /// The card colour of the chosen surface (Black, Graphite or Tinted), as the apps use it.
-    pub fn card(&self, pal: &Palette) -> Rgb {
-        let mix = |a: Rgb, b: Rgb, t: f64| Rgb::new(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t);
-        let hex = |v: u32| Rgb::new(((v >> 16) & 0xff) as f64 / 255.0, ((v >> 8) & 0xff) as f64 / 255.0, (v & 0xff) as f64 / 255.0);
-        match self.prefs.borrow().ui_surface.as_str() {
-            "graphite" => hex(0x1b1b1f),
-            "tinted" => mix(hex(0x0e0e0e), pal.accent, 0.085),
-            _ => hex(0x0f0f0f),
+    /// Game Bar is an app surface, so use the Apps accent and card color.
+    pub fn gamebar_palette(&self, mut palette: Palette) -> Palette {
+        let prefs = self.prefs.borrow();
+        if let Some((accent, on_accent)) = kit::style::custom_accent(&prefs.ui_accent) {
+            palette.accent = accent;
+            palette.on_accent = Rgb::hex(on_accent).expect("valid accent text color");
         }
+        palette.body = kit::style::card_color(&prefs.ui_surface, palette.accent);
+        palette
     }
 
     /// Screen edges and corners stay quiet while a fullscreen app is up, unless the user allows them.
@@ -591,9 +598,11 @@ impl App {
                 n.restyle();
             }
         }
-        if rounding || before.ui_surface != next.ui_surface {
+        if rounding {
             self.redraw();
-            crate::gamebar::changed();
+        }
+        if rounding || before.ui_surface != next.ui_surface || before.ui_accent != next.ui_accent {
+            crate::gamebar::appearance_changed();
         }
         if before.ui_round != next.ui_round {
             // Window corners in a full Hyprland setup follow the same Corners setting.

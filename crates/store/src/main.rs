@@ -408,7 +408,7 @@ button.chip {{ background: @d_field; border-radius: 999px; padding: 6px 16px 6px
 button.chip:hover {{ background: @d_raised; }}
 .story {{ border-radius: calc(var(--r-card) + 4px); background: @d_field; }}
 .scrim {{ padding: 40px 18px 16px 18px; background: linear-gradient(rgba(0,0,0,0), rgba(0,0,0,0.88) 55%); }}
-.feature {{ border-radius: 28px; padding: 30px 34px; background: linear-gradient(120deg, alpha({accent}, 0.30), #0e0e0e 62%); }}
+.feature {{ border-radius: 28px; padding: 30px 34px; background: linear-gradient(120deg, alpha({accent}, 0.30), @d_card 62%); }}
 .eyebrow {{ color: {accent}; font-size: 12px; font-weight: 650; letter-spacing: 1px; }}
 .jobtile {{ background: @d_card; border-radius: var(--r-card); padding: 16px; border: none; box-shadow: none; min-width: 168px; }}
 .jobtile:hover {{ background: @d_raised; }}
