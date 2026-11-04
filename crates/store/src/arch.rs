@@ -19,7 +19,7 @@
 //! its library). Repository order follows `pacman-conf`, so a package from a higher-priority
 //! repository hides its namesake further down, as pacman does.
 
-use crate::xml::{Event, Reader, attr, unescape};
+use crate::appstream;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -27,8 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const SYNC: &str = "/var/lib/pacman/sync";
-const LOCAL: &str = "/var/lib/pacman/local";
-const SWCATALOG: &str = "/usr/share/swcatalog";
+pub(crate) const LOCAL: &str = "/var/lib/pacman/local";
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Hash, Default)]
 pub enum Kind {
@@ -350,116 +349,6 @@ fn stamp_of(path: &Path) -> String {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or_else(|| "0".into(), |d| d.as_secs().to_string())
 }
 
-fn appstream_files() -> Vec<PathBuf> {
-    std::fs::read_dir(Path::new(SWCATALOG).join("xml"))
-        .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.to_string_lossy().ends_with(".xml.gz") || p.extension().is_some_and(|e| e == "xml")).collect())
-        .unwrap_or_default()
-}
-
-/// AppStream facts per package name: component type, display name and cached icon.
-struct Component {
-    kind: String,
-    name: String,
-    icon: String,
-    stock: String,
-}
-
-fn appstream() -> HashMap<String, Component> {
-    let mut out = HashMap::new();
-    for path in appstream_files() {
-        let text = if path.to_string_lossy().ends_with(".gz") {
-            Command::new("gzip").arg("-dc").arg(&path).stderr(Stdio::null()).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        } else {
-            std::fs::read_to_string(&path).ok()
-        };
-        if let Some(text) = text {
-            components(&text, &mut out);
-        }
-    }
-    out
-}
-
-fn components(xml: &str, out: &mut HashMap<String, Component>) {
-    let mut origin = String::new();
-    let (mut kind, mut name, mut pkg, mut icon, mut stock) = (String::new(), String::new(), String::new(), String::new(), String::new());
-    let mut depth = 0usize;
-    let mut grab: Option<&str> = None;
-    let mut icon_size = 0u32;
-    for ev in Reader::new(xml) {
-        match ev {
-            Event::Start { name: "components", attrs, .. } => origin = attr(attrs, "origin").unwrap_or_default().to_string(),
-            Event::Start { name: "component", attrs, empty } => {
-                if !empty {
-                    depth = 1;
-                    kind = attr(attrs, "type").unwrap_or_default().to_string();
-                    name.clear();
-                    pkg.clear();
-                    icon.clear();
-                    stock.clear();
-                    icon_size = 0;
-                }
-            }
-            Event::Start { name: tag, attrs, empty } if depth > 0 => {
-                if !empty {
-                    depth += 1;
-                }
-                // Only the component's own <name> (depth 2), not names inside releases or developers.
-                grab = match tag {
-                    "name" if depth == 2 && attr(attrs, "xml:lang").is_none() && name.is_empty() => Some("name"),
-                    "pkgname" if depth == 2 => Some("pkgname"),
-                    "icon" if depth == 2 && attr(attrs, "type") == Some("stock") && stock.is_empty() => Some("stock"),
-                    "icon" if depth == 2 && attr(attrs, "type") == Some("cached") => {
-                        let w = attr(attrs, "width").and_then(|w| w.parse().ok()).unwrap_or(0);
-                        if (w >= icon_size && w <= 128) || icon.is_empty() {
-                            icon_size = w;
-                            Some("icon")
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                };
-                if empty {
-                    grab = None;
-                }
-            }
-            Event::Text(t) if grab.is_some() => {
-                let t = unescape(t.trim()).into_owned();
-                match grab {
-                    Some("name") => name = t,
-                    Some("pkgname") => pkg = t,
-                    Some("stock") => stock = t,
-                    Some("icon") => {
-                        let size = if icon_size > 0 { format!("{icon_size}x{icon_size}") } else { "64x64".into() };
-                        let p = Path::new(SWCATALOG).join("icons").join(&origin).join(size).join(&t);
-                        if p.exists() {
-                            icon = p.to_string_lossy().into_owned();
-                        }
-                    }
-                    _ => {}
-                }
-                grab = None;
-            }
-            Event::End("component") => {
-                depth = 0;
-                if !pkg.is_empty() {
-                    let c = Component { kind: kind.clone(), name: name.clone(), icon: icon.clone(), stock: stock.clone() };
-                    // A package can have several components; a desktop application describes it best.
-                    let better = out.get(&pkg).is_none_or(|old: &Component| old.kind != "desktop-application" && c.kind == "desktop-application");
-                    if better {
-                        out.insert(pkg.clone(), c);
-                    }
-                }
-            }
-            Event::End(_) if depth > 0 => {
-                depth -= 1;
-                grab = None;
-            }
-            _ => {}
-        }
-    }
-}
-
 /// Installed packages and their versions, from the local database.
 pub fn installed() -> HashMap<String, String> {
     let mut out = HashMap::new();
@@ -585,7 +474,7 @@ pub fn load() -> Option<Index> {
     for (_, p) in &dbs {
         stamp.push_str(&format!("|{}:{}", p.display(), stamp_of(p)));
     }
-    for p in appstream_files() {
+    for p in appstream::files() {
         stamp.push_str(&format!("|{}:{}", p.display(), stamp_of(&p)));
     }
     stamp.push_str(&format!("|local:{}", stamp_of(Path::new(LOCAL))));
@@ -596,7 +485,7 @@ pub fn load() -> Option<Index> {
             }
         }
     }
-    let components = appstream();
+    let components = appstream::load();
     let local = local_files();
     let mut seen = HashSet::new();
     let mut packages = Vec::new();
@@ -721,14 +610,7 @@ mod tests {
         assert_eq!((got[1].name.as_str(), got[1].files.as_ref().map(|f| f.bins)), ("x", Some(1)));
     }
 
-    #[test]
-    fn reads_appstream_package_names_and_types() {
-        let xml = r#"<components origin="archlinux-arch-extra"><component type="desktop-application"><id>org.mozilla.firefox</id><name>Firefox</name><name xml:lang="de">Feuerfuchs</name><pkgname>firefox</pkgname><developer><name>Mozilla</name></developer></component><component type="console-application"><id>curl</id><name>curl</name><pkgname>curl</pkgname></component></components>"#;
-        let mut out = HashMap::new();
-        components(xml, &mut out);
-        assert_eq!(out.get("firefox").map(|c| (c.kind.as_str(), c.name.as_str())), Some(("desktop-application", "Firefox")));
-        assert_eq!(out.get("curl").map(|c| c.kind.as_str()), Some("console-application"));
-    }
+
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use crate::{Store, flatpak, store};
+use crate::{Store, aur, flatpak, store};
 use gtk::{gio, glib, pango, prelude::*};
 use kit::ui;
 use std::rc::Rc;
@@ -6,7 +6,7 @@ use std::rc::Rc;
 #[derive(Clone, PartialEq)]
 pub enum Distro {
     PackageKit,
-    Arch { shelly: bool },
+    Arch,
     None,
 }
 
@@ -21,7 +21,7 @@ pub fn distro() -> Distro {
     let field = |k: &str| text.lines().find_map(|l| l.strip_prefix(&format!("{k}="))).map(|v| v.trim_matches('"').to_lowercase()).unwrap_or_default();
     let (id, like) = (field("ID"), field("ID_LIKE"));
     if id == "arch" || like.split_whitespace().any(|l| l == "arch") || glib::find_program_in_path("pacman").is_some() && glib::find_program_in_path("zypper").is_none() {
-        return Distro::Arch { shelly: glib::find_program_in_path("shelly").is_some() };
+        return Distro::Arch;
     }
     if std::path::Path::new("/usr/share/dbus-1/system-services/org.freedesktop.PackageKit.service").exists() || glib::find_program_in_path("pkcon").is_some() {
         return Distro::PackageKit;
@@ -37,15 +37,17 @@ pub fn scope_system() -> bool {
     kit::prefs::text(&kit::prefs::read(), "store_scope", "user") == "system"
 }
 
-fn terminal(argv: &[&str]) -> Result<(), String> {
+pub(crate) fn terminal(argv: &[&str]) -> Result<(), String> {
     let chosen = kit::prefs::text(&kit::prefs::read(), "files_terminal", "");
     let candidates = ["ghostty", "kitty", "foot", "alacritty", "wezterm", "konsole", "gnome-terminal", "ptyxis", "xterm"];
     let term = if !chosen.is_empty() && glib::find_program_in_path(&chosen).is_some() { Some(chosen) } else { candidates.iter().find(|c| glib::find_program_in_path(c).is_some()).map(|c| c.to_string()) };
     let term = term.ok_or("No terminal found")?;
     let mut full: Vec<String> = vec![term.clone()];
-    match term.as_str() {
+    let executable = std::path::Path::new(&term).file_name().and_then(|s| s.to_str()).unwrap_or_default();
+    match executable {
         "kitty" | "foot" => full.push("--hold".into()),
         "gnome-terminal" | "ptyxis" => full.push("--".into()),
+        "wezterm" => full.extend(["start".into(), "--".into()]),
         _ => full.push("-e".into()),
     }
     full.extend(argv.iter().map(|s| s.to_string()));
@@ -87,7 +89,7 @@ pub fn page(s: &Rc<Store>) -> gtk::Widget {
         dwrap.prepend(&head);
     }
     body.append(&dwrap);
-    match distro() {
+    match s.distro {
         Distro::PackageKit => {
             dcard.append(&loading());
             let dc = dcard.clone();
@@ -101,24 +103,17 @@ pub fn page(s: &Rc<Store>) -> gtk::Widget {
                 }
             });
         }
-        Distro::Arch { shelly } => {
+        Distro::Arch => {
             for r in pacman_repos() {
                 dcard.append(&ui::row(Some("deployed_code"), &r, "Enabled in /etc/pacman.conf").0);
             }
-            let (row, end) = ui::row(Some("terminal"), "Shelly", if shelly { "Installs, AUR builds and upgrades run in a terminal so you can review them" } else { "Install Shelly (Seafoam-Labs/Shelly-ALPM) for one-click Arch packages and the AUR" });
-            if shelly {
-                let up = ui::button("Upgrade Everything", "");
-                up.connect_clicked(|_| {
-                    if let Err(e) = terminal(&["shelly", "upgrade", "all"]) {
-                        if let Some(s) = store() {
-                            s.note(&e, true);
-                        }
-                    }
-                });
-                end.append(&up);
-            }
+            let (row, end) = ui::row(Some("system_update"), "System updates", "Review and install updates in a terminal");
+            let update = ui::button("Update system", "");
+            update.connect_clicked(|_| terminal_action(|| terminal(&["pkexec", "pacman", "-Syu"])));
+            end.append(&update);
             dcard.append(&row);
-            dcard.append(&ui::row(Some("info"), "Changing repositories", "Shelly can't edit repositories yet; edit /etc/pacman.conf as root").0);
+            dcard.append(&ui::row(Some("info"), "Changing repositories", "System repositories are configured in /etc/pacman.conf").0);
+            body.append(&aur_section());
         }
         Distro::None => {
             dcard.append(&ui::row(Some("info"), "No supported package manager", "PackageKit isn't available, so only Flatpak apps can be managed here").0);
@@ -135,6 +130,97 @@ pub fn page(s: &Rc<Store>) -> gtk::Widget {
     scard.append(&row);
     body.append(&swrap);
     scroll.upcast()
+}
+
+fn terminal_action(action: impl FnOnce() -> Result<(), String>) {
+    let Some(s) = store() else { return };
+    if s.busy.borrow().is_some() {
+        s.note("Wait for the current package operation to finish", true);
+    } else if let Err(error) = action() {
+        s.note(&error, true);
+    }
+}
+
+fn aur_section() -> gtk::Box {
+    let (wrap, card) = section("Arch User Repository");
+    let helper = aur::helper();
+    let detail = match &helper {
+        Some(helper) => format!("Community packages. Review build scripts in the terminal with {}.", helper.name),
+        None => "Install yay or paru and make sure it is on PATH".into(),
+    };
+    let (row, end) = ui::row(Some("terminal"), "Enable AUR", &detail);
+    let switch = gtk::Switch::new();
+    switch.set_active(helper.is_some() && aur::requested());
+    switch.set_sensitive(helper.is_some());
+    switch.set_valign(gtk::Align::Center);
+    end.append(&switch);
+    card.append(&row);
+
+    let (row, end) = ui::row(Some("system_update"), "AUR updates", "Review updates to community packages in a terminal");
+    let update = ui::button("Update AUR packages", "");
+    update.connect_clicked(|_| terminal_action(aur::update));
+    end.append(&update);
+    row.set_visible(switch.is_active());
+    card.append(&row);
+
+    switch.connect_state_set(move |switch, on| {
+        if switch.state() == on {
+            return glib::Propagation::Proceed;
+        }
+        let result = if on && aur::helper().is_none() {
+            Err("Install yay or paru and make sure it is on PATH".into())
+        } else {
+            kit::prefs::set(aur::PREF, toml::Value::Boolean(on))
+        };
+        match result {
+            Ok(()) => row.set_visible(on),
+            Err(error) => {
+                switch.set_active(switch.state());
+                if let Some(s) = store() {
+                    s.note(&error, true);
+                }
+                return glib::Propagation::Stop;
+            }
+        }
+        glib::Propagation::Proceed
+    });
+    wrap
+}
+
+pub fn aur_row(s: &Store, pkg: &aur::Package) -> gtk::Widget {
+    let (row, end) = ui::row(Some("inventory_2"), &pkg.name, pkg.description.as_deref().unwrap_or(""));
+    end.append(&ui::badge("AUR", ""));
+    end.append(&ui::badge(&pkg.version, ""));
+    let installed = s.arch_installed.borrow().contains_key(&pkg.name);
+    if installed {
+        end.append(&ui::badge("Installed", "good"));
+    }
+    let details = gtk::LinkButton::new(&format!("https://aur.archlinux.org/packages/{}", pkg.name));
+    details.add_css_class("ctl");
+    details.set_tooltip_text(Some("View on AUR"));
+    details.update_property(&[gtk::accessible::Property::Label("View on AUR")]);
+    let logo = if gtk::gdk::Display::default().is_some_and(|display| gtk::IconTheme::for_display(&display).has_icon("distributor-logo-archlinux")) {
+        let image = gtk::Image::from_icon_name("distributor-logo-archlinux");
+        image.set_pixel_size(18);
+        image.upcast()
+    } else {
+        ui::distro_logo(18, true)
+    };
+    details.set_child(Some(&logo));
+    end.append(&details);
+    if !installed {
+        let install = ui::button("Install", "");
+        let label = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        label.append(&ui::sym("terminal"));
+        label.append(&gtk::Label::new(Some("Install")));
+        install.set_child(Some(&label));
+        install.update_property(&[gtk::accessible::Property::Label("Install")]);
+        install.set_sensitive(s.busy.borrow().is_none());
+        let name = pkg.name.clone();
+        install.connect_clicked(move |_| terminal_action(|| aur::install(&name)));
+        end.append(&install);
+    }
+    row.upcast()
 }
 
 fn loading() -> gtk::Widget {
@@ -366,24 +452,32 @@ pub fn app_sources(s: &Rc<Store>, id: &str, name: &str, card: &gtk::Box) {
             });
         });
     }
-    match distro() {
+    match s.distro {
         Distro::PackageKit => {
+            let recommendation = crate::native::recommendation(id);
             let candidates = candidates(id, name);
             let (row, end) = ui::row(None, &format!("{} package", os_name()), "Looking…");
             row.prepend(&kit::ui::distro_logo(28, false));
             card.append(&row);
             let me = s.clone();
             glib::spawn_future_local(async move {
-                let refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
-                let found = kit::pk::resolve(&refs, kit::pk::FILTER_NONE).await.unwrap_or_default();
+                let resolved = if let Some(rec) = recommendation {
+                    crate::native::resolve(rec).await
+                } else {
+                    let refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
+                    let found = kit::pk::resolve(&refs, kit::pk::FILTER_NONE).await.unwrap_or_default();
+                    found.iter().find(|p| p.info == kit::pk::INFO_AVAILABLE).or(found.first()).map(|pkg| {
+                        let installed = found.iter().any(|p| p.name() == pkg.name() && p.installed());
+                        (pkg.clone(), installed)
+                    })
+                };
                 let sub = row.first_child().and_then(|t| t.next_sibling()).and_then(|c| c.last_child()).and_downcast::<gtk::Label>();
-                let Some(pkg) = found.iter().find(|p| p.repo() != "installed").or(found.first()).cloned() else {
+                let Some((pkg, installed)) = resolved else {
                     if let Some(l) = sub {
                         l.set_text("Not packaged by your distribution");
                     }
                     return;
                 };
-                let installed = found.iter().any(|p| p.name() == pkg.name() && p.id.contains(";installed"));
                 if let Some(l) = sub {
                     l.set_text(&format!("{} {} · {}", pkg.name(), pkg.version(), if installed { "installed".to_string() } else { pkg.repo().to_string() }));
                 }
@@ -395,27 +489,46 @@ pub fn app_sources(s: &Rc<Store>, id: &str, name: &str, card: &gtk::Box) {
                 }
             });
         }
-        Distro::Arch { shelly } => {
-            let pkg = candidates(id, name).into_iter().next().unwrap_or_default();
-            let (row, end) = ui::row(Some("inventory_2"), "Arch package", if shelly { "Install with Shelly in a terminal" } else { "Install Shelly to use Arch repositories and the AUR" });
-            if shelly && !pkg.is_empty() {
-                let repo = ui::button("Repositories", "");
-                let p1 = pkg.clone();
-                repo.connect_clicked(move |_| {
-                    let _ = terminal(&["shelly", "-Is", &p1]);
-                });
-                let aur = ui::button("AUR", "");
-                aur.set_tooltip_text(Some("AUR packages are built from user-submitted scripts; review them before building"));
-                aur.connect_clicked(move |_| {
-                    let _ = terminal(&["shelly", "install", "aur", &pkg]);
-                });
-                end.append(&repo);
-                end.append(&aur);
-            }
-            card.append(&row);
-        }
+        Distro::Arch => arch_sources(s, id, name, card),
         Distro::None => {}
     }
+}
+
+fn arch_sources(s: &Rc<Store>, id: &str, name: &str, card: &gtk::Box) {
+    let names: Vec<String> = crate::native::recommendation(id)
+        .map(|r| r.arch_names.iter().map(|name| name.to_string()).collect())
+        .unwrap_or_else(|| candidates(id, name));
+    let arch = s.arch.borrow();
+    let available = arch.as_ref().and_then(|index| {
+        names.iter().find_map(|name| index.packages.iter().find(|pkg| pkg.name == *name))
+    });
+    if let Some(pkg) = available {
+        let title = (pkg.name == "code").then_some("Code - OSS");
+        card.append(&crate::pages::package_row(s, pkg, title));
+    } else {
+        let detail = if arch.is_none() && crate::arch::available() { "Reading repositories…" } else { "No match in enabled repositories" };
+        card.append(&ui::row(Some("inventory_2"), "Arch package", detail).0);
+    }
+    if !aur::enabled() {
+        return;
+    }
+    let slot = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    card.append(&slot);
+    let slot = slot.downgrade();
+    let weak = Rc::downgrade(s);
+    let serial = s.serial.get();
+    let exclude = available.map(|pkg| pkg.name.clone());
+    glib::spawn_future_local(async move {
+        let names: Vec<_> = names.iter().map(String::as_str).filter(|n| Some(*n) != exclude.as_deref()).collect();
+        let Ok(packages) = aur::lookup(&names).await else { return };
+        let (Some(slot), Some(s)) = (slot.upgrade(), weak.upgrade()) else { return };
+        if s.serial.get() != serial || !aur::enabled() {
+            return;
+        }
+        for pkg in &packages {
+            slot.append(&aur_row(&s, pkg));
+        }
+    });
 }
 
 fn candidates(id: &str, name: &str) -> Vec<String> {
@@ -430,7 +543,11 @@ fn candidates(id: &str, name: &str) -> Vec<String> {
     out
 }
 
-fn distro_install(s: &Rc<Store>, button: &gtk::Button, pkg: kit::pk::Pkg) {
+pub fn distro_install(s: &Rc<Store>, button: &gtk::Button, pkg: kit::pk::Pkg) {
+    if s.busy.borrow().is_some() {
+        s.note("Another app is still being installed", true);
+        return;
+    }
     button.set_sensitive(false);
     let me = s.clone();
     let b = button.clone();
@@ -451,10 +568,21 @@ fn distro_install(s: &Rc<Store>, button: &gtk::Button, pkg: kit::pk::Pkg) {
         let b2 = b.clone();
         let w = me.window.clone();
         kit::ui::ask(Some(w.upcast_ref()), &format!("Install {}?", pkg.name()), &detail, "Cancel", "Install", "accent", move || {
+            if me2.busy.borrow().is_some() {
+                me2.note("Another app is still being installed", true);
+                return;
+            }
+            *me2.busy.borrow_mut() = Some(format!("system:{}", pkg.name()));
+            b2.set_sensitive(false);
             glib::spawn_future_local(async move {
                 me2.note(&format!("Installing {}…", pkg.name()), false);
-                match kit::pk::install(&[pkg.id.clone()], kit::pk::ONLY_TRUSTED, |_| {}).await {
-                    Ok(_) => me2.note(&format!("{} installed", pkg.name()), false),
+                let result = kit::pk::install(std::slice::from_ref(&pkg.id), kit::pk::ONLY_TRUSTED, |_| {}).await;
+                *me2.busy.borrow_mut() = None;
+                match result {
+                    Ok(_) => {
+                        me2.note(&format!("{} installed", pkg.name()), false);
+                        me2.refresh();
+                    }
                     Err(e) => {
                         me2.note(&e, true);
                         b2.set_sensitive(true);

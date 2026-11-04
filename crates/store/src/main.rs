@@ -1,6 +1,9 @@
+mod appstream;
 mod arch;
+mod aur;
 mod catalog;
 mod flatpak;
+mod native;
 mod pages;
 mod sources;
 mod xml;
@@ -63,6 +66,8 @@ pub struct Store {
     /// Arch repository packages, when this is an Arch system.
     pub arch: RefCell<Option<Rc<arch::Index>>>,
     pub arch_installed: RefCell<HashMap<String, String>>,
+    pub distro: sources::Distro,
+    pub native_metadata: RefCell<HashMap<String, appstream::Component>>,
     /// Search shows every package rather than favouring apps and tools.
     pub all_packages: Cell<bool>,
     pub installed: RefCell<HashMap<String, flatpak::Installed>>,
@@ -86,6 +91,10 @@ pub fn store() -> Option<Rc<Store>> {
 }
 
 impl Store {
+    fn can_search(&self) -> bool {
+        self.catalog.borrow().is_some() || self.distro != sources::Distro::None
+    }
+
     pub fn open(self: &Rc<Self>, page: Page) {
         let from = self.current.replace(page.clone());
         let replace_search = matches!((&from, &page), (Page::Search(_), Page::Search(_)));
@@ -528,6 +537,8 @@ fn build(app: &gtk::Application) -> Rc<Store> {
         catalog: RefCell::new(None),
         arch: RefCell::new(None),
         arch_installed: RefCell::new(HashMap::new()),
+        distro: sources::distro(),
+        native_metadata: RefCell::new(HashMap::new()),
         all_packages: Cell::new(false),
         installed: RefCell::new(HashMap::new()),
         updates: RefCell::new(HashSet::new()),
@@ -560,6 +571,7 @@ fn build(app: &gtk::Application) -> Rc<Store> {
             s.open(Page::Sources);
         }
     });
+    search.set_search_delay(300);
     search.connect_search_changed(|e| {
         let Some(s) = store() else { return };
         let q = e.text().to_string();
@@ -567,7 +579,7 @@ fn build(app: &gtk::Application) -> Rc<Store> {
             if matches!(*s.current.borrow(), Page::Search(_)) {
                 s.back();
             }
-        } else if s.catalog.borrow().is_some() {
+        } else if s.can_search() && *s.current.borrow() != Page::Search(q.clone()) {
             s.open(Page::Search(q));
         }
     });
@@ -594,7 +606,25 @@ fn build(app: &gtk::Application) -> Rc<Store> {
 
 fn load(store: &Rc<Store>) {
     load_with(store, true);
-    load_arch(store);
+    match store.distro {
+        sources::Distro::Arch => {
+            watch_arch_installed(store);
+            load_arch(store);
+        }
+        sources::Distro::PackageKit => {
+            let me = store.clone();
+            glib::spawn_future_local(async move {
+                let data = gio::spawn_blocking(appstream::load).await.unwrap_or_default();
+                if !data.is_empty() {
+                    *me.native_metadata.borrow_mut() = data;
+                    if matches!(*me.current.borrow(), Page::Search(_)) {
+                        me.refresh();
+                    }
+                }
+            });
+        }
+        sources::Distro::None => {}
+    }
 }
 
 /// Builds the Arch package index in the background; search picks it up once it is there.
@@ -608,10 +638,36 @@ fn load_arch(store: &Rc<Store>) {
         let Some(index) = index else { return };
         *me.arch.borrow_mut() = Some(Rc::new(index));
         *me.arch_installed.borrow_mut() = installed;
-        if matches!(*me.current.borrow(), Page::Search(_)) {
+        if matches!(*me.current.borrow(), Page::Search(_) | Page::App(_)) {
             me.refresh();
         }
     });
+}
+
+/// Pacman drops its database lock after writing the local database, including helper installs.
+fn watch_arch_installed(store: &Rc<Store>) {
+    let Some(dir) = std::path::Path::new(arch::LOCAL).parent() else { return };
+    let lock = dir.join("db.lck");
+    let Ok(monitor) = gio::File::for_path(dir).monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE) else { return };
+    let weak = Rc::downgrade(store);
+    monitor.connect_changed(move |_, file, other, _| {
+        let hit = |f: &gio::File| f.basename().is_some_and(|b| b.as_os_str() == "db.lck");
+        if !(hit(file) || other.is_some_and(hit)) || lock.exists() {
+            return;
+        }
+        let weak = weak.clone();
+        glib::spawn_future_local(async move {
+            let Ok(installed) = gio::spawn_blocking(arch::installed).await else { return };
+            let Some(s) = weak.upgrade() else { return };
+            if *s.arch_installed.borrow() != installed {
+                *s.arch_installed.borrow_mut() = installed;
+                if matches!(*s.current.borrow(), Page::Search(_) | Page::App(_)) {
+                    s.refresh();
+                }
+            }
+        });
+    });
+    unsafe { store.window.set_data("digit-pacman-watch", monitor) };
 }
 
 async fn set_up_flathub() {
@@ -632,15 +688,27 @@ fn load_with(store: &Rc<Store>, retry: bool) {
             load_with(&me, false);
             return;
         }
+        let waiting = matches!(*me.current.borrow(), Page::Loading | Page::Problem(_));
+        *me.installed.borrow_mut() = installed;
+        *me.updates.borrow_mut() = updates;
         match catalog {
             Some(c) => {
                 *me.catalog.borrow_mut() = Some(Rc::new(c));
-                *me.installed.borrow_mut() = installed;
-                *me.updates.borrow_mut() = updates;
-                let page = me.pending.borrow_mut().take().unwrap_or(Page::Discover);
                 collections(&me);
-                *me.current.borrow_mut() = Page::Loading;
-                me.open(page);
+                if waiting {
+                    let page = me.pending.borrow_mut().take().unwrap_or(Page::Discover);
+                    me.open(page);
+                } else {
+                    me.refresh();
+                }
+            }
+            None if me.distro != sources::Distro::None => {
+                if waiting {
+                    let page = me.pending.borrow_mut().take().unwrap_or(Page::Discover);
+                    me.open(page);
+                } else if matches!(*me.current.borrow(), Page::Yours) {
+                    me.refresh();
+                }
             }
             None if glib::find_program_in_path("flatpak").is_none() => me.open(Page::Problem("Digit Store gets apps from Flathub and needs Flatpak. Install the “flatpak” package with your package manager, then open the store again.".into())),
             None => me.open(Page::Problem("Flathub's app catalogue could not be downloaded. Check your internet connection, run “flatpak update --appstream” once, then open the store again.".into())),
@@ -738,7 +806,7 @@ fn main() -> glib::ExitCode {
         if let Page::Search(q) = &page {
             s.search.set_text(q);
         }
-        if s.catalog.borrow().is_some() {
+        if s.catalog.borrow().is_some() || matches!(page, Page::Search(_) | Page::Yours | Page::Sources) && s.can_search() {
             s.open(page);
         } else {
             *s.pending.borrow_mut() = Some(page);

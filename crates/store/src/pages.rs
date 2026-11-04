@@ -458,7 +458,7 @@ fn lane(s: &Rc<Store>, title: &str, apps: Vec<&App>) -> Option<gtk::Widget> {
 
 fn discover(s: &Rc<Store>) -> gtk::Widget {
     let b = body();
-    let Some(cat) = s.catalog.borrow().clone() else { return message("error", "No catalogue", "") };
+    let Some(cat) = s.catalog.borrow().clone() else { return message("apps", "Flathub catalogue unavailable", "Search by name to find apps and system packages.") };
     let lists = s.lists.borrow().clone();
     let get = |k: &str| lists.get(k).cloned().unwrap_or_default();
     let mut ranked: Vec<String> = get("trending");
@@ -587,7 +587,7 @@ fn job(s: &Rc<Store>, i: usize) -> gtk::Widget {
 }
 
 fn search(s: &Rc<Store>, q: &str) -> gtk::Widget {
-    let Some(cat) = s.catalog.borrow().clone() else { return message("error", "No catalogue", "") };
+    let cat = s.catalog.borrow().clone();
     let (scroll, b) = ui::page("Results", &format!("for “{}”", q.trim()));
     let folded = kit::fuzzy::fold(q.trim());
     let jobs = flow(6);
@@ -598,33 +598,221 @@ fn search(s: &Rc<Store>, q: &str) -> gtk::Widget {
             any_job = true;
         }
     }
+    let recommendation = crate::native::recommendation(q);
+    let arch = s.arch.borrow().clone();
+    let recommended_arch = arch.as_ref().and_then(|index| {
+        let rec = recommendation?;
+        rec.arch_names.iter().find_map(|name| index.packages.iter().find(|p| p.name == *name)).map(|pkg| (pkg, rec))
+    });
+    let recommended = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    b.append(&recommended);
+    if let Some((pkg, rec)) = recommended_arch {
+        recommended.append(&ui::heading("Recommended"));
+        let card = ui::card();
+        let title = if pkg.name == "code" { "Code - OSS" } else { rec.title };
+        card.append(&package_row(s, pkg, Some(title)));
+        recommended.append(&card);
+    }
     if any_job {
         b.append(&jobs);
     }
-    let hits = cat.search(q, 40);
-    let arch = s.arch.borrow().clone();
+
+    let hits = cat.as_ref().map(|cat| cat.search(q, 40)).unwrap_or_default();
     let packages = arch.as_ref().map(|a| a.search(q, !s.all_packages.get(), 30)).unwrap_or_default();
-    if hits.is_empty() && !any_job && packages.is_empty() {
-        b.append(&message("search_off", "No apps match", "Try a word for what you want to do, like “edit photos” or “record”."));
-    } else if !hits.is_empty() {
-        if arch.is_some() {
-            b.append(&ui::heading("Flathub"));
-        }
+    if !hits.is_empty() {
+        b.append(&ui::heading("Flathub"));
         let card = ui::card();
-        for app in hits {
+        for app in hits.iter() {
             card.append(&lockup(s, app));
         }
         b.append(&card);
     }
-    if let Some(arch) = arch.as_ref().filter(|_| !packages.is_empty()) {
+    let other_packages = packages.into_iter()
+        .filter(|pkg| !recommended_arch.is_some_and(|(p, _)| p.name == pkg.name))
+        .collect::<Vec<_>>();
+    if let Some(arch) = arch.as_ref().filter(|_| !other_packages.is_empty()) {
         b.append(&packages_head(s, arch));
         let card = ui::card();
-        for p in packages {
-            card.append(&package_row(s, p));
+        for p in other_packages.iter() {
+            card.append(&package_row(s, p, None));
         }
         b.append(&card);
     }
+
+    let empty = hits.is_empty() && !any_job && other_packages.is_empty() && recommended_arch.is_none();
+    if s.distro == crate::sources::Distro::PackageKit {
+        let system = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        system.append(&ui::text("Searching system packages…", "dim"));
+        b.append(&system);
+        search_system(s, q.trim(), recommendation, &recommended, &system, empty);
+    } else if s.distro == crate::sources::Distro::Arch && crate::aur::enabled() && crate::aur::searchable(q.trim()) {
+        let section = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        section.append(&ui::text("Searching the AUR…", "dim"));
+        b.append(&section);
+        search_aur(s, q.trim(), &section, empty);
+    } else if empty {
+        b.append(&no_matches());
+    }
     scroll.upcast()
+}
+
+fn no_matches() -> gtk::Widget {
+    message("search_off", "No apps or packages match", "Try a different name.")
+}
+
+fn search_aur(s: &Rc<Store>, query: &str, section: &gtk::Box, otherwise_empty: bool) {
+    let weak = Rc::downgrade(s);
+    let serial = s.serial.get();
+    let section = section.downgrade();
+    let query = query.to_string();
+    glib::spawn_future_local(async move {
+        if weak.upgrade().is_none_or(|s| s.serial.get() != serial) {
+            return;
+        }
+        let result = crate::aur::search(&query).await;
+        let (Some(s), Some(section)) = (weak.upgrade(), section.upgrade()) else { return };
+        if s.serial.get() != serial {
+            return;
+        }
+        ui::clear(&section);
+        if !crate::aur::enabled() {
+            return;
+        }
+        match result {
+            Ok(packages) if !packages.is_empty() => {
+                let card = ui::card();
+                for pkg in &packages {
+                    card.append(&crate::sources::aur_row(&s, pkg));
+                }
+                let reveal = gtk::Revealer::new();
+                reveal.set_transition_type(gtk::RevealerTransitionType::SlideDown);
+                reveal.set_transition_duration(200);
+                reveal.set_child(Some(&card));
+
+                let button = ui::button("Show other AUR packages", "");
+                button.set_halign(gtk::Align::Start);
+                let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                let arrow = ui::sym("expand_more");
+                let label = gtk::Label::new(Some("Show other AUR packages"));
+                content.append(&arrow);
+                content.append(&label);
+                button.set_child(Some(&content));
+                button.update_state(&[gtk::accessible::State::Expanded(Some(false))]);
+                let panel = reveal.clone();
+                button.connect_clicked(move |button| {
+                    let open = !panel.reveals_child();
+                    panel.set_reveal_child(open);
+                    arrow.set_label(if open { "expand_less" } else { "expand_more" });
+                    let text = if open { "Hide other AUR packages" } else { "Show other AUR packages" };
+                    label.set_label(text);
+                    button.update_property(&[gtk::accessible::Property::Label(text)]);
+                    button.update_state(&[gtk::accessible::State::Expanded(Some(open))]);
+                });
+                section.append(&button);
+                section.append(&reveal);
+            }
+            Ok(_) if otherwise_empty => section.append(&no_matches()),
+            Ok(_) => {}
+            Err(error) => section.append(&ui::row(Some("error"), "Couldn't search the AUR", &error).0),
+        }
+    });
+}
+
+fn search_system(
+    s: &Rc<Store>,
+    query: &str,
+    recommendation: Option<&'static crate::native::Recommendation>,
+    promoted: &gtk::Box,
+    results: &gtk::Box,
+    otherwise_empty: bool,
+) {
+    let weak = Rc::downgrade(s);
+    let serial = s.serial.get();
+    let (promoted, results) = (promoted.downgrade(), results.downgrade());
+    let query = query.to_string();
+    glib::spawn_future_local(async move {
+        let current = || weak.upgrade().filter(|s| s.serial.get() == serial);
+        let mut recommended_name = None;
+        if let Some(rec) = recommendation {
+            if let Some((pkg, installed)) = crate::native::resolve(rec).await {
+                let (Some(s), Some(promoted)) = (current(), promoted.upgrade()) else { return };
+                let card = ui::card();
+                card.append(&system_row(&s, &pkg, installed, Some(rec)));
+                promoted.append(&ui::heading("Recommended"));
+                promoted.append(&card);
+                recommended_name = Some(pkg.name().to_string());
+            }
+        }
+        if current().is_none() {
+            return;
+        }
+        let result = kit::pk::search_names(&[&query], kit::pk::FILTER_NONE).await;
+        let (Some(s), Some(results)) = (current(), results.upgrade()) else { return };
+        ui::clear(&results);
+        match result {
+            Ok(packages) => {
+                let rows = crate::native::results(&query, packages);
+                let card = ui::card();
+                for pkg in rows.iter().filter(|p| recommended_name.as_deref() != Some(p.name())) {
+                    card.append(&system_row(&s, pkg, pkg.installed(), None));
+                }
+                if card.first_child().is_some() {
+                    results.append(&ui::heading("System packages"));
+                    results.append(&card);
+                } else if otherwise_empty && recommended_name.is_none() {
+                    results.append(&no_matches());
+                }
+            }
+            Err(error) => {
+                results.append(&ui::row(Some("error"), "Couldn't search system packages", &error).0);
+            }
+        }
+    });
+}
+
+fn system_row(s: &Rc<Store>, pkg: &kit::pk::Pkg, installed: bool, rec: Option<&crate::native::Recommendation>) -> gtk::Widget {
+    let metadata = s.native_metadata.borrow();
+    let app = metadata.get(pkg.name());
+    let title = rec.map(|r| r.title)
+        .or_else(|| app.map(|a| a.name.as_str()).filter(|n| !n.is_empty()))
+        .unwrap_or_else(|| pkg.name());
+    let summary = app.map(|a| a.summary.as_str()).filter(|text| !text.is_empty()).unwrap_or(&pkg.summary);
+    let (row, actions) = ui::row(None, title, summary);
+    row.add_css_class("lockup");
+    let artwork = app.and_then(|a| package_icon(&a.icon, &a.stock))
+        .or_else(|| rec.and_then(|r| s.catalog.borrow().as_ref()?.get(r.flatpak).map(|app| icon(app, 52))));
+    if let Some(artwork) = artwork {
+        row.prepend(&artwork);
+    } else {
+        let tile = ui::tile("inventory_2");
+        tile.set_valign(gtk::Align::Center);
+        row.prepend(&tile);
+    }
+    if let Some(description) = app.map(|a| a.description.trim()).filter(|text| !text.is_empty()) {
+        row.set_tooltip_text(Some(description));
+    }
+    if title != pkg.name() {
+        actions.append(&ui::badge(pkg.name(), ""));
+    }
+    actions.append(&ui::badge(pkg.version(), ""));
+    if !pkg.repo().is_empty() && pkg.repo() != "installed" {
+        actions.append(&ui::badge(pkg.repo(), ""));
+    }
+    if installed {
+        actions.append(&ui::badge("Installed", "good"));
+    } else {
+        let button = ui::button("Install", "accent");
+        button.set_sensitive(s.busy.borrow().is_none());
+        let pkg = pkg.clone();
+        let weak = Rc::downgrade(s);
+        button.connect_clicked(move |button| {
+            if let Some(s) = weak.upgrade() {
+                crate::sources::distro_install(&s, button, pkg.clone());
+            }
+        });
+        actions.append(&button);
+    }
+    row.upcast()
 }
 
 /// "Arch packages" with the Apps & Tools / All Packages switch.
@@ -656,28 +844,28 @@ fn packages_head(s: &Rc<Store>, arch: &crate::arch::Index) -> gtk::Widget {
 
 /// A package's AppStream icon. Arch caches them as JPEG XL, which GTK may not read, so each is
 /// turned into a PNG under the cache once (with djxl) and the theme icon stands in meanwhile.
-fn package_icon(p: &crate::arch::Package) -> Option<gtk::Image> {
+fn package_icon(icon: &str, stock: &str) -> Option<gtk::Image> {
     let theme = gdk::Display::default().map(|d| gtk::IconTheme::for_display(&d));
-    let stock = (!p.stock.is_empty() && theme.as_ref().is_some_and(|t| t.has_icon(&p.stock))).then(|| p.stock.clone());
-    if p.icon.is_empty() && stock.is_none() {
+    let stock = (!stock.is_empty() && theme.as_ref().is_some_and(|t| t.has_icon(stock))).then(|| stock.to_string());
+    if icon.is_empty() && stock.is_none() {
         return None;
     }
     let image = gtk::Image::new();
     image.set_pixel_size(52);
     image.set_valign(gtk::Align::Center);
-    let source = std::path::PathBuf::from(&p.icon);
-    let readable = !p.icon.is_empty() && !p.icon.ends_with(".jxl");
+    let source = std::path::PathBuf::from(icon);
+    let readable = !icon.is_empty() && !icon.ends_with(".jxl");
     let png = glib::user_cache_dir().join("digit/store/icons").join(source.file_stem().map(|s| s.to_string_lossy().into_owned() + ".png").unwrap_or_default());
     if readable {
         image.set_from_file(Some(&source));
-    } else if !p.icon.is_empty() && png.exists() {
+    } else if !icon.is_empty() && png.exists() {
         image.set_from_file(Some(&png));
     } else {
         match &stock {
             Some(name) => image.set_icon_name(Some(name)),
             None => image.set_icon_name(Some("package-x-generic")),
         }
-        if !p.icon.is_empty() && glib::find_program_in_path("djxl").is_some() {
+        if !icon.is_empty() && glib::find_program_in_path("djxl").is_some() {
             let weak = image.downgrade();
             glib::spawn_future_local(async move {
                 if let Some(dir) = png.parent() {
@@ -697,11 +885,11 @@ fn package_icon(p: &crate::arch::Package) -> Option<gtk::Image> {
     Some(image)
 }
 
-fn package_row(s: &Rc<Store>, p: &crate::arch::Package) -> gtk::Widget {
+pub(crate) fn package_row(s: &Rc<Store>, p: &crate::arch::Package, title: Option<&str>) -> gtk::Widget {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 14);
     row.add_css_class("lockup");
     let kind = p.shown();
-    match package_icon(p) {
+    match package_icon(&p.icon, &p.stock) {
         Some(image) => row.append(&image),
         None => {
             let t = ui::tile(kind.glyph());
@@ -713,7 +901,7 @@ fn package_row(s: &Rc<Store>, p: &crate::arch::Package) -> gtk::Widget {
     col.set_hexpand(true);
     col.set_valign(gtk::Align::Center);
     let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let n = ui::text(if p.title.is_empty() { &p.name } else { &p.title }, "name");
+    let n = ui::text(title.unwrap_or(if p.title.is_empty() { &p.name } else { &p.title }), "name");
     n.set_ellipsize(pango::EllipsizeMode::End);
     top.append(&n);
     let v = ui::text(&if p.title.is_empty() { p.version.clone() } else { format!("{} · {}", p.name, p.version) }, "dim");
