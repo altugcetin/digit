@@ -504,7 +504,7 @@ fn section(body: &gtk::Box, title: &str) -> gtk::Box {
 
 fn shell_look(body: &gtk::Box, t: &toml::Table) {
     let look = section(body, "Shell");
-    choice(&look, "dark_mode", "Surfaces", "Notch, dock, menus and panels", "surface", &[("black", "Pure black"), ("tinted", "Tinted by wallpaper")], &prefs::get_str(&t, "surface", "black"));
+    choice(&look, "dark_mode", "Shell surfaces", "Notch, dock, menus and panels", "surface", &[("black", "Pure black"), ("tinted", "Tinted by wallpaper")], &prefs::get_str(&t, "surface", "black"));
     let (row, end) = ui::row(Some("palette"), "Color scheme", "Colors generated from your wallpaper");
     let current = kit::theme::load().map(|t| t.scheme).unwrap_or_else(|| prefs::get_str(&t, "scheme", "content"));
     let schemes: Vec<&str> = kit::theme::SCHEMES.to_vec();
@@ -566,7 +566,7 @@ fn shell_look(body: &gtk::Box, t: &toml::Table) {
 
 fn app_look(body: &gtk::Box, t: &toml::Table) {
     let apps = section(body, "Apps");
-    surfaces(&apps, "layers", "Surfaces", "Background of Settings, Store, Files and the Game Bar", &prefs::get_str(&t, "ui_surface", "black"));
+    surfaces(&apps, "layers", "App surfaces", "Background of Digit apps and the Game Bar", &prefs::get_str(&t, "ui_surface", "black"));
     accent(&apps, &t);
     corners(&apps, "rounded_corner", "Corners", "Cards, menus, buttons and dialogs", "ui_round", prefs::get_f64(&t, "ui_round", 1.0));
     choice(&apps, "density_medium", "Density", "", "ui_density", &[("comfortable", "Comfortable"), ("compact", "Compact")], &prefs::get_str(&t, "ui_density", "comfortable"));

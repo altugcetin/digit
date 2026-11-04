@@ -60,6 +60,7 @@ struct Shell {
     stack: gtk::Stack,
     list: gtk::ListBox,
     find: gtk::SearchEntry,
+    brand: gtk::DrawingArea,
     /// The page shown before a search, to go back to when it is cleared.
     current: RefCell<String>,
 }
@@ -185,13 +186,7 @@ fn searched(entry: &gtk::SearchEntry) {
 
 const APP_ID: &str = "dev.digit.Settings";
 
-fn rgb(hex: &str) -> (f64, f64, f64) {
-    let v = |i: usize| u8::from_str_radix(hex.get(i..i + 2).unwrap_or("ff"), 16).unwrap_or(255) as f64 / 255.0;
-    (v(1), v(3), v(5))
-}
-
-fn brand() -> gtk::Widget {
-    let ink = style::ink();
+fn brand() -> gtk::DrawingArea {
     let (_, ww, _) = kit::pixel::cells("Digit");
     let (_, mw, mh) = kit::pixel::cells("d");
     let cell = 3.0;
@@ -204,8 +199,10 @@ fn brand() -> gtk::Widget {
     area.set_margin_start(12);
     area.set_margin_top(6);
     area.set_margin_bottom(18);
-    let (accent, on_accent, main) = (rgb(&ink.accent), rgb(&ink.on_accent), rgb(&ink.main));
-    area.set_draw_func(move |_, cr, _, _| {
+    area.set_draw_func(move |widget, cr, _, _| {
+        #[allow(deprecated)]
+        let color = |name| widget.style_context().lookup_color(name).unwrap_or_else(|| widget.color());
+        let set = |ink: gtk::gdk::RGBA| cr.set_source_rgb(ink.red() as f64, ink.green() as f64, ink.blue() as f64);
         let r = 9.0;
         cr.new_sub_path();
         cr.arc(tile - r, r, r, -std::f64::consts::FRAC_PI_2, 0.0);
@@ -213,20 +210,28 @@ fn brand() -> gtk::Widget {
         cr.arc(r, tile - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
         cr.arc(r, r, r, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
         cr.close_path();
-        cr.set_source_rgb(accent.0, accent.1, accent.2);
+        set(color("accent_bg_color"));
         let _ = cr.fill();
         let ox = ((tile - mw as f64 * cell) / 2.0).round();
         let oy = ((tile - mh as f64 * cell) / 2.0).round();
-        cr.set_source_rgb(on_accent.0, on_accent.1, on_accent.2);
+        set(color("accent_fg_color"));
         kit::pixel::trace(cr, "d", cell, ox, oy);
         let _ = cr.fill();
         let tx = tile + 12.0;
         let ty = ((tile - 7.0 * cell) / 2.0).round();
-        cr.set_source_rgb(main.0, main.1, main.2);
+        set(color("d_ink_main"));
         kit::pixel::trace(cr, "Digit", cell, tx, ty);
         let _ = cr.fill();
     });
-    area.upcast()
+    area
+}
+
+fn refresh_brand() {
+    SHELL.with(|s| {
+        if let Some(shell) = s.borrow().as_ref() {
+            shell.brand.queue_draw();
+        }
+    });
 }
 
 fn install() {
@@ -391,7 +396,8 @@ fn window(app: &gtk::Application) -> gtk::ApplicationWindow {
     side.add_css_class("side");
     side.set_size_request(232, -1);
     let top = gtk::WindowHandle::new();
-    top.set_child(Some(&brand()));
+    let brand = brand();
+    top.set_child(Some(&brand));
     side.append(&top);
     let find = gtk::SearchEntry::new();
     find.add_css_class("search");
@@ -521,7 +527,7 @@ fn window(app: &gtk::Application) -> gtk::ApplicationWindow {
         glib::Propagation::Proceed
     });
     window.add_controller(keys);
-    SHELL.with(|s| *s.borrow_mut() = Some(Shell { window: window.clone(), stack, list, find, current: RefCell::new("overview".into()) }));
+    SHELL.with(|s| *s.borrow_mut() = Some(Shell { window: window.clone(), stack, list, find, brand, current: RefCell::new("overview".into()) }));
     watch(&window);
     window
 }
@@ -530,7 +536,7 @@ fn present(app: &gtk::Application, page: Option<&str>) {
     if page == Some("welcome") {
         if let Some(display) = gtk::gdk::Display::default() {
             if SHELL.with(|s| s.borrow().is_none()) {
-                kit::style::live(&display, style::css);
+                kit::style::live_with(&display, style::css, refresh_brand);
             }
         }
         welcome::open(app);
@@ -539,7 +545,7 @@ fn present(app: &gtk::Application, page: Option<&str>) {
     let existing = SHELL.with(|s| s.borrow().as_ref().map(|s| s.window.clone()));
     let window = existing.unwrap_or_else(|| {
         if let Some(display) = gtk::gdk::Display::default() {
-            kit::style::live(&display, style::css);
+            kit::style::live_with(&display, style::css, refresh_brand);
         }
         window(app)
     });

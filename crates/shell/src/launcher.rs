@@ -825,6 +825,13 @@ impl Launcher {
         ));
     }
 
+    pub fn refresh_palette(&self) {
+        if self.0.borrow().open {
+            self.style();
+            self.kick();
+        }
+    }
+
     fn step_selection(&self, by: i32) {
         let mut s = self.0.borrow_mut();
         let picks: Vec<usize> = s.lines.iter().enumerate().filter(|(_, l)| l.pickable()).map(|(i, _)| i).collect();
