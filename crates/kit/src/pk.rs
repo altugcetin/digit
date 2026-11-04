@@ -6,6 +6,8 @@ const NAME: &str = "org.freedesktop.PackageKit";
 
 pub const FILTER_NONE: u64 = 1 << 1;
 pub const FILTER_INSTALLED: u64 = 1 << 2;
+pub const INFO_INSTALLED: u32 = 1;
+pub const INFO_AVAILABLE: u32 = 2;
 pub const ONLY_TRUSTED: u64 = 1 << 1;
 pub const SIMULATE: u64 = 1 << 2;
 pub const ALLOW_DOWNGRADE: u64 = 1 << 6;
@@ -18,6 +20,7 @@ pub const INFO_CRITICAL: u32 = 26;
 pub struct Pkg {
     pub info: u32,
     pub id: String,
+    pub summary: String,
 }
 
 impl Pkg {
@@ -31,6 +34,14 @@ impl Pkg {
 
     pub fn version(&self) -> &str {
         self.part(1)
+    }
+
+    pub fn arch(&self) -> &str {
+        self.part(2)
+    }
+
+    pub fn installed(&self) -> bool {
+        self.info == INFO_INSTALLED
     }
 
     pub fn repo(&self) -> &str {
@@ -163,8 +174,8 @@ where
                 let member = header.member().map(|m| m.as_str().to_string()).unwrap_or_default();
                 match member.as_str() {
                     "Package" => {
-                        if let Ok((info, id, _)) = msg.body().deserialize::<(u32, String, String)>() {
-                            found.push(Pkg { info, id });
+                        if let Ok((info, id, summary)) = msg.body().deserialize::<(u32, String, String)>() {
+                            found.push(Pkg { info, id, summary });
                         }
                     }
                     "RepoDetail" => {
@@ -255,7 +266,7 @@ mod tests {
 
     #[test]
     fn reads_package_ids_and_versions() {
-        let p = Pkg { info: 1, id: "nvidia-gl-G07;595.104.02-11.1;x86_64;installed:NVIDIA".into() };
+        let p = Pkg { info: 1, id: "nvidia-gl-G07;595.104.02-11.1;x86_64;installed:NVIDIA".into(), summary: String::new() };
         assert_eq!(p.name(), "nvidia-gl-G07");
         assert_eq!(p.version(), "595.104.02-11.1");
         assert_eq!(p.repo(), "NVIDIA");
