@@ -15,25 +15,34 @@ A calm, fast desktop shell for Wayland, written in Rust and GTK 4. It runs on
 
 ## Install
 
+Run the installer from your local checkout (repository access is required while
+Digit is private):
+
 ```bash
-git clone https://github.com/altugcetin/astrobabaninammehizmeti.git digit
 cd digit
 ./install.sh
 ```
 
+In a graphical session, this prepares build dependencies and Rust in the terminal,
+then builds and opens the GTK installer. Before building it prints “Preparing the
+graphical installer (one time, about a minute)”. This bootstrap does not install a
+compositor. If the frontend build fails, installation continues in text mode.
+Use `--tui` to go straight to the text installer.
+
 The installer:
 
-1. detects your distribution (openSUSE Tumbleweed/Slowroll, Fedora (current release), Arch Linux and
+1. detects your distribution (openSUSE Tumbleweed/Slowroll, Fedora, Arch Linux and
    Arch-based systems such as CachyOS, EndeavourOS, Manjaro and Garuda),
-2. detects the compositor you are running or have installed; if there is none it asks
-   which one to install (niri or Hyprland),
-3. installs build and runtime packages with your package manager (it asks first),
-4. builds digit and installs the programs to `~/.local/bin`,
-5. installs the fonts (Readex Pro, Rubik, Material Symbols Rounded) to `~/.local/share/fonts/digit`,
-   adds Settings, Store, Files, Screenshot and Recorder to your app list and sets up Flathub
-   for Digit Store,
-6. installs the “Hyprland with Digit” or “niri with Digit” login session for the chosen
-   compositor (the session file in `/usr/share/wayland-sessions` needs sudo) and writes its config.
+2. asks which compositor to use (niri or Hyprland) and how to install; compilation
+   from this checkout is the working method, while ready-made packages become
+   available with the public release,
+3. shows a summary and asks for confirmation before installation, then installs
+   the compositor and build/runtime packages with your package manager,
+4. builds Digit locally and installs the programs to `~/.local/bin`,
+5. installs Readex Pro, Rubik and Material Symbols Rounded to
+   `~/.local/share/fonts/digit`, registers the companion apps and sets up Flathub,
+6. adds the “Hyprland with Digit” or “niri with Digit” login session in
+   `/usr/share/wayland-sessions` (needs sudo) and prepares its config.
 
 Log out and select the Digit session on the login screen. Digit keeps its own
 config in `~/.config/digit/hyprland` or `~/.config/digit/niri`; your normal
@@ -49,12 +58,29 @@ Digit settings, including the user files.
 Options:
 
 ```text
-./install.sh --wm niri      force a compositor (niri | hyprland)
-./install.sh --yes          take the defaults without asking
-./install.sh --no-deps      skip system packages
-./install.sh --dry-run      only show what would happen
-./install.sh --uninstall    remove digit (your ~/.config/digit stays)
+./install.sh --tui            force the interactive text installer
+./install.sh --wm niri        force a compositor (niri | hyprland)
+./install.sh --method source  compile from the local checkout
+./install.sh --yes            take the defaults without asking
+./install.sh --no-deps        skip system packages
+./install.sh --dry-run        only show what would happen
+./install.sh --check          fast local key=value report; no changes, sudo or network
+./install.sh --uninstall      remove digit (your ~/.config/digit stays)
 ```
+
+The GUI runs `./install.sh --engine --yes --wm hyprland --method source`.
+Engine mode never reads the terminal and emits `@@digit step <id> <title>`,
+`@@digit warn <text>`, `@@digit fail <text>` and `@@digit done` on stdout alongside
+the regular log text. Its step IDs are `system`, `compositor`, `packages`, `rust`,
+`build`, `install`, `session` and `fonts`. Every privileged command uses `sudo -A`
+when `SUDO_ASKPASS` is set. Engine `--method package` reports that packages are
+unavailable and exits 3; text mode explains this and uses source compilation.
+
+`--check` reports distro/family/support, GPU, compositor availability, Rust and GTK,
+missing build/runtime packages, free home disk space and installed Digit sessions.
+Package checks use only the local pacman/RPM database. Installation output is also
+saved without colors in `~/.cache/digit/install.log` (`XDG_CACHE_HOME` is respected),
+with the previous log kept as `install.log.1`, including in engine mode.
 
 Requirements the installer checks: Rust 1.97+ (it falls back to rustup when the
 distribution's Rust is older), GTK 4.18+, gtk4-layer-shell 1.2+.
