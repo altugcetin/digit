@@ -1,7 +1,7 @@
 use crate::capture::Shot;
 use crate::windows::Rect;
 use crate::{draw, out};
-use gtk::{cairo, gdk, glib, prelude::*};
+use gtk::{cairo, gdk, glib, graphene, gsk, pango, prelude::*, subclass::prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -13,9 +13,47 @@ pub struct Screen {
     pub base: draw::Base,
     wins: Vec<Rect>,
     window: gtk::Window,
-    area: gtk::DrawingArea,
+    area: Canvas,
+    layer: gtk::Overlay,
+    texture: gdk::Texture,
+    label: pango::Layout,
+    loupe_label: pango::Layout,
     bar: gtk::Box,
     hint: gtk::Label,
+}
+
+mod canvas {
+    use super::*;
+
+    #[derive(Default)]
+    pub struct Canvas {
+        pub(super) overlay: RefCell<std::rc::Weak<Overlay>>,
+        pub(super) screen: Cell<usize>,
+        pub(super) pending: Cell<bool>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for Canvas {
+        const NAME: &'static str = "DigitSnapSelection";
+        type Type = super::Canvas;
+        type ParentType = gtk::Widget;
+    }
+
+    impl ObjectImpl for Canvas {}
+
+    impl WidgetImpl for Canvas {
+        fn snapshot(&self, snapshot: &gtk::Snapshot) {
+            if let Some(o) = self.overlay.borrow().upgrade() {
+                o.paint(self.screen.get(), snapshot);
+            }
+        }
+    }
+}
+
+glib::wrapper! {
+    pub struct Canvas(ObjectSubclass<canvas::Canvas>)
+        @extends gtk::Widget,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
 }
 
 #[derive(Clone, Copy)]
@@ -64,6 +102,32 @@ fn handles(r: Rect) -> [(f64, f64); 8] {
     [(x, y), (x + w / 2.0, y), (x + w, y), (x + w, y + h / 2.0), (x + w, y + h), (x + w / 2.0, y + h), (x, y + h), (x, y + h / 2.0)]
 }
 
+// All arguments are in the owning monitor's local logical coordinates. Positioning
+// must never become part of the bar's measured size (as widget margins do).
+fn place(bar_size: (f64, f64), selection: Rect, monitor_size: (f64, f64)) -> (f64, f64) {
+    let (bw, bh) = bar_size;
+    let (x, y, w, h) = selection;
+    let (mw, mh) = monitor_size;
+    let inset = 8.0;
+    let gap = 12.0;
+    let below = y + h + gap;
+    let above = y - bh - gap;
+    let by = if below + bh <= mh - inset {
+        below
+    } else if above >= inset {
+        above
+    } else {
+        y + h - bh - gap
+    };
+    // On an output smaller than the bar, keep its origin on screen without
+    // panicking on inverted clamp bounds. Normal outputs retain the full inset.
+    let clamp = |pos: f64, size: f64, extent: f64| {
+        let end = (extent - size - inset).max(0.0);
+        pos.clamp(inset.min(end), end)
+    };
+    (clamp(x + (w - bw) / 2.0, bw, mw), clamp(by, bh, mh))
+}
+
 const PICK: &str = "Click to copy a color  ·  Enter picks under the pointer  ·  Esc cancels";
 
 pub fn open(app: &gtk::Application, shots: Vec<Shot>, pick: bool) {
@@ -71,8 +135,11 @@ pub fn open(app: &gtk::Application, shots: Vec<Shot>, pick: bool) {
     let prefs = out::prefs();
     let ov = Rc::new(Overlay { app: app.clone(), screens: RefCell::new(Vec::new()), sel: Cell::new(None), drag: Cell::new(None), hover: Cell::new(None), prefs, closed: Cell::new(false), pick });
     let mut screens = Vec::new();
-    for (i, (shot, wins)) in shots.into_iter().zip(rects).enumerate() {
+    for (shot, wins) in shots.into_iter().zip(rects) {
         let Some(base) = draw::Base::new(shot.data, shot.pw, shot.ph, shot.stride) else { continue };
+        // A failed image must not leave subsequent callbacks addressing the wrong screen.
+        let i = screens.len();
+        let texture = gdk::MemoryTexture::new(base.w, base.h, gdk::MemoryFormat::B8g8r8a8Premultiplied, &base.pixels, base.stride).upcast();
         let window = gtk::Window::new();
         window.set_application(Some(app));
         window.add_css_class("snap");
@@ -88,7 +155,9 @@ pub fn open(app: &gtk::Application, shots: Vec<Shot>, pick: bool) {
             let m = d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).find(|m| m.connector().is_some_and(|c| c == shot.name));
             window.set_monitor(m.as_ref());
         }
-        let area = gtk::DrawingArea::new();
+        let area: Canvas = glib::Object::new();
+        *area.imp().overlay.borrow_mut() = Rc::downgrade(&ov);
+        area.imp().screen.set(i);
         area.set_hexpand(true);
         area.set_vexpand(true);
         area.set_cursor_from_name(Some("crosshair"));
@@ -123,6 +192,24 @@ pub fn open(app: &gtk::Application, shots: Vec<Shot>, pick: bool) {
         });
         bar.append(&x);
         layer.add_overlay(&bar);
+        let weak = Rc::downgrade(&ov);
+        let bar_child = bar.clone();
+        layer.connect_get_child_position(move |layer, child| {
+            if child != bar_child.upcast_ref::<gtk::Widget>() {
+                return None;
+            }
+            let o = weak.upgrade()?;
+            let (si, r) = o.sel.get()?;
+            if si != i {
+                return None;
+            }
+            // Run during allocation: CSS has resolved and the overlay has its
+            // actual monitor size. No physical screenshot pixels or desktop offsets.
+            let bw = child.measure(gtk::Orientation::Horizontal, -1).1;
+            let bh = child.measure(gtk::Orientation::Vertical, bw).1;
+            let (x, y) = place((bw as f64, bh as f64), r, (layer.width() as f64, layer.height() as f64));
+            Some(gdk::Rectangle::new(x.round() as i32, y.round() as i32, bw, bh))
+        });
         let hint = kit::ui::text(if pick { PICK } else { HINT }, "snaphint");
         hint.set_halign(gtk::Align::Center);
         hint.set_valign(gtk::Align::End);
@@ -130,14 +217,12 @@ pub fn open(app: &gtk::Application, shots: Vec<Shot>, pick: bool) {
         hint.set_can_target(false);
         layer.add_overlay(&hint);
         window.set_child(Some(&layer));
-        let weak = Rc::downgrade(&ov);
-        area.set_draw_func(move |_, cr, _, _| {
-            if let Some(o) = weak.upgrade() {
-                o.paint(i, cr);
-            }
-        });
+        let label = area.create_pango_layout(None);
+        label.set_font_description(Some(&pango::FontDescription::from_string("Rubik Medium 12px")));
+        let loupe_label = area.create_pango_layout(None);
+        loupe_label.set_font_description(Some(&pango::FontDescription::from_string("Rubik Medium 11px")));
         wire(&ov, i, &window, &area);
-        screens.push(Screen { name: shot.name, w: shot.w as f64, h: shot.h as f64, base, wins, window, area, bar, hint });
+        screens.push(Screen { name: shot.name, w: shot.w as f64, h: shot.h as f64, base, wins, window, area, layer, texture, label, loupe_label, bar, hint });
     }
     *ov.screens.borrow_mut() = screens;
     let windows: Vec<gtk::Window> = ov.screens.borrow().iter().map(|s| s.window.clone()).collect();
@@ -147,27 +232,23 @@ pub fn open(app: &gtk::Application, shots: Vec<Shot>, pick: bool) {
     }
 }
 
-fn wire(ov: &Rc<Overlay>, i: usize, window: &gtk::Window, area: &gtk::DrawingArea) {
+fn wire(ov: &Rc<Overlay>, i: usize, window: &gtk::Window, area: &Canvas) {
     let motion = gtk::EventControllerMotion::new();
     let weak = Rc::downgrade(ov);
     motion.connect_motion(move |_, x, y| {
         if let Some(o) = weak.upgrade() {
             let prev = o.hover.replace(Some((i, x, y)));
-            if let Some((p, _, _)) = prev {
-                if p != i {
-                    o.redraw(p);
-                }
+            if let Some((p, _, _)) = prev && p != i {
+                o.redraw_hover(p);
             }
-            o.redraw(i);
+            o.redraw_hover(i);
         }
     });
     let weak = Rc::downgrade(ov);
     motion.connect_leave(move |_| {
-        if let Some(o) = weak.upgrade() {
-            if o.hover.get().is_some_and(|h| h.0 == i) {
-                o.hover.set(None);
-                o.redraw(i);
-            }
+        if let Some(o) = weak.upgrade() && o.hover.get().is_some_and(|h| h.0 == i) {
+            o.hover.set(None);
+            o.redraw_hover(i);
         }
     });
     area.add_controller(motion);
@@ -190,6 +271,7 @@ fn wire(ov: &Rc<Overlay>, i: usize, window: &gtk::Window, area: &gtk::DrawingAre
     let weak = Rc::downgrade(ov);
     drag.connect_drag_end(move |g, dx, dy| {
         if let (Some(o), Some((sx, sy))) = (weak.upgrade(), g.start_point()) {
+            o.update(i, sx, sy, dx, dy);
             o.end(i, sx + dx, sy + dy);
         }
     });
@@ -229,18 +311,39 @@ fn wire(ov: &Rc<Overlay>, i: usize, window: &gtk::Window, area: &gtk::DrawingAre
 
 impl Overlay {
     fn redraw(&self, i: usize) {
-        if let Ok(s) = self.screens.try_borrow() {
-            if let Some(sc) = s.get(i) {
-                sc.area.queue_draw();
+        if let Ok(s) = self.screens.try_borrow() && let Some(sc) = s.get(i) {
+            // Coalesce motion + gesture updates into one redraw at the next
+            // frame, and stop ticking immediately when there is no more work.
+            if !sc.area.imp().pending.replace(true) {
+                sc.area.add_tick_callback(|area, _| {
+                    area.imp().pending.set(false);
+                    area.queue_draw();
+                    glib::ControlFlow::Break
+                });
             }
         }
     }
 
-    fn redraw_all(&self) {
-        if let Ok(s) = self.screens.try_borrow() {
-            for sc in s.iter() {
-                sc.area.queue_draw();
-            }
+    fn redraw_hover(&self, i: usize) {
+        // Hover only affects the window preview/loupe before selection or while
+        // creating it. Moving over a completed selection changes no pixels.
+        if !self.sel.get().is_some_and(|(si, _)| si == i)
+            || self.drag.get().is_some_and(|(di, d)| di == i && matches!(d, Drag::Create(..)))
+        {
+            self.redraw(i);
+        }
+    }
+
+    fn select(&self, selection: Option<(usize, Rect)>) {
+        let previous = self.sel.replace(selection);
+        if previous == selection {
+            return;
+        }
+        if let Some((i, _)) = previous {
+            self.redraw(i);
+        }
+        if let Some((i, _)) = selection && previous.is_none_or(|(p, _)| p != i) {
+            self.redraw(i);
         }
     }
 
@@ -250,25 +353,29 @@ impl Overlay {
 
     fn window_at(&self, i: usize, x: f64, y: f64) -> Option<Rect> {
         let s = self.screens.borrow();
-        let wins = &s.get(i)?.wins;
-        wins.iter().rev().find(|r| x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3).copied()
+        let sc = s.get(i)?;
+        let r = sc.wins.iter().rev().find(|r| x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3)?;
+        // Windows may extend beyond an output. Keep selection geometry within
+        // its monitor, including later move/resize clamp bounds.
+        let (x0, y0) = (r.0.clamp(0.0, sc.w), r.1.clamp(0.0, sc.h));
+        let (x1, y1) = ((r.0 + r.2).clamp(0.0, sc.w), (r.1 + r.3).clamp(0.0, sc.h));
+        Some((x0, y0, x1 - x0, y1 - y0))
     }
 
     fn begin(&self, i: usize, x: f64, y: f64) {
         self.hide_bars();
-        if let Some((s, r)) = self.sel.get() {
-            if s == i {
-                if let Some(h) = handles(r).iter().position(|p| (p.0 - x).abs() < 10.0 && (p.1 - y).abs() < 10.0) {
-                    self.drag.set(Some((i, Drag::Resize(h as u8, r))));
-                    return;
-                }
-                if x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3 {
-                    self.drag.set(Some((i, Drag::Move(r))));
-                    return;
-                }
+        if let Some((s, r)) = self.sel.get() && s == i {
+            if let Some(h) = handles(r).iter().position(|p| (p.0 - x).abs() < 10.0 && (p.1 - y).abs() < 10.0) {
+                self.drag.set(Some((i, Drag::Resize(h as u8, r))));
+                return;
+            }
+            if x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3 {
+                self.drag.set(Some((i, Drag::Move(r))));
+                return;
             }
         }
         self.drag.set(Some((i, Drag::Create(x, y))));
+        self.redraw(i);
     }
 
     fn update(&self, i: usize, sx: f64, sy: f64, dx: f64, dy: f64) {
@@ -301,27 +408,23 @@ impl Overlay {
                 norm((x0, y0), (x1, y1))
             }
         };
-        self.sel.set(Some((i, r)));
-        self.redraw_all();
+        self.select(Some((i, r)));
     }
 
     fn end(&self, i: usize, x: f64, y: f64) {
         let d = self.drag.take();
-        if let Some((_, Drag::Create(sx, sy))) = d {
-            if (x - sx).abs() < 4.0 && (y - sy).abs() < 4.0 {
-                let (w, h) = self.size(i);
-                let r = self.window_at(i, x, y).unwrap_or((0.0, 0.0, w, h));
-                self.sel.set(Some((i, r)));
-            }
+        if let Some((_, Drag::Create(sx, sy))) = d && (x - sx).abs() < 4.0 && (y - sy).abs() < 4.0 {
+            let (w, h) = self.size(i);
+            let r = self.window_at(i, x, y).unwrap_or((0.0, 0.0, w, h));
+            self.select(Some((i, r)));
         }
-        self.redraw_all();
+        self.redraw(i);
         self.show_bar();
     }
 
     fn clear(&self) {
-        self.sel.set(None);
+        self.select(None);
         self.hide_bars();
-        self.redraw_all();
     }
 
     fn hide_bars(&self) {
@@ -334,19 +437,14 @@ impl Overlay {
     }
 
     fn show_bar(&self) {
-        let Some((i, r)) = self.sel.get() else { return };
+        let Some((i, _)) = self.sel.get() else { return };
         let s = self.screens.borrow();
         for (k, sc) in s.iter().enumerate() {
             sc.hint.set_visible(false);
             sc.bar.set_visible(k == i);
         }
         let Some(sc) = s.get(i) else { return };
-        let (bw, bh) = (sc.bar.measure(gtk::Orientation::Horizontal, -1).1, sc.bar.measure(gtk::Orientation::Vertical, -1).1);
-        let x = (r.0 + r.2 / 2.0 - bw as f64 / 2.0).clamp(8.0, sc.w - bw as f64 - 8.0);
-        let below = r.1 + r.3 + 12.0;
-        let y = if below + bh as f64 + 8.0 < sc.h { below } else if r.1 - bh as f64 - 12.0 > 8.0 { r.1 - bh as f64 - 12.0 } else { r.1 + r.3 - bh as f64 - 12.0 };
-        sc.bar.set_margin_start(x.round() as i32);
-        sc.bar.set_margin_top(y.round() as i32);
+        sc.layer.queue_allocate();
     }
 
     fn default_act(&self) -> Act {
@@ -407,8 +505,7 @@ impl Overlay {
                 };
                 let (w, h) = self.size(i);
                 let r = if ctrl { (r.0, r.1, (r.2 + dx).clamp(1.0, w - r.0), (r.3 + dy).clamp(1.0, h - r.1)) } else { ((r.0 + dx).clamp(0.0, w - r.2), (r.1 + dy).clamp(0.0, h - r.3), r.2, r.3) };
-                self.sel.set(Some((i, r)));
-                self.redraw_all();
+                self.select(Some((i, r)));
                 self.show_bar();
             }
             _ => return false,
@@ -426,8 +523,7 @@ impl Overlay {
     fn whole(&self) {
         let i = self.hover.get().map(|h| h.0).unwrap_or(0);
         let (w, h) = self.size(i);
-        self.sel.set(Some((i, (0.0, 0.0, w, h))));
-        self.redraw_all();
+        self.select(Some((i, (0.0, 0.0, w, h))));
     }
 
     fn picked(&self, i: usize, x: f64, y: f64) {
@@ -513,47 +609,45 @@ impl Overlay {
         });
     }
 
-    fn paint(&self, i: usize, cr: &cairo::Context) {
+    fn paint(&self, i: usize, snapshot: &gtk::Snapshot) {
         let Ok(s) = self.screens.try_borrow() else { return };
         let Some(sc) = s.get(i) else { return };
         let (w, h) = (sc.w, sc.h);
         let k = sc.base.w as f64 / w;
-        cr.save().ok();
-        cr.scale(1.0 / k, 1.0 / k);
-        let _ = cr.set_source_surface(&sc.base.surface, 0.0, 0.0);
-        cr.source().set_filter(cairo::Filter::Good);
-        let _ = cr.paint();
-        cr.restore().ok();
+        // The frozen screenshot is uploaded once, then reused by both the
+        // background and magnifier. No full-screen Cairo raster/upload per frame.
+        snapshot.append_texture(&sc.texture, &bounds((0.0, 0.0, w, h)));
         let sel = self.sel.get().filter(|(si, _)| *si == i).map(|(_, r)| r);
-        cr.set_fill_rule(cairo::FillRule::EvenOdd);
-        cr.rectangle(0.0, 0.0, w, h);
-        if let Some(r) = sel {
-            cr.rectangle(r.0, r.1, r.2, r.3);
-        }
-        cr.set_source_rgba(0.0, 0.0, 0.0, if self.pick { 0.0 } else { 0.45 });
-        let _ = cr.fill();
-        cr.set_fill_rule(cairo::FillRule::Winding);
-        let hover = self.hover.get().filter(|(hi, _, _)| *hi == i);
-        let dragging = self.drag.get().is_some_and(|(di, d)| di == i && matches!(d, Drag::Create(..)));
-        if sel.is_none() && !dragging {
-            if let Some((_, x, y)) = hover {
-                if let Some(r) = sc.wins.iter().rev().find(|r| x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3) {
-                    draw::rounded(cr, r.0, r.1, r.2, r.3, 12.0);
-                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.10);
-                    let _ = cr.fill_preserve();
-                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
-                    cr.set_line_width(2.0);
-                    let _ = cr.stroke();
+        if !self.pick {
+            let dim = gdk::RGBA::new(0.0, 0.0, 0.0, 0.45);
+            if let Some((x, y, sw, sh)) = sel {
+                for r in [(0.0, 0.0, w, y), (0.0, y, x, sh), (x + sw, y, w - x - sw, sh), (0.0, y + sh, w, h - y - sh)] {
+                    if r.2 > 0.0 && r.3 > 0.0 {
+                        snapshot.append_color(&dim, &bounds(r));
+                    }
                 }
+            } else {
+                snapshot.append_color(&dim, &bounds((0.0, 0.0, w, h)));
             }
         }
+        let hover = self.hover.get().filter(|(hi, _, _)| *hi == i);
+        let dragging = self.drag.get().is_some_and(|(di, d)| di == i && matches!(d, Drag::Create(..)));
+        if sel.is_none() && !dragging && let Some((_, x, y)) = hover && let Some(r) = self.window_at(i, x, y) {
+            // GSK draws the preview without a monitor-sized Cairo node.
+            let shape = gsk::RoundedRect::from_rect(bounds((r.0 - 1.0, r.1 - 1.0, r.2 + 2.0, r.3 + 2.0)), 13.0);
+            fill(snapshot, &gsk::RoundedRect::from_rect(bounds(r), 12.0), gdk::RGBA::new(1.0, 1.0, 1.0, 0.10));
+            snapshot.append_border(&shape, &[2.0; 4], &[gdk::RGBA::new(1.0, 1.0, 1.0, 0.9); 4]);
+        }
         if let Some(r) = sel {
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
-            cr.set_line_width(1.5);
-            cr.rectangle(r.0.round() + 0.25, r.1.round() + 0.25, r.2.round() - 0.5, r.3.round() - 0.5);
-            let _ = cr.stroke();
+            // Cairo strokes are centred on the path; GSK borders are inset.
+            let edge = (r.0.round() - 0.5, r.1.round() - 0.5, r.2.round() + 1.0, r.3.round() + 1.0);
+            let shape = gsk::RoundedRect::from_rect(bounds(edge), 0.0);
+            snapshot.append_border(&shape, &[1.5; 4], &[gdk::RGBA::new(1.0, 1.0, 1.0, 0.95); 4]);
             if !dragging {
                 for (hx, hy) in handles(r) {
+                    // Small Cairo nodes preserve the exact existing circular
+                    // handles without allocating a surface spanning the selection.
+                    let cr = snapshot.append_cairo(&bounds((hx - 6.0, hy - 6.0, 12.0, 12.0)));
                     cr.arc(hx, hy, 5.0, 0.0, std::f64::consts::TAU);
                     cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
                     let _ = cr.fill_preserve();
@@ -563,54 +657,68 @@ impl Overlay {
                 }
             }
             let label = format!("{} × {}", (r.2 * k).round(), (r.3 * k).round());
-            pill(cr, &label, r.0 + 2.0, if r.1 > 34.0 { r.1 - 30.0 } else { r.1 + 6.0 }, w);
+            set_text(&sc.label, &label);
+            pill(snapshot, &sc.label, r.0 + 2.0, if r.1 > 34.0 { r.1 - 30.0 } else { r.1 + 6.0 }, w);
         }
-        if (self.prefs.loupe || self.pick) && (sel.is_none() || dragging) {
-            if let Some((_, x, y)) = hover {
-                loupe(cr, &sc.base, x, y, k, w, h, self.pick);
-            }
+        if (self.prefs.loupe || self.pick) && (sel.is_none() || dragging) && let Some((_, x, y)) = hover {
+            loupe(snapshot, sc, x, y, k, self.pick);
         }
     }
 }
 
-fn pill(cr: &cairo::Context, text: &str, x: f64, y: f64, maxw: f64) {
-    let l = draw::layout(cr, text, "Rubik Medium 12px");
-    let (tw, th) = l.pixel_size();
-    let (bw, bh) = (tw as f64 + 16.0, th as f64 + 8.0);
-    let x = x.min(maxw - bw - 4.0).max(4.0);
-    draw::rounded(cr, x, y, bw, bh, bh / 2.0);
-    cr.set_source_rgba(0.0, 0.0, 0.0, 0.78);
-    let _ = cr.fill();
-    cr.set_source_rgb(1.0, 1.0, 1.0);
-    cr.move_to(x + 8.0, y + 4.0);
-    draw::show(cr, &l);
+fn bounds(r: Rect) -> graphene::Rect {
+    graphene::Rect::new(r.0 as f32, r.1 as f32, r.2 as f32, r.3 as f32)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn loupe(cr: &cairo::Context, base: &draw::Base, x: f64, y: f64, k: f64, w: f64, h: f64, color: bool) {
+fn fill(snapshot: &gtk::Snapshot, shape: &gsk::RoundedRect, color: gdk::RGBA) {
+    snapshot.push_rounded_clip(shape);
+    snapshot.append_color(&color, shape.bounds());
+    snapshot.pop();
+}
+
+fn set_text(layout: &pango::Layout, text: &str) {
+    if layout.text().as_str() != text {
+        layout.set_text(text);
+    }
+}
+
+fn text(snapshot: &gtk::Snapshot, layout: &pango::Layout, x: f64, y: f64) {
+    snapshot.save();
+    snapshot.translate(&graphene::Point::new(x as f32, y as f32));
+    snapshot.append_layout(layout, &gdk::RGBA::WHITE);
+    snapshot.restore();
+}
+
+fn pill(snapshot: &gtk::Snapshot, layout: &pango::Layout, x: f64, y: f64, maxw: f64) {
+    let (tw, th) = layout.pixel_size();
+    let (bw, bh) = (tw as f64 + 16.0, th as f64 + 8.0);
+    let x = x.min(maxw - bw - 4.0).max(4.0);
+    let shape = gsk::RoundedRect::from_rect(bounds((x, y, bw, bh)), (bh / 2.0) as f32);
+    fill(snapshot, &shape, gdk::RGBA::new(0.0, 0.0, 0.0, 0.78));
+    text(snapshot, layout, x + 8.0, y + 4.0);
+}
+
+fn loupe(snapshot: &gtk::Snapshot, sc: &Screen, x: f64, y: f64, k: f64, color: bool) {
     let r = 62.0;
     let zoom = 9.0;
     let mut lx = x + 26.0;
     let mut ly = y + 26.0;
-    if lx + r * 2.0 > w - 4.0 {
+    if lx + r * 2.0 > sc.w - 4.0 {
         lx = x - 26.0 - r * 2.0;
     }
-    if ly + r * 2.0 + 30.0 > h - 4.0 {
+    if ly + r * 2.0 + 30.0 > sc.h - 4.0 {
         ly = y - 26.0 - r * 2.0 - 30.0;
     }
     let (px, py) = ((x * k).floor(), (y * k).floor());
-    cr.save().ok();
-    cr.arc(lx + r, ly + r, r, 0.0, std::f64::consts::TAU);
-    cr.clip();
-    cr.set_source_rgb(0.0, 0.0, 0.0);
-    let _ = cr.paint();
-    cr.translate(lx + r, ly + r);
-    cr.scale(zoom, zoom);
-    cr.translate(-(px + 0.5), -(py + 0.5));
-    let _ = cr.set_source_surface(&base.surface, 0.0, 0.0);
-    cr.source().set_filter(cairo::Filter::Nearest);
-    let _ = cr.paint();
-    cr.restore().ok();
+    let circle = gsk::RoundedRect::from_rect(bounds((lx, ly, r * 2.0, r * 2.0)), r as f32);
+    snapshot.push_rounded_clip(&circle);
+    snapshot.append_color(&gdk::RGBA::BLACK, circle.bounds());
+    // Only the 124px circle is sampled, directly from the shared texture. Nearest
+    // filtering preserves the original nine-logical-pixels-per-image-pixel loupe.
+    snapshot.append_scaled_texture(&sc.texture, gsk::ScalingFilter::Nearest,
+        &bounds((lx + r - (px + 0.5) * zoom, ly + r - (py + 0.5) * zoom, sc.base.w as f64 * zoom, sc.base.h as f64 * zoom)));
+    snapshot.pop();
+    let cr = snapshot.append_cairo(&bounds((lx - 1.0, ly - 1.0, r * 2.0 + 2.0, r * 2.0 + 2.0)));
     cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
     cr.set_line_width(1.0);
     cr.rectangle(lx + r - zoom / 2.0, ly + r - zoom / 2.0, zoom, zoom);
@@ -619,17 +727,16 @@ fn loupe(cr: &cairo::Context, base: &draw::Base, x: f64, y: f64, k: f64, w: f64,
     cr.set_source_rgba(1.0, 1.0, 1.0, 0.85);
     cr.set_line_width(2.0);
     let _ = cr.stroke();
-    let (rr, gg, bb) = base.pixel(px as i32, py as i32);
-    let text = if color { format!("#{rr:02x}{gg:02x}{bb:02x}   {} , {}", px as i32, py as i32) } else { format!("{} , {}", px as i32, py as i32) };
-    let l = draw::layout(cr, &text, "Rubik Medium 11px");
-    let (tw, th) = l.pixel_size();
+    let (rr, gg, bb) = sc.base.pixel(px as i32, py as i32);
+    let caption = if color { format!("#{rr:02x}{gg:02x}{bb:02x}   {} , {}", px as i32, py as i32) } else { format!("{} , {}", px as i32, py as i32) };
+    set_text(&sc.loupe_label, &caption);
+    let (tw, th) = sc.loupe_label.pixel_size();
     let (bw, bh) = (tw as f64 + 30.0, th as f64 + 8.0);
     let bx = lx + r - bw / 2.0;
     let by = ly + r * 2.0 + 6.0;
-    draw::rounded(cr, bx, by, bw, bh, bh / 2.0);
-    cr.set_source_rgba(0.0, 0.0, 0.0, 0.8);
-    let _ = cr.fill();
+    fill(snapshot, &gsk::RoundedRect::from_rect(bounds((bx, by, bw, bh)), (bh / 2.0) as f32), gdk::RGBA::new(0.0, 0.0, 0.0, 0.8));
     if color {
+        let cr = snapshot.append_cairo(&bounds((bx + 6.0, by + bh / 2.0 - 6.0, 12.0, 12.0)));
         cr.arc(bx + 12.0, by + bh / 2.0, 5.0, 0.0, std::f64::consts::TAU);
         cr.set_source_rgb(rr as f64 / 255.0, gg as f64 / 255.0, bb as f64 / 255.0);
         let _ = cr.fill_preserve();
@@ -637,7 +744,111 @@ fn loupe(cr: &cairo::Context, base: &draw::Base, x: f64, y: f64, k: f64, w: f64,
         cr.set_line_width(1.0);
         let _ = cr.stroke();
     }
-    cr.set_source_rgb(1.0, 1.0, 1.0);
-    cr.move_to(if color { bx + 22.0 } else { bx + 15.0 }, by + 4.0);
-    draw::show(cr, &l);
+    text(snapshot, &sc.loupe_label, if color { bx + 22.0 } else { bx + 15.0 }, by + 4.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::place;
+
+    const BAR: (f64, f64) = (300.0, 46.0);
+    const MONITOR: (f64, f64) = (1920.0, 1080.0);
+
+    #[test]
+    fn bar_is_centered_below_selection() {
+        assert_eq!(
+            place(BAR, (400.0, 200.0, 500.0, 300.0), MONITOR),
+            (500.0, 512.0)
+        );
+    }
+
+    #[test]
+    fn bar_goes_above_when_below_is_full() {
+        assert_eq!(
+            place(BAR, (400.0, 800.0, 500.0, 260.0), MONITOR),
+            (500.0, 742.0)
+        );
+    }
+
+    #[test]
+    fn full_screen_bar_is_inside_near_bottom() {
+        assert_eq!(
+            place(BAR, (0.0, 0.0, 1920.0, 1080.0), MONITOR),
+            (810.0, 1022.0)
+        );
+    }
+
+    #[test]
+    fn exact_gap_and_inset_fit_below_or_above() {
+        assert_eq!(
+            place(BAR, (400.0, 200.0, 500.0, 814.0), MONITOR),
+            (500.0, 1026.0)
+        );
+        assert_eq!(
+            place(BAR, (400.0, 66.0, 500.0, 1014.0), MONITOR),
+            (500.0, 8.0)
+        );
+    }
+
+    #[test]
+    fn bar_is_clamped_to_left_right_and_vertical_insets() {
+        assert_eq!(place(BAR, (0.0, 100.0, 20.0, 20.0), MONITOR), (8.0, 132.0));
+        assert_eq!(
+            place(BAR, (1900.0, 100.0, 20.0, 20.0), MONITOR),
+            (1612.0, 132.0)
+        );
+        assert_eq!(
+            place(BAR, (0.0, 0.0, 100.0, 50.0), (320.0, 62.0)),
+            (8.0, 8.0)
+        );
+    }
+
+    #[test]
+    fn narrow_outputs_do_not_panic_on_inverted_bounds() {
+        assert_eq!(
+            place(BAR, (0.0, 0.0, 200.0, 40.0), (200.0, 40.0)),
+            (0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn placement_is_stable_across_repeated_handle_adjustments() {
+        let selection = (400.0, 200.0, 500.0, 300.0);
+        let first = place(BAR, selection, MONITOR);
+        for _ in 0..10 {
+            assert_eq!(place(BAR, selection, MONITOR), first);
+        }
+        assert_eq!(
+            place(BAR, (400.0, 200.0, 502.0, 301.0), MONITOR),
+            (501.0, 513.0)
+        );
+        assert_eq!(place(BAR, selection, MONITOR), first);
+    }
+
+    #[test]
+    fn monitors_with_offsets_and_different_scales_use_local_logical_pixels() {
+        // Model the boundary contract: pointer/selection and GTK bar dimensions
+        // are logical and local, while only the frozen image is physical pixels.
+        // A monitor's desktop origin must have no effect on its bar placement.
+        for (origin, pixels, scale) in [
+            ((0.0, 0.0), (1920.0, 1080.0), 1.0),
+            ((1920.0, -200.0), (3840.0, 2160.0), 2.0),
+            ((-1920.0, 300.0), (2400.0, 1350.0), 1.25),
+        ] {
+            let desktop_selection = (origin.0 + 400.0, origin.1 + 200.0, 500.0, 300.0);
+            let local = (
+                desktop_selection.0 - origin.0,
+                desktop_selection.1 - origin.1,
+                desktop_selection.2,
+                desktop_selection.3,
+            );
+            let monitor = (pixels.0 / scale, pixels.1 / scale);
+            assert_eq!(place(BAR, local, monitor), (500.0, 512.0));
+        }
+        // A smaller logical second output clamps to its own right edge.
+        assert_eq!(
+            place(BAR, (1200.0, 600.0, 80.0, 120.0), (1280.0, 720.0)),
+            (972.0, 542.0)
+        );
+    }
 }

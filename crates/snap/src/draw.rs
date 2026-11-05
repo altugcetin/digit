@@ -1,4 +1,4 @@
-use gtk::{cairo, pango};
+use gtk::{cairo, glib, pango};
 
 pub use kit::paint::{layout, show};
 
@@ -132,7 +132,7 @@ impl Mark {
 
 pub struct Base {
     pub surface: cairo::ImageSurface,
-    pub pixels: Vec<u8>,
+    pub pixels: glib::Bytes,
     pub stride: usize,
     pub w: i32,
     pub h: i32,
@@ -144,7 +144,8 @@ impl Base {
         if data.len() < need {
             data.resize(need, 0);
         }
-        let pixels = data.clone();
+        // Share the read-only pixels with screenshot textures without another image copy.
+        let pixels = glib::Bytes::from_owned(data.clone());
         let surface = cairo::ImageSurface::create_for_data(data, cairo::Format::ARgb32, w, h, stride).ok()?;
         Some(Base { surface, pixels, stride: stride as usize, w, h })
     }
