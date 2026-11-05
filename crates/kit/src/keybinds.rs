@@ -45,6 +45,8 @@ pub enum Win {
     ToWorkspace(u8),
     /// The next (1) or previous (-1) workspace in use.
     StepWorkspace(i8),
+    /// Traverse windows in compositor order (1 forward, -1 backward).
+    StepWindow(i8),
     Drag,
     Resize,
     Grow(Dir),
@@ -170,8 +172,13 @@ pub fn defaults() -> Vec<Bind> {
         bind("column-width", "Windows", "Cycle the column width", "SUPER + R", Act::Window(Win::PresetWidth), n, true),
         bind("overview", "Workspaces", "Overview of all workspaces", "SUPER + O", Act::Window(Win::Overview), n, true),
         bind("center", "Windows", "Center the column", "", Act::Window(Win::Center), n, true),
-        bind("workspace-next", "Workspaces", "Next workspace", "SUPER + mouse_down", Act::Window(Win::StepWorkspace(1)), n, true),
-        bind("workspace-prev", "Workspaces", "Previous workspace", "SUPER + mouse_up", Act::Window(Win::StepWorkspace(-1)), n, true),
+        // Keep the workspace-only ids for saved overrides; the wheel now follows spatial focus.
+        bind("focus-scroll-up", "Windows", "Focus above", "SUPER + mouse_up", Act::Window(Win::Focus(Dir::Up)), n, true),
+        bind("focus-scroll-down", "Windows", "Focus below", "SUPER + mouse_down", Act::Window(Win::Focus(Dir::Down)), n, true),
+        bind("window-next", "Windows", "Next window", "SUPER + SHIFT + mouse_down", Act::Window(Win::StepWindow(1)), n, true),
+        bind("window-prev", "Windows", "Previous window", "SUPER + SHIFT + mouse_up", Act::Window(Win::StepWindow(-1)), n, true),
+        bind("workspace-next", "Workspaces", "Next workspace", "", Act::Window(Win::StepWorkspace(1)), n, true),
+        bind("workspace-prev", "Workspaces", "Previous workspace", "", Act::Window(Win::StepWorkspace(-1)), n, true),
         bind("play", "Media keys", "Play or pause", "XF86AudioPlay", Act::Shell("playerctl play-pause".into()), LOCKED, true),
         bind("pause", "Media keys", "Play or pause", "XF86AudioPause", Act::Shell("playerctl play-pause".into()), LOCKED, true),
         bind("next", "Media keys", "Next track", "XF86AudioNext", Act::Shell("playerctl next".into()), LOCKED, true),
@@ -323,8 +330,12 @@ pub fn shown(id: &str) -> Option<String> {
     if b.keys.trim().is_empty() {
         return None;
     }
-    let parts: Vec<String> = b
-        .keys
+    Some(label(&b.keys))
+}
+
+/// A shortcut written for people, including mouse wheel directions.
+pub fn label(keys: &str) -> String {
+    let parts: Vec<String> = keys
         .split('+')
         .map(str::trim)
         .filter(|p| !p.is_empty())
@@ -333,6 +344,8 @@ pub fn shown(id: &str) -> Option<String> {
             "CTRL" | "CONTROL" => "Ctrl".into(),
             "ALT" => "Alt".into(),
             "SHIFT" => "Shift".into(),
+            "MOUSE_UP" => "Scroll up".into(),
+            "MOUSE_DOWN" => "Scroll down".into(),
             "COMMA" => ",".into(),
             "PERIOD" => ".".into(),
             "RETURN" | "ENTER" => "Enter".into(),
@@ -352,7 +365,7 @@ pub fn shown(id: &str) -> Option<String> {
             }
         })
         .collect();
-    Some(parts.join("+"))
+    parts.join("+")
 }
 
 /// `shown`, or a word saying the shortcut is off.
@@ -402,11 +415,15 @@ pub fn set_custom(list: &[(String, String, String)]) -> Result<(), String> {
 /// The keys a GTK key press stands for, in Hyprland's spelling ("SUPER + SHIFT + E"); `None`
 /// for a modifier pressed on its own.
 pub fn from_press(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> Option<String> {
-    use gtk::gdk::ModifierType as M;
     let name = key.to_lower().name()?.to_string();
     if ["Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", "Super_L", "Super_R", "Meta_L", "Meta_R", "ISO_Level3_Shift", "Hyper_L", "Hyper_R"].contains(&name.as_str()) {
         return None;
     }
+    Some(with_modifiers(if name.starts_with("XF86") { name } else { name.to_ascii_uppercase() }, mods))
+}
+
+fn with_modifiers(trigger: String, mods: gtk::gdk::ModifierType) -> String {
+    use gtk::gdk::ModifierType as M;
     let mut parts = Vec::new();
     if mods.intersects(M::SUPER_MASK | M::META_MASK | M::HYPER_MASK) {
         parts.push("SUPER".to_string());
@@ -420,9 +437,8 @@ pub fn from_press(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> Option<St
     if mods.contains(M::SHIFT_MASK) {
         parts.push("SHIFT".into());
     }
-    // Media keys keep their XF86 spelling; everything else is upper case, as digit writes them.
-    parts.push(if name.starts_with("XF86") { name } else { name.to_ascii_uppercase() });
-    Some(parts.join(" + "))
+    parts.push(trigger);
+    parts.join(" + ")
 }
 
 #[cfg(test)]
@@ -448,5 +464,27 @@ mod tests {
         assert_eq!(gamebar.group, "Shell");
         assert_eq!(gamebar.keys, "ALT + Z");
         assert_eq!(gamebar.act, Act::Ctl("gamebar toggle".into()));
+    }
+
+    #[test]
+    fn wheel_focus_and_window_defaults_replace_workspace_only_wheel_actions() {
+        let binds = defaults();
+        let get = |id: &str| binds.iter().find(|b| b.id == id).unwrap();
+        assert_eq!(get("focus-scroll-up").keys, "SUPER + mouse_up");
+        assert_eq!(get("focus-scroll-up").act, Act::Window(Win::Focus(Dir::Up)));
+        assert_eq!(get("focus-scroll-down").keys, "SUPER + mouse_down");
+        assert_eq!(get("focus-scroll-down").act, Act::Window(Win::Focus(Dir::Down)));
+        assert_eq!(get("window-next").keys, "SUPER + SHIFT + mouse_down");
+        assert_eq!(get("window-next").act, Act::Window(Win::StepWindow(1)));
+        assert_eq!(get("window-prev").keys, "SUPER + SHIFT + mouse_up");
+        assert_eq!(get("window-prev").act, Act::Window(Win::StepWindow(-1)));
+        assert!(get("workspace-next").keys.is_empty());
+        assert!(get("workspace-prev").keys.is_empty());
+    }
+
+    #[test]
+    fn wheel_labels_use_readable_directions() {
+        assert_eq!(label("SUPER + SHIFT + mouse_up"), "Super+Shift+Scroll up");
+        assert_eq!(label("CTRL + mouse_down"), "Ctrl+Scroll down");
     }
 }

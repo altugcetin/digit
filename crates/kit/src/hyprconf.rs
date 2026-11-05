@@ -37,10 +37,10 @@ pub(crate) fn lua_str(s: &str) -> String {
 }
 
 pub(crate) fn terminal() -> String {
-    if let Ok(t) = std::env::var("TERMINAL") {
-        if !t.trim().is_empty() {
-            return t;
-        }
+    if let Ok(t) = std::env::var("TERMINAL")
+        && !t.trim().is_empty()
+    {
+        return t;
     }
     for t in ["xdg-terminal-exec", "kitty", "foot", "alacritty", "wezterm", "ghostty", "konsole", "gnome-terminal"] {
         if gtk::glib::find_program_in_path(t).is_some() {
@@ -83,6 +83,7 @@ fn action(b: &Bind) -> String {
             Win::Move(d) => scrolling(*d, format!("hl.dsp.window.move({{ direction = \"{}\" }})", d.name()), "swapcol"),
             Win::Workspace(i) => format!("hl.dsp.focus({{ workspace = {i} }})"),
             Win::ToWorkspace(i) => format!("hl.dsp.window.move({{ workspace = {i} }})"),
+            Win::StepWindow(i) => format!("hl.dsp.window.cycle_next({{ next = {} }})", *i > 0),
             Win::StepWorkspace(i) => format!("hl.dsp.focus({{ workspace = \"e{i:+}\" }})"),
             Win::Drag => "hl.dsp.window.drag()".into(),
             Win::Resize => "hl.dsp.window.resize()".into(),
@@ -127,8 +128,17 @@ pub fn render_keybinds(binds: &[Bind]) -> String {
          -- Settings lets keys through to itself while you record a new shortcut; Escape leaves.\n\
          hl.define_submap(\"digit-capture\", function()\n    hl.bind(\"ESCAPE\", hl.dsp.submap(\"reset\"))\nend)\n\n",
     );
+    // A saved override keeps its keys if a new default lands on the same combination.
+    let taken: Vec<_> = binds.iter().filter(|b| supports(b) && (keybinds::changed(&b.id) || b.id.starts_with("custom-"))).map(|b| keybinds::normalize(&b.keys)).collect();
+    let mut placed = Vec::new();
     let mut group = "";
-    for b in binds.iter().filter(|b| supports(b)) {
+    for b in binds.iter().filter(|b| supports(b) && !b.keys.trim().is_empty()) {
+        let k = keybinds::normalize(&b.keys);
+        let own = keybinds::changed(&b.id) || b.id.starts_with("custom-");
+        if placed.contains(&k) || (!own && taken.contains(&k)) {
+            continue;
+        }
+        placed.push(k);
         if b.group != group {
             group = b.group;
             out.push_str(&format!("-- {group}\n"));
@@ -411,6 +421,21 @@ pub fn capture(on: bool) {
     if !installed() { return; }
     let map = if on { "digit-capture" } else { "reset" };
     let _ = run(&["hyprctl", "eval", &format!("hl.dispatch(hl.dsp.submap(\"{map}\"))")]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wheel_focus_and_window_defaults_render_to_hyprland_actions() {
+        let binds: Vec<_> = keybinds::defaults().into_iter().filter(|b| b.id.starts_with("focus-scroll-") || b.id.starts_with("window-")).collect();
+        let rendered = render_keybinds(&binds);
+        assert!(rendered.contains("bind(\"SUPER + mouse_up\", hl.dsp.focus({ direction = \"up\" }))"));
+        assert!(rendered.contains("bind(\"SUPER + mouse_down\", hl.dsp.focus({ direction = \"down\" }))"));
+        assert!(rendered.contains("bind(\"SUPER + SHIFT + mouse_down\", hl.dsp.window.cycle_next({ next = true }))"));
+        assert!(rendered.contains("bind(\"SUPER + SHIFT + mouse_up\", hl.dsp.window.cycle_next({ next = false }))"));
+    }
 }
 
 /// Regenerates digit's files after a shortcut changed and has Hyprland pick them up.

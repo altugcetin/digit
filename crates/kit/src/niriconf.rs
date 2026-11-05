@@ -93,10 +93,12 @@ fn action(b: &Bind) -> Option<String> {
             Win::Float => "toggle-window-floating;".into(),
             Win::Maximize => "maximize-column;".into(),
             Win::Fullscreen => "fullscreen-window;".into(),
-            Win::Focus(Dir::Left) => "focus-column-left;".into(),
-            Win::Focus(Dir::Right) => "focus-column-right;".into(),
-            Win::Focus(Dir::Up) => "focus-window-up;".into(),
-            Win::Focus(Dir::Down) => "focus-window-down;".into(),
+            Win::Focus(Dir::Left) => "focus-column-or-monitor-left;".into(),
+            Win::Focus(Dir::Right) => "focus-column-or-monitor-right;".into(),
+            Win::Focus(Dir::Up) => "focus-window-or-workspace-up;".into(),
+            Win::Focus(Dir::Down) => "focus-window-or-workspace-down;".into(),
+            Win::StepWindow(i) if *i > 0 => "focus-window-down-or-column-right;".into(),
+            Win::StepWindow(_) => "focus-window-up-or-column-left;".into(),
             // At the edge of the screen a move carries on to the next monitor or workspace.
             Win::Move(Dir::Left) => "move-column-left-or-to-monitor-left;".into(),
             Win::Move(Dir::Right) => "move-column-right-or-to-monitor-right;".into(),
@@ -144,6 +146,7 @@ pub fn render_keybinds(binds: &[Bind]) -> String {
     let mut placed: Vec<String> = Vec::new();
     let mut group = "";
     for b in binds {
+        if b.keys.trim().is_empty() { continue; }
         let Some(act) = action(b) else { continue };
         let k = keybinds::normalize(&b.keys);
         let own = keybinds::changed(&b.id) || b.id.starts_with("custom-");
@@ -166,7 +169,7 @@ pub fn render_keybinds(binds: &[Bind]) -> String {
         if spawns && !b.opts.repeating {
             props.push("repeat=false".into());
         }
-        if matches!(b.act, Act::Window(Win::StepWorkspace(_))) {
+        if b.keys.split('+').any(|k| k.trim().to_ascii_lowercase().starts_with("mouse_")) {
             props.push("cooldown-ms=150".into());
         }
         // digit's own panels keep working even when an app inhibits shortcuts.
@@ -416,4 +419,34 @@ fn generate() -> Result<bool, String> {
 /// Prepares the session without a display.
 pub fn prepare() -> Result<(), String> {
     generate().map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wheel_names_convert_to_niri_scroll_triggers() {
+        assert_eq!(keys("SUPER + mouse_up"), "Super+WheelScrollUp");
+        assert_eq!(keys("SUPER + SHIFT + mouse_down"), "Super+Shift+WheelScrollDown");
+    }
+
+    #[test]
+    fn wheel_focus_actions_use_native_niri_focus_and_cooldown() {
+        let binds: Vec<_> = keybinds::defaults().into_iter().filter(|b| b.id.starts_with("focus-scroll-") || b.id.starts_with("window-")).collect();
+        let rendered = render_keybinds(&binds);
+        assert!(rendered.contains("Super+WheelScrollUp cooldown-ms=150 hotkey-overlay-title=\"Focus above\" { focus-window-or-workspace-up; }"));
+        assert!(rendered.contains("Super+WheelScrollDown cooldown-ms=150 hotkey-overlay-title=\"Focus below\" { focus-window-or-workspace-down; }"));
+        assert!(rendered.contains("Super+Shift+WheelScrollDown cooldown-ms=150 hotkey-overlay-title=\"Next window\" { focus-window-down-or-column-right; }"));
+        assert!(rendered.contains("Super+Shift+WheelScrollUp cooldown-ms=150 hotkey-overlay-title=\"Previous window\" { focus-window-up-or-column-left; }"));
+    }
+
+    #[test]
+    fn focus_left_and_right_include_monitor_fallbacks() {
+        let binds: Vec<_> = keybinds::defaults().into_iter().filter(|b| b.id == "focus-left" || b.id == "focus-right").collect();
+        let rendered = render_keybinds(&binds);
+        assert!(rendered.contains("focus-column-or-monitor-left;"));
+        assert!(rendered.contains("focus-column-or-monitor-right;"));
+    }
+
 }
