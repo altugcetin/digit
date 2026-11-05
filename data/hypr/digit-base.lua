@@ -3,7 +3,7 @@
 
 hl.env("XCURSOR_SIZE", "24")
 hl.env("QT_QPA_PLATFORMTHEME", "qt6ct")
-
+{{gpu}}
 hl.config({
     dwindle = { preserve_split = true },
     master = { new_status = "master" },
