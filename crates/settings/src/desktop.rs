@@ -933,7 +933,6 @@ fn screenshots(body: &gtk::Box, t: &toml::Table) {
     end.append(&pickb);
     snap.append(&row);
     choice(&snap, "image", "File format", "", "snap_format", &[("png", "PNG (lossless)"), ("jpg", "JPEG (smaller)")], &prefs::get_str(&t, "snap_format", "png"));
-    choice(&snap, "gradient", "Background frame", "Padding, gradient and shadow added in the editor", "snap_frame", &[("None", "None"), ("Ocean", "Ocean"), ("Sunset", "Sunset"), ("Grape", "Grape"), ("Mint", "Mint"), ("Graphite", "Graphite"), ("Paper", "Paper")], &prefs::get_str(&t, "snap_frame", "None"));
     toggle(&snap, "zoom_in", "Magnifier", "Pixel loupe with coordinates while selecting (the color picker lives in the notch)", "snap_loupe", prefs::get_bool(&t, "snap_loupe", false));
     toggle(&snap, "arrow_selector_tool", "Include the pointer", "", "snap_cursor", prefs::get_bool(&t, "snap_cursor", false));
     toggle(&snap, "notifications", "Notify when done", "Shows the screenshot in the notch", "snap_notify", prefs::get_bool(&t, "snap_notify", true));

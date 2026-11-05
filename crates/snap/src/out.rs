@@ -13,7 +13,6 @@ pub struct Prefs {
     pub loupe: bool,
     pub notify: bool,
     pub palette: Vec<String>,
-    pub frame: usize,
 }
 
 pub fn prefs() -> Prefs {
@@ -25,7 +24,6 @@ pub fn prefs() -> Prefs {
     if palette.is_empty() {
         palette = ["#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#0a84ff", "#bf5af2", "#ffffff", "#111111"].iter().map(|s| s.to_string()).collect();
     }
-    let frame = kit::prefs::text(&t, "snap_frame", "None");
     Prefs {
         dir: if dir.is_empty() { pictures.join("Screenshots") } else { kit::prefs::home(&dir) },
         name: kit::prefs::text(&t, "snap_name", "Screenshot %Y-%m-%d at %H.%M.%S"),
@@ -36,7 +34,6 @@ pub fn prefs() -> Prefs {
         loupe: kit::prefs::flag(&t, "snap_loupe", false),
         notify: kit::prefs::flag(&t, "snap_notify", true),
         palette,
-        frame: crate::draw::FRAMES.iter().position(|f| f.0.eq_ignore_ascii_case(&frame)).unwrap_or(0),
     }
 }
 
