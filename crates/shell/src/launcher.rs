@@ -1519,7 +1519,11 @@ impl State {
             || self.app.palette_moving(now);
         if !moving && !self.open && self.window.is_visible() {
             let window = self.window.clone();
-            glib::idle_add_local_once(move || window.set_visible(false));
+            glib::idle_add_local_once(move || {
+                if window.keyboard_mode() == KeyboardMode::None {
+                    window.set_visible(false);
+                }
+            });
             self.panel.set(0.0);
             self.lines.clear();
             self.items.clear();
