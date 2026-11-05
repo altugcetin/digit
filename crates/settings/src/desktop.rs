@@ -317,14 +317,102 @@ pub(crate) fn toggle(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn slider(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, range: (f64, f64, f64), value: f64, digits: i32) -> gtk::Box {
+pub(crate) fn slider(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, range: (f64, f64, f64), value: f64, default: f64, digits: i32) -> gtk::Box {
     let (row, end) = ui::row(Some(icon), title, sub);
     let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, range.0, range.1, range.2);
     scale.set_value(value);
     scale.set_digits(digits);
-    scale.set_draw_value(true);
-    scale.set_value_pos(gtk::PositionType::Left);
+    scale.set_draw_value(false);
     scale.set_size_request(240, -1);
+    let reset = gtk::Button::new();
+    reset.set_child(Some(&ui::sym("restart_alt")));
+    reset.add_css_class("ctl");
+    reset.set_tooltip_text(Some("Reset to default"));
+    reset.set_valign(gtk::Align::Center);
+    let s = scale.downgrade();
+    reset.connect_clicked(move |_| {
+        if let Some(s) = s.upgrade() { s.set_value(default); }
+    });
+
+    let precision = digits.max(0) as usize;
+    let width = [range.0, range.1].iter().map(|v| format!("{v:.precision$}").len()).max().unwrap_or(1).max(4) as i32;
+    let label = ui::text(&format!("{:.precision$}", scale.value()), "mono");
+    label.set_xalign(1.0);
+    label.set_width_chars(width);
+    label.set_max_width_chars(width);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    label.set_tooltip_text(Some("Double-click to type a value"));
+    let entry = gtk::Entry::new();
+    entry.add_css_class("search");
+    entry.add_css_class("mono");
+    entry.set_width_chars(width);
+    entry.set_max_width_chars(width);
+    gtk::prelude::EditableExt::set_alignment(&entry, 1.0);
+    entry.set_input_purpose(gtk::InputPurpose::Number);
+    let value_slot = gtk::Stack::new();
+    value_slot.set_hhomogeneous(true);
+    value_slot.set_vhomogeneous(true);
+    value_slot.set_transition_type(gtk::StackTransitionType::Crossfade);
+    value_slot.set_transition_duration(160);
+    value_slot.add_named(&label, Some("value"));
+    value_slot.add_named(&entry, Some("entry"));
+    value_slot.set_visible_child_name("value");
+    let editing = Rc::new(Cell::new(false));
+    let finish: Rc<dyn Fn(bool)> = {
+        let (s, slot, entry) = (scale.downgrade(), value_slot.downgrade(), entry.downgrade());
+        let editing = editing.clone();
+        Rc::new(move |commit| {
+            // Hide/focus changes can re-enter this handler; Escape must never commit.
+            if !editing.replace(false) { return; }
+            if let (Some(s), Some(slot), Some(entry)) = (s.upgrade(), slot.upgrade(), entry.upgrade()) {
+                if commit && let Ok(v) = entry.text().trim().replace(',', ".").parse::<f64>() && v.is_finite() {
+                    let v = v.clamp(range.0, range.1);
+                    s.set_value((range.0 + ((v - range.0) / range.2).round() * range.2).clamp(range.0, range.1));
+                }
+                slot.set_visible_child_name("value");
+            }
+        })
+    };
+    let commit = finish.clone();
+    entry.connect_activate(move |_| commit(true));
+    let focus = gtk::EventControllerFocus::new();
+    let commit = finish.clone();
+    focus.connect_leave(move |_| commit(true));
+    entry.add_controller(focus);
+    let keys = gtk::EventControllerKey::new();
+    keys.connect_key_pressed(move |_, key, _, _| {
+        if key == gtk::gdk::Key::Escape {
+            finish(false);
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    entry.add_controller(keys);
+    let click = gtk::GestureClick::new();
+    click.set_button(1);
+    let (s, slot, input) = (scale.downgrade(), value_slot.downgrade(), entry.downgrade());
+    click.connect_pressed(move |_, n, _, _| {
+        if n == 2 && let (Some(s), Some(slot), Some(input)) = (s.upgrade(), slot.upgrade(), input.upgrade()) {
+            input.set_text(&format!("{:.precision$}", s.value()));
+            editing.set(true);
+            slot.set_visible_child_name("entry");
+            input.grab_focus();
+            input.select_region(0, -1);
+        }
+    });
+    label.add_controller(click);
+    end.append(&reset);
+    end.append(&value_slot);
+    // Opacity preserves the button's slot; sensitivity removes the invisible focus target.
+    let update = move |s: &gtk::Scale| {
+        label.set_text(&format!("{:.precision$}", s.value()));
+        let changed = (s.value() - default).abs() > 1e-9;
+        reset.set_sensitive(changed);
+        reset.set_opacity(if changed { 1.0 } else { 0.0 });
+    };
+    update(&scale);
+    scale.connect_value_changed(update);
     let generation = Rc::new(Cell::new(0u64));
     let accepted = Rc::new(Cell::new(scale.value()));
     let restoring = Rc::new(Cell::new(false));
@@ -586,8 +674,8 @@ fn dock(body: &gtk::Box, t: &toml::Table) {
     let shows = keys("dock").map(|k| format!("{k} shows or hides it at any time")).unwrap_or_default();
     let visibility = choice(&dock, "dock_to_bottom", "Visibility", &shows, "dock_mode", &[("on", "Always shown"), ("autohide", "Auto-hide"), ("smart", "Hide when windows are open"), ("off", "Off")], &prefs::get_str(&t, "dock_mode", "on"));
     choice(&dock, "side_navigation", "Position", "", "dock_side", &[("bottom", "Bottom"), ("left", "Left"), ("right", "Right")], &prefs::get_str(&t, "dock_side", "bottom"));
-    slider(&dock, "photo_size_select_small", "Icon size", "", "dock_size", (32.0, 80.0, 2.0), prefs::get_f64(&t, "dock_size", 50.0), 0);
-    slider(&dock, "zoom_in", "Magnification", "1.0 turns it off", "dock_magnify", (1.0, 2.0, 0.05), prefs::get_f64(&t, "dock_magnify", 1.5), 2);
+    slider(&dock, "photo_size_select_small", "Icon size", "", "dock_size", (32.0, 80.0, 2.0), prefs::get_f64(&t, "dock_size", 50.0), 50.0, 0);
+    slider(&dock, "zoom_in", "Magnification", "1.0 turns it off", "dock_magnify", (1.0, 2.0, 0.05), prefs::get_f64(&t, "dock_magnify", 1.5), 1.5, 2);
     toggle(&dock, "apps", "Show running apps", "Apps that are open but not kept in the dock", "dock_running", prefs::get_bool(&t, "dock_running", true));
     toggle(&dock, "notifications", "Notification badges", "Unread notification counts on icons", "dock_badges", prefs::get_bool(&t, "dock_badges", true));
     let style = match prefs::get_str(&t, "dock_icons", "light").as_str() {
@@ -694,7 +782,7 @@ fn menu_bar(body: &gtk::Box, t: &toml::Table) {
     let bar = section(body, "Menu bar");
     let enabled = toggle(&bar, "menu", "Menu bar", "Distro menu, the focused app's menus, status and date beside the notch", "menubar", prefs::get_bool(&t, "menubar", true));
     let backdrop = choice(&bar, "blur_on", "Menu bar backdrop", "Adaptive stays clear over the wallpaper and turns to frosted glass when windows are open", "menubar_look", &[("adaptive", "Adaptive"), ("clear", "Clear"), ("glass", "Glass")], &prefs::get_str(&t, "menubar_look", "adaptive"));
-    slider(&bar, "height", "Bar height", "Used by the full-width bar", "wide_height", (28.0, 56.0, 1.0), prefs::get_f64(&t, "wide_height", 34.0), 0);
+    slider(&bar, "height", "Bar height", "Used by the full-width bar", "wide_height", (28.0, 56.0, 1.0), prefs::get_f64(&t, "wide_height", 34.0), 34.0, 0);
     let tray = toggle(&bar, "widgets", "Menu bar app icons", "Shows the icons apps like Discord or Steam put in the system tray. Applies after digit restarts", "tray", prefs::get_bool(&t, "tray", true));
     when_on(&enabled, &backdrop.row);
     when_on(&enabled, &tray);
@@ -718,9 +806,9 @@ fn screen_edges(body: &gtk::Box, t: &toml::Table) {
 
 fn power(body: &gtk::Box, t: &toml::Table) {
     let power = section(body, "Lock and power");
-    slider(&power, "lock_clock", "Lock after idle", "Minutes without input before the screen locks. 0 never locks on its own", "idle_lock", (0.0, 60.0, 1.0), prefs::get_f64(&t, "idle_lock", 0.0), 0);
-    slider(&power, "monitor", "Turn off displays", "Minutes without input. The screen dims softly for a few seconds first; any input cancels", "idle_off", (0.0, 60.0, 1.0), prefs::get_f64(&t, "idle_off", 10.0), 0);
-    slider(&power, "bedtime", "Sleep after idle", "Minutes without input before the computer sleeps. 0 never sleeps on its own", "idle_sleep", (0.0, 180.0, 5.0), prefs::get_f64(&t, "idle_sleep", 0.0), 0);
+    slider(&power, "lock_clock", "Lock after idle", "Minutes without input before the screen locks. 0 never locks on its own", "idle_lock", (0.0, 60.0, 1.0), prefs::get_f64(&t, "idle_lock", 0.0), 0.0, 0);
+    slider(&power, "monitor", "Turn off displays", "Minutes without input. The screen dims softly for a few seconds first; any input cancels", "idle_off", (0.0, 60.0, 1.0), prefs::get_f64(&t, "idle_off", 10.0), 10.0, 0);
+    slider(&power, "bedtime", "Sleep after idle", "Minutes without input before the computer sleeps. 0 never sleeps on its own", "idle_sleep", (0.0, 180.0, 5.0), prefs::get_f64(&t, "idle_sleep", 0.0), 0.0, 0);
     toggle(&power, "lock", "Lock before sleep", "The lock screen is ready before the computer suspends, so waking needs your password", "lock_on_sleep", prefs::get_bool(&t, "lock_on_sleep", true));
     let mut said = Vec::new();
     if let Some(k) = keys("lock") {
@@ -743,7 +831,7 @@ fn power(body: &gtk::Box, t: &toml::Table) {
 pub fn night_light(body: &gtk::Box, t: &toml::Table) {
     let night = section(body, "Night Light");
     let mode = choice(&night, "nightlight", "Night Light", "Warms the screen in the evening to be easier on your eyes. Sunset uses the weather city set in Desktop", "night_light", &[("off", "Off"), ("sunset", "Sunset to sunrise"), ("schedule", "Custom hours"), ("always", "Always on")], &prefs::get_str(&t, "night_light", "off"));
-    let warmth = slider(&night, "thermostat", "Warmth", "Color temperature at night, in kelvin. Lower is warmer", "night_temp", (2500.0, 6000.0, 100.0), prefs::get_f64(&t, "night_temp", 4200.0), 0);
+    let warmth = slider(&night, "thermostat", "Warmth", "Color temperature at night, in kelvin. Lower is warmer", "night_temp", (2500.0, 6000.0, 100.0), prefs::get_f64(&t, "night_temp", 4200.0), 4200.0, 0);
     let from = field(&night, "schedule", "From", "Custom hours start, 24-hour HH:MM", "night_from", &prefs::get_str(&t, "night_from", "20:00"), "20:00", hhmm);
     let until = field(&night, "wb_sunny", "Until", "Custom hours end, 24-hour HH:MM", "night_to", &prefs::get_str(&t, "night_to", "07:00"), "07:00", hhmm);
     mode.enable_when(&warmth, |v| v != "off");
@@ -754,7 +842,7 @@ pub fn night_light(body: &gtk::Box, t: &toml::Table) {
 fn desktop(body: &gtk::Box, t: &toml::Table) {
     let desk = section(body, "Desktop");
     choice(&desk, "schedule", "Desktop clock", "A large clock with the date and weather on the wallpaper, behind your windows", "desktop_widget", &[("off", "Off"), ("left", "Top left"), ("center", "Center")], &prefs::get_str(&t, "desktop_widget", "off"));
-    slider(&desk, "rounded_corner", "Rounded screen corners", "Softens the corners of every display. 0 turns it off", "screen_corners", (0.0, 24.0, 1.0), prefs::get_f64(&t, "screen_corners", 0.0), 0);
+    slider(&desk, "rounded_corner", "Rounded screen corners", "Softens the corners of every display. 0 turns it off", "screen_corners", (0.0, 24.0, 1.0), prefs::get_f64(&t, "screen_corners", 0.0), 0.0, 0);
 }
 
 fn weather(body: &gtk::Box, t: &toml::Table) {

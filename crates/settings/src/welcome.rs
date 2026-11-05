@@ -284,7 +284,7 @@ fn step(index: usize, t: &toml::Table) -> gtk::Widget {
             choice(&card, "side_navigation", "Position", "", "dock_side", &[("bottom", "Bottom"), ("left", "Left"), ("right", "Right")], &prefs::get_str(t, "dock_side", "bottom"));
             choice(&card, "visibility", "Visibility", "Auto-hide reveals it when the pointer touches the edge", "dock_mode", &[("on", "Always shown"), ("autohide", "Auto-hide"), ("smart", "Hide when windows are open"), ("off", "Off")], &prefs::get_str(t, "dock_mode", "on"));
             choice(&card, "style", "Icon style", "", "dock_icons", &[("light", "Big Sur"), ("graphite", "Big Sur graphite"), ("mono", "Mono"), ("tinted", "Tinted"), ("native", "Original")], &prefs::get_str(t, "dock_icons", "light"));
-            slider(&card, "zoom_in", "Magnification", "1.0 turns it off", "dock_magnify", (1.0, 2.0, 0.05), prefs::get_f64(t, "dock_magnify", 1.5), 2);
+            slider(&card, "zoom_in", "Magnification", "1.0 turns it off", "dock_magnify", (1.0, 2.0, 0.05), prefs::get_f64(t, "dock_magnify", 1.5), 1.5, 2);
             crate::desktop::toggle(&card, "fullscreen", "Edges over fullscreen apps", "Let the dock, workspaces and Control Center open from screen edges while a game or video is fullscreen", "fullscreen_edges", prefs::get_bool(t, "fullscreen_edges", false));
             page.append(&card);
         }
@@ -292,8 +292,8 @@ fn step(index: usize, t: &toml::Table) -> gtk::Widget {
             page.append(&header("nightlight", "Comfort and safety", "Gentle on your eyes in the evening, locked when you step away."));
             let card = ui::card();
             choice(&card, "nightlight", "Night Light", "Warmer colors in the evening", "night_light", &[("off", "Off"), ("sunset", "Sunset to sunrise"), ("schedule", "20:00 to 07:00"), ("always", "Always on")], &prefs::get_str(t, "night_light", "off"));
-            slider(&card, "lock_clock", "Lock after idle", "Minutes. 0 never locks on its own", "idle_lock", (0.0, 60.0, 1.0), prefs::get_f64(t, "idle_lock", 0.0), 0);
-            slider(&card, "monitor", "Turn off displays", "Minutes without input", "idle_off", (0.0, 60.0, 1.0), prefs::get_f64(t, "idle_off", 10.0), 0);
+            slider(&card, "lock_clock", "Lock after idle", "Minutes. 0 never locks on its own", "idle_lock", (0.0, 60.0, 1.0), prefs::get_f64(t, "idle_lock", 0.0), 0.0, 0);
+            slider(&card, "monitor", "Turn off displays", "Minutes without input", "idle_off", (0.0, 60.0, 1.0), prefs::get_f64(t, "idle_off", 10.0), 10.0, 0);
             crate::desktop::toggle(&card, "lock", "Lock before sleep", "Waking up asks for your password", "lock_on_sleep", prefs::get_bool(t, "lock_on_sleep", true));
             choice(&card, "schedule", "Desktop clock", "", "desktop_widget", &[("off", "Off"), ("left", "Top left"), ("center", "Center")], &prefs::get_str(t, "desktop_widget", "off"));
             page.append(&card);
