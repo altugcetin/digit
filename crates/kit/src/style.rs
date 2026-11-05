@@ -100,6 +100,11 @@ fn surfaces(look: &Look, accent: &str) -> [String; 5] {
     }
 }
 
+/// Parts of GTK's own widgets that a desktop theme may paint in ways digit's controls never
+/// want. A dropdown shows its choice in a list row that GTK marks hovered while the list is
+/// open, and many themes fill hovered or selected rows with a bright selection color.
+const RESETS: &str = "dropdown.picker > button row, dropdown.picker > button row:hover, dropdown.picker > button row:selected, dropdown.picker > button row:focus, dropdown.picker > button row:focus-visible, dropdown.picker > button row:active { background: none; background-image: none; box-shadow: none; outline: none; border: none; color: inherit; padding: 0; margin: 0; min-height: 0; }";
+
 pub fn live(display: &gtk::gdk::Display, build: fn() -> String) {
     live_with(display, build, || {});
 }
@@ -112,6 +117,10 @@ pub fn live_with(display: &gtk::gdk::Display, build: fn() -> String, changed: fn
     let provider = gtk::CssProvider::new();
     provider.load_from_string(&build());
     gtk::style_context_add_provider_for_display(display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+    // The user's own gtk.css outranks the application's; these few resets must hold anyway.
+    let resets = gtk::CssProvider::new();
+    resets.load_from_string(RESETS);
+    gtk::style_context_add_provider_for_display(display, &resets, gtk::STYLE_PROVIDER_PRIORITY_USER + 1);
     let pending = std::rc::Rc::new(std::cell::Cell::new(false));
     let mut monitors = Vec::new();
     for path in [crate::prefs::path(), crate::theme::path()] {
