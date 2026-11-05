@@ -100,7 +100,7 @@ enum Act {
     Spawn(Vec<String>),
 }
 
-const PAGES: [(&str, &str, &str, &str, &str); 17] = [
+const PAGES: [(&str, &str, &str, &str, &str); 18] = [
     ("wifi", "Wi-Fi", "Settings", "wifi", "wifi wi-fi wireless wlan network internet hotspot password ssid"),
     ("bluetooth", "Bluetooth", "Settings", "bluetooth", "bluetooth pair pairing headphones headset mouse keyboard controller adapter blueman"),
     ("displays", "Displays", "Settings", "monitor", "display displays monitor monitors screen resolution refresh rate hz scale rotation arrange"),
@@ -118,6 +118,7 @@ const PAGES: [(&str, &str, &str, &str, &str); 17] = [
     ("keyboard", "Keyboard shortcuts", "Settings", "keyboard", "keyboard shortcuts keybinds hotkeys keys"),
     ("power", "Lock and power", "Settings", "power_settings_new", "lock power idle sleep suspend screen off"),
     ("screenshots", "Screenshots", "Settings", "screenshot_region", "screenshot screenshots capture print folder format"),
+    ("recording", "Recording", "Settings", "radio_button_checked", "record recording video screen capture replay stream gpu"),
 ];
 
 /// A page or row in digit Settings, from the index Settings writes for Spotlight.

@@ -29,6 +29,7 @@ fn page_words(page: &str) -> &'static str {
         "drivers" => "nvidia amd intel gpu firmware graphics",
         "overview" => "about system hardware memory disk processor version",
         "keyboard" => "shortcuts keybinds hotkeys keys",
+        "recording" => "record video screen capture replay stream gpu",
         "compositor" => "hyprland niri compositor gaps layout tiling",
         _ => "",
     }

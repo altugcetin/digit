@@ -75,7 +75,7 @@ pub(crate) fn accent(card: &gtk::Box, t: &toml::Table) {
 pub(crate) struct Choice {
     pub row: gtk::Box,
     controls: Vec<gtk::Widget>,
-    values: Rc<Vec<&'static str>>,
+    values: Rc<Vec<String>>,
     selected: Rc<Cell<usize>>,
 }
 
@@ -99,11 +99,11 @@ impl Choice {
     }
 }
 
-pub(crate) fn choice(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, options: &[(&'static str, &'static str)], current: &str) -> Choice {
+pub(crate) fn choice(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, options: &[(&str, &str)], current: &str) -> Choice {
     let (row, end) = ui::row(Some(icon), title, sub);
     let labels: Vec<&str> = options.iter().map(|o| o.1).collect();
     let at = options.iter().position(|o| o.0 == current).unwrap_or(0);
-    let values: Rc<Vec<&'static str>> = Rc::new(options.iter().map(|o| o.0).collect());
+    let values: Rc<Vec<String>> = Rc::new(options.iter().map(|o| o.0.to_string()).collect());
     let selected = Rc::new(Cell::new(at));
     let mut controls = Vec::new();
     let short = options.len() <= 3 && labels.iter().map(|l| l.chars().count()).sum::<usize>() <= 26;
@@ -502,6 +502,7 @@ pub fn sections(page: &str) -> &'static [Section] {
         "displays" => &[night_light],
         "power" => &[power],
         "screenshots" => &[screenshots],
+        "recording" => &[recording_capture, recording_sound, recording_replay, recording_saving, recording_streaming, recording_shortcuts],
         "files" => &[files],
         "overview" => &[advanced],
         _ => &[],
@@ -511,9 +512,18 @@ pub fn sections(page: &str) -> &'static [Section] {
 /// Builds a page made only of sections.
 pub fn build(page: &str, title: &str, lead: &str) -> gtk::Widget {
     let (scroll, body) = ui::page(title, lead);
+    let available = page != "recording" || needs(&body, &kit::optional::GPU_SCREEN_RECORDER, "Recording");
     let t = prefs::read();
+    let notice = body.last_child();
     for section in sections(page) {
         section(&body, &t);
+    }
+    if !available {
+        let mut child = notice.and_then(|w| w.next_sibling());
+        while let Some(c) = child {
+            child = c.next_sibling();
+            if c.has_css_class("card") { c.set_sensitive(false); }
+        }
     }
     // A page of one section doesn't repeat its name under the title.
     let mut child = body.first_child();
@@ -532,11 +542,12 @@ fn keys(id: &str) -> Option<String> {
 }
 
 /// A shortcut's keys as a badge that opens it in Settings > Keyboard.
-pub(crate) fn shortcut(id: &'static str) -> gtk::Button {
+pub(crate) fn shortcut(id: &str) -> gtk::Button {
     let b = ui::button(&keys(id).unwrap_or_else(|| "Off".into()), "");
     b.add_css_class("keycap");
     b.set_valign(gtk::Align::Center);
     b.set_tooltip_text(Some("Change in Keyboard"));
+    let id = id.to_string();
     b.connect_clicked(move |_| {
         let label = kit::keybinds::all().into_iter().find(|b| b.id == id).map(|b| b.label).unwrap_or_default();
         crate::show(&format!("keyboard/{}", crate::search::slug(&label)));
@@ -926,6 +937,172 @@ fn screenshots(body: &gtk::Box, t: &toml::Table) {
     toggle(&snap, "zoom_in", "Magnifier", "Pixel loupe with coordinates while selecting (the color picker lives in the notch)", "snap_loupe", prefs::get_bool(&t, "snap_loupe", false));
     toggle(&snap, "arrow_selector_tool", "Include the pointer", "", "snap_cursor", prefs::get_bool(&t, "snap_cursor", false));
     toggle(&snap, "notifications", "Notify when done", "Shows the screenshot in the notch", "snap_notify", prefs::get_bool(&t, "snap_notify", true));
+}
+
+/// Adds an install notice before a page's sections, leaving its controls visible.
+fn needs(body: &gtk::Box, need: &kit::optional::Need, what_for: &str) -> bool {
+    if kit::optional::present(need) { return true; }
+    let card = ui::card();
+    let (row, end) = ui::row(Some("download"), &format!("{} isn't installed", need.name), &format!("{what_for} needs it. Get it from Digit Store."));
+    let open = ui::button("Open Store", "accent");
+    let query = format!("search:{}", need.store_query);
+    open.connect_clicked(move |_| {
+        let argv: [&std::ffi::OsStr; 2] = ["digit-store".as_ref(), query.as_ref()];
+        if let Err(e) = gio::Subprocess::newv(&argv, gio::SubprocessFlags::NONE) {
+            ui::fail(&format!("Could not open Digit Store: {e}"));
+        }
+    });
+    end.append(&open);
+    card.append(&row);
+    body.append(&card);
+    false
+}
+
+fn recording_capture(body: &gtk::Box, t: &toml::Table) {
+    let cap = section(body, "Capture");
+    let mut targets = vec![("monitor".to_string(), "The focused screen".to_string())];
+    if let Some(display) = gtk::gdk::Display::default() {
+        for monitor in display.monitors().iter::<gtk::gdk::Monitor>().filter_map(Result::ok) {
+            if let Some(connector) = monitor.connector() {
+                let g = monitor.geometry();
+                targets.push((connector.to_string(), format!("Screen {connector} · {}×{}", g.width() * monitor.scale_factor(), g.height() * monitor.scale_factor())));
+            }
+        }
+    }
+    targets.push(("region".into(), "A region you draw".into()));
+    targets.push(("portal".into(), "A window, chosen in the system picker".into()));
+    let pairs: Vec<(&str, &str)> = targets.iter().map(|(value, label)| (value.as_str(), label.as_str())).collect();
+    choice(&cap, "screenshot_monitor", "What to record", "", "rec_target", &pairs, &prefs::get_str(t, "rec_target", "monitor"));
+    choice(&cap, "speed", "Frame rate", "", "rec_fps", &[("30", "30 fps"), ("60", "60 fps"), ("120", "120 fps"), ("144", "144 fps"), ("165", "165 fps"), ("240", "240 fps")], &prefs::get_str(t, "rec_fps", "60"));
+    choice(&cap, "high_quality", "Quality", "", "rec_quality", &[("medium", "Medium"), ("high", "High"), ("very_high", "Very high"), ("ultra", "Ultra")], &prefs::get_str(t, "rec_quality", "very_high"));
+    choice(&cap, "movie", "Codec", "", "rec_codec", &[("auto", "Automatic (H.264)"), ("hevc", "HEVC"), ("av1", "AV1"), ("vp9", "VP9")], &prefs::get_str(t, "rec_codec", "auto"));
+    choice(&cap, "video_file", "File type", "", "rec_container", &[("mp4", "MP4"), ("mkv", "MKV"), ("mov", "MOV")], &prefs::get_str(t, "rec_container", "mp4"));
+    toggle(&cap, "arrow_selector_tool", "Show the pointer", "", "rec_cursor", prefs::get_bool(t, "rec_cursor", true));
+}
+
+fn recording_sound(body: &gtk::Box, t: &toml::Table) {
+    let sound = section(body, "Sound");
+    toggle(&sound, "volume_up", "System sound", "Records what you hear.", "rec_system_audio", prefs::get_bool(t, "rec_system_audio", true));
+    toggle(&sound, "mic", "Microphone", "Mixed into the same track.", "rec_mic", prefs::get_bool(t, "rec_mic", false));
+}
+
+fn recording_replay(body: &gtk::Box, t: &toml::Table) {
+    let replay = section(body, "Instant Replay");
+    choice(&replay, "history", "Keep the last", "", "rec_replay", &[("15", "15 seconds"), ("30", "30 seconds"), ("60", "1 minute"), ("120", "2 minutes"), ("300", "5 minutes"), ("600", "10 minutes")], &prefs::get_str(t, "rec_replay", "60"));
+}
+
+fn recording_folder(t: &toml::Table) -> std::path::PathBuf {
+    let custom = prefs::get_str(t, "rec_dir", "");
+    if !custom.is_empty() { return kit::prefs::home(&custom); }
+    glib::user_special_dir(glib::UserDirectory::Videos).unwrap_or_else(|| glib::home_dir().join("Videos")).join("Recordings")
+}
+
+fn recording_saving(body: &gtk::Box, t: &toml::Table) {
+    let saving = section(body, "Saving");
+    let (row, end) = ui::row(Some("folder"), "Save to", "");
+    let entry = gtk::Entry::new();
+    entry.set_text(&recording_folder(t).display().to_string());
+    entry.set_width_chars(22);
+    entry.set_hexpand(true);
+    ui::bind_entry(&entry, screenshot_folder, |text| save("rec_dir", toml::Value::String(text.into())));
+    end.append(&entry);
+    let pick = ui::button("Choose…", "");
+    let target = entry.downgrade();
+    pick.connect_clicked(move |b| {
+        let path = recording_folder(&prefs::read());
+        let target = target.clone();
+        choose_recording_folder(ui::root(b), &path, move |path| {
+            if let Some(entry) = target.upgrade() {
+                entry.set_text(&path.display().to_string());
+                entry.emit_activate();
+            }
+        });
+    });
+    end.append(&pick);
+    saving.append(&row);
+    let (row, end) = ui::row(Some("folder_open"), "Open the folder", "");
+    let open = ui::button("Open", "");
+    open.connect_clicked(|_| {
+        let path = recording_folder(&prefs::read());
+        if let Err(e) = std::fs::create_dir_all(&path) {
+            ui::fail(&format!("Could not open the folder: {e}"));
+            return;
+        }
+        ui::open_uri(&gio::File::for_path(path).uri());
+    });
+    end.append(&open);
+    saving.append(&row);
+}
+
+// Match ui::choose_folder's portal and layer-shell handling with a recording-specific title.
+fn choose_recording_folder(parent: Option<gtk::Window>, initial: &std::path::Path, done: impl FnOnce(std::path::PathBuf) + 'static) {
+    use gtk4_layer_shell::LayerShell;
+    let chooser = gtk::FileDialog::new();
+    chooser.set_title("Save recordings to");
+    chooser.set_accept_label(Some("Choose"));
+    if initial.is_dir() { chooser.set_initial_folder(Some(&gio::File::for_path(initial))); }
+    let overlay = parent.as_ref().is_some_and(|w| w.is_layer_window());
+    let restore = parent.as_ref().filter(|w| overlay && w.is_visible()).cloned();
+    if let Some(window) = &restore { window.set_visible(false); }
+    let native_parent = if overlay { None } else { parent.as_ref() };
+    chooser.select_folder(native_parent, gio::Cancellable::NONE, move |result| {
+        if let Some(window) = restore { window.present(); }
+        match result {
+            Ok(file) => match file.path() {
+                Some(path) => done(path),
+                None => ui::fail("Choose a folder on this computer"),
+            },
+            Err(e) if e.matches(gtk::DialogError::Cancelled) || e.matches(gtk::DialogError::Dismissed) => {},
+            Err(e) => ui::fail(&format!("Could not open the folder chooser: {e}")),
+        }
+    });
+}
+
+fn recording_stream_path() -> std::path::PathBuf {
+    glib::user_config_dir().join("digit/rec-stream")
+}
+
+fn save_recording_stream(url: &str) -> Result<(), String> {
+    let path = recording_stream_path();
+    if url.is_empty() {
+        return match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        };
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    // Replace atomically with a new private file, even if the old file had wider permissions.
+    gio::File::for_path(path).replace_contents(url.as_bytes(), None, false, gio::FileCreateFlags::PRIVATE | gio::FileCreateFlags::REPLACE_DESTINATION, gio::Cancellable::NONE)
+        .map(|_| ()).map_err(|e| e.to_string())
+}
+
+fn recording_streaming(body: &gtk::Box, _: &toml::Table) {
+    let streaming = section(body, "Streaming");
+    let (row, end) = ui::row(Some("cell_tower"), "Stream address", "Use rtmp://, rtmps:// or srt:// with your stream key. Only you can read the private file.");
+    let entry = gtk::PasswordEntry::new();
+    entry.set_show_peek_icon(true);
+    entry.set_text(std::fs::read_to_string(recording_stream_path()).unwrap_or_default().trim());
+    entry.set_width_chars(22);
+    entry.add_css_class("search");
+    entry.connect_changed(|e| {
+        if let Err(error) = save_recording_stream(e.text().trim()) {
+            ui::fail(&format!("Could not save the stream address: {error}"));
+        }
+    });
+    end.append(&entry);
+    streaming.append(&row);
+}
+
+fn recording_shortcuts(body: &gtk::Box, _: &toml::Table) {
+    let shortcuts = section(body, "Shortcuts");
+    let (row, end) = ui::row(Some("keyboard"), "Shortcuts", "Start, stop, pause and replay recordings with keys");
+    let change = ui::button("Change…", "");
+    change.connect_clicked(|_| crate::show("keyboard/recording"));
+    end.append(&change);
+    shortcuts.append(&row);
 }
 
 fn screenshot_folder(text: &str) -> Result<(), String> {

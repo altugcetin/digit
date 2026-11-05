@@ -27,7 +27,7 @@ use gtk::{gio, glib, prelude::*};
 use std::cell::RefCell;
 
 /// Sidebar pages: id, name, icon and the group they're listed under.
-pub(crate) const PAGES: [(&str, &str, &str, &str); 17] = [
+pub(crate) const PAGES: [(&str, &str, &str, &str); 18] = [
     ("wifi", "Wi-Fi", "wifi", "Connections"),
     ("bluetooth", "Bluetooth", "bluetooth", "Connections"),
     ("appearance", "Appearance", "palette", "Personalize"),
@@ -40,6 +40,7 @@ pub(crate) const PAGES: [(&str, &str, &str, &str); 17] = [
     ("displays", "Displays", "monitor", "Workspace"),
     ("power", "Lock and power", "power_settings_new", "System"),
     ("screenshots", "Screenshots", "screenshot_region", "System"),
+    ("recording", "Recording", "radio_button_checked", "System"),
     ("files", "Files", "folder", "System"),
     ("apps", "Apps", "apps", "System"),
     ("updates", "Updates", "system_update_alt", "System"),
@@ -89,6 +90,7 @@ fn build_page(name: &str) -> gtk::Widget {
         }),
         "power" => desktop::build(name, "Lock and power", ""),
         "screenshots" => desktop::build(name, "Screenshots", ""),
+        "recording" => desktop::build(name, "Recording", "Changes apply the next time a recording starts."),
         "files" => desktop::build(name, "Files", ""),
         _ => overview::build(),
     }
@@ -111,6 +113,10 @@ pub(crate) fn show(name: &str) {
         let (stack, list, current) = s;
         let name = if PAGES.iter().any(|p| p.0 == name) { name } else { "overview" };
         *current.borrow_mut() = name.to_string();
+        // Optional recording tools may have been installed since the last visit.
+        if name == "recording" && let Some(old) = stack.child_by_name(name) {
+            stack.remove(&old);
+        }
         if stack.child_by_name(name).is_none() {
             stack.add_named(&build_page(name), Some(name));
             glib::timeout_add_local_once(std::time::Duration::from_millis(1500), || unsafe {
