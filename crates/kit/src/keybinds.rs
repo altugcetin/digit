@@ -13,6 +13,7 @@
 //! ```
 //!
 //! A default whose keys change in an update moves for everyone who hadn't moved it themselves.
+//! Changing a shortcut's group or label preserves user keys as long as its id stays the same.
 
 use std::path::PathBuf;
 
@@ -120,6 +121,7 @@ pub fn defaults() -> Vec<Bind> {
         bind("launcher", "Shell", "Spotlight", "ALT + SPACE", ctl("key launcher"), n, false),
         bind("clipboard", "Shell", "Clipboard history", "ALT + V", ctl("key clipboard"), n, false),
         bind("control", "Shell", "Control Center", "ALT + C", ctl("key control"), n, false),
+        bind("gamebar", "Shell", "Game Bar", "ALT + Z", ctl("gamebar toggle"), n, false),
         bind("spaces", "Shell", "Workspaces", "SUPER + TAB", ctl("key spaces"), n, false),
         bind("windows", "Shell", "Switch windows", "ALT + TAB", ctl("key windows"), n, false),
         bind("windows-back", "Shell", "Switch windows backwards", "ALT + SHIFT + TAB", ctl("key windows-back"), n, false),
@@ -141,9 +143,12 @@ pub fn defaults() -> Vec<Bind> {
         bind("snap-screen", "Screenshots", "Screenshot of the screen", "CTRL + PRINT", run("digit-snap screen"), n, false),
         bind("snap-window", "Screenshots", "Screenshot of a window", "ALT + PRINT", run("digit-snap window"), n, false),
         bind("snap-delay", "Screenshots", "Screenshot after 3 seconds", "SHIFT + PRINT", run("digit-snap --delay 3"), n, false),
-        bind("gamebar", "Recording", "Game Bar", "ALT + Z", ctl("gamebar toggle"), n, false),
+        bind("record-panel", "Recording", "Open the recorder panel", "", ctl("record panel"), n, false),
         bind("record", "Recording", "Start or stop recording", "SUPER + ALT + R", ctl("record toggle"), n, false),
+        bind("record-pause", "Recording", "Pause or resume recording", "", ctl("record pause"), n, false),
+        bind("replay", "Recording", "Instant replay on or off", "", ctl("record replay toggle"), n, false),
         bind("replay-save", "Recording", "Save the instant replay", "SUPER + ALT + S", ctl("record replay-save"), n, false),
+        bind("stream", "Recording", "Start or stop streaming", "", ctl("record stream toggle"), n, false),
         bind("volume-up", "Media keys", "Volume up", "XF86AudioRaiseVolume", ctl("key volume-up"), MEDIA, false),
         bind("volume-down", "Media keys", "Volume down", "XF86AudioLowerVolume", ctl("key volume-down"), MEDIA, false),
         bind("mute", "Media keys", "Mute", "XF86AudioMute", ctl("key mute"), LOCKED, false),
@@ -418,4 +423,30 @@ pub fn from_press(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> Option<St
     // Media keys keep their XF86 spelling; everything else is upper case, as digit writes them.
     parts.push(if name.starts_with("XF86") { name } else { name.to_ascii_uppercase() });
     Some(parts.join(" + "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recording_group_contains_only_recording_actions() {
+        let binds = defaults();
+        let recording: Vec<_> = binds.iter().filter(|b| b.group == "Recording").collect();
+        assert!(!recording.is_empty());
+        for bind in recording {
+            assert!(matches!(&bind.act, Act::Ctl(action) if action.starts_with("record")), "{} is not a recording action", bind.id);
+        }
+    }
+
+    #[test]
+    fn gamebar_is_a_shell_panel_after_control_center() {
+        let binds = defaults();
+        let control = binds.iter().position(|b| b.id == "control").unwrap();
+        let gamebar = &binds[control + 1];
+        assert_eq!(gamebar.id, "gamebar");
+        assert_eq!(gamebar.group, "Shell");
+        assert_eq!(gamebar.keys, "ALT + Z");
+        assert_eq!(gamebar.act, Act::Ctl("gamebar toggle".into()));
+    }
 }
