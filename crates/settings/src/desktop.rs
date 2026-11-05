@@ -740,6 +740,8 @@ fn menu_bar(body: &gtk::Box, t: &toml::Table) {
     let bar = section(body, "Menu bar");
     let enabled = toggle(&bar, "menu", "Menu bar", "Distro menu, the focused app's menus, status and date beside the notch", "menubar", prefs::get_bool(&t, "menubar", true));
     let backdrop = choice(&bar, "blur_on", "Menu bar backdrop", "Adaptive stays clear over the wallpaper and turns to frosted glass when windows are open", "menubar_look", &[("adaptive", "Adaptive"), ("clear", "Clear"), ("glass", "Glass")], &prefs::get_str(&t, "menubar_look", "adaptive"));
+    let logo = choice(&bar, "deployed_code", "Menu bar logo", "The mark beside the app menus", "menubar_logo", &[("distro", "Distribution"), ("digit", "Digit")], &prefs::get_str(t, "menubar_logo", "distro"));
+    when_on(&enabled, &logo.row);
     slider(&bar, "height", "Bar height", "Used by the full-width bar", "wide_height", (28.0, 56.0, 1.0), prefs::get_f64(&t, "wide_height", 34.0), 34.0, 0);
     let tray = toggle(&bar, "widgets", "Menu bar app icons", "Shows the icons apps like Discord or Steam put in the system tray. Applies after digit restarts", "tray", prefs::get_bool(&t, "tray", true));
     when_on(&enabled, &backdrop.row);
@@ -799,6 +801,36 @@ pub fn night_light(body: &gtk::Box, t: &toml::Table) {
 
 fn desktop(body: &gtk::Box, t: &toml::Table) {
     let desk = section(body, "Desktop");
+    let default = glib::user_special_dir(glib::UserDirectory::Pictures).unwrap_or_else(|| glib::home_dir().join("Pictures")).join("Wallpapers");
+    let (row, end) = ui::row(Some("folder"), "Wallpaper folder", "Leave empty to use Pictures and its wallpaper folders");
+    let entry = gtk::Entry::new();
+    entry.set_text(&prefs::get_str(t, "wall_dir", ""));
+    entry.set_width_chars(22);
+    entry.set_hexpand(true);
+    entry.set_placeholder_text(Some(&default.display().to_string()));
+    ui::bind_entry(&entry, |text| {
+        screenshot_folder(text)?;
+        if !text.is_empty() && std::fs::read_dir(kit::prefs::home(text)).is_err() {
+            return Err("Choose a readable folder".into());
+        }
+        Ok(())
+    }, |text| save("wall_dir", toml::Value::String(text.into())));
+    end.append(&entry);
+    let pickb = ui::button("Choose…", "");
+    let target = entry.downgrade();
+    pickb.connect_clicked(move |b| {
+        let Some(entry) = target.upgrade() else { return };
+        let path = if entry.text().trim().is_empty() { default.clone() } else { kit::prefs::home(entry.text().trim()) };
+        let target = target.clone();
+        ui::choose_folder(ui::root(b), &path, move |path| {
+            if let Some(entry) = target.upgrade() {
+                entry.set_text(&path.display().to_string());
+                entry.emit_activate();
+            }
+        });
+    });
+    end.append(&pickb);
+    desk.append(&row);
     choice(&desk, "schedule", "Desktop clock", "A large clock with the date and weather on the wallpaper, behind your windows", "desktop_widget", &[("off", "Off"), ("left", "Top left"), ("center", "Center")], &prefs::get_str(&t, "desktop_widget", "off"));
     slider(&desk, "rounded_corner", "Rounded screen corners", "Softens the corners of every display. 0 turns it off", "screen_corners", (0.0, 24.0, 1.0), prefs::get_f64(&t, "screen_corners", 0.0), 0.0, 0);
 }

@@ -4,6 +4,34 @@ use gio_unix::DesktopAppInfo;
 use gtk::{gdk, gio, glib, prelude::*};
 use std::rc::Rc;
 
+thread_local! {
+    static DIGIT_LOGO: std::cell::Cell<bool> = std::cell::Cell::new(kit::prefs::text(&kit::prefs::read(), "menubar_logo", "distro") == "digit");
+}
+
+pub fn prefs_changed(app: &Rc<App>) {
+    let digit = kit::prefs::text(&kit::prefs::read(), "menubar_logo", "distro") == "digit";
+    if DIGIT_LOGO.with(|old| old.replace(digit) != digit) {
+        app.redraw();
+    }
+}
+
+/// Draw the compact brand tile; return false to keep the distribution logo.
+pub fn logo(s: &gtk::Snapshot, app: &App, x: f64, y: f64, size: f64) -> bool {
+    if !DIGIT_LOGO.with(std::cell::Cell::get) {
+        return false;
+    }
+    let pal = app.palette_at(App::now());
+    let tile = crate::draw::round(x, y, size, size, (size * 0.265 * app.round()).min(size / 2.0));
+    crate::draw::fill(s, &tile, pal.accent);
+    let cr = s.append_cairo(tile.bounds());
+    let cell = size / 12.0;
+    let (_, w, h) = kit::pixel::cells("d");
+    cr.set_source_rgba(pal.on_accent.r, pal.on_accent.g, pal.on_accent.b, pal.on_accent.a);
+    kit::pixel::trace(&cr, "d", cell, x + ((size - w as f64 * cell) / 2.0).round(), y + ((size - h as f64 * cell) / 2.0).round());
+    let _ = cr.fill();
+    true
+}
+
 fn spawn(argv: &[&str]) {
     let argv: Vec<&std::ffi::OsStr> = argv.iter().map(std::ffi::OsStr::new).collect();
     let _ = gio::Subprocess::newv(&argv, gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE);

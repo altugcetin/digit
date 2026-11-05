@@ -57,6 +57,25 @@ pub fn listed(dir: &std::path::Path) -> Vec<String> {
     files.into_iter().map(|(_, p)| p).collect()
 }
 
+/// Shared by the picker, slideshow and first-run wallpaper discovery.
+pub fn directories() -> Vec<PathBuf> {
+    let t = kit::prefs::read();
+    let custom = kit::prefs::text(&t, "wall_dir", "");
+    let pictures = glib::user_special_dir(glib::UserDirectory::Pictures).unwrap_or_else(|| glib::home_dir().join("Pictures"));
+    search_directories(&custom, pictures)
+}
+
+fn search_directories(custom: &str, pictures: PathBuf) -> Vec<PathBuf> {
+    let custom = custom.trim();
+    if !custom.is_empty() && !custom.chars().any(char::is_control) {
+        let path = kit::prefs::home(custom);
+        if path.is_absolute() {
+            return vec![path];
+        }
+    }
+    vec![pictures.join("Wallpapers"), pictures.join("wallpapers"), pictures]
+}
+
 pub fn thumbnail(path: &str) -> Option<gdk::Texture> {
     let file = gio::File::for_path(path);
     let uri = file.uri();
@@ -108,11 +127,10 @@ pub fn decode_all(path: &str, sizes: &[(i32, i32)]) -> Vec<((i32, i32), Option<g
 }
 
 pub fn found() -> Option<String> {
-    let pictures = glib::user_special_dir(glib::UserDirectory::Pictures)?;
     let image = |p: &std::path::Path| {
         p.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png" | "webp" | "avif" | "jxl"))
     };
-    for dir in [pictures.join("Wallpapers"), pictures.join("wallpapers"), pictures] {
+    for dir in directories() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         let mut files: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_file() && image(p)).collect();
         files.sort();
@@ -560,5 +578,33 @@ impl Wallpapers {
         for s in screens {
             s.window.destroy();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_folder_replaces_default_search_locations() {
+        let pictures = PathBuf::from("/pictures");
+        let defaults = vec![pictures.join("Wallpapers"), pictures.join("wallpapers"), pictures.clone()];
+        for value in ["", "  ", "relative/folder", "/bad\nfolder"] {
+            assert_eq!(search_directories(value, pictures.clone()), defaults);
+        }
+        assert_eq!(search_directories(" /custom/wallpapers ", pictures.clone()), vec![PathBuf::from("/custom/wallpapers")]);
+        assert_eq!(search_directories("~/Art", pictures), vec![glib::home_dir().join("Art")]);
+    }
+
+    #[test]
+    fn wallpaper_scan_only_lists_images_in_the_selected_folder() {
+        let dir = std::env::temp_dir().join(format!("digit-wallpapers-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(dir.join("nested.png")).unwrap();
+        std::fs::write(dir.join("wall.PNG"), "image").unwrap();
+        std::fs::write(dir.join("notes.txt"), "text").unwrap();
+        std::fs::write(dir.join("nested.png/inside.jpg"), "image").unwrap();
+        assert_eq!(listed(&dir), vec![dir.join("wall.PNG").display().to_string()]);
+        assert!(listed(&dir.join("missing")).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

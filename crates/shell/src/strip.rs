@@ -233,14 +233,17 @@ impl Strip {
         let mut x = 10.0;
         pill(s, Zone::Logo, x, 36.0);
         let logo = imp.logo.borrow().as_ref().and_then(|(_, l)| l.clone());
-        match logo {
-            Some(l) => {
-                s.save();
-                s.translate(&graphene::Point::new((x + 18.0 - logo_px as f64 / 2.0) as f32, (mid - logo_px as f64 / 2.0) as f32));
-                l.snapshot_symbolic(s, logo_px as f64, logo_px as f64, &[ink_main.rgba()]);
-                s.restore();
+        let digit = crate::menubar::logo(s, &app, x + 18.0 - logo_px as f64 / 2.0, mid - logo_px as f64 / 2.0, logo_px as f64);
+        if !digit {
+            match logo {
+                Some(l) => {
+                    s.save();
+                    s.translate(&graphene::Point::new((x + 18.0 - logo_px as f64 / 2.0) as f32, (mid - logo_px as f64 / 2.0) as f32));
+                    l.snapshot_symbolic(s, logo_px as f64, logo_px as f64, &[ink_main.rgba()]);
+                    s.restore();
+                }
+                None => draw::icon(s, self, cfg, "deployed_code", 20.0, true, ink_main, x + 18.0, mid),
             }
-            None => draw::icon(s, self, cfg, "deployed_code", 20.0, true, ink_main, x + 18.0, mid),
         }
         zones.push((Zone::Logo, (x, 0.0, 36.0, band)));
         x += 42.0;
