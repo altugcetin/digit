@@ -188,7 +188,7 @@ popover.menu-pop listview {{ background: transparent; padding: 0; }}
 popover.menu-pop listview > row {{ border-radius: max(4px, calc(var(--r-pop) - 6px)); padding: 8px 10px 8px 12px; margin: 1px 0; min-height: 20px; background: transparent; transition: background-color 120ms ease; }}
 popover.menu-pop listview > row:hover {{ background: alpha({main}, 0.07); }}
 popover.menu-pop listview > row:selected {{ background: alpha({accent}, 0.15); }}
-popover.menu-pop listview > row:selected label {{ color: {main}; font-weight: 560; }}
+popover.menu-pop listview > row:selected label {{ color: {main}; }}
 popover.menu-pop scrolledwindow, popover.menu-pop viewport {{ background: transparent; }}
 .pick-check {{ color: {accent}; font-size: 18px; }}
 .pick-chevron {{ font-size: 18px; color: {meta}; margin-left: 2px; }}
