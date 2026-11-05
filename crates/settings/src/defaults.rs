@@ -92,5 +92,42 @@ pub fn section(body: &gtk::Box) {
         end.append(&pick);
         card.append(&row);
     }
+    terminal(&card);
     body.append(&card);
+}
+
+/// The terminal Super+Return, Open Terminal Here and digit's own commands open.
+fn terminal(card: &gtk::Box) {
+    let terms = kit::terminal::installed();
+    if terms.is_empty() {
+        return;
+    }
+    let current = kit::terminal::chosen(&kit::prefs::read()).unwrap_or_default();
+    let automatic = kit::terminal::automatic();
+    let auto_name = kit::terminal::KNOWN.iter().find(|t| t.0 == automatic.split_whitespace().next().unwrap_or_default()).map_or(automatic.as_str(), |t| t.1);
+    let mut values = vec![String::new()];
+    let mut labels = vec![format!("Automatic ({auto_name})")];
+    for (program, name) in &terms {
+        values.push(program.to_string());
+        labels.push(name.to_string());
+    }
+    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let at = values.iter().position(|v| *v == current).unwrap_or(0);
+    let (row, end) = ui::row(Some("terminal"), "Terminal", "Super+Return, Open Terminal Here in Files and commands from Settings");
+    let pick = kit::ui::dropdown(&refs, at as u32);
+    let accepted = std::cell::Cell::new(at as u32);
+    let restoring = std::cell::Cell::new(false);
+    pick.connect_selected_notify(move |p| {
+        if restoring.get() { return; }
+        let Some(value) = values.get(p.selected() as usize) else { return };
+        if crate::desktop::save("terminal", toml::Value::String(value.clone())) {
+            accepted.set(p.selected());
+        } else {
+            restoring.set(true);
+            p.set_selected(accepted.get());
+            restoring.set(false);
+        }
+    });
+    end.append(&pick);
+    card.append(&row);
 }
