@@ -278,18 +278,62 @@ package_lists() {
 deps() {
     local build run_pkgs
     package_lists
-    # Bootstrap needs only the libraries and tools to compile the frontend.
-    if [ "${1:-}" = build ]; then run_pkgs=(); fi
     step packages "System packages"
     info "${build[*]} ${run_pkgs[*]}"
     if confirm "Install them with your package manager (asks for your sudo password)?"; then
         install_pkgs "${build[@]}" "${run_pkgs[@]}"
         # Digit Store tells apps, tools and libraries apart from each package's file list.
-        if [ "$FAMILY" = arch ] && [ "${1:-}" != build ]; then
+        if [ "$FAMILY" = arch ]; then
             superuser pacman -Fy
         fi
     else
         warn "Skipped. The build may fail if something is missing."
+    fi
+}
+
+bootstrap_deps() {
+    local packages=() missing=() p
+    case $FAMILY in
+        suse|fedora)
+            packages=(gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel wayland-devel) ;;
+        arch)
+            # Cargo needs a C linker, not the whole base-devel tool collection.
+            packages=(gcc pkgconf gtk4 gtk4-layer-shell wayland) ;;
+    esac
+    # Devel packages pull in the GTK/Wayland runtime libraries. The GUI supplies
+    # its own sudo askpass; --check can read GPU IDs from sysfs without pciutils.
+    # Accept providers such as Fedora's curl-minimal instead of replacing them.
+    command -v curl >/dev/null 2>&1 || packages+=(curl)
+    if ! command -v fc-cache >/dev/null 2>&1 || ! command -v fc-list >/dev/null 2>&1; then
+        packages+=(fontconfig)
+    fi
+    command -v sudo >/dev/null 2>&1 || packages+=(sudo)
+    for p in "${packages[@]}"; do
+        case $FAMILY in
+            arch) pacman -Q "$p" >/dev/null 2>&1 || missing+=("$p") ;;
+            fedora|suse) rpm -q "$p" >/dev/null 2>&1 || missing+=("$p") ;;
+        esac
+    done
+    [ "${#missing[@]}" -gt 0 ] || return 0
+    step packages "Graphical installer prerequisites"
+    info "${missing[*]}"
+    local auth="sudo password"
+    command -v sudo >/dev/null 2>&1 || auth="root password via su (sudo is not installed yet)"
+    if confirm "Install them with your package manager (asks for your $auth)?"; then
+        (
+            # Bootstrap sudo itself on systems that only have su. Keep this
+            # fallback local; the real installer always uses sudo/askpass.
+            if ! command -v sudo >/dev/null 2>&1; then
+                superuser() {
+                    local command
+                    printf -v command '%q ' "$@"
+                    run su -c "$command"
+                }
+            fi
+            install_pkgs "${missing[@]}"
+        )
+    else
+        warn "Skipped. The graphical installer may not build or run if something is missing."
     fi
 }
 
@@ -530,9 +574,16 @@ check_system() {
 
 bootstrap() {
     info "Preparing the graphical installer (one time, about a minute)"
-    if $DEPS; then deps build || return 1; fi
+    if $DEPS; then bootstrap_deps || return 1; fi
+    # Do not let a rustup proxy download a toolchain before terminal consent.
+    if ! RUSTUP_AUTO_INSTALL=0 cargo_ok cargo && ! RUSTUP_AUTO_INSTALL=0 cargo_ok "$HOME/.cargo/bin/cargo"; then
+        confirm "Prepare Rust $MIN_RUST+ (may install Rust packages and a rustup toolchain)?" || return 1
+    fi
     rust || return 1
     libs || return 1
+    # fonts() skips existing files and warns once on download failure, so an
+    # offline font fetch still allows the GUI to open. The install step reuses it.
+    fonts
     (cd "$ROOT" && "$CARGO" build --release -p digit-installer) || return 1
     DIGIT_ROOT="$ROOT" exec "$ROOT/target/release/digit-installer"
 }
