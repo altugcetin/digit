@@ -388,6 +388,28 @@ fn decorations() -> String {
     fill(DECORATIONS, &[("rounding", &rounding().to_string())])
 }
 
+// niri uses the FIRST matching output block, rather than merging duplicate blocks.
+// Keep startup focus in the same Settings-owned block as the output's mode and position.
+fn primary(prefs: &toml::Table, outputs: &str) -> String {
+    let name = crate::prefs::text(prefs, "primary_monitor", "");
+    let header = format!("output {} {{", kdl_str(&name));
+    let mut text = String::new();
+    let mut found = false;
+    for line in outputs.lines() {
+        if line.trim() == "focus-at-startup" { continue; }
+        text.push_str(line);
+        text.push('\n');
+        if !name.is_empty() && line.trim() == header {
+            text.push_str("    focus-at-startup\n");
+            found = true;
+        }
+    }
+    if !name.is_empty() && !found {
+        text.push_str(&format!("output {} {{\n    focus-at-startup\n}}\n", kdl_str(&name)));
+    }
+    text
+}
+
 /// Rewrites digit's niri folder from digit's settings. niri notices the change by itself.
 pub fn sync() -> Result<bool, String> {
     if !installed() {
@@ -410,6 +432,13 @@ fn generate() -> Result<bool, String> {
     let settings = format!("// Settings > Compositor. Written by digit; change them in digit Settings.\n// niri can't switch a setting like tap-to-click off from here; turn those off in user.kdl.\n\n{}", compositor());
     changed |= write_if_changed(&d.join("digit-compositor.kdl"), &settings).map_err(e)?;
     changed |= write_if_changed(&d.join("digit-decorations.kdl"), &decorations()).map_err(e)?;
+    let outputs_path = niri().join("digit-outputs.kdl");
+    let outputs = match std::fs::read_to_string(&outputs_path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(e(error)),
+    };
+    changed |= write_if_changed(&outputs_path, &primary(&crate::prefs::read(), &outputs)).map_err(e)?;
     changed |= write_if_changed(&d.join("digit-rules.kdl"), RULES).map_err(e)?;
     changed |= write_if_changed(&d.join("digit-keybinds.kdl"), &render_keybinds(&binds)).map_err(e)?;
     changed |= write_if_changed(&d.join("digit-autostart.kdl"), &fill(AUTOSTART, &[("digit", &kdl_str(&bin().join("digit").display().to_string()))])).map_err(e)?;
@@ -424,6 +453,36 @@ pub fn prepare() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primary_focus_preserves_geometry_and_never_duplicates_output_blocks() {
+        let prefs = "primary_monitor = 'DP-1'".parse().unwrap();
+        let outputs = "output \"DP-1\" {\n    mode \"2560x1440@144\"\n    scale 1.25\n    position x=1920 y=0\n}\noutput \"eDP-1\" {\n    focus-at-startup\n    off\n}\n";
+        let rendered = primary(&prefs, outputs);
+        assert_eq!(rendered.matches("output \"DP-1\"").count(), 1);
+        assert_eq!(rendered.matches("focus-at-startup").count(), 1);
+        assert!(rendered.starts_with("output \"DP-1\" {\n    focus-at-startup\n    mode"));
+        assert!(rendered.contains("scale 1.25\n    position x=1920 y=0"));
+        assert!(rendered.contains("output \"eDP-1\" {\n    off\n}"));
+        assert_eq!(primary(&prefs, &rendered), rendered);
+        assert!(!primary(&toml::Table::new(), &rendered).contains("focus-at-startup"));
+    }
+
+    #[test]
+    fn primary_focus_can_precede_the_first_display_layout_and_keeps_unplugged_outputs() {
+        let prefs = "primary_monitor = 'HDMI-A-1'".parse().unwrap();
+        let rendered = primary(&prefs, "output \"DP-1\" {\n    off\n}\n");
+        assert!(rendered.contains("output \"HDMI-A-1\" {\n    focus-at-startup\n}"));
+        assert!(rendered.contains("output \"DP-1\" {\n    off\n}"));
+        assert_eq!(primary(&prefs, &rendered), rendered);
+    }
+
+    #[test]
+    fn primary_output_names_are_kdl_strings() {
+        let mut prefs = toml::Table::new();
+        prefs.insert("primary_monitor".into(), toml::Value::String("DP-\"1".into()));
+        assert!(primary(&prefs, "").contains("output \"DP-\\\"1\" {"));
+    }
 
     #[test]
     fn wheel_names_convert_to_niri_scroll_triggers() {

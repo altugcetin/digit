@@ -182,12 +182,19 @@ fn save_pins(pins: &[String]) {
 
 fn monitor_for(output: Option<&str>) -> Option<gdk::Monitor> {
     let monitors: Vec<gdk::Monitor> = gdk::Display::default()?.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect();
+    let primary = if kit::setup::installed() { kit::prefs::text(&kit::prefs::read(), "primary_monitor", "") } else { String::new() };
     monitors
         .iter()
         .find(|m| output.is_some_and(|o| m.connector().as_deref() == Some(o)))
+        .or_else(|| monitors.iter().find(|m| m.connector().as_deref() == Some(primary.as_str())))
         .or_else(|| monitors.iter().find(|m| m.geometry().x() == 0 && m.geometry().y() == 0))
         .or(monitors.first())
         .cloned()
+}
+
+pub fn primary_changed(app: &Rc<App>) {
+    PREFER.with(|p| p.borrow_mut().take());
+    apply(app);
 }
 
 fn teardown(st: &Shared) {

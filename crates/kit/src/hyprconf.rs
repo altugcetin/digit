@@ -182,6 +182,52 @@ fn autostart() -> String {
     fill(AUTOSTART, &[("digit", &lua_str(&bin().join("digit").display().to_string()))])
 }
 
+/// Connector-keyed assignments include unplugged displays. Ignore invalid numbers and
+/// resolve duplicate assignments deterministically, so each workspace has one home.
+pub fn workspace_monitors(prefs: &toml::Table) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut monitors = std::collections::BTreeMap::new();
+    let mut used = std::collections::BTreeSet::new();
+    if let Some(table) = prefs.get("monitor_workspaces").and_then(toml::Value::as_table) {
+        for (name, value) in table {
+            let mut numbers: Vec<u8> = value.as_array().into_iter().flatten().filter_map(toml::Value::as_integer).filter(|n| (1..=10).contains(n)).map(|n| n as u8).collect();
+            numbers.sort_unstable();
+            numbers.retain(|n| used.insert(*n));
+            monitors.insert(name.clone(), numbers);
+        }
+    }
+    monitors
+}
+
+fn workspaces(prefs: &toml::Table) -> String {
+    let mut monitors = workspace_monitors(prefs);
+    let primary = crate::prefs::text(prefs, "primary_monitor", "");
+    // An explicit workspace assignment takes precedence over the primary default.
+    if !primary.is_empty() && !monitors.values().any(|numbers| numbers.contains(&1)) {
+        monitors.entry(primary).or_default().insert(0, 1);
+    }
+    let mut rules = String::new();
+    for (monitor, numbers) in monitors {
+        for (i, number) in numbers.iter().enumerate() {
+            let default = if i == 0 { ", default = true" } else { "" };
+            rules.push_str(&format!("hl.workspace_rule({{ workspace = \"{number}\", monitor = {}{default} }})\n", lua_str(&monitor)));
+        }
+    }
+    fill(WORKSPACES, &[("rules", &rules)])
+}
+
+fn primary(prefs: &toml::Table) -> String {
+    let name = crate::prefs::text(prefs, "primary_monitor", "");
+    let mut text = String::from("-- Primary XWayland output from Digit Settings. Requires xrandr.\n");
+    if prefs.contains_key("primary_monitor") {
+        // hl.exec_cmd uses a shell. Quote independently of the Lua string literal.
+        let quoted = format!("'{}'", name.replace('\'', "'\\''"));
+        let command = if name.is_empty() { "xrandr --noprimary".to_string() } else { format!("xrandr --output {quoted} --primary") };
+        let command = lua_str(&command);
+        text.push_str(&format!("local function primary()\n    hl.exec_cmd({command})\nend\nhl.on(\"hyprland.start\", primary)\nhl.on(\"config.reloaded\", primary)\nhl.on(\"monitor.layout_changed\", primary)\n"));
+    }
+    text
+}
+
 /// Corner radius for windows, following Settings > Desktop > Corners like the rest of digit.
 pub(crate) fn rounding() -> i64 {
     let round = crate::prefs::number(&crate::prefs::read(), "ui_round", 1.0).clamp(0.1, 1.8);
@@ -365,8 +411,8 @@ pub(crate) fn write_if_changed(path: &Path, body: &str) -> std::io::Result<bool>
     Ok(true)
 }
 
-/// Rewrites digit's folder from digit's settings. Displays and workspaces, which Settings
-/// writes itself, are only created when missing. Returns whether anything changed.
+/// Rewrites digit's folder from digit's settings. Display geometry is only created when
+/// missing; workspace assignments are regenerated from connector-keyed preferences.
 pub fn sync() -> Result<bool, String> {
     if !installed() {
         return Ok(false);
@@ -389,14 +435,16 @@ fn generate() -> Result<bool, String> {
     changed |= write_if_changed(&d.join("digit-keybinds.lua"), &render_keybinds(&binds)).map_err(e)?;
     changed |= write_if_changed(&d.join("digit-base.lua"), &base()).map_err(e)?;
     changed |= write_if_changed(&d.join("digit-decorations.lua"), &decorations()).map_err(e)?;
-    for (name, body) in [
-        ("digit-workspaces.lua", WORKSPACES),
-        ("digit-monitors.lua", MONITORS),
-    ] {
-        let p = d.join(name);
-        if !p.exists() {
-            changed |= write_if_changed(&p, body).map_err(e)?;
-        }
+    let prefs = crate::prefs::read();
+    changed |= write_if_changed(&d.join("digit-primary.lua"), &primary(&prefs)).map_err(e)?;
+    let workspaces_path = d.join("digit-workspaces.lua");
+    let managed = std::fs::read_to_string(&workspaces_path).is_ok_and(|text| text.starts_with(WORKSPACES.lines().next().unwrap_or_default()));
+    if prefs.contains_key("monitor_workspaces") || prefs.contains_key("primary_monitor") || managed || !workspaces_path.exists() {
+        changed |= write_if_changed(&workspaces_path, &workspaces(&prefs)).map_err(e)?;
+    }
+    let monitors_path = d.join("digit-monitors.lua");
+    if !monitors_path.exists() {
+        changed |= write_if_changed(&monitors_path, MONITORS).map_err(e)?;
     }
     Ok(changed)
 }
@@ -426,6 +474,60 @@ pub fn capture(on: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_rules_choose_the_lowest_default_and_keep_unplugged_connectors() {
+        let prefs = "primary_monitor = 'DP-1'\n[monitor_workspaces]\nDP-1 = [5, 3, 3, 0, 11]\nHDMI-A-1 = [10, 7]\n".parse().unwrap();
+        let rendered = workspaces(&prefs);
+        assert!(rendered.contains("workspace = \"1\", monitor = \"DP-1\", default = true"));
+        assert!(rendered.contains("workspace = \"3\", monitor = \"DP-1\" })"));
+        assert!(rendered.contains("workspace = \"7\", monitor = \"HDMI-A-1\", default = true"));
+        assert!(rendered.contains("workspace = \"10\", monitor = \"HDMI-A-1\" })"));
+        assert_eq!(rendered.matches("hl.workspace_rule(").count(), 5);
+        assert_eq!(rendered.matches("default = true").count(), 2);
+    }
+
+    #[test]
+    fn explicit_workspace_one_overrides_primary_and_duplicates_have_one_home() {
+        let prefs = "primary_monitor = 'HDMI-A-1'\n[monitor_workspaces]\nDP-1 = [1, 2]\nHDMI-A-1 = [2, 4]\n".parse().unwrap();
+        let rendered = workspaces(&prefs);
+        assert_eq!(rendered.matches("workspace = \"1\"").count(), 1);
+        assert_eq!(rendered.matches("workspace = \"2\"").count(), 1);
+        assert!(rendered.contains("workspace = \"1\", monitor = \"DP-1\", default = true"));
+        assert!(rendered.contains("workspace = \"4\", monitor = \"HDMI-A-1\", default = true"));
+    }
+
+    #[test]
+    fn automatic_primary_generates_no_rules_or_commands() {
+        let prefs = toml::Table::new();
+        assert!(!workspaces(&prefs).contains("hl.workspace_rule("));
+        assert!(!primary(&prefs).contains("hl.exec_cmd("));
+    }
+
+    #[test]
+    fn clearing_primary_removes_workspace_one_and_resets_xwayland_primary() {
+        let prefs = "primary_monitor = ''".parse().unwrap();
+        assert!(!workspaces(&prefs).contains("hl.workspace_rule("));
+        assert!(primary(&prefs).contains("hl.exec_cmd(\"xrandr --noprimary\")"));
+    }
+
+    #[test]
+    fn primary_command_quotes_connector_for_both_lua_and_the_shell() {
+        let mut prefs = toml::Table::new();
+        prefs.insert("primary_monitor".into(), toml::Value::String("DP-'\"$(touch /tmp/never)".into()));
+        let rendered = primary(&prefs);
+        let command = "xrandr --output 'DP-'\\''\"$(touch /tmp/never)' --primary";
+        assert!(rendered.contains(&format!("hl.exec_cmd({})", lua_str(command))));
+        for event in ["hyprland.start", "config.reloaded", "monitor.layout_changed"] {
+            assert!(rendered.contains(&format!("hl.on(\"{event}\", primary)")));
+        }
+    }
+
+    #[test]
+    fn workspace_connectors_are_lua_strings() {
+        let prefs = "[monitor_workspaces]\n'DP-\"1' = [2]\n".parse().unwrap();
+        assert!(workspaces(&prefs).contains("monitor = \"DP-\\\"1\", default = true"));
+    }
 
     #[test]
     fn wheel_focus_and_window_defaults_render_to_hyprland_actions() {
