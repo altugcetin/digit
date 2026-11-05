@@ -24,10 +24,13 @@ cd digit
 ./install.sh
 ```
 
-In a graphical session, this prepares build dependencies and Rust in the terminal,
-then builds and opens the GTK installer. Before building it prints “Preparing the
-graphical installer (one time, about a minute)”. This bootstrap does not install a
-compositor. If the frontend build fails, installation continues in text mode.
+In a graphical session, this asks in the terminal to install missing build/runtime
+prerequisites and prepare Rust, then caches Readex Pro, Rubik and Material Symbols
+Rounded before building and opening the GTK installer. Existing font files are
+reused; failed font downloads produce a warning and the installer still opens.
+Before building it prints “Preparing the graphical installer (one time, about a
+minute)”. This bootstrap does not install a compositor or optional services.
+If the frontend build fails, installation continues in text mode.
 Use `--tui` to go straight to the text installer.
 
 The installer:
