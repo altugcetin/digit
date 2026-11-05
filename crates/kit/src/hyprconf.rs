@@ -37,17 +37,7 @@ pub(crate) fn lua_str(s: &str) -> String {
 }
 
 pub(crate) fn terminal() -> String {
-    if let Ok(t) = std::env::var("TERMINAL")
-        && !t.trim().is_empty()
-    {
-        return t;
-    }
-    for t in ["xdg-terminal-exec", "kitty", "foot", "alacritty", "wezterm", "ghostty", "konsole", "gnome-terminal"] {
-        if gtk::glib::find_program_in_path(t).is_some() {
-            return t.into();
-        }
-    }
-    "kitty".into()
+    crate::terminal::command()
 }
 
 /// Left and right mean columns in the scrolling layout: the same keys focus or swap whole

@@ -38,19 +38,7 @@ pub fn scope_system() -> bool {
 }
 
 pub(crate) fn terminal(argv: &[&str]) -> Result<(), String> {
-    let chosen = kit::prefs::text(&kit::prefs::read(), "files_terminal", "");
-    let candidates = ["ghostty", "kitty", "foot", "alacritty", "wezterm", "konsole", "gnome-terminal", "ptyxis", "xterm"];
-    let term = if !chosen.is_empty() && glib::find_program_in_path(&chosen).is_some() { Some(chosen) } else { candidates.iter().find(|c| glib::find_program_in_path(c).is_some()).map(|c| c.to_string()) };
-    let term = term.ok_or("No terminal found")?;
-    let mut full: Vec<String> = vec![term.clone()];
-    let executable = std::path::Path::new(&term).file_name().and_then(|s| s.to_str()).unwrap_or_default();
-    match executable {
-        "kitty" | "foot" => full.push("--hold".into()),
-        "gnome-terminal" | "ptyxis" => full.push("--".into()),
-        "wezterm" => full.extend(["start".into(), "--".into()]),
-        _ => full.push("-e".into()),
-    }
-    full.extend(argv.iter().map(|s| s.to_string()));
+    let full = kit::terminal::with_command(argv);
     let os: Vec<&std::ffi::OsStr> = full.iter().map(std::ffi::OsStr::new).collect();
     gio::Subprocess::newv(&os, gio::SubprocessFlags::NONE).map(|_| ()).map_err(|e| e.to_string())
 }

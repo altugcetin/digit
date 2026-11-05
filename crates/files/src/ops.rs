@@ -1055,16 +1055,16 @@ pub fn terminal(dir: &gio::File) {
         crate::toast("Terminals open only in local folders");
         return;
     };
-    let chosen = kit::prefs::text(&kit::prefs::read(), "files_terminal", "");
-    let candidates = ["ghostty", "kitty", "foot", "alacritty", "wezterm", "konsole", "gnome-terminal", "ptyxis", "xfce4-terminal", "xterm"];
-    let bin = if !chosen.is_empty() && has(&chosen) { Some(chosen) } else { candidates.iter().find(|c| has(c)).map(|c| c.to_string()) };
-    let Some(bin) = bin else {
+    let line = kit::terminal::command();
+    let argv: Vec<&std::ffi::OsStr> = line.split_whitespace().map(std::ffi::OsStr::new).collect();
+    let bin = argv.first().map(|b| b.to_string_lossy().into_owned()).unwrap_or_default();
+    if argv.is_empty() || !has(&bin) {
         crate::toast("No terminal found");
         return;
-    };
+    }
     let launcher = gio::SubprocessLauncher::new(gio::SubprocessFlags::NONE);
     launcher.set_cwd(&path);
-    if launcher.spawn(&[std::ffi::OsStr::new(&bin)]).is_err() {
+    if launcher.spawn(&argv).is_err() {
         crate::toast(&format!("Couldn't start {bin}"));
     }
 }

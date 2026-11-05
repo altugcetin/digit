@@ -396,17 +396,7 @@ pub fn ask(parent: Option<&gtk::Window>, title: &str, detail: &str, cancel: &str
 }
 
 pub fn terminal(argv: &[&str]) -> Result<(), String> {
-    let term = std::env::var("TERMINAL").ok().filter(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/')));
-    let term = term.unwrap_or_else(|| "kitty".into());
-    let base = std::path::Path::new(&term).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    let mut full: Vec<String> = vec![term.clone()];
-    match base.as_str() {
-        "kitty" => full.push("--hold".into()),
-        "foot" => full.push("--hold".into()),
-        "alacritty" | "wezterm" | "ghostty" => full.push("-e".into()),
-        _ => full.push("-e".into()),
-    }
-    full.extend(argv.iter().map(|s| s.to_string()));
+    let full = kit::terminal::with_command(argv);
     let os: Vec<&std::ffi::OsStr> = full.iter().map(std::ffi::OsStr::new).collect();
     aside();
     gtk::gio::Subprocess::newv(&os, gtk::gio::SubprocessFlags::NONE).map(|_| ()).map_err(|e| e.to_string())

@@ -15,7 +15,7 @@ pub(crate) fn save_many(values: &[(&str, toml::Value)]) -> bool {
     }
     // Compositor settings (and the accent, which colors niri's window border) go straight into
     // digit's part of the compositor config.
-    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "ui_accent" | "border_color" | "reduced_effects")) {
+    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "ui_accent" | "border_color" | "reduced_effects" | "terminal")) {
         glib::spawn_future_local(async {
             match gio::spawn_blocking(kit::setup::apply).await {
                 Ok(Ok(())) => {},
@@ -1164,15 +1164,6 @@ fn files(body: &gtk::Box, t: &toml::Table) {
     choice(&files, "view_list", "View", "", "files_view", &[("grid", "Icons"), ("list", "List")], &prefs::get_str(&t, "files_view", "grid"));
     toggle(&files, "visibility", "Show hidden files", "Ctrl+H toggles it in the window", "files_hidden", prefs::get_bool(&t, "files_hidden", false));
     choice(&files, "photo_size_select_small", "Thumbnails", "Videos, PDFs and documents are rendered in a sandbox", "files_thumbnails", &[("local", "This computer only"), ("all", "Everywhere, also network"), ("off", "Never")], &prefs::get_str(&t, "files_thumbnails", "local"));
-    let terms: Vec<&str> = ["ghostty", "kitty", "foot", "alacritty", "wezterm", "konsole", "gnome-terminal", "ptyxis", "xfce4-terminal", "xterm"].into_iter().filter(|b| glib::find_program_in_path(b).is_some()).collect();
-    if !terms.is_empty() {
-        let mut opts: Vec<(&'static str, &'static str)> = vec![("", "Automatic")];
-        for b in terms {
-            let s: &'static str = Box::leak(b.to_string().into_boxed_str());
-            opts.push((s, s));
-        }
-        choice(&files, "terminal", "Terminal", "Used by Open Terminal Here (F4)", "files_terminal", &opts, &prefs::get_str(&t, "files_terminal", ""));
-    }
 }
 
 pub fn advanced(body: &gtk::Box, _: &toml::Table) {
