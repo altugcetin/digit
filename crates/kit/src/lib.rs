@@ -10,6 +10,7 @@ pub mod niriconf;
 pub mod setup;
 pub mod keybinds;
 pub mod motion;
+pub mod optional;
 pub mod paint;
 pub mod palette;
 pub mod pictures;

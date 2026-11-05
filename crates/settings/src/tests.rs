@@ -272,3 +272,97 @@ fn settings_controls_and_dialogs() {
     let context = glib::MainContext::default();
     while context.pending() { context.iteration(false); }
 }
+
+#[test]
+fn recording_page_tracks_optional_recorder_and_indexes_rows() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(mode) = std::env::var_os("DIGIT_SETTINGS_RECORDING_TEST") else {
+        let dir = std::env::temp_dir().join(format!("digit-recording-test-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        for mode in ["missing", "present"] {
+            let root = dir.join(mode);
+            let bin = root.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            if mode == "present" {
+                let program = bin.join("gpu-screen-recorder");
+                std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+                std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::recording_page_tracks_optional_recorder_and_indexes_rows", "--nocapture"])
+                .env("DIGIT_SETTINGS_RECORDING_TEST", mode)
+                .env("XDG_CONFIG_HOME", root.join("config"))
+                .env("XDG_STATE_HOME", root.join("state"))
+                .env("XDG_CACHE_HOME", root.join("cache"))
+                .env("XDG_DATA_HOME", root.join("data"))
+                .env("PATH", &bin)
+                .status().unwrap();
+            assert!(status.success(), "recording page with {mode} recorder");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    };
+    let present = mode == "present";
+    assert_eq!(kit::optional::present(&kit::optional::GPU_SCREEN_RECORDER), present);
+    if let Err(e) = gtk::init() {
+        eprintln!("Skipping recording GTK checks without a display: {e}");
+        return;
+    }
+    let page = crate::build_page("recording");
+    let all = widgets(&page);
+    let cards: Vec<_> = all.iter().filter(|w| w.has_css_class("card")).collect();
+    assert_eq!(cards.len(), if present { 6 } else { 7 });
+    let settings = if present { &cards[..] } else { &cards[1..] };
+    assert!(settings.iter().all(|card| card.is_sensitive() == present));
+    let store = all.iter().filter_map(|w| w.downcast_ref::<gtk::Button>()).find(|b| b.label().as_deref() == Some("Open Store"));
+    assert_eq!(store.is_some(), !present);
+    if let Some(store) = store { assert!(store.is_sensitive()); }
+    let headings: Vec<_> = all.iter().filter(|w| w.has_css_class("heading")).filter_map(|w| w.downcast_ref::<gtk::Label>().map(|l| l.text().to_string())).collect();
+    assert_eq!(headings, ["Capture", "Sound", "Instant Replay", "Saving", "Streaming", "Shortcuts"]);
+    let rows: Vec<_> = all.iter().filter(|w| w.has_css_class("row")).collect();
+    let shortcuts = widgets(*settings.last().unwrap());
+    assert_eq!(shortcuts.iter().filter(|w| w.has_css_class("row")).count(), 1);
+    assert!(shortcuts.iter().filter_map(|w| w.downcast_ref::<gtk::Label>()).any(|l| l.has_css_class("name") && l.text() == "Shortcuts"));
+    assert!(shortcuts.iter().filter_map(|w| w.downcast_ref::<gtk::Label>()).any(|l| l.text() == "Start, stop, pause and replay recordings with keys"));
+    let buttons: Vec<_> = shortcuts.iter().filter_map(|w| w.downcast_ref::<gtk::Button>()).collect();
+    assert_eq!(buttons.len(), 1);
+    assert_eq!(buttons[0].label().as_deref(), Some("Change…"));
+    assert!(!all.iter().any(|w| w.has_css_class("keycap")));
+    for bind in kit::keybinds::all().into_iter().filter(|b| b.group == "Recording") {
+        assert!(!all.iter().filter_map(|w| w.downcast_ref::<gtk::Label>()).any(|l| l.text() == bind.label));
+    }
+    for (title, expected) in [("What to record", "The focused screen"), ("Frame rate", "60 fps"), ("Quality", "Very high"), ("Codec", "Automatic (H.264)"), ("Keep the last", "1 minute")] {
+        let row = rows.iter().find(|r| widgets(**r).iter().filter_map(|w| w.downcast_ref::<gtk::Label>()).any(|l| l.text() == title)).unwrap();
+        let pick = widgets(*row).into_iter().find_map(|w| w.downcast::<gtk::DropDown>().ok()).unwrap();
+        assert_eq!(pick.selected_item().unwrap().downcast::<gtk::StringObject>().unwrap().string(), expected);
+    }
+    for (title, expected) in [("Show the pointer", true), ("System sound", true), ("Microphone", false)] {
+        let row = rows.iter().find(|r| widgets(**r).iter().filter_map(|w| w.downcast_ref::<gtk::Label>()).any(|l| l.text() == title)).unwrap();
+        let switch = widgets(*row).into_iter().find_map(|w| w.downcast::<gtk::Switch>().ok()).unwrap();
+        assert_eq!(switch.is_active(), expected);
+    }
+    assert!(!prefs::path().exists(), "building the page must not write defaults");
+    if present {
+        let stream = all.iter().find_map(|w| w.downcast_ref::<gtk::PasswordEntry>()).unwrap();
+        let path = glib::user_config_dir().join("digit/rec-stream");
+        stream.set_text("rtmps://example.test/live/private-key");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), stream.text());
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        // Replacing a pre-existing file must repair its permissions too.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        stream.set_text("srt://example.test/private-key");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let rebuilt = crate::build_page("recording");
+        assert_eq!(widgets(&rebuilt).iter().find_map(|w| w.downcast_ref::<gtk::PasswordEntry>()).unwrap().text(), stream.text());
+        assert!(!prefs::path().exists(), "stream keys stay outside preferences");
+        crate::search::refresh();
+        let cache = std::fs::read_to_string(crate::search::cache()).unwrap();
+        assert!(!cache.contains("private-key"));
+        let index: Vec<serde_json::Value> = serde_json::from_str(&cache).unwrap();
+        for (title, section) in [("What to record", "capture"), ("Frame rate", "capture"), ("System sound", "sound"), ("Keep the last", "instant-replay"), ("Save to", "saving"), ("Stream address", "streaming"), ("Shortcuts", "shortcuts")] {
+            let link = format!("recording/{}/{section}", crate::search::slug(title));
+            assert!(index.iter().any(|hit| hit["title"] == title && hit["link"] == link), "missing index row: {link}");
+        }
+        stream.set_text("");
+        assert!(!path.exists(), "clearing the stream address removes its private file");
+    }
+}
