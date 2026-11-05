@@ -182,7 +182,15 @@ pub(crate) fn rounding() -> i64 {
 /// digit-base.lua: what the config needs to be usable on its own: input, layouts, gestures,
 /// environment.
 fn base() -> String {
-    fill(BASE, &[("settings", &compositor())])
+    let gpu = NVIDIA_ENV.iter().filter(|_| nvidia()).map(|(k, v)| format!("hl.env(\"{k}\", \"{v}\")\n")).collect::<String>();
+    fill(BASE, &[("settings", &compositor()), ("gpu", &gpu)])
+}
+
+/// What the NVIDIA driver needs for hardware video (screen sharing, players) and GLX apps.
+pub(crate) const NVIDIA_ENV: [(&str, &str); 3] = [("LIBVA_DRIVER_NAME", "nvidia"), ("__GLX_VENDOR_LIBRARY_NAME", "nvidia"), ("NVD_BACKEND", "direct")];
+
+pub(crate) fn nvidia() -> bool {
+    Path::new("/sys/module/nvidia_drm").exists()
 }
 
 /// Settings > Compositor, as Lua: every value, with digit's defaults for the ones never changed.
