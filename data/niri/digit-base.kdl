@@ -1,5 +1,5 @@
-// The base of a full setup: environment, layout and small fixes. Written by digit;
-// change any of it in config.kdl, which loads after this.
+// Session defaults: environment, layout and small fixes. Written by digit;
+// change any of it in user.kdl, which loads after this.
 
 environment {
     QT_QPA_PLATFORMTHEME "qt6ct"

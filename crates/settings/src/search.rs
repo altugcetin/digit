@@ -150,7 +150,7 @@ pub fn refresh() {
     index();
 }
 
-/// Settings change what pages show (setup rows, niri-only rows), so the index is rebuilt
+/// Settings change what pages show (session notices, niri-only rows), so the index is rebuilt
 /// on the next search.
 pub fn forget() {
     INDEX.with(|i| *i.borrow_mut() = None);

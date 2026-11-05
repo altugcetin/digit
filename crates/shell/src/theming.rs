@@ -89,7 +89,7 @@ fn gtk_css(t: &Theme) -> String {
 }
 
 fn niri_radius() -> u32 {
-    let path = gtk::glib::user_config_dir().join("niri/config.kdl");
+    let path = kit::niriconf::dir().join("digit-decorations.kdl");
     std::fs::read_to_string(path)
         .ok()
         .and_then(|text| {

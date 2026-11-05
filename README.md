@@ -32,8 +32,19 @@ The installer:
 5. installs the fonts (Readex Pro, Rubik, Material Symbols Rounded) to `~/.local/share/fonts/digit`,
    adds Settings, Store, Files, Screenshot and Recorder to your app list and sets up Flathub
    for Digit Store,
-6. adds digit's shortcuts and autostart to your compositor config, with backups
-   (`*.bak-<date>`) and, for niri, validation before anything is changed.
+6. installs the “Hyprland with Digit” or “niri with Digit” login session for the chosen
+   compositor (the session file in `/usr/share/wayland-sessions` needs sudo) and writes its config.
+
+Log out and select the Digit session on the login screen. Digit keeps its own
+config in `~/.config/digit/hyprland` or `~/.config/digit/niri`; your normal
+`~/.config/hypr` and `~/.config/niri` are never changed. Add personal settings to
+`user.lua` or `user.kdl` in the Digit compositor folder: they load last and Digit
+never overwrites them. `XDG_CONFIG_HOME` is respected. Compositor settings in
+Settings apply only inside a Digit session.
+
+For headless preparation, run `digit-settings --prepare-session hyprland` (or
+`niri`). Uninstalling removes the login sessions and launcher and keeps your
+Digit settings, including the user files.
 
 Options:
 

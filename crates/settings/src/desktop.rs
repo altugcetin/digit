@@ -491,7 +491,7 @@ fn icon_themes() -> Vec<String> {
 }
 
 fn niri_dir() -> std::path::PathBuf {
-    glib::user_config_dir().join("niri")
+    kit::niriconf::niri()
 }
 
 fn free_windows() -> bool {
@@ -501,7 +501,7 @@ fn free_windows() -> bool {
 fn set_windows(free: bool) -> bool {
     // digit's niri rules include this file, so writing it is enough.
     if !kit::niriconf::installed() {
-        ui::fail("Set digit up on niri first, above");
+        ui::fail("Log in to niri with Digit to change these");
         return false;
     }
     let file = niri_dir().join("digit-windows.kdl");
@@ -537,7 +537,7 @@ pub fn sections(page: &str) -> &'static [Section] {
         "notch" => &[notch, menu_bar, panels, screen_edges],
         "desktop" => &[desktop, weather],
         "spotlight" => &[search, scopes, clipboard],
-        "compositor" => &[setup],
+        "compositor" => &[session],
         "displays" => &[night_light],
         "power" => &[power],
         "screenshots" => &[screenshots],
@@ -691,41 +691,26 @@ fn dock(body: &gtk::Box, t: &toml::Table) {
     }
 }
 
-pub fn setup(body: &gtk::Box, _: &toml::Table) {
-    if kit::setup::kind().is_none() {
+pub fn session_notice(body: &gtk::Box, kind: kit::setup::Kind) {
+    let card = ui::card();
+    let (row, _) = ui::row(Some("info"), &format!("Log in to {} with Digit to change these", kind.name()), "Choose the session on your login screen");
+    card.append(&row);
+    body.append(&card);
+}
+
+pub fn session(body: &gtk::Box, _: &toml::Table) {
+    let Some(kind) = kit::setup::kind() else { return };
+    if !kit::setup::installed() {
+        session_notice(body, kind);
         return;
     }
-    let win = section(body, "Setup");
-    if let Some(kind) = kit::setup::kind() {
-        let installed = kit::setup::installed();
-        let (folder, main) = match kind {
-            kit::setup::Kind::Hyprland => ("~/.config/hypr", "hyprland.lua"),
-            kit::setup::Kind::Niri => ("~/.config/niri", "config.kdl"),
-        };
-        let sub = if installed {
-            format!("digit keeps its part in {folder}/digit; your own settings go in {main}")
-        } else {
-            format!("Not set up. Your {folder} is backed up first, then digit sets up its shortcuts, window keys and looks")
-        };
-        let (row, end) = ui::row(Some("tune"), &format!("{} setup", kind.name()), &sub);
-        if !installed {
-            let b = ui::button("Set up", "accent");
-            let detail = format!("Your {folder} is copied to a dated backup folder, then digit sets up the whole config. Your own shortcuts from the old config need to be set again, in Settings > Keyboard or in {main}.");
-            b.connect_clicked(move |b| {
-                let parent = ui::root(b);
-                ui::ask(parent.as_ref(), &format!("Set up {}?", kind.name()), &detail, "Cancel", "Set up", "accent", move || match kit::setup::setup() {
-                    Ok(note) => {
-                        ui::done(&note);
-                        crate::reload("compositor");
-                        crate::reload("keyboard");
-                    }
-                    Err(e) => ui::fail(&e),
-                });
-            });
-            end.append(&b);
-        }
-        win.append(&row);
-    }
+    let win = section(body, "Session");
+    let user = match kind {
+        kit::setup::Kind::Hyprland => "~/.config/digit/hyprland/user.lua",
+        kit::setup::Kind::Niri => "~/.config/digit/niri/user.kdl",
+    };
+    let (row, _) = ui::row(Some("tune"), &format!("{} with Digit", kind.name()), &format!("Your additions in {user} load last"));
+    win.append(&row);
     if kit::setup::kind() == Some(kit::setup::Kind::Niri) {
         let (row, end) = ui::row(Some("select_window"), "Window placement", "Free: windows open side by side; drag by the title bar or Super + drag, resize with Super + right drag. Super+Up maximizes, Super+Left/Right fills a half, Super+Down restores");
         let modes = ["Tiling columns", "Free placement"];

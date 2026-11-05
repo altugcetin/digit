@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=niri with Digit
+Comment=niri with the Digit desktop
+Exec=digit-session niri
+Type=Application
+DesktopNames=niri

@@ -568,40 +568,18 @@ fn main() -> glib::ExitCode {
         install();
         return glib::ExitCode::SUCCESS;
     }
-    // The installer sets digit up through here, sharing the code Settings uses.
-    if std::env::args().nth(1).as_deref() == Some("--hypr-setup") {
-        return match kit::hyprconf::setup() {
-            Ok(note) => {
-                println!("{note}");
-                glib::ExitCode::SUCCESS
-            }
-            Err(e) => {
-                eprintln!("{e}");
-                glib::ExitCode::FAILURE
-            }
-        };
-    }
-    // The installer sets digit up through here, sharing the code Settings uses.
-    if std::env::args().nth(1).as_deref() == Some("--niri-setup") {
-        return match kit::niriconf::setup() {
-            Ok(note) => {
-                println!("{note}");
-                glib::ExitCode::SUCCESS
-            }
-            Err(e) => {
-                eprintln!("{e}");
-                glib::ExitCode::FAILURE
-            }
-        };
-    }
-    if std::env::args().nth(1).as_deref() == Some("--niri-remove") {
-        return match kit::niriconf::remove() {
+    if std::env::args().nth(1).as_deref() == Some("--prepare-session") {
+        return match kit::setup::prepare(&std::env::args().nth(2).unwrap_or_default()) {
             Ok(()) => glib::ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("{e}");
                 glib::ExitCode::FAILURE
             }
         };
+    }
+    if matches!(std::env::args().nth(1).as_deref(), Some("--hypr-setup" | "--niri-setup")) {
+        println!("Log out and select Hyprland with Digit or niri with Digit.");
+        return glib::ExitCode::SUCCESS;
     }
     // Spotlight asks for the settings index this way when it has none or it is out of date.
     if std::env::args().nth(1).as_deref() == Some("--index") {
@@ -622,15 +600,6 @@ fn main() -> glib::ExitCode {
     }
     if std::env::args().nth(1).as_deref() == Some("--hypr-sync") {
         return match kit::hyprconf::apply() {
-            Ok(()) => glib::ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("{e}");
-                glib::ExitCode::FAILURE
-            }
-        };
-    }
-    if std::env::args().nth(1).as_deref() == Some("--hypr-remove") {
-        return match kit::hyprconf::remove() {
             Ok(()) => glib::ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("{e}");

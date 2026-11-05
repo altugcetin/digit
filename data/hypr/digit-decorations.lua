@@ -1,6 +1,6 @@
 -- Look and feel of windows. Written by digit: Settings > Desktop > Corners sets the rounding,
 -- Settings > Compositor the gaps, borders, shadows and blur.
--- Change the rest in hyprland.lua, which loads after this.
+-- Change the rest in user.lua, which loads after this.
 
 hl.config({
     general = {
