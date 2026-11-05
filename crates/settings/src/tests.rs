@@ -217,6 +217,60 @@ fn settings_controls_and_dialogs() {
     assert_eq!(prefs::get_str(&prefs::read(), "snap_frame", ""), "Ocean");
     assert!(widgets(&screenshot_page).into_iter().filter_map(|w| w.downcast::<gtk::Button>().ok()).any(|b| b.label().as_deref() == Some("Choose…")));
 
+    let desktop_page = desktop::build("desktop", "Desktop", "");
+    let folder_row = widgets(&desktop_page).into_iter().filter_map(|w| w.downcast::<gtk::Label>().ok()).find(|l| l.text() == "Wallpaper folder").unwrap().parent().unwrap().parent().unwrap();
+    let folder = widgets(&folder_row).into_iter().find_map(|w| w.downcast::<gtk::Entry>().ok()).unwrap();
+    assert!(folder.text().is_empty(), "an empty folder keeps the default search locations");
+    assert!(widgets(&folder_row).into_iter().filter_map(|w| w.downcast::<gtk::Button>().ok()).any(|b| b.label().as_deref() == Some("Choose…")));
+    let wall_dir = glib::user_cache_dir().join("wallpapers");
+    std::fs::create_dir_all(&wall_dir).unwrap();
+    let wall_dir = wall_dir.display().to_string();
+    folder.set_text(&wall_dir);
+    folder.emit_activate();
+    assert_eq!(prefs::get_str(&prefs::read(), "wall_dir", ""), wall_dir);
+    for invalid in ["relative/folder".to_string(), format!("{wall_dir}/missing"), format!("{wall_dir}/bad\nfolder"), prefs::path().display().to_string()] {
+        folder.set_text(&invalid);
+        folder.emit_activate();
+        assert!(folder.has_css_class("error"));
+        assert_eq!(prefs::get_str(&prefs::read(), "wall_dir", ""), wall_dir);
+    }
+    let accepted = std::fs::read(prefs::path()).unwrap();
+    std::fs::write(prefs::path(), damaged).unwrap();
+    folder.set_text("");
+    folder.emit_activate();
+    assert_eq!(folder.text(), wall_dir, "a failed save restores the last accepted folder");
+    assert_eq!(std::fs::read_to_string(prefs::path()).unwrap(), damaged);
+    std::fs::write(prefs::path(), accepted).unwrap();
+    folder.set_text("");
+    folder.emit_activate();
+    assert_eq!(prefs::get_str(&prefs::read(), "wall_dir", "missing"), "");
+
+    let notch_page = desktop::build("notch", "Notch and menu bar", "");
+    let logo_row = widgets(&notch_page).into_iter().filter_map(|w| w.downcast::<gtk::Label>().ok()).find(|l| l.text() == "Menu bar logo").unwrap().parent().unwrap().parent().unwrap();
+    let logos: Vec<_> = widgets(&logo_row).into_iter().filter_map(|w| w.downcast::<gtk::ToggleButton>().ok()).collect();
+    assert_eq!(logos.len(), 2);
+    assert!(logos[0].is_active(), "the distribution logo is the default");
+    assert_eq!(logos[0].label().as_deref(), Some("Distribution"));
+    assert_eq!(logos[1].label().as_deref(), Some("Digit"));
+    logos[1].set_active(true);
+    assert_eq!(prefs::get_str(&prefs::read(), "menubar_logo", ""), "digit");
+    let rebuilt = desktop::build("notch", "Notch and menu bar", "");
+    assert!(widgets(&rebuilt).into_iter().filter_map(|w| w.downcast::<gtk::ToggleButton>().ok()).any(|b| b.label().as_deref() == Some("Digit") && b.is_active()));
+    let accepted = std::fs::read(prefs::path()).unwrap();
+    std::fs::write(prefs::path(), damaged).unwrap();
+    logos[0].set_active(true);
+    assert!(logos[1].is_active(), "a failed save restores the logo choice");
+    assert_eq!(std::fs::read_to_string(prefs::path()).unwrap(), damaged);
+    std::fs::write(prefs::path(), accepted).unwrap();
+    logos[0].set_active(true);
+    assert_eq!(prefs::get_str(&prefs::read(), "menubar_logo", ""), "distro");
+    let enabled_row = widgets(&notch_page).into_iter().filter_map(|w| w.downcast::<gtk::Label>().ok()).filter(|l| l.text() == "Menu bar" && l.has_css_class("name")).filter_map(|l| l.parent()?.parent()).find(|row| widgets(row).into_iter().any(|w| w.is::<gtk::Switch>())).unwrap();
+    let enabled = widgets(&enabled_row).into_iter().find_map(|w| w.downcast::<gtk::Switch>().ok()).unwrap();
+    enabled.set_active(false);
+    assert!(!logo_row.is_sensitive());
+    enabled.set_active(true);
+    assert!(logo_row.is_sensitive());
+
     let appearance = desktop::build("appearance", "Appearance", "");
     let color_row = widgets(&appearance).into_iter().filter_map(|w| w.downcast::<gtk::Label>().ok()).find(|l| l.text() == "Color scheme").unwrap().parent().unwrap().parent().unwrap();
     let color = widgets(&color_row).into_iter().find_map(|w| w.downcast::<gtk::DropDown>().ok()).unwrap();

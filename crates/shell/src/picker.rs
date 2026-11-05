@@ -110,9 +110,60 @@ pub fn toggle(app: &Rc<App>) {
 
 thread_local! {
     static SLIDES: RefCell<Option<glib::SourceId>> = const { RefCell::new(None) };
+    static WALL_DIR: RefCell<String> = RefCell::new(kit::prefs::text(&kit::prefs::read(), "wall_dir", ""));
+    static PREFS_MONITOR: RefCell<Option<gio::FileMonitor>> = const { RefCell::new(None) };
+}
+
+/// Reload the selected source in place, keeping the current preview and search.
+fn prefs_changed(app: &Rc<App>) {
+    let dir = kit::prefs::text(&kit::prefs::read(), "wall_dir", "");
+    let changed = WALL_DIR.with(|old| old.replace(dir.clone()) != dir);
+    if changed {
+        let picker = app.picker.borrow().clone();
+        if let Some(picker) = picker {
+            let (open, source) = {
+                let s = picker.0.borrow();
+                (s.open, s.source)
+            };
+            if open && source == Source::Yours {
+                picker.0.borrow_mut().preview_wait += 1;
+                picker.load(source);
+            }
+        }
+    }
+    crate::menubar::prefs_changed(app);
+}
+
+fn watch_prefs(app: &Rc<App>) {
+    PREFS_MONITOR.with(|slot| {
+        if slot.borrow().is_some() {
+            return;
+        }
+        let Some(dir) = kit::prefs::path().parent().map(std::path::Path::to_path_buf) else { return };
+        let Ok(monitor) = gio::File::for_path(dir).monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE) else { return };
+        let weak = Rc::downgrade(app);
+        let pending = Rc::new(std::cell::Cell::new(false));
+        monitor.connect_changed(move |_, file, other, _| {
+            let ours = |f: &gio::File| f.basename().is_some_and(|b| b.as_os_str() == "config.toml");
+            if (!ours(file) && !other.is_some_and(ours)) || pending.replace(true) {
+                return;
+            }
+            let (weak, pending) = (weak.clone(), pending.clone());
+            glib::timeout_add_local_once(Duration::from_millis(90), move || {
+                pending.set(false);
+                if let Some(app) = weak.upgrade() {
+                    prefs_changed(&app);
+                }
+            });
+        });
+        *slot.borrow_mut() = Some(monitor);
+    });
 }
 
 pub fn slideshow(app: &Rc<App>) {
+    // Initialize the folder before the first config change, even if the picker stays closed.
+    WALL_DIR.with(|_| {});
+    watch_prefs(app);
     if let Some(id) = SLIDES.with(|s| s.borrow_mut().take()) {
         id.remove();
     }
@@ -149,12 +200,10 @@ fn list(source: Source) -> Vec<String> {
     match source {
         Source::Yours => {
             let mut out = wallpaper::used();
-            if let Some(pictures) = source_dir(Source::Pictures) {
-                for dir in [pictures.join("Wallpapers"), pictures.join("wallpapers")] {
-                    for p in wallpaper::listed(&dir) {
-                        if !out.contains(&p) {
-                            out.push(p);
-                        }
+            for dir in wallpaper::directories() {
+                for p in wallpaper::listed(&dir) {
+                    if !out.contains(&p) {
+                        out.push(p);
                     }
                 }
             }
