@@ -1,9 +1,7 @@
-use crate::{ops, thumbs};
+use crate::{ops, search, thumbs};
 use gtk::{gdk, gio, glib, pango, prelude::*};
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 pub const ATTRS: &str = "standard::name,standard::display-name,standard::edit-name,standard::type,standard::size,standard::icon,standard::fast-content-type,standard::is-hidden,standard::is-backup,standard::is-symlink,standard::target-uri,time::modified,access::can-write,access::can-trash,access::can-rename,trash::orig-path,trash::deletion-date,unix::mode";
@@ -39,7 +37,11 @@ pub struct Pane {
     zoom_gen: Cell<u64>,
     view: Cell<View>,
     found: gio::ListStore,
-    hunt: RefCell<Option<Arc<AtomicBool>>>,
+    hunt: RefCell<Option<gio::Cancellable>>,
+    hunt_source: RefCell<Option<glib::SourceId>>,
+    hunt_debounce: RefCell<Option<glib::SourceId>>,
+    hunt_generation: Cell<u64>,
+    search_cache: RefCell<Option<search::Cache>>,
     pub cut: Rc<RefCell<Vec<String>>>,
     pending: RefCell<Option<String>>,
 }
@@ -160,13 +162,15 @@ impl Pane {
                 return false;
             }
             let q = q.borrow();
-            q.is_empty() || info.display_name().to_lowercase().contains(q.as_str())
+            q.is_empty() || search::matches(&info.display_name(), &q)
         });
         let filtered = gtk::FilterListModel::new(Some(dir.clone()), Some(filter.clone()));
+        filtered.set_incremental(true);
         let folders = sorter(|a, b| order(!is_dir(a), !is_dir(b)));
         let multi = gtk::MultiSorter::new();
         multi.append(folders);
         let sorted = gtk::SortListModel::new(Some(filtered.clone()), Some(multi.clone()));
+        sorted.set_incremental(true);
         let sel = gtk::MultiSelection::new(Some(sorted.clone()));
         let grid = gtk::GridView::new(Some(sel.clone()), None::<gtk::ListItemFactory>);
         grid.set_enable_rubberband(true);
@@ -230,6 +234,10 @@ impl Pane {
             view: Cell::new(View::Grid),
             found: gio::ListStore::new::<gio::FileInfo>(),
             hunt: RefCell::new(None),
+            hunt_source: RefCell::new(None),
+            hunt_debounce: RefCell::new(None),
+            hunt_generation: Cell::new(0),
+            search_cache: RefCell::new(None),
             cut: Rc::new(RefCell::new(Vec::new())),
             pending: RefCell::new(None),
         });
@@ -583,6 +591,20 @@ impl Pane {
                 p.sync_status();
             }
         });
+        // Incremental filtering/sorting can settle after DirectoryList finishes.
+        // Keep a pending reveal until both models have processed the directory.
+        let me = self.weak();
+        self.filtered.connect_pending_notify(move |_| {
+            if let Some(p) = me.upgrade() && !p.dir.is_loading() {
+                p.settled();
+            }
+        });
+        let me = self.weak();
+        self.sorted.connect_pending_notify(move |_| {
+            if let Some(p) = me.upgrade() && !p.dir.is_loading() {
+                p.settled();
+            }
+        });
         let me = self.weak();
         self.sel.connect_selection_changed(move |_, _, _| {
             if let Some(p) = me.upgrade() {
@@ -756,7 +778,11 @@ impl Pane {
     }
 
     fn settled(&self) {
-        if let Some(name) = self.pending.borrow_mut().take() {
+        if self.filtered.pending() > 0 || self.sorted.pending() > 0 {
+            return;
+        }
+        let pending = self.pending.borrow_mut().take();
+        if let Some(name) = pending {
             let n = self.sorted.n_items();
             if let Some(pos) = (0..n).find(|i| self.sorted.item(*i).and_downcast::<gio::FileInfo>().is_some_and(|f| f.name().to_str() == Some(name.as_str()))) {
                 self.reveal(pos);
@@ -812,6 +838,8 @@ impl Pane {
         self.stop_hunt();
         self.query.borrow_mut().clear();
         self.filtered.set_model(Some(&self.dir));
+        self.search_cache.borrow_mut().take();
+        self.found.remove_all();
         self.filter.changed(gtk::FilterChange::LessStrict);
         self.typed.borrow_mut().0.clear();
         self.dir.set_file(Some(file));
@@ -850,10 +878,15 @@ impl Pane {
         !self.future.borrow().is_empty()
     }
 
-    pub fn refresh(&self) {
+    pub fn refresh(self: &Rc<Self>) {
         let f = self.location();
         self.dir.set_file(None::<&gio::File>);
         self.dir.set_file(Some(&f));
+        self.stop_hunt();
+        self.search_cache.borrow_mut().take();
+        if self.filtered.model().is_some_and(|model| model == self.found) {
+            self.queue_hunt();
+        }
     }
 
     pub fn selected(&self) -> Vec<gio::FileInfo> {
@@ -943,9 +976,16 @@ impl Pane {
         self.hidden.get()
     }
 
-    pub fn set_hidden(&self, on: bool) {
-        self.hidden.set(on);
+    pub fn set_hidden(self: &Rc<Self>, on: bool) {
+        if self.hidden.replace(on) == on {
+            return;
+        }
+        self.stop_hunt();
+        self.search_cache.borrow_mut().take();
         self.filter.changed(gtk::FilterChange::Different);
+        if self.filtered.model().is_some_and(|model| model == self.found) {
+            self.queue_hunt();
+        }
     }
 
     pub fn sort_by(&self, column: usize, descending: bool) {
@@ -973,56 +1013,105 @@ impl Pane {
     }
 
     pub fn search(self: &Rc<Self>, q: &str, deep: bool) {
-        let q = q.trim().to_lowercase();
+        let q = search::normalize(q);
+        let previous = self.query();
+        let recursive = !q.is_empty() && deep && self.location().is_native();
+        let showing_found = self.filtered.model().is_some_and(|model| model == self.found);
+        if q == previous && recursive == showing_found {
+            return;
+        }
+        let reuse = self.search_cache.borrow().as_ref().is_some_and(|cache| cache.can_narrow(&previous, &q));
         self.stop_hunt();
         *self.query.borrow_mut() = q.clone();
-        if q.is_empty() || !deep || !self.location().is_native() {
+        if !recursive {
             self.filtered.set_model(Some(&self.dir));
             self.filter.changed(gtk::FilterChange::Different);
             self.sync_status();
             return;
         }
-        self.found.remove_all();
         self.filtered.set_model(Some(&self.found));
         self.filter.changed(gtk::FilterChange::Different);
-        let Some(root) = self.location().path() else { return };
-        let stop = Arc::new(AtomicBool::new(false));
-        *self.hunt.borrow_mut() = Some(stop.clone());
-        let show_hidden = self.hidden.get();
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<std::path::PathBuf>>();
-        std::thread::spawn(move || hunt(&root, &q, show_hidden, &stop, &tx));
-        let me = self.weak();
-        glib::timeout_add_local(Duration::from_millis(120), move || {
-            let Some(p) = me.upgrade() else { return glib::ControlFlow::Break };
-            loop {
-                match rx.try_recv() {
-                    Ok(batch) => p.add_found(batch),
-                    Err(std::sync::mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        p.sync_status();
-                        return glib::ControlFlow::Break;
-                    }
-                }
-            }
-        });
+        self.sync_status();
+        if !reuse {
+            self.queue_hunt();
+        }
     }
 
-    fn add_found(&self, batch: Vec<std::path::PathBuf>) {
-        let items: Vec<glib::Object> = batch
-            .iter()
-            .filter_map(|path| {
-                let f = gio::File::for_path(path);
-                let info = f.query_info(ATTRS, gio::FileQueryInfoFlags::NONE, None::<&gio::Cancellable>).ok()?;
-                info.set_attribute_object("standard::file", &f);
-                Some(info.upcast())
-            })
-            .collect();
+    fn queue_hunt(self: &Rc<Self>) {
+        let me = self.weak();
+        let generation = self.hunt_generation.get();
+        let source = glib::timeout_add_local_once(search::DEBOUNCE, move || {
+            let Some(p) = me.upgrade() else { return };
+            if p.hunt_generation.get() != generation {
+                return;
+            }
+            p.hunt_debounce.borrow_mut().take();
+            p.start_hunt(generation);
+        });
+        *self.hunt_debounce.borrow_mut() = Some(source);
+    }
+
+    fn start_hunt(self: &Rc<Self>, generation: u64) {
+        let Some(root) = self.location().path() else { return };
+        self.search_cache.borrow_mut().take();
+        self.found.remove_all();
+        let q = self.query();
+        let searched = q.clone();
+        let cancel = gio::Cancellable::new();
+        *self.hunt.borrow_mut() = Some(cancel.clone());
+        let show_hidden = self.hidden.get();
+        let (tx, rx) = std::sync::mpsc::sync_channel(2);
+        std::thread::spawn(move || {
+            let outcome = search::scan(&root, &q, show_hidden, &cancel,
+                |path| search::Hit::read(path, ATTRS, show_hidden, &cancel),
+                |batch| search::send(&tx, search::Message::Batch(batch), &cancel));
+            search::send(&tx, search::Message::Finished(outcome), &cancel);
+        });
+        let me = self.weak();
+        let source = glib::timeout_add_local(search::BATCH_INTERVAL, move || {
+            let Some(p) = me.upgrade() else { return glib::ControlFlow::Break };
+            if p.hunt_generation.get() != generation {
+                return glib::ControlFlow::Break;
+            }
+            // One bounded batch per tick: never drain a backlog in one frame.
+            match rx.try_recv() {
+                Ok(search::Message::Batch(batch)) => {
+                    p.add_found(batch);
+                    return glib::ControlFlow::Continue;
+                }
+                Ok(search::Message::Finished(outcome)) => {
+                    *p.search_cache.borrow_mut() = Some(search::Cache { query: searched.clone(), outcome });
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+            }
+            p.hunt_source.borrow_mut().take();
+            p.hunt.borrow_mut().take();
+            p.sync_status();
+            glib::ControlFlow::Break
+        });
+        *self.hunt_source.borrow_mut() = Some(source);
+    }
+
+    fn add_found(&self, batch: Vec<search::Hit>) {
+        let room = search::RESULT_LIMIT.saturating_sub(self.found.n_items() as usize);
+        let items: Vec<gio::FileInfo> = batch.into_iter().take(room).map(search::Hit::into_info).collect();
         self.found.extend_from_slice(&items);
     }
 
     fn stop_hunt(&self) {
-        if let Some(s) = self.hunt.borrow_mut().take() {
-            s.store(true, AtomicOrdering::Relaxed);
+        self.hunt_generation.set(self.hunt_generation.get().wrapping_add(1));
+        let cancel = self.hunt.borrow_mut().take();
+        if let Some(cancel) = cancel {
+            cancel.cancel();
+        }
+        let debounce = self.hunt_debounce.borrow_mut().take();
+        if let Some(source) = debounce {
+            source.remove();
+        }
+        let pending = self.hunt_source.borrow_mut().take();
+        if let Some(source) = pending {
+            source.remove();
         }
     }
 
@@ -1043,7 +1132,10 @@ impl Pane {
     fn sync_status(&self) {
         let n = self.sorted.n_items();
         let picked = self.selected();
-        let text = if picked.is_empty() {
+        let capped = !self.query.borrow().is_empty() && self.found.n_items() as usize >= search::RESULT_LIMIT;
+        let text = if picked.is_empty() && capped {
+            format!("Showing the first {} results · Type more to narrow them", search::RESULT_LIMIT)
+        } else if picked.is_empty() {
             format!("{n} item{}", if n == 1 { "" } else { "s" })
         } else {
             let bytes: i64 = picked.iter().filter(|i| !is_dir(i)).map(|i| i.size()).sum();
@@ -1061,39 +1153,8 @@ impl Pane {
     }
 }
 
-fn hunt(root: &std::path::Path, q: &str, hidden: bool, stop: &AtomicBool, tx: &std::sync::mpsc::Sender<Vec<std::path::PathBuf>>) {
-    let mut queue = std::collections::VecDeque::from([(root.to_path_buf(), 0usize)]);
-    let mut batch = Vec::new();
-    let mut total = 0usize;
-    let mut last = Instant::now();
-    while let Some((dir, depth)) = queue.pop_front() {
-        if stop.load(AtomicOrdering::Relaxed) || total >= 3000 {
-            return;
-        }
-        let Ok(read) = std::fs::read_dir(&dir) else { continue };
-        for e in read.flatten() {
-            let name = e.file_name();
-            let name = name.to_string_lossy();
-            if !hidden && name.starts_with('.') {
-                continue;
-            }
-            let Ok(ft) = e.file_type() else { continue };
-            if name.to_lowercase().contains(q) {
-                batch.push(e.path());
-                total += 1;
-            }
-            if ft.is_dir() && !ft.is_symlink() && depth < 14 {
-                queue.push_back((e.path(), depth + 1));
-            }
-        }
-        if !batch.is_empty() && (batch.len() >= 64 || last.elapsed() > Duration::from_millis(150)) {
-            if tx.send(std::mem::take(&mut batch)).is_err() {
-                return;
-            }
-            last = Instant::now();
-        }
-    }
-    if !batch.is_empty() {
-        let _ = tx.send(batch);
+impl Drop for Pane {
+    fn drop(&mut self) {
+        self.stop_hunt();
     }
 }
