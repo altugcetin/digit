@@ -998,7 +998,7 @@ impl State {
                 self.region = self.open;
             }
         }
-        self.born.retain(|_, t| now - *t < BORN);
+        self.born.retain(|_, t| !motion::reduced() && now - *t < BORN);
         let moving = [&self.fade, &self.focus, &self.rise, &self.scroll].iter().any(|t| !t.settled(now)) || self.app.palette_moving(now) || !self.born.is_empty();
         if !moving && !self.open && self.window.is_visible() {
             let window = self.window.clone();
@@ -1019,6 +1019,9 @@ impl State {
     }
 
     fn arrived(&self, kind: &str, path: &str, now: i64) -> f64 {
+        if motion::reduced() {
+            return 1.0;
+        }
         self.born.get(&format!("{kind}:{path}")).map_or(1.0, |t| motion::STANDARD.at(((now - t) as f64 / BORN as f64).clamp(0.0, 1.0)))
     }
 

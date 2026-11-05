@@ -411,21 +411,6 @@ impl Control {
         } else {
             self.resize_with(240, SHUT);
             self.stop_scan();
-            let weak = Rc::downgrade(&self.0);
-            glib::timeout_add_local_once(Duration::from_millis(260), move || {
-                let Some(s) = weak.upgrade() else { return };
-                let gone = {
-                    let mut st = s.borrow_mut();
-                    let gone = st.reveal.target() < 0.5 && st.expand.is_some();
-                    if gone {
-                        st.expand = None;
-                    }
-                    gone
-                };
-                if gone {
-                    Control(s).changed();
-                }
-            });
         }
         self.kick();
     }

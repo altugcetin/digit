@@ -142,6 +142,7 @@ fn run() {
     icons::install(&display);
 
     let cfg = config::load();
+    kit::motion::apply(cfg.reduce_motion);
     let gtk_owns_blur = (gtk::major_version(), gtk::minor_version(), gtk::micro_version()) >= (4, 23, 3);
     let frost = if cfg.dock == config::Dock::Screen && !gtk_owns_blur { blur::Blur::new(&display) } else { None };
     let app = App::new(cfg, frost);

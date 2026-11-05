@@ -137,7 +137,7 @@ struct Scene {
 
 impl Scene {
     fn progress(&self, now: i64) -> f64 {
-        if self.old.is_none() || self.start == 0 {
+        if motion::reduced() || self.old.is_none() || self.start == 0 {
             return 1.0;
         }
         let span = if self.blend { self.span.max(1) } else { SPAN };
@@ -257,7 +257,9 @@ impl Canvas {
     fn show(&self, texture: gdk::Texture) {
         {
             let mut scene = self.imp().scene.borrow_mut();
-            if scene.new.is_none() {
+            if scene.new.is_none() || motion::reduced() {
+                scene.old = None;
+                scene.prime = None;
                 scene.new = Some(texture);
                 drop(scene);
                 self.queue_draw();

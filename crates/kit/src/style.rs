@@ -107,6 +107,8 @@ pub fn live(display: &gtk::gdk::Display, build: fn() -> String) {
 /// Reload CSS and let custom artwork pick up the same colors.
 pub fn live_with(display: &gtk::gdk::Display, build: fn() -> String, changed: fn()) {
     use gtk::{gio, glib, prelude::*};
+    let update_motion = || crate::motion::apply(crate::prefs::flag(&crate::prefs::read(), "reduce_motion", false));
+    update_motion();
     let provider = gtk::CssProvider::new();
     provider.load_from_string(&build());
     gtk::style_context_add_provider_for_display(display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -125,6 +127,7 @@ pub fn live_with(display: &gtk::gdk::Display, build: fn() -> String, changed: fn
             let (provider, pending) = (provider.clone(), pending.clone());
             glib::timeout_add_local_once(std::time::Duration::from_millis(220), move || {
                 pending.set(false);
+                update_motion();
                 provider.load_from_string(&build());
                 changed();
             });

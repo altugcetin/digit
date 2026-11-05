@@ -1,3 +1,31 @@
+use std::cell::Cell;
+
+thread_local! {
+    static POLICY: Cell<(bool, u64)> = const { Cell::new((false, 0)) };
+}
+
+pub fn reduced() -> bool {
+    POLICY.get().0
+}
+
+pub fn apply(reduce: bool) {
+    let (before, generation) = POLICY.get();
+    if before == reduce {
+        return;
+    }
+    // An in-flight tween stays settled if motion is turned back on.
+    POLICY.set((reduce, generation + u64::from(reduce)));
+    if let Some(settings) = gtk::Settings::default() {
+        if reduce {
+            settings.set_gtk_enable_animations(false);
+            settings.set_gtk_cursor_blink(false);
+        } else {
+            settings.reset_property("gtk-enable-animations");
+            settings.reset_property("gtk-cursor-blink");
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Curve(f64, f64, f64, f64);
 
@@ -57,15 +85,16 @@ pub struct Tween {
     start: i64,
     span: i64,
     curve: Curve,
+    generation: u64,
 }
 
 impl Tween {
     pub fn still(v: f64) -> Self {
-        Self { from: v, to: v, start: 0, span: 0, curve: STANDARD }
+        Self { from: v, to: v, start: 0, span: 0, curve: STANDARD, generation: 0 }
     }
 
     pub fn value(&self, now: i64) -> f64 {
-        if self.span <= 0 || now >= self.start + self.span {
+        if self.settled(now) {
             return self.to;
         }
         let x = (now - self.start).max(0) as f64 / self.span as f64;
@@ -77,14 +106,18 @@ impl Tween {
     }
 
     pub fn left_ms(&self, now: i64) -> i64 {
-        ((self.start + self.span - now) / 1000).max(0)
+        if self.settled(now) { 0 } else { (self.start + self.span - now) / 1000 }
     }
 
     pub fn settled(&self, now: i64) -> bool {
-        self.span <= 0 || now >= self.start + self.span
+        self.span <= 0 || now >= self.start + self.span || self.generation != POLICY.get().1
     }
 
     pub fn go(&mut self, to: f64, now: i64, ms: i64, curve: Curve) {
+        if reduced() {
+            self.set(to);
+            return;
+        }
         if (to - self.to).abs() < 1e-6 {
             return;
         }
@@ -93,14 +126,20 @@ impl Tween {
         self.start = now;
         self.span = ms * 1000;
         self.curve = curve;
+        self.generation = POLICY.get().1;
     }
 
     pub fn after(&mut self, to: f64, now: i64, delay_ms: i64, ms: i64, curve: Curve) {
+        if reduced() {
+            self.set(to);
+            return;
+        }
         self.from = self.value(now);
         self.to = to;
         self.start = now + delay_ms * 1000;
         self.span = ms * 1000;
         self.curve = curve;
+        self.generation = POLICY.get().1;
     }
 
     pub fn set(&mut self, v: f64) {

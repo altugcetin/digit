@@ -1896,7 +1896,7 @@ impl View {
         }
         let tweens = [&self.w, &self.depth, &self.r, &self.fade, &self.sheet, &self.back, &self.meter, &self.art_scale, &self.fill, &self.tune, &self.hush, &self.spot, &self.tab_fade, &self.flip, &self.float, &self.widen, &self.menu, &self.glass];
         let moving = tweens.into_iter().chain(self.glow.iter()).chain(self.dots.iter()).any(|t| !t.settled(now));
-        let rolling = self.roll.iter().flatten().any(|t| now < t + ROLL);
+        let rolling = !motion::reduced() && self.roll.iter().flatten().any(|t| now < t + ROLL);
         moving || rolling || self.app.palette_moving(now)
     }
 
@@ -2185,7 +2185,7 @@ impl View {
         let y = (mid - line / 2.0).round();
         for (i, (l, w)) in cells.iter().enumerate() {
             let e = match self.roll.get(i).copied().flatten() {
-                Some(t) if now < t + ROLL => motion::IN_OUT_CUBIC.at(((now - t).max(0)) as f64 / ROLL as f64),
+                Some(t) if !motion::reduced() && now < t + ROLL => motion::IN_OUT_CUBIC.at(((now - t).max(0)) as f64 / ROLL as f64),
                 _ => 1.0,
             };
             if e < 1.0 {
@@ -2672,7 +2672,11 @@ impl View {
             None => self.draw_monogram(s, &who, icon_rect.x, icon_rect.y + 34.0, 68.0),
         }
         let dot = graphene::Rect::new((LEFT + 82.0) as f32, (top + 12.0) as f32, 8.0, 8.0);
-        let pulse = 0.55 + 0.45 * ((now as f64 / 1_000_000.0) * std::f64::consts::PI).sin().abs();
+        let pulse = if motion::reduced() {
+            1.0
+        } else {
+            0.55 + 0.45 * ((now as f64 / 1_000_000.0) * std::f64::consts::PI).sin().abs()
+        };
         s.push_rounded_clip(&gsk::RoundedRect::from_rect(dot, 4.0));
         s.append_color(&GREEN.alpha(pulse).rgba(), &dot);
         s.pop();

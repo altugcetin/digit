@@ -200,13 +200,23 @@ fn dim(on: bool) {
         paint.on_draw(move |s| {
             let Some(p) = weak.upgrade() else { return };
             let now = p.frame_clock().map(|c| c.frame_time()).unwrap_or_else(glib::monotonic_time);
-            let t = ((now - start) as f64 / (DIM as f64 * 1_000_000.0)).clamp(0.0, 1.0);
+            let t = if kit::motion::reduced() {
+                1.0
+            } else {
+                ((now - start) as f64 / (DIM as f64 * 1_000_000.0)).clamp(0.0, 1.0)
+            };
             s.append_color(&gdk::RGBA::new(0.0, 0.0, 0.0, (0.6 * t * t * (3.0 - 2.0 * t)) as f32), &graphene::Rect::new(0.0, 0.0, p.width() as f32, p.height() as f32));
         });
-        paint.add_tick_callback(move |p, clock| {
-            p.queue_draw();
-            if clock.frame_time() - start > DIM as i64 * 1_000_000 { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
-        });
+        if !kit::motion::reduced() {
+            paint.add_tick_callback(move |p, clock| {
+                p.queue_draw();
+                if kit::motion::reduced() || clock.frame_time() - start > DIM as i64 * 1_000_000 {
+                    glib::ControlFlow::Break
+                } else {
+                    glib::ControlFlow::Continue
+                }
+            });
+        }
         window.set_child(Some(&paint));
         window.connect_realize(|w| {
             if let Some(surface) = w.surface() {

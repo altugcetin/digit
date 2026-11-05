@@ -40,6 +40,7 @@ pub struct Config {
     pub hover: bool,
     pub intro: bool,
     pub smooth_caret: bool,
+    pub reduce_motion: bool,
     pub fullscreen_edges: bool,
     pub ui_round: f64,
     pub ui_surface: String,
@@ -109,6 +110,7 @@ impl Default for Config {
             hover: true,
             intro: true,
             smooth_caret: true,
+            reduce_motion: false,
             fullscreen_edges: false,
             ui_round: 1.0,
             ui_surface: "black".into(),
@@ -192,6 +194,7 @@ pub struct Prefs {
     pub fullscreen_edges: bool,
     /// Spotlight draws a caret that glides between positions and blinks softly.
     pub smooth_caret: bool,
+    pub reduce_motion: bool,
     /// Settings > Apps: corner roundness and card surface, shared with the shell's panels.
     pub ui_round: f64,
     pub ui_surface: String,
@@ -247,6 +250,7 @@ impl From<&Config> for Prefs {
             control_corner: c.control_corner,
             fullscreen_edges: c.fullscreen_edges,
             smooth_caret: c.smooth_caret,
+            reduce_motion: c.reduce_motion,
             ui_round: c.ui_round,
             ui_surface: c.ui_surface.clone(),
             ui_accent: c.ui_accent.clone(),
