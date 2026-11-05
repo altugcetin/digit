@@ -9,7 +9,7 @@ use kit::calc;
 use kit::fuzzy::{fold, score};
 use kit::motion::{self, Tween};
 use kit::palette::{Palette, Rgb};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
@@ -301,6 +301,9 @@ struct State {
     caret: Tween,
     caret_moved: i64,
     caret_shown: bool,
+    caret_paint: crate::paint::Paint,
+    caret_ticking: bool,
+    caret_measure: Option<(glib::GString, i32, f64)>,
     tip_wait: u64,
     field_w: i32,
     icons: HashMap<String, gtk::IconPaintable>,
@@ -470,6 +473,11 @@ impl Launcher {
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&canvas));
         overlay.add_overlay(&field);
+        let caret_paint = crate::paint::Paint::new(SURFACE_W as i32, 26);
+        caret_paint.set_valign(gtk::Align::Start);
+        caret_paint.set_margin_top((PAD + BAR / 2.0 - 13.0) as i32);
+        caret_paint.set_can_target(false);
+        overlay.add_overlay(&caret_paint);
         let lift = crate::lift::Lift::new(&overlay, (SURFACE_W / 2.0, PAD + BAR / 2.0));
         window.set_child(Some(&lift));
         let css = gtk::CssProvider::new();
@@ -508,6 +516,9 @@ impl Launcher {
             caret: Tween::still(0.0),
             caret_moved: 0,
             caret_shown: false,
+            caret_paint: caret_paint.clone(),
+            caret_ticking: false,
+            caret_measure: None,
             tip_wait: 0,
             field_w: 0,
             icons: HashMap::new(),
@@ -524,6 +535,12 @@ impl Launcher {
             moved: false,
         }));
         *canvas.imp().state.borrow_mut() = Rc::downgrade(&state);
+        let weak = Rc::downgrade(&state);
+        caret_paint.on_draw(move |snapshot| {
+            if let Some(state) = weak.upgrade() {
+                state.borrow().draw_caret(snapshot, glib::monotonic_time());
+            }
+        });
         let launcher = Launcher(state);
         launcher.wire();
         launcher
@@ -574,6 +591,24 @@ impl Launcher {
                 Launcher(s).search();
             }
         });
+        // Text edits can notify both properties. Coalesce them after GTK finishes the edit.
+        let pending = Rc::new(Cell::new(false));
+        for property in ["text", "cursor-position", "has-focus"] {
+            let pending = pending.clone();
+            let weak = Rc::downgrade(&self.0);
+            field.connect_notify_local(Some(property), move |_, _| {
+                if pending.replace(true) {
+                    return;
+                }
+                let (pending, weak) = (pending.clone(), weak.clone());
+                glib::idle_add_local_once(move || {
+                    pending.set(false);
+                    if let Some(state) = weak.upgrade() {
+                        Launcher(state).update_caret();
+                    }
+                });
+            });
+        }
         let click = gtk::GestureClick::new();
         let weak = Rc::downgrade(&self.0);
         click.connect_released(move |_, _, x, y| {
@@ -729,6 +764,7 @@ impl Launcher {
         self.search();
         window.present();
         field.grab_focus();
+        self.update_caret();
         self.kick();
     }
 
@@ -744,6 +780,7 @@ impl Launcher {
             s.rise.go(0.0, now, 240, LEAVE);
             s.window.set_keyboard_mode(KeyboardMode::None);
             s.caret_shown = false;
+            s.caret_paint.queue_draw();
             if let Some(scrim) = s.scrim.take() {
                 scrim.destroy();
             }
@@ -811,7 +848,7 @@ impl Launcher {
         let s = self.0.borrow();
         let pal = s.app.palette.get();
         // With the smooth caret on, GTK's own caret hides and the launcher draws one that glides.
-        let caret = if s.app.prefs.borrow().smooth_caret { "transparent".to_string() } else { draw::css(pal.accent) };
+        let caret = if s.smooth_caret() { "transparent".to_string() } else { draw::css(pal.accent) };
         s.css.load_from_string(&format!(
             "text.digit-field {{ background: none; border: none; box-shadow: none; padding: 0; min-height: 34px; font-family: \"{}\"; font-size: 22px; font-weight: 420; color: {}; caret-color: {}; }}
              text.digit-field > placeholder {{ color: {}; }}
@@ -825,11 +862,52 @@ impl Launcher {
         ));
     }
 
+    pub fn refresh_caret(&self) {
+        self.style();
+        self.update_caret();
+    }
+
     pub fn refresh_palette(&self) {
         if self.0.borrow().open {
             self.style();
             self.kick();
         }
+    }
+
+    fn update_caret(&self) {
+        let paint = {
+            let mut s = self.0.borrow_mut();
+            let visible = s.open && s.smooth_caret() && s.field.has_focus();
+            if !visible {
+                s.caret_shown = false;
+                s.caret_paint.queue_draw();
+                return;
+            }
+            let text = s.field.text();
+            let position = s.field.position().max(0);
+            if s.caret_measure.as_ref().is_none_or(|(t, p, _)| *t != text || *p != position) {
+                let prefix: String = text.chars().take(position as usize).collect();
+                let width = s.field.create_pango_layout(Some(&prefix)).pixel_size().0 as f64;
+                s.caret_measure = Some((text, position, width));
+                s.caret_moved = glib::monotonic_time();
+            }
+            s.retarget_caret(glib::monotonic_time());
+            if std::mem::replace(&mut s.caret_ticking, true) {
+                return;
+            }
+            s.caret_paint.clone()
+        };
+        let weak = Rc::downgrade(&self.0);
+        paint.add_tick_callback(move |paint, _| {
+            let Some(state) = weak.upgrade() else { return glib::ControlFlow::Break };
+            let mut s = state.borrow_mut();
+            paint.queue_draw();
+            if s.caret_shown && s.open && s.smooth_caret() && s.field.has_focus() {
+                return glib::ControlFlow::Continue;
+            }
+            s.caret_ticking = false;
+            glib::ControlFlow::Break
+        });
     }
 
     fn step_selection(&self, by: i32) {
@@ -1385,9 +1463,38 @@ impl State {
         self.scroll.go(to.max(0.0), glib::monotonic_time(), 140, motion::STANDARD);
     }
 
+    fn smooth_caret(&self) -> bool {
+        self.app.prefs.borrow().smooth_caret
+    }
+
+    fn retarget_caret(&mut self, now: i64) {
+        let Some((_, _, width)) = &self.caret_measure else { return };
+        // Long text scrolls inside the field; the caret then rides its right edge.
+        let x = FIELD_X + width.min((self.field_w as f64 - 2.0).max(0.0));
+        if !self.caret_shown {
+            self.caret.set(x);
+            self.caret_shown = true;
+            self.caret_moved = now;
+        } else if (x - self.caret.target()).abs() > 0.1 {
+            self.caret.go(x, now, 110, CARET);
+            self.caret_moved = now;
+        }
+    }
+
+    fn draw_caret(&self, snapshot: &gtk::Snapshot, now: i64) {
+        if !self.caret_shown || !self.open || !self.smooth_caret() || !self.field.has_focus() {
+            return;
+        }
+        let idle = (now - self.caret_moved) as f64 / 1e6 - 0.5;
+        let alpha = if idle <= 0.0 { 1.0 } else { 0.5 + 0.5 * (idle * std::f64::consts::TAU / 1.1).cos() };
+        let bounds = rounded(self.caret.value(now) - 1.0, 0.0, 2.0, 26.0, 1.0);
+        draw::fill(snapshot, &bounds, self.app.palette_at(now).accent.alpha(alpha));
+    }
+
     fn step(&mut self, now: i64) -> bool {
         let fade = self.fade.value(now).clamp(0.0, 1.0);
         self.field.set_opacity(fade);
+        self.caret_paint.set_opacity(fade);
         let rise = self.rise.value(now);
         let dy = if self.open { -10.0 } else { -6.0 } * (1.0 - rise);
         self.lift.set(1.0, dy);
@@ -1395,22 +1502,8 @@ impl State {
         if want != self.field_w {
             self.field.set_size_request(want, 34);
             self.field_w = want;
-        }
-        let caret_on = self.open && self.app.prefs.borrow().smooth_caret;
-        if caret_on {
-            let text = self.field.text();
-            let at = self.field.position().max(0) as usize;
-            let before: String = text.chars().take(at).collect();
-            let w = self.field.create_pango_layout(Some(&before)).pixel_size().0 as f64;
-            // Long text scrolls inside the field; the caret then rides its right edge.
-            let x = FIELD_X + w.min((self.field_w as f64 - 2.0).max(0.0));
-            if !self.caret_shown {
-                self.caret = Tween::still(x);
-                self.caret_shown = true;
-                self.caret_moved = now;
-            } else if (x - self.caret.target()).abs() > 0.1 {
-                self.caret.go(x, now, 110, CARET);
-                self.caret_moved = now;
+            if self.caret_shown {
+                self.retarget_caret(now);
             }
         }
         let rect = if self.open { (0, 0, SURFACE_W as i32, SURFACE_H as i32) } else { (0, 0, 1, 1) };
@@ -1423,8 +1516,6 @@ impl State {
         let moving = [&self.fade, &self.rise, &self.panel, &self.bar, &self.bubbles, &self.scroll, &self.tip].iter().any(|t| !t.settled(now))
             || self.glow.iter().any(|t| !t.settled(now))
             || !self.clear_glow.settled(now)
-            // The caret keeps breathing while Spotlight is open.
-            || caret_on
             || self.app.palette_moving(now);
         if !moving && !self.open && self.window.is_visible() {
             let window = self.window.clone();
@@ -1469,16 +1560,6 @@ impl State {
         match MODES.iter().find(|m| m.0 == self.shown) {
             Some(m) => draw::icon(s, &canvas, &cfg, m.1, 24.0, true, pal.accent, PAD + 30.0, mid),
             None => draw::icon(s, &canvas, &cfg, "search", 24.0, false, pal.ink_meta, PAD + 30.0, mid),
-        }
-        if self.caret_shown && self.open && self.field.has_focus() {
-            // Solid right after a move, then a slow fade in and out like VS Code's smooth blink.
-            let idle = (now - self.caret_moved) as f64 / 1e6 - 0.5;
-            let alpha = if idle <= 0.0 { 1.0 } else { 0.5 + 0.5 * (idle * std::f64::consts::TAU / 1.1).cos() };
-            let x = self.caret.value(now);
-            let h = 26.0;
-            s.push_rounded_clip(&rounded(x - 1.0, mid - h / 2.0, 2.0, h, 1.0));
-            s.append_color(&pal.accent.alpha(alpha.clamp(0.0, 1.0)).rgba(), &graphene::Rect::new((x - 1.0) as f32, (mid - h / 2.0) as f32, 2.0, h as f32));
-            s.pop();
         }
         let shown = self.bubbles.value(now).clamp(0.0, 1.0);
         if shown > 0.01 {
