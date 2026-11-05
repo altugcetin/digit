@@ -479,70 +479,62 @@ fn save_role(key: &str, value: toml::Value) {
     }
 }
 
-fn refresh_roles(card: &gtk::Box, wm: Wm, outs: &[Out]) {
-    kit::ui::clear(card);
+type Refill = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+
+/// The selected display's roles, which save right away: primary, and on Hyprland the
+/// workspaces that live on it.
+fn roles(detail: &gtk::Box, wm: Wm, o: &Out, outs: &[Out], refill: Refill) {
     let prefs = crate::prefs::read();
     let primary = crate::prefs::get_str(&prefs, "primary_monitor", "");
-    let mut names = vec![String::new()];
-    let mut labels = vec!["Automatic".to_string()];
-    for o in outs.iter().filter(|o| o.on) {
-        names.push(o.name.clone());
-        labels.push(o.name.clone());
-    }
-    // Keep an unplugged preference visible until the user chooses a replacement.
-    if !names.contains(&primary) {
-        names.push(primary.clone());
-        labels.push(format!("{primary} (unavailable)"));
-    }
-    let selected = names.iter().position(|n| *n == primary).unwrap_or(0);
-    let (row, end) = ui::row(Some("monitor"), "Primary display", if wm == Wm::Hypr {
-        "Default dock screen and workspace 1, unless assigned below"
+    let redraw = move || {
+        if let Some(f) = refill.borrow().clone() {
+            glib::idle_add_local_once(move || f());
+        }
+    };
+    let (row, end) = ui::row(Some("star"), "Primary display", if wm == Wm::Hypr {
+        "The dock and workspace 1 start here"
     } else {
-        "Default dock screen; focused at login"
+        "The dock starts here and it has focus at login"
     });
-    let refs: Vec<_> = labels.iter().map(String::as_str).collect();
-    let pick = kit::ui::dropdown(&refs, selected as u32);
-    let (weak, outputs) = (card.downgrade(), outs.to_vec());
-    pick.connect_selected_notify(move |p| {
-        let Some(name) = names.get(p.selected() as usize) else { return };
-        save_role("primary_monitor", toml::Value::String(name.clone()));
-        let (weak, outs) = (weak.clone(), outputs.clone());
-        glib::idle_add_local_once(move || {
-            if let Some(card) = weak.upgrade() { refresh_roles(&card, wm, &outs); }
+    let sw = gtk::Switch::new();
+    sw.set_active(primary == o.name);
+    sw.set_valign(gtk::Align::Center);
+    {
+        let (name, redraw) = (o.name.clone(), redraw.clone());
+        sw.connect_active_notify(move |w| {
+            save_role("primary_monitor", toml::Value::String(if w.is_active() { name.clone() } else { String::new() }));
+            redraw();
         });
-    });
-    end.append(&pick);
-    card.append(&row);
-    if wm != Wm::Hypr { return; }
+    }
+    end.append(&sw);
+    detail.append(&row);
+    if wm != Wm::Hypr || outs.iter().filter(|o| o.on).count() < 2 {
+        return;
+    }
     let assignments = kit::hyprconf::workspace_monitors(&prefs);
     let explicit_one = assignments.values().any(|numbers| numbers.contains(&1));
-    for o in outs {
-        let (row, end) = ui::row(None, &o.name, "Workspaces");
-        let chips = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        chips.add_css_class("seg");
-        chips.set_valign(gtk::Align::Center);
-        for number in 1..=10_u8 {
-            let button = gtk::ToggleButton::with_label(&number.to_string());
-            button.set_focus_on_click(false);
-            let implicit = number == 1 && !explicit_one && primary == o.name;
-            button.set_active(implicit || assignments.get(&o.name).is_some_and(|numbers| numbers.contains(&number)));
-            button.set_tooltip_text(Some(if implicit { "Workspace 1 follows the primary display" } else { "Assign workspace to this display" }));
-            // The primary default can be moved to another screen, or cleared by choosing
-            // Automatic above. Never offer a toggle that immediately turns itself back on.
-            button.set_sensitive(!implicit);
-            let (weak, outs, connector) = (card.downgrade(), outs.to_vec(), o.name.clone());
-            button.connect_toggled(move |b| {
-                save_role("monitor_workspaces", assign_workspace(&crate::prefs::read(), &connector, number, b.is_active()));
-                let (weak, outs) = (weak.clone(), outs.clone());
-                glib::idle_add_local_once(move || {
-                    if let Some(card) = weak.upgrade() { refresh_roles(&card, wm, &outs); }
-                });
-            });
-            chips.append(&button);
-        }
-        end.append(&chips);
-        card.append(&row);
+    let (row, end) = ui::row(Some("view_carousel"), "Workspaces", "Open on this display");
+    let chips = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    chips.add_css_class("seg");
+    chips.set_valign(gtk::Align::Center);
+    for number in 1..=10_u8 {
+        let button = gtk::ToggleButton::with_label(&number.to_string());
+        button.set_focus_on_click(false);
+        let implicit = number == 1 && !explicit_one && primary == o.name;
+        button.set_active(implicit || assignments.get(&o.name).is_some_and(|numbers| numbers.contains(&number)));
+        button.set_tooltip_text(Some(if implicit { "Workspace 1 follows the primary display" } else { "Open this workspace on this display" }));
+        // The primary default moves with the primary display; never offer a toggle that
+        // immediately turns itself back on.
+        button.set_sensitive(!implicit);
+        let (connector, redraw) = (o.name.clone(), redraw.clone());
+        button.connect_toggled(move |b| {
+            save_role("monitor_workspaces", assign_workspace(&crate::prefs::read(), &connector, number, b.is_active()));
+            redraw();
+        });
+        chips.append(&button);
     }
+    end.append(&chips);
+    detail.append(&row);
 }
 
 const SHEET_MARGIN: i32 = 24;
@@ -645,14 +637,8 @@ pub fn build() -> gtk::Widget {
     actions.append(&reset);
     actions.append(&apply);
     body.append(&actions);
-    let roles = kit::setup::installed().then(ui::card);
-    if let Some(roles) = &roles {
-        body.append(&ui::heading(if wm == Wm::Hypr { "Primary and workspaces" } else { "Primary display" }));
-        body.append(&kit::ui::text("These choices save immediately.", "sub"));
-        body.append(roles);
-    }
 
-    let refill: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let refill: Refill = Rc::new(RefCell::new(None));
     {
         let (st, area) = (st.clone(), area.clone());
         let widget = area.clone();
@@ -669,10 +655,6 @@ pub fn build() -> gtk::Widget {
         let (st, detail, area, refill) = (st.clone(), detail.clone(), area.clone(), refill.clone());
         Rc::new(move || {
             kit::ui::clear(&detail);
-            if let Some(roles) = &roles {
-                let s = st.borrow();
-                refresh_roles(roles, s.wm, &s.outs);
-            }
             let (o, count_on) = {
                 let s = st.borrow();
                 (s.outs.get(s.pick).cloned(), s.outs.iter().filter(|o| o.on).count())
@@ -705,6 +687,10 @@ pub fn build() -> gtk::Widget {
             detail.append(&row);
             if !o.on {
                 return;
+            }
+            if kit::setup::installed() {
+                let s = st.borrow();
+                roles(&detail, s.wm, &o, &s.outs, refill.clone());
             }
             let mut sizes: Vec<(i32, i32)> = Vec::new();
             for m in &o.modes {
