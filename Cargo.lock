@@ -265,6 +265,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "digit-installer"
+version = "0.1.0"
+dependencies = [
+ "gtk4",
+ "kit",
+]
+
+[[package]]
 name = "digit-rec"
 version = "0.1.0"
 dependencies = [
