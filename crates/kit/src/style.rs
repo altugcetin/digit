@@ -204,6 +204,11 @@ dropdown.picker arrow {{ -gtk-icon-size: 0; min-width: 0; min-height: 0; margin:
 .seg > button {{ background: transparent; color: {meta}; border: none; box-shadow: none; outline: none; border-radius: max(3px, calc(var(--r-ctl) - 2px)); padding: 4px 13px; min-height: 22px; font-weight: 520; transition: background-color 180ms ease, color 180ms ease, box-shadow 180ms ease; }}
 .seg > button:hover {{ color: {main}; }}
 .seg > button:checked {{ background: alpha({main}, 0.15); color: {main}; box-shadow: 0 1px 4px rgba(0,0,0,0.45), inset 0 0 0 1px alpha({main}, 0.06); }}
+popover.menu-pop .pop-menu {{ min-width: 220px; }}
+popover.menu-pop button.pop-item {{ background: transparent; border: none; box-shadow: none; border-radius: max(4px, calc(var(--r-pop) - 6px)); padding: 7px 12px; min-height: 22px; color: {main}; transition: background-color 120ms ease; }}
+popover.menu-pop button.pop-item:hover, popover.menu-pop button.pop-item:focus-visible {{ background: alpha({main}, 0.07); }}
+popover.menu-pop button.pop-item .sym {{ font-size: 18px; color: {meta}; }}
+popover.menu-pop .pop-panel {{ padding: 6px 8px 4px 8px; min-width: 220px; }}
 popover.menu modelbutton {{ border-radius: max(4px, calc(var(--r-pop) - 6px)); padding: 7px 12px; min-height: 22px; color: {main}; transition: background-color 120ms ease; }}
 popover.menu modelbutton:hover, popover.menu modelbutton:selected {{ background: alpha({main}, 0.07); }}
 popover.menu modelbutton accelerator {{ color: alpha({meta}, 0.85); font-size: 12px; margin-left: 18px; }}
