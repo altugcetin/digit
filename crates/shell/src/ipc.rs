@@ -305,6 +305,7 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
             Err(_) => "digit-snap is missing".into(),
         },
         "control" | "spaces" | "session" | "clipboard" | "settings" => Box::pin(handle(app, &["key".to_string(), verb.to_string()])).await,
+        "renderer" => crate::gpu::describe().to_string(),
         "status" => {
             let (level, muted) = app.volume.get().unwrap_or((0.0, false));
             let call = app.call.borrow().as_ref().map(|c| c.who.clone());
