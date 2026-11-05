@@ -1464,7 +1464,7 @@ impl State {
     }
 
     fn smooth_caret(&self) -> bool {
-        self.app.prefs.borrow().smooth_caret
+        !motion::reduced() && self.app.prefs.borrow().smooth_caret
     }
 
     fn retarget_caret(&mut self, now: i64) {
@@ -1579,7 +1579,7 @@ impl State {
                 let x = (PAD + WIDTH - (n - i) as f64 * BUBBLE - (n - 1 - i) as f64 * BUBBLE_GAP + (1.0 - shown) * 18.0 + (1.0 - enter) * 14.0).round();
                 let on = *mode == self.mode;
                 let glow = self.glow[i].value(now).clamp(0.0, 1.0);
-                let grow = 1.5 * glow;
+                let grow = if motion::reduced() { 0.0 } else { 1.5 * glow };
                 let fill = if on { pal.accent } else { pal.ink_main.mix(pal.body, 0.09 * glow) };
                 // The shadow keeps the resting size: a blurred shadow whose size changes every frame
                 // gets re-rendered by the GL renderer and flickers, so only the face grows on hover.
@@ -1602,7 +1602,7 @@ impl State {
                 // Drawn like the mode bubbles: same size, shadow, hover growth and tint.
                 let (cx, cy) = Launcher::clear_center(height);
                 let glow = self.clear_glow.value(now).clamp(0.0, 1.0);
-                let grow = 1.5 * glow;
+                let grow = if motion::reduced() { 0.0 } else { 1.5 * glow };
                 let (x, y) = (cx - BUBBLE / 2.0, cy - BUBBLE / 2.0);
                 shadow(s, &rounded(x, y, BUBBLE, BUBBLE, BUBBLE / 2.0));
                 face(s, &rounded(x - grow, y - grow, BUBBLE + 2.0 * grow, BUBBLE + 2.0 * grow, BUBBLE / 2.0 + grow), pal.ink_main.mix(pal.body, 0.09 * glow));

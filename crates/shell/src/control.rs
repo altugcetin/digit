@@ -831,6 +831,9 @@ impl State {
     }
 
     fn step(&mut self, now: i64) -> bool {
+        if self.reveal.target() == 0.0 && self.reveal.settled(now) {
+            self.expand = None;
+        }
         let rect = if self.open { (0, 0, (W + FILLET) as i32, (self.max_h + FILLET) as i32) } else { (0, 0, 1, 1) };
         if rect != self.region {
             if let Some(surface) = self.window.surface() {

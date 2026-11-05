@@ -360,7 +360,7 @@ impl App {
             launcher.refresh_palette();
         }
         crate::gamebar::appearance_changed();
-        crate::paint::refresh_palette(now + PALETTE_FADE_US);
+        crate::paint::refresh_palette(if kit::motion::reduced() { now } else { now + PALETTE_FADE_US });
         let notches: Vec<_> = self.notches.borrow().iter().cloned().collect();
         for n in notches {
             n.refresh();
@@ -369,12 +369,15 @@ impl App {
     }
 
     pub fn palette_at(&self, now: i64) -> Palette {
+        if kit::motion::reduced() {
+            return self.palette.get();
+        }
         let t = ((now - self.palette_since.get()) as f64 / PALETTE_FADE_US as f64).clamp(0.0, 1.0);
         self.palette_from.get().lerp(&self.palette.get(), kit::motion::IN_OUT_CUBIC.at(t))
     }
 
     pub fn palette_moving(&self, now: i64) -> bool {
-        now - self.palette_since.get() < PALETTE_FADE_US
+        !kit::motion::reduced() && now - self.palette_since.get() < PALETTE_FADE_US
     }
 
     pub fn now() -> i64 {
@@ -585,6 +588,21 @@ impl App {
 
     pub fn apply_prefs(self: &Rc<Self>, next: crate::config::Prefs) {
         let before = self.prefs.replace(next.clone());
+        if before.reduce_motion != next.reduce_motion {
+            kit::motion::apply(next.reduce_motion);
+            if next.reduce_motion {
+                self.palette_since.set(0);
+            }
+            let wants = self.media.borrow().wings(Self::now()) || self.call.borrow().is_some();
+            spectrum::want(self, wants);
+            self.redraw_wings();
+            self.redraw();
+        }
+        if before.reduce_motion != next.reduce_motion || before.smooth_caret != next.smooth_caret {
+            if let Some(launcher) = self.launcher.borrow().as_ref() {
+                launcher.refresh_caret();
+            }
+        }
         let restyle = before.style != next.style || before.menubar != next.menubar || (next.wide(&self.cfg) && before.wide_height != next.wide_height);
         if before.surface != next.surface || restyle {
             self.set_roles(self.roles.get());

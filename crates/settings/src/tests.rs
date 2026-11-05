@@ -49,6 +49,21 @@ fn settings_controls_and_dialogs() {
         eprintln!("Skipping GTK checks without a display: {e}");
         return;
     }
+    // Closing with reduced motion must complete even without a mapped frame clock.
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let closed = Rc::new(Cell::new(false));
+    kit::motion::apply(true);
+    let done = closed.clone();
+    kit::ui::settle(&root, &card, 0, false, move || done.set(true));
+    assert_eq!(root.opacity(), 0.0);
+    let context = glib::MainContext::default();
+    while context.pending() {
+        context.iteration(false);
+    }
+    assert!(closed.get(), "closing must not wait for an animation frame");
+    kit::motion::apply(false);
+
     let calls = Rc::new(Cell::new(0));
     let count = calls.clone();
     let bar = ui::segmented(&["Old", "New"], 0, move |_| { count.set(count.get() + 1); false });

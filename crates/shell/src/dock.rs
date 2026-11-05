@@ -946,8 +946,7 @@ fn activate(st: &Shared, i: usize) {
         let list = app.apps.list();
         if let Some(e) = entry.and_then(|idx| list.get(idx)) {
             app.apps.launch(e);
-            st.borrow_mut().bounce.push((key, glib::monotonic_time()));
-            kick(st);
+            bounce(st, key);
         }
         return;
     }
@@ -971,6 +970,12 @@ fn launch(st: &Shared, i: usize) {
     let list = app.apps.list();
     if let Some(e) = entry.and_then(|idx| list.get(idx)) {
         app.apps.launch(e);
+        bounce(st, key);
+    }
+}
+
+fn bounce(st: &Shared, key: String) {
+    if !motion::reduced() {
         st.borrow_mut().bounce.push((key, glib::monotonic_time()));
         kick(st);
     }
@@ -1042,6 +1047,9 @@ fn kick(st: &Shared) {
         let Ok(mut s) = st.try_borrow_mut() else { return glib::ControlFlow::Continue };
         let now = glib::monotonic_time().max(clock.frame_time());
         w.queue_draw();
+        if motion::reduced() {
+            s.bounce.clear();
+        }
         let bouncing = s.bounce.iter().any(|(_, t)| now - t < 3 * BOUNCE);
         let busy = [&s.magnify, &s.shown, &s.tip].iter().any(|t| !t.settled(now))
             || s.slide.values().chain(s.appear.values()).any(|t| !t.settled(now))
@@ -1097,7 +1105,7 @@ impl State {
         let sep = if split.is_some() { g.gap() * 2.0 + 1.0 } else { 0.0 };
         let total0 = n as f64 * g.base + (n - 1) as f64 * g.gap() + sep;
         let start0 = self.along_len() / 2.0 - total0 / 2.0;
-        let m = if g.mag > 1.0 { self.magnify.value(now).clamp(0.0, 1.0) } else { 0.0 };
+        let m = if g.mag > 1.0 && !motion::reduced() { self.magnify.value(now).clamp(0.0, 1.0) } else { 0.0 };
         let pa = self.pointer.map_or(-1e4, |p| p.0);
         let mut sizes = Vec::with_capacity(n);
         for i in 0..n {

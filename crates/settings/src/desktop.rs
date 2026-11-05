@@ -663,6 +663,7 @@ fn app_look(body: &gtk::Box, t: &toml::Table) {
 
 fn effects(body: &gtk::Box, t: &toml::Table) {
     let look = section(body, "Motion and effects");
+    toggle(&look, "motion_photos_off", "Reduce motion", "Turn off panel transitions and decorative animations in Digit", "reduce_motion", prefs::get_bool(&t, "reduce_motion", false));
     toggle(&look, "swipe_vertical", "Smooth scrolling", "Mouse wheel steps glide instead of jumping. Touchpads always scroll smoothly", "smooth_scroll", prefs::get_bool(&t, "smooth_scroll", true));
     toggle(&look, "speed", "Reduce effects", "No shadows, blur or frosted panels in digit and the compositor; smoother on older laptops", "reduced_effects", prefs::get_bool(&t, "reduced_effects", false));
     choice(&look, "memory", "Rendering", "How digit and its apps draw. Takes effect when they next start", "renderer", &[("auto", "Automatic"), ("gl", "GPU (OpenGL)"), ("vulkan", "GPU (Vulkan)"), ("cairo", "Software")], &prefs::get_str(&t, "renderer", "auto"));

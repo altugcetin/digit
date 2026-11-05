@@ -266,13 +266,16 @@ fn each(f: impl Fn(&Sheet)) {
 }
 
 fn shake(column: &gtk::Box) {
+    if kit::motion::reduced() {
+        return;
+    }
     let start = glib::monotonic_time();
     column.add_tick_callback(move |c, clock| {
         let t = ((clock.frame_time() - start) as f64 / 420_000.0).clamp(0.0, 1.0);
         let dx = ((t * std::f64::consts::PI * 6.0).sin() * 12.0 * (1.0 - t)).round() as i32;
         c.set_margin_start((dx * 2).max(0));
         c.set_margin_end((-dx * 2).max(0));
-        if t >= 1.0 {
+        if t >= 1.0 || kit::motion::reduced() {
             c.set_margin_start(0);
             c.set_margin_end(0);
             glib::ControlFlow::Break
@@ -397,7 +400,7 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool) -> Sheet {
                 }
             }
             let now = p.frame_clock().map(|c| c.frame_time()).unwrap_or_else(glib::monotonic_time);
-            let fade = ((now - start) as f64 / 380_000.0).clamp(0.0, 1.0);
+            let fade = if kit::motion::reduced() { 1.0 } else { ((now - start) as f64 / 380_000.0).clamp(0.0, 1.0) };
             let fade = fade * fade * (3.0 - 2.0 * fade);
             if let Some(t) = back.borrow().as_ref() {
                 s.push_opacity(fade);
@@ -424,10 +427,16 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool) -> Sheet {
             s.pop();
         });
     }
-    paint.add_tick_callback(move |p, clock| {
-        p.queue_draw();
-        if clock.frame_time() - start > 420_000 { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
-    });
+    if !kit::motion::reduced() {
+        paint.add_tick_callback(move |p, clock| {
+            p.queue_draw();
+            if kit::motion::reduced() || clock.frame_time() - start > 420_000 {
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+    }
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&paint));
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);

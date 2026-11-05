@@ -33,7 +33,7 @@ impl Drop for Cava {
 }
 
 pub fn want(app: &Rc<App>, on: bool) {
-    if !on {
+    if !on || kit::motion::reduced() {
         if app.cava.borrow_mut().take().is_some() {
             app.spectrum.borrow_mut().clear();
         }
@@ -59,6 +59,9 @@ pub fn want(app: &Rc<App>, on: bool) {
     glib::spawn_future_local(async move {
         while let Ok(Some(line)) = lines.read_line_utf8_future(glib::Priority::DEFAULT).await {
             let Some(app) = weak.upgrade() else { break };
+            if app.cava.borrow().as_ref().is_none_or(|c| c.process != process) {
+                break;
+            }
             let bars: Vec<f64> = line.split(';').filter_map(|v| v.trim().parse::<f64>().ok()).map(|v| v / 1000.0).collect();
             *app.spectrum.borrow_mut() = bars;
             app.redraw_wings();
