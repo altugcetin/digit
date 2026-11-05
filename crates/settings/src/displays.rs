@@ -314,6 +314,7 @@ fn persist(wm: Wm, outs: &[Out]) -> Result<String, String> {
                 return Err("niri did not accept the saved display settings; they stay active until you log out".into());
             }
             save_atomic(&dir.join("digit-outputs.kdl"), &text).map_err(|e| e.to_string())?;
+            kit::niriconf::sync()?;
             Ok("Saved to Digit's niri display config".into())
         }
         Wm::Hypr => Ok("Saved to Digit's Hyprland display config".into()),
@@ -442,6 +443,108 @@ fn rgb(c: gtk::gdk::RGBA) -> (f64, f64, f64) {
     (c.red() as f64, c.green() as f64, c.blue() as f64)
 }
 
+fn assign_workspace(prefs: &toml::Table, connector: &str, workspace: u8, active: bool) -> toml::Value {
+    let mut assignments = kit::hyprconf::workspace_monitors(prefs);
+    for numbers in assignments.values_mut() {
+        numbers.retain(|n| *n != workspace);
+    }
+    if active {
+        assignments.entry(connector.to_string()).or_default().push(workspace);
+    }
+    toml::Value::Table(assignments.into_iter().map(|(name, numbers)| {
+        (name, toml::Value::Array(numbers.into_iter().map(|n| toml::Value::Integer(n.into())).collect()))
+    }).collect())
+}
+
+fn save_role(key: &str, value: toml::Value) {
+    if !kit::setup::installed() {
+        ui::fail("Log in to a Digit session to change these");
+        return;
+    }
+    let old = crate::prefs::read().get(key).cloned();
+    if let Err(e) = crate::prefs::set(key, value) {
+        ui::fail(&e);
+        return;
+    }
+    if let Err(e) = kit::setup::apply() {
+        let restored = match old {
+            Some(value) => crate::prefs::set(key, value),
+            None => crate::prefs::unset(key),
+        };
+        if let Err(restore) = restored.and_then(|_| kit::setup::apply()) {
+            ui::fail(&format!("{e}. Could not restore the saved setting: {restore}"));
+        } else {
+            ui::fail(&e);
+        }
+    }
+}
+
+fn refresh_roles(card: &gtk::Box, wm: Wm, outs: &[Out]) {
+    kit::ui::clear(card);
+    let prefs = crate::prefs::read();
+    let primary = crate::prefs::get_str(&prefs, "primary_monitor", "");
+    let mut names = vec![String::new()];
+    let mut labels = vec!["Automatic".to_string()];
+    for o in outs.iter().filter(|o| o.on) {
+        names.push(o.name.clone());
+        labels.push(o.name.clone());
+    }
+    // Keep an unplugged preference visible until the user chooses a replacement.
+    if !names.contains(&primary) {
+        names.push(primary.clone());
+        labels.push(format!("{primary} (unavailable)"));
+    }
+    let selected = names.iter().position(|n| *n == primary).unwrap_or(0);
+    let (row, end) = ui::row(Some("monitor"), "Primary display", if wm == Wm::Hypr {
+        "Default dock screen and workspace 1, unless assigned below"
+    } else {
+        "Default dock screen; focused at login"
+    });
+    let refs: Vec<_> = labels.iter().map(String::as_str).collect();
+    let pick = kit::ui::dropdown(&refs, selected as u32);
+    let (weak, outputs) = (card.downgrade(), outs.to_vec());
+    pick.connect_selected_notify(move |p| {
+        let Some(name) = names.get(p.selected() as usize) else { return };
+        save_role("primary_monitor", toml::Value::String(name.clone()));
+        let (weak, outs) = (weak.clone(), outputs.clone());
+        glib::idle_add_local_once(move || {
+            if let Some(card) = weak.upgrade() { refresh_roles(&card, wm, &outs); }
+        });
+    });
+    end.append(&pick);
+    card.append(&row);
+    if wm != Wm::Hypr { return; }
+    let assignments = kit::hyprconf::workspace_monitors(&prefs);
+    let explicit_one = assignments.values().any(|numbers| numbers.contains(&1));
+    for o in outs {
+        let (row, end) = ui::row(None, &o.name, "Workspaces");
+        let chips = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        chips.add_css_class("seg");
+        chips.set_valign(gtk::Align::Center);
+        for number in 1..=10_u8 {
+            let button = gtk::ToggleButton::with_label(&number.to_string());
+            button.set_focus_on_click(false);
+            let implicit = number == 1 && !explicit_one && primary == o.name;
+            button.set_active(implicit || assignments.get(&o.name).is_some_and(|numbers| numbers.contains(&number)));
+            button.set_tooltip_text(Some(if implicit { "Workspace 1 follows the primary display" } else { "Assign workspace to this display" }));
+            // The primary default can be moved to another screen, or cleared by choosing
+            // Automatic above. Never offer a toggle that immediately turns itself back on.
+            button.set_sensitive(!implicit);
+            let (weak, outs, connector) = (card.downgrade(), outs.to_vec(), o.name.clone());
+            button.connect_toggled(move |b| {
+                save_role("monitor_workspaces", assign_workspace(&crate::prefs::read(), &connector, number, b.is_active()));
+                let (weak, outs) = (weak.clone(), outs.clone());
+                glib::idle_add_local_once(move || {
+                    if let Some(card) = weak.upgrade() { refresh_roles(&card, wm, &outs); }
+                });
+            });
+            chips.append(&button);
+        }
+        end.append(&chips);
+        card.append(&row);
+    }
+}
+
 const SHEET_MARGIN: i32 = 24;
 
 /// A dialog card centred over the Settings page with a dimmed backdrop.
@@ -542,6 +645,12 @@ pub fn build() -> gtk::Widget {
     actions.append(&reset);
     actions.append(&apply);
     body.append(&actions);
+    let roles = kit::setup::installed().then(ui::card);
+    if let Some(roles) = &roles {
+        body.append(&ui::heading(if wm == Wm::Hypr { "Primary and workspaces" } else { "Primary display" }));
+        body.append(&kit::ui::text("These choices save immediately.", "sub"));
+        body.append(roles);
+    }
 
     let refill: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
     {
@@ -560,6 +669,10 @@ pub fn build() -> gtk::Widget {
         let (st, detail, area, refill) = (st.clone(), detail.clone(), area.clone(), refill.clone());
         Rc::new(move || {
             kit::ui::clear(&detail);
+            if let Some(roles) = &roles {
+                let s = st.borrow();
+                refresh_roles(roles, s.wm, &s.outs);
+            }
             let (o, count_on) = {
                 let s = st.borrow();
                 (s.outs.get(s.pick).cloned(), s.outs.iter().filter(|o| o.on).count())
@@ -829,4 +942,23 @@ pub fn build() -> gtk::Widget {
     }
     crate::desktop::night_light(&body, &crate::prefs::read());
     scroll.upcast()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moving_a_workspace_keeps_other_and_unplugged_assignments() {
+        let mut prefs = "[monitor_workspaces]\nDP-1 = [1, 2]\nHDMI-A-1 = [3, 4]\nUNPLUGGED = [9, 10]\n".parse::<toml::Table>().unwrap();
+        prefs.insert("monitor_workspaces".into(), assign_workspace(&prefs, "DP-1", 3, true));
+        let assignments = kit::hyprconf::workspace_monitors(&prefs);
+        assert_eq!(assignments["DP-1"], [1, 2, 3]);
+        assert_eq!(assignments["HDMI-A-1"], [4]);
+        assert_eq!(assignments["UNPLUGGED"], [9, 10]);
+        prefs.insert("monitor_workspaces".into(), assign_workspace(&prefs, "DP-1", 3, false));
+        let assignments = kit::hyprconf::workspace_monitors(&prefs);
+        assert_eq!(assignments["DP-1"], [1, 2]);
+        assert_eq!(assignments["UNPLUGGED"], [9, 10]);
+    }
 }

@@ -345,6 +345,7 @@ fn watch_config(app: &Rc<App>) {
     let Ok(monitor) = dir.monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE) else { return };
     let weak = Rc::downgrade(app);
     let pending = Rc::new(std::cell::Cell::new(false));
+    let primary = Rc::new(std::cell::RefCell::new(kit::prefs::text(&kit::prefs::read(), "primary_monitor", "")));
     monitor.connect_changed(move |_, file, other, _| {
         let ours = |f: &gio::File| f.basename().is_some_and(|b| b.as_os_str() == "config.toml");
         if !ours(file) && !other.is_some_and(ours) {
@@ -355,10 +356,15 @@ fn watch_config(app: &Rc<App>) {
         }
         let weak = weak.clone();
         let pending = pending.clone();
+        let primary = primary.clone();
         glib::timeout_add_local_once(std::time::Duration::from_millis(90), move || {
             pending.set(false);
             if let Some(app) = weak.upgrade() {
                 app.apply_prefs(config::Prefs::from(&config::load()));
+                let next = kit::prefs::text(&kit::prefs::read(), "primary_monitor", "");
+                if primary.replace(next.clone()) != next && kit::setup::installed() {
+                    dock::primary_changed(&app);
+                }
             }
         });
     });

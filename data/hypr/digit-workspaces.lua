@@ -1,1 +1,3 @@
--- Workspace rules from digit Settings, e.g. hl.workspace_rule({ workspace = "1", monitor = "DP-1" })
+-- Workspace rules from Digit Settings. Unplugged displays keep their assignments.
+-- Explicit assignments take precedence over the primary display's workspace 1 default.
+{{rules}}
