@@ -55,8 +55,8 @@ pub(crate) fn accent(card: &gtk::Box, t: &toml::Table) {
         area.add_css_class("accent-tile");
         area.set_overflow(gtk::Overflow::Hidden);
         area.set_size_request(76, 56);
-        let rgb = hex_rgb(&hex);
-        area.set_draw_func(move |a, cr, w, h| accent_preview(a, cr, w as f64, h as f64, rgb));
+        let rgb = kit::pictures::rgb(&hex);
+        area.set_draw_func(move |a, cr, w, h| kit::pictures::accent(a, cr, w as f64, h as f64, rgb));
         col.append(&area);
         let label = gtk::Label::new(Some(if value == "wallpaper" { "Wallpaper" } else { name }));
         label.add_css_class("corner-name");
@@ -71,45 +71,6 @@ pub(crate) fn accent(card: &gtk::Box, t: &toml::Table) {
     block.append(&flow);
     card.append(&block);
 }
-
-fn hex_rgb(hex: &str) -> (f64, f64, f64) {
-    let h = hex.trim_start_matches('#');
-    let v = |i: usize| h.get(i..i + 2).and_then(|s| u8::from_str_radix(s, 16).ok()).unwrap_or(128) as f64 / 255.0;
-    (v(0), v(2), v(4))
-}
-
-/// A tiny window in the accent: a filled button, a switch that's on and a selected line.
-fn accent_preview(a: &gtk::DrawingArea, cr: &gtk::cairo::Context, w: f64, h: f64, (r, g, b): (f64, f64, f64)) {
-    let ink = a.color();
-    let (ir, ig, ib) = (ink.red() as f64, ink.green() as f64, ink.blue() as f64);
-    let pill = |x: f64, y: f64, pw: f64, ph: f64| {
-        let rad = ph / 2.0;
-        cr.new_sub_path();
-        cr.arc(x + pw - rad, y + rad, rad, -std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2);
-        cr.arc(x + rad, y + rad, rad, std::f64::consts::FRAC_PI_2, 1.5 * std::f64::consts::PI);
-        cr.close_path();
-    };
-    // A selected row across the top.
-    pill(8.0, 9.0, w - 16.0, 10.0);
-    cr.set_source_rgba(r, g, b, 0.28);
-    let _ = cr.fill();
-    pill(12.0, 13.0, w * 0.4, 2.5);
-    cr.set_source_rgba(ir, ig, ib, 0.7);
-    let _ = cr.fill();
-    // A button and a switch that's on.
-    let y = h - 22.0;
-    pill(8.0, y, w * 0.42, 13.0);
-    cr.set_source_rgb(r, g, b);
-    let _ = cr.fill();
-    let sx = w - 8.0 - 24.0;
-    pill(sx, y, 24.0, 13.0);
-    cr.set_source_rgb(r, g, b);
-    let _ = cr.fill();
-    cr.arc(sx + 24.0 - 6.5, y + 6.5, 4.5, 0.0, std::f64::consts::TAU);
-    cr.set_source_rgb(1.0, 1.0, 1.0);
-    let _ = cr.fill();
-}
-
 
 pub(crate) struct Choice {
     pub row: gtk::Box,
@@ -745,7 +706,7 @@ fn notch(body: &gtk::Box, t: &toml::Table) {
     let items = STYLES
         .iter()
         .map(|(key, name)| {
-            let picture = crate::welcome::preview(key);
+            let picture = kit::pictures::notch(key);
             picture.set_content_width(136);
             picture.set_content_height(72);
             (*name, picture.upcast())

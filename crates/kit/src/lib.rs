@@ -12,6 +12,7 @@ pub mod keybinds;
 pub mod motion;
 pub mod paint;
 pub mod palette;
+pub mod pictures;
 pub mod pixel;
 pub mod pk;
 pub mod prefs;
