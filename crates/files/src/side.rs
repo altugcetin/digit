@@ -1,5 +1,8 @@
+mod devices;
+
 use gtk::{gdk, gio, glib, pango, prelude::*};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -16,7 +19,12 @@ pub struct Side {
     list: gtk::ListBox,
     targets: RefCell<Vec<Option<Target>>>,
     monitor: gio::VolumeMonitor,
-    marking: std::cell::Cell<bool>,
+    mount_monitor: gio_unix::MountMonitor,
+    device_start: Cell<usize>,
+    device_count: Cell<usize>,
+    refresh_pending: Cell<bool>,
+    mounting: Rc<RefCell<HashSet<gio::Volume>>>,
+    marking: Cell<bool>,
 }
 
 fn bookmarks_file() -> PathBuf {
@@ -74,7 +82,10 @@ impl Side {
         root.set_hscrollbar_policy(gtk::PolicyType::Never);
         root.set_vexpand(true);
         root.set_child(Some(&list));
-        let side = Rc::new(Side { root, list, targets: RefCell::new(Vec::new()), monitor: gio::VolumeMonitor::get(), marking: std::cell::Cell::new(false) });
+        let side = Rc::new(Side {
+            root, list, targets: RefCell::new(Vec::new()), monitor: gio::VolumeMonitor::get(), mount_monitor: gio_unix::MountMonitor::get(),
+            device_start: Cell::new(0), device_count: Cell::new(0), refresh_pending: Cell::new(false), mounting: Rc::new(RefCell::new(HashSet::new())), marking: Cell::new(false),
+        });
         let me = Rc::downgrade(&side);
         side.list.connect_row_activated(move |_, row| {
             if let Some(s) = me.upgrade() {
@@ -91,12 +102,20 @@ impl Side {
                 s.activate(r.index() as usize);
             }
         });
-        for sig in ["mount-added", "mount-removed", "mount-changed", "volume-added", "volume-removed", "volume-changed"] {
+        for sig in ["mount-added", "mount-removed", "mount-changed", "volume-added", "volume-removed", "volume-changed", "drive-connected", "drive-disconnected", "drive-changed"] {
             let me = Rc::downgrade(&side);
             side.monitor.connect_local(sig, false, move |_| {
                 if let Some(s) = me.upgrade() {
-                    let s2 = s.clone();
-                    glib::idle_add_local_once(move || s2.build());
+                    s.queue_devices();
+                }
+                None
+            });
+        }
+        for sig in ["mounts-changed", "mountpoints-changed"] {
+            let me = Rc::downgrade(&side);
+            side.mount_monitor.connect_local(sig, false, move |_| {
+                if let Some(s) = me.upgrade() {
+                    s.queue_devices();
                 }
                 None
             });
@@ -106,6 +125,7 @@ impl Side {
     }
 
     pub fn build(&self) {
+        self.marking.set(true);
         while let Some(c) = self.list.first_child() {
             self.list.remove(&c);
         }
@@ -144,30 +164,52 @@ impl Side {
         }
         self.header("Devices", &mut targets);
         self.row("hard_drive", "Computer", None, &mut targets, Target::File(gio::File::for_path("/")));
-        let mut seen_roots: Vec<gio::File> = Vec::new();
-        for m in self.monitor.mounts() {
-            if m.is_shadowed() {
-                continue;
-            }
-            let root = m.root();
-            if root.path().is_some_and(|p| p == std::path::Path::new("/") || p == glib::home_dir()) {
-                continue;
-            }
-            seen_roots.push(root.clone());
-            let icon = if root.is_native() { if m.can_eject() { "usb" } else { "hard_drive" } } else { "lan" };
-            let eject = (m.can_eject() || m.can_unmount()).then(|| m.clone());
-            self.row(icon, &m.name(), eject, &mut targets, Target::Mount(m));
+        self.device_start.set(targets.len());
+        for device in devices::rows(&self.monitor) {
+            self.row(device.icon, &device.name, device.eject, &mut targets, device.target);
         }
-        for v in self.monitor.volumes() {
-            if v.get_mount().is_some() || !v.can_mount() {
-                continue;
-            }
-            let icon = if v.can_eject() { "usb" } else { "hard_drive" };
-            self.row(icon, &v.name(), None, &mut targets, Target::Volume(v));
-        }
+        self.device_count.set(targets.len() - self.device_start.get());
         self.header("Network", &mut targets);
         self.row("lan", "Connect to Server…", None, &mut targets, Target::Connect);
         *self.targets.borrow_mut() = targets;
+        self.marking.set(false);
+        if let Some(p) = crate::active() {
+            self.mark(&p.location());
+        }
+    }
+
+    fn queue_devices(self: &Rc<Self>) {
+        if self.refresh_pending.replace(true) {
+            return;
+        }
+        let me = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            if let Some(s) = me.upgrade() {
+                s.refresh_pending.set(false);
+                s.refresh_devices();
+            }
+        });
+    }
+
+    fn refresh_devices(&self) {
+        let devices = devices::rows(&self.monitor);
+        let start = self.device_start.get();
+        self.marking.set(true);
+        for _ in 0..self.device_count.get() {
+            if let Some(row) = self.list.row_at_index(start as i32) {
+                self.list.remove(&row);
+            }
+        }
+        let mut targets = Vec::with_capacity(devices.len());
+        for (i, device) in devices.into_iter().enumerate() {
+            let row = self.row_widget(device.icon, &device.name, device.eject, &device.target);
+            self.list.insert(&row, (start + i) as i32);
+            targets.push(Some(device.target));
+        }
+        let count = targets.len();
+        self.targets.borrow_mut().splice(start..start + self.device_count.get(), targets);
+        self.device_count.set(count);
+        self.marking.set(false);
         if let Some(p) = crate::active() {
             self.mark(&p.location());
         }
@@ -185,6 +227,12 @@ impl Side {
     }
 
     fn row(&self, icon: &str, label: &str, eject: Option<gio::Mount>, targets: &mut Vec<Option<Target>>, target: Target) {
+        let row = self.row_widget(icon, label, eject, &target);
+        self.list.append(&row);
+        targets.push(Some(target));
+    }
+
+    fn row_widget(&self, icon: &str, label: &str, eject: Option<gio::Mount>, target: &Target) -> gtk::ListBoxRow {
         let b = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         let s = kit::ui::sym(icon);
         s.add_css_class("place-icon");
@@ -200,7 +248,7 @@ impl Side {
                 let op = gtk::MountOperation::new(crate::window().as_ref());
                 let done = |r: Result<(), glib::Error>| {
                     if let Err(e) = r {
-                        crate::toast(&e.message().to_string());
+                        crate::toast(e.message());
                     }
                 };
                 if m.can_eject() {
@@ -213,7 +261,7 @@ impl Side {
         }
         let row = gtk::ListBoxRow::new();
         row.set_child(Some(&b));
-        if let Target::File(f) = &target {
+        if let Target::File(f) = target {
             let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY | gdk::DragAction::MOVE);
             let dest = f.clone();
             drop.connect_drop(move |t, v, _, _| {
@@ -227,8 +275,7 @@ impl Side {
             });
             row.add_controller(drop);
         }
-        self.list.append(&row);
-        targets.push(Some(target));
+        row
     }
 
     fn activate(&self, i: usize) {
@@ -237,15 +284,34 @@ impl Side {
             Target::File(f) => crate::go(&f),
             Target::Mount(m) => crate::go(&m.default_location()),
             Target::Volume(v) => {
+                if let Some(m) = v.get_mount() {
+                    crate::go(&m.root());
+                    return;
+                }
+                // Selection and row activation can both fire for one click.
+                if !self.mounting.borrow_mut().insert(v.clone()) {
+                    return;
+                }
                 let op = gtk::MountOperation::new(crate::window().as_ref());
                 let vv = v.clone();
-                v.mount(gio::MountMountFlags::NONE, Some(&op), None::<&gio::Cancellable>, move |r| match r {
-                    Ok(()) => {
-                        if let Some(m) = vv.get_mount() {
-                            crate::go(&m.default_location());
+                let mounting = self.mounting.clone();
+                v.mount(gio::MountMountFlags::NONE, Some(&op), None::<&gio::Cancellable>, move |r| {
+                    mounting.borrow_mut().remove(&vv);
+                    match r {
+                        Ok(()) => {
+                            if let Some(m) = vv.get_mount() {
+                                crate::go(&m.root());
+                            }
                         }
+                        Err(e) if e.matches(gio::IOErrorEnum::AlreadyMounted) => {
+                            if let Some(m) = vv.get_mount() {
+                                crate::go(&m.root());
+                            } else {
+                                crate::toast(e.message());
+                            }
+                        }
+                        Err(e) => crate::toast(e.message()),
                     }
-                    Err(e) => crate::toast(&e.message().to_string()),
                 });
             }
             Target::Connect => connect(),
