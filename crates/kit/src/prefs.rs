@@ -44,14 +44,6 @@ fn write(table: &toml::Table) -> Result<(), String> {
     std::fs::rename(&tmp, &file).map_err(|e| e.to_string())
 }
 
-pub fn unset(key: &str) -> Result<(), String> {
-    let mut table = for_writing()?;
-    if table.remove(key).is_some() {
-        write(&table)?;
-    }
-    Ok(())
-}
-
 pub fn set(key: &str, value: toml::Value) -> Result<(), String> {
     let mut table = for_writing()?;
     if table.get(key) == Some(&value) {

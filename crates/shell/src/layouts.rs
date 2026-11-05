@@ -72,7 +72,7 @@ pub fn names() -> Vec<&'static str> {
 }
 
 pub fn niri_gap() -> f64 {
-    let path = glib::user_config_dir().join("niri/config.kdl");
+    let path = kit::niriconf::dir().join("digit-compositor.kdl");
     std::fs::read_to_string(path)
         .ok()
         .and_then(|t| t.lines().map(str::trim).find(|l| l.starts_with("gaps ")).and_then(|l| l.split_whitespace().nth(1)?.parse::<f64>().ok()))

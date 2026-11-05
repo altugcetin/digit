@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Hyprland with Digit
+Comment=Hyprland with the Digit desktop
+Exec=digit-session hyprland
+Type=Application
+DesktopNames=Hyprland

@@ -14,13 +14,7 @@ pub fn build() -> gtk::Widget {
         return scroll.upcast();
     };
     if !kit::setup::installed() {
-        let card = ui::card();
-        let (row, end) = ui::row(Some("warning"), "Shortcuts aren't set up", &format!("Set {} up first, under Windows > Setup", kind.name()));
-        let b = ui::button("Open Windows", "accent");
-        b.connect_clicked(|_| crate::show("compositor"));
-        end.append(&b);
-        card.append(&row);
-        body.append(&card);
+        crate::desktop::session_notice(&body, kind);
         return scroll.upcast();
     }
     let live = kit::setup::shortcuts();

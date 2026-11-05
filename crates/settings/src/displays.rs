@@ -180,10 +180,6 @@ fn apply_now(wm: Wm, outs: &[Out]) -> Result<(), String> {
     Ok(())
 }
 
-fn stamp() -> String {
-    glib::DateTime::now_local().and_then(|d| d.format("%Y%m%d-%H%M%S")).map(|s| s.to_string()).unwrap_or_else(|_| "backup".into())
-}
-
 // hl.monitor({...}) blocks in an existing monitors.lua, keyed by output, so
 // rules for screens that are unplugged right now survive a rewrite.
 fn lua_monitor_blocks(text: &str) -> Vec<(&str, &str)> {
@@ -227,13 +223,6 @@ fn hypr_lua(outs: &[Out], old: &str) -> String {
     text
 }
 
-fn has_require(text: &str, module: &str) -> bool {
-    text.lines().any(|l| {
-        let code = l.split("--").next().unwrap_or("").replace([' ', '\t', '(', ')'], "").replace('\'', "\"");
-        code == format!("require\"{module}\"")
-    })
-}
-
 // Hyprland watches every require()'d file and reloads by itself, unless the
 // user turned that off.
 fn hypr_reload_if_needed() {
@@ -246,51 +235,25 @@ fn hypr_reload_if_needed() {
     }
 }
 
-/// Where displays are saved: digit's own monitors file once digit is set up on Hyprland,
-/// otherwise a monitors.lua next to hyprland.lua.
+/// Display settings belong to the Digit session.
 fn monitors_path() -> std::path::PathBuf {
-    if kit::hyprconf::installed() {
-        kit::hyprconf::dir().join("digit-monitors.lua")
-    } else {
-        glib::user_config_dir().join("hypr").join("monitors.lua")
-    }
+    kit::hyprconf::dir().join("digit-monitors.lua")
 }
 
-/// Writes the displays to Hyprland's config. Returns what the file held before, for Revert.
+/// Returns the old contents for Revert.
 fn hypr_write(outs: &[Out]) -> Result<Option<String>, String> {
-    if kit::hyprconf::installed() {
-        // digit's folder is already loaded by hyprland.lua; only its monitors file changes.
-        let monitors = monitors_path();
-        let old = std::fs::read_to_string(&monitors).ok();
-        save_atomic(&monitors, &hypr_lua(outs, old.as_deref().unwrap_or(""))).map_err(|e| e.to_string())?;
-        hypr_reload_if_needed();
-        return Ok(old);
+    if !kit::hyprconf::installed() {
+        return Err("Log in to Hyprland with Digit to change these".into());
     }
-    let dir = glib::user_config_dir().join("hypr");
-    let main = dir.join("hyprland.lua");
-    let current = std::fs::read_to_string(&main).map_err(|_| "Display settings need Hyprland's Lua config (~/.config/hypr/hyprland.lua)".to_string())?;
-    let s = stamp();
-    let monitors = dir.join("monitors.lua");
+    let monitors = monitors_path();
     let old = std::fs::read_to_string(&monitors).ok();
-    if old.is_some() {
-        std::fs::copy(&monitors, dir.join(format!("monitors.lua.bak-{s}"))).map_err(|e| format!("Could not back up monitors.lua: {e}"))?;
-    }
     save_atomic(&monitors, &hypr_lua(outs, old.as_deref().unwrap_or(""))).map_err(|e| e.to_string())?;
-    let workspaces = dir.join("workspaces.lua");
-    if !workspaces.exists() {
-        save_atomic(&workspaces, "-- Workspace rules, e.g. hl.workspace_rule({ workspace = \"1\", monitor = \"DP-1\" })\n").map_err(|e| e.to_string())?;
-    }
-    let missing: Vec<&str> = ["monitors", "workspaces"].into_iter().filter(|m| !has_require(&current, m)).collect();
-    if !missing.is_empty() {
-        std::fs::copy(&main, dir.join(format!("hyprland.lua.bak-{s}"))).map_err(|e| format!("Could not back up hyprland.lua: {e}"))?;
-        let lines: String = missing.iter().map(|m| format!("require(\"{m}\")\n")).collect();
-        save_atomic(&main, &format!("{}\n{lines}", current.trim_end())).map_err(|e| e.to_string())?;
-    }
     hypr_reload_if_needed();
     Ok(old)
 }
 
 fn hypr_restore(old: Option<String>) {
+    if !kit::hyprconf::installed() { return; }
     let path = monitors_path();
     match old {
         Some(text) => {
@@ -317,10 +280,12 @@ fn save_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
 }
 
 fn persist(wm: Wm, outs: &[Out]) -> Result<String, String> {
-    let conf = glib::user_config_dir();
+    if !kit::setup::installed() {
+        return Err("Log in to a Digit session to change these".into());
+    }
     match wm {
         Wm::Niri => {
-            let dir = conf.join("niri");
+            let dir = kit::niriconf::niri();
             let mut text = String::new();
             for o in outs {
                 if o.on {
@@ -339,35 +304,19 @@ fn persist(wm: Wm, outs: &[Out]) -> Result<String, String> {
                     text.push_str(&format!("output \"{}\" {{\n    off\n}}\n\n", o.name));
                 }
             }
-            let main = dir.join("config.kdl");
-            let current = std::fs::read_to_string(&main).map_err(|e| format!("Could not read config.kdl: {e}"))?;
-            let line = "include optional=true \"digit-outputs.kdl\"";
-            let needs = !current.lines().any(|l| l.trim() == line);
             let test = glib::user_cache_dir().join("digit").join("niri-check");
-            let _ = std::fs::remove_dir_all(&test);
             std::fs::create_dir_all(&test).map_err(|e| e.to_string())?;
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                for e in entries.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "kdl")) {
-                    let _ = std::fs::copy(e.path(), test.join(e.file_name()));
-                }
-            }
-            std::fs::write(test.join("digit-outputs.kdl"), &text).map_err(|e| e.to_string())?;
-            if needs {
-                std::fs::write(test.join("config.kdl"), format!("{}\n{line}\n", current.trim_end())).map_err(|e| e.to_string())?;
-            }
+            // Validate the output declarations without rewriting the session entry file.
+            std::fs::write(test.join("config.kdl"), &text).map_err(|e| e.to_string())?;
             let ok = Command::new("niri").args(["validate", "-c"]).arg(test.join("config.kdl")).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
             let _ = std::fs::remove_dir_all(&test);
             if !ok {
                 return Err("niri did not accept the saved display settings; they stay active until you log out".into());
             }
             save_atomic(&dir.join("digit-outputs.kdl"), &text).map_err(|e| e.to_string())?;
-            if needs {
-                let _ = std::fs::copy(&main, dir.join("config.kdl.before-displays"));
-                save_atomic(&main, &format!("{}\n{line}\n", current.trim_end())).map_err(|e| e.to_string())?;
-            }
-            Ok("Saved to ~/.config/niri/digit-outputs.kdl".into())
+            Ok("Saved to Digit's niri display config".into())
         }
-        Wm::Hypr => Ok(if kit::hyprconf::installed() { "Saved to ~/.config/hypr/digit/digit-monitors.lua".into() } else { "Saved to ~/.config/hypr/monitors.lua".into() }),
+        Wm::Hypr => Ok("Saved to Digit's Hyprland display config".into()),
         Wm::Other => Err("Display settings work on niri and Hyprland".into()),
     }
 }
@@ -557,6 +506,11 @@ impl Sheet {
 
 pub fn build() -> gtk::Widget {
     let (scroll, body) = ui::page("Displays", "Drag screens to arrange them, then choose resolution, refresh rate, scale and rotation. New settings undo themselves after 15 seconds unless you keep them.");
+    if let Some(kind) = kit::setup::kind().filter(|_| !kit::setup::installed()) {
+        crate::desktop::session_notice(&body, kind);
+        crate::desktop::night_light(&body, &crate::prefs::read());
+        return scroll.upcast();
+    }
     let (wm, outs) = read();
     if wm == Wm::Other || outs.is_empty() {
         let card = ui::card();

@@ -1,5 +1,5 @@
--- The base of a full setup: environment, layouts and small fixes. Written by digit;
--- change any of it in hyprland.lua, which loads after this.
+-- Session defaults: environment, layouts and small fixes. Written by digit;
+-- change any of it in user.lua, which loads after this.
 
 hl.env("XCURSOR_SIZE", "24")
 hl.env("QT_QPA_PLATFORMTHEME", "qt6ct")

@@ -1,0 +1,50 @@
+#!/bin/sh
+# Start a compositor with Digit's own config, leaving normal sessions alone.
+case "${1:-}" in
+    hyprland) wm=hyprland; main=hyprland.lua ;;
+    niri) wm=niri; main=config.kdl ;;
+    *) echo "Usage: digit-session hyprland|niri" >&2; exit 2 ;;
+esac
+
+# The only change to the environment: digit's apps read this to know the config is theirs.
+export DIGIT_SESSION="$wm"
+config="${XDG_CONFIG_HOME:-$HOME/.config}/digit/$wm/$main"
+bin=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+prepare="$bin/digit-settings"
+[ -x "$prepare" ] || prepare=digit-settings
+if ! "$prepare" --prepare-session "$wm"; then
+    echo "Digit session preparation failed; trying the available config." >&2
+    if [ ! -f "$config" ]; then
+        unset DIGIT_SESSION
+        config=
+    fi
+fi
+
+if [ "$wm" = hyprland ]; then
+    if command -v start-hyprland >/dev/null 2>&1; then
+        if [ -n "$config" ]; then
+            exec start-hyprland -- --config "$config"
+        fi
+        exec start-hyprland
+    fi
+    if [ -n "$config" ]; then
+        exec Hyprland --config "$config"
+    fi
+    exec Hyprland
+fi
+
+if [ -n "$config" ]; then
+    export NIRI_CONFIG="$config"
+fi
+if command -v niri-session >/dev/null 2>&1; then
+    niri-session
+    status=$?
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user unset-environment NIRI_CONFIG DIGIT_SESSION || :
+    fi
+    exit "$status"
+fi
+if [ -n "$config" ]; then
+    exec niri --config "$config"
+fi
+exec niri --session

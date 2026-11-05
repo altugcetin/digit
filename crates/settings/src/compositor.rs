@@ -3,8 +3,8 @@ use crate::{prefs, ui};
 use gtk::prelude::*;
 
 pub fn build() -> gtk::Widget {
-    let (scroll, body) = ui::page("Windows", "How digit sets up your compositor, and its keyboard, mouse and window settings. They apply right away.");
-    crate::desktop::setup(&body, &prefs::read());
+    let (scroll, body) = ui::page("Windows", "Keyboard, mouse and window settings for your Digit session. Changes apply right away.");
+    crate::desktop::session(&body, &prefs::read());
     let Some(kind) = kit::setup::kind() else {
         let card = ui::card();
         let (row, _) = ui::row(Some("warning"), "digit can't change this compositor's settings", "These settings are written to Hyprland's or niri's config. Set them in your compositor's own config instead");
@@ -13,7 +13,6 @@ pub fn build() -> gtk::Widget {
         return scroll.upcast();
     };
     let niri = kind == kit::setup::Kind::Niri;
-    // Without a setup, only the Setup row above has anything to offer.
     if !kit::setup::installed() {
         return scroll.upcast();
     }

@@ -64,7 +64,7 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-[ "$(id -u)" -ne 0 ] || die "Run this as your normal user. sudo is used only to install packages."
+[ "$(id -u)" -ne 0 ] || die "Run this as your normal user. sudo is used for packages and login sessions."
 
 # Everything the installer prints also goes to a log (without colors), kept for support.
 # The previous run's log stays next to it as install.log.1.
@@ -199,27 +199,9 @@ pick_wm() {
     WM=${REPLY%% *}
 }
 
-# digit sets the compositor up from its own config. Say what that means before anything
-# changes; a run on a setup digit already made only refreshes digit's files.
 explain_setup() {
-    local dir=hypr main=hyprland.lua
-    [ "$WM" = niri ] && dir=niri main=config.kdl
-    if grep -qs "^${dir}_setup = \"full\"$" "$CONF/digit/config.toml" && [ -d "$CONF/$dir/digit" ]; then
-        info "digit has set up $WM before; its files there will be refreshed."
-        return
-    fi
-    echo
-    bold "About your $WM config"
-    if [ -e "$CONF/$dir" ]; then
-        info "~/.config/$dir is copied to ~/.config/$dir.backup-<date>, then digit writes its own config."
-        info "Shortcuts you made yourself need to be set again: in digit Settings > Keyboard, or in"
-        info "~/.config/$dir/$main, which stays yours. Your old file is in the backup to copy from."
-    else
-        info "digit writes a new config to ~/.config/$dir."
-    fi
-    info "Nothing else is touched: only the $WM config changes, your other configs stay as they are."
-    echo
-    confirm "Continue?" || die "Nothing was changed."
+    info "Digit uses its own configs in $CONF/digit/hyprland and $CONF/digit/niri."
+    info "Your normal Hyprland and niri configs are not touched."
 }
 
 install_wm() {
@@ -368,28 +350,32 @@ fonts() {
 }
 
 
-stamp() {
-    date +%Y%m%d-%H%M%S
-}
-
-
-hook() {
-    bold "Connecting digit to $WM"
-    case $WM in
-        niri)
-            if $DRY; then
-                info "[dry-run] $BIN/digit-settings --niri-setup"
-            elif ! "$BIN/digit-settings" --niri-setup | sed 's/^/  /'; then
-                warn "The niri setup did not finish; run it again from digit Settings > Windows."
-            fi ;;
-        hyprland)
-            # digit-settings does the Hyprland setup, the same code its Settings page uses.
-            if $DRY; then
-                info "[dry-run] $BIN/digit-settings --hypr-setup"
-            elif ! "$BIN/digit-settings" --hypr-setup | sed 's/^/  /'; then
-                warn "The Hyprland setup did not finish; run it again from digit Settings > Windows."
-            fi ;;
-    esac
+sessions() {
+    bold "Installing the $WM login session"
+    run install -m 755 "$ROOT/data/session/digit-session" "$BIN/digit-session"
+    local w tmp line
+    # Login managers such as SDDM run Exec without unquoting it, so the path must need no quotes.
+    [[ $BIN =~ ^[A-Za-z0-9_./+-]+$ ]] || die "The install folder $BIN has characters a login session cannot start from; install into a folder without spaces or quotes."
+    w=$WM
+    if $DRY; then
+        info "[dry-run] install /usr/share/wayland-sessions/digit-$w.desktop with Exec=$BIN/digit-session $w"
+    else
+        tmp=$(mktemp)
+        while IFS= read -r line; do
+            if [[ $line == Exec=* ]]; then
+                printf 'Exec=%s/digit-session %s\n' "$BIN" "$w"
+            else
+                printf '%s\n' "$line"
+            fi
+        done <"$ROOT/data/session/digit-$w.desktop" >"$tmp"
+        if ! sudo install -D -m 644 "$tmp" "/usr/share/wayland-sessions/digit-$w.desktop"; then
+            rm -f "$tmp"
+            die "Could not install the $w login session."
+        fi
+        rm -f "$tmp"
+    fi
+    # Write the config now, so it is there to look at before the first login.
+    run "$BIN/digit-settings" --prepare-session "$w" || warn "Could not write Digit's $w config yet; the session writes it when it starts."
 }
 
 # Older installs let D-Bus start the whole shell for the first notification, which raced the
@@ -404,13 +390,9 @@ drop_dbus() {
 
 uninstall() {
     bold "Removing digit"
-    pkill -x digit 2>/dev/null || true
-    if [ -d "$CONF/hypr/digit" ] && [ -x "$BIN/digit-settings" ]; then
-        run "$BIN/digit-settings" --hypr-remove
-    fi
-    if [ -d "$CONF/niri/digit" ] && [ -x "$BIN/digit-settings" ]; then
-        run "$BIN/digit-settings" --niri-remove
-    fi
+    run pkill -x digit 2>/dev/null || true
+    run sudo rm -f /usr/share/wayland-sessions/digit-hyprland.desktop /usr/share/wayland-sessions/digit-niri.desktop
+    run rm -f "$BIN/digit-session"
     local a
     for a in "${APPS[@]}"; do
         if [ -e "$BIN/$a" ]; then
@@ -441,9 +423,7 @@ main() {
     rust
     libs
     build
-    # The compositor config needs nothing from the network, so it is written before the
-    # downloads below can stop the run.
-    hook
+    sessions
     drop_dbus
     flathub
     fonts
@@ -453,17 +433,11 @@ main() {
     esac
     echo
     bold "digit is installed."
-    local now
-    now=$(running_wm)
-    if [ "$now" = "$WM" ] && ! $DRY; then
-        if confirm "Start digit now?"; then
-            pkill -x digit 2>/dev/null || true
-            (setsid "$BIN/digit" >/dev/null 2>&1 </dev/null &)
-            info "Started. It will also start with $WM from now on."
-        fi
-    else
-        info "Log into $WM and digit starts by itself."
-    fi
+    local name=Hyprland
+    [ "$WM" = niri ] && name=niri
+    info "Log out and pick \"$name with Digit\" on the login screen."
+    info "Its config is in $CONF/digit/$WM; add your own settings to user.$([ "$WM" = niri ] && echo kdl || echo lua) there."
+    info "Your own Hyprland and niri configs are not touched."
     info "Super+Space notch · Alt+Space Spotlight · Alt+, Settings · Super+L lock"
     if [ -n "$LOG" ]; then
         info "Install log: $LOG"

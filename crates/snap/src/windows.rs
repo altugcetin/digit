@@ -4,7 +4,7 @@ use serde_json::Value;
 pub type Rect = (f64, f64, f64, f64);
 
 fn gaps() -> f64 {
-    let path = gtk::glib::user_config_dir().join("niri/config.kdl");
+    let path = kit::niriconf::dir().join("digit-compositor.kdl");
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let mut depth = 0i32;
     let mut in_layout = false;

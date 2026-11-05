@@ -28,10 +28,10 @@ thread_local! {
 }
 
 pub fn enabled() -> bool {
-    if !crate::compositor::niri_running() {
+    if !kit::niriconf::installed() || !crate::compositor::niri_running() {
         return false;
     }
-    let path = glib::user_config_dir().join("niri/digit-windows.kdl");
+    let path = kit::niriconf::niri().join("digit-windows.kdl");
     let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
     MODE.with(|m| {
         let mut m = m.borrow_mut();
@@ -183,7 +183,7 @@ fn place(id: u64, g: Geo, float: bool) {
 }
 
 pub fn snap(app: &Rc<App>, which: &str) {
-    if !crate::compositor::niri_running() {
+    if !kit::niriconf::installed() || !crate::compositor::niri_running() {
         return;
     }
     let which = which.to_string();
