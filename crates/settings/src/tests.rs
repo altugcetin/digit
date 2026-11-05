@@ -206,12 +206,15 @@ fn settings_controls_and_dialogs() {
     assert_eq!(scale.value(), 0.0, "Escape cancels even when focus leaves afterward");
     assert_eq!(slot.visible_child_name().as_deref(), Some("value"));
 
+    assert!(prefs::set("snap_frame", toml::Value::String("Ocean".into())).is_ok());
     let screenshot_page = desktop::build("screenshots", "Screenshots", "");
+    assert!(!widgets(&screenshot_page).into_iter().filter_map(|w| w.downcast::<gtk::Label>().ok()).any(|l| l.text() == "Background frame"));
     let folder = widgets(&screenshot_page).into_iter().find_map(|w| w.downcast::<gtk::Entry>().ok()).unwrap();
     let new_path = format!("/{}", "screenshots/".repeat(12));
     folder.set_text(&new_path);
     folder.emit_activate();
     assert_eq!(prefs::get_str(&prefs::read(), "snap_dir", ""), new_path);
+    assert_eq!(prefs::get_str(&prefs::read(), "snap_frame", ""), "Ocean");
     assert!(widgets(&screenshot_page).into_iter().filter_map(|w| w.downcast::<gtk::Button>().ok()).any(|b| b.label().as_deref() == Some("Choose…")));
 
     let appearance = desktop::build("appearance", "Appearance", "");

@@ -6,6 +6,9 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+const DEFAULT_TOOL: Tool = Tool::Pen;
+const DEFAULT_FRAME: usize = 0;
+
 #[derive(Clone)]
 struct State {
     marks: Vec<Mark>,
@@ -123,12 +126,12 @@ fn open_base(app: &gtk::Application, base: draw::Base, output: String, origin: R
         undo: RefCell::new(Vec::new()),
         redo: RefCell::new(Vec::new()),
         live: RefCell::new(None),
-        tool: Cell::new(Tool::Arrow),
+        tool: Cell::new(DEFAULT_TOOL),
         color: Cell::new(color),
         width: Cell::new(kit::prefs::number(&kit::prefs::read(), "snap_width", 4.0)),
         fill: Cell::new(false),
         crop: Cell::new(None),
-        frame: Cell::new(prefs.frame),
+        frame: Cell::new(DEFAULT_FRAME),
         pad: Cell::new(kit::prefs::number(&kit::prefs::read(), "snap_pad", 56.0)),
         picked: Cell::new(None),
         step: Cell::new(1),
@@ -173,7 +176,7 @@ fn open_base(app: &gtk::Application, base: draw::Base, output: String, origin: R
     let k = ed.base.w as f64 / origin.2.max(1.0);
     let (iw, ih) = (ed.base.w as f64 / k.max(1.0), ed.base.h as f64 / k.max(1.0));
     col.set_size_request((iw + 96.0).clamp(1040.0, mw * 0.86) as i32, (ih + 200.0).clamp(600.0, mh * 0.86) as i32);
-    ed.select_tool(Tool::Arrow);
+    ed.select_tool(DEFAULT_TOOL);
     ed.sync_style();
     backdrop.set_opacity(0.0);
     window.present();
@@ -448,7 +451,6 @@ fn footer(ed: &Rc<Ed>) -> gtk::Widget {
             if let Some(e) = weak.upgrade() {
                 e.snapshot();
                 e.frame.set(i);
-                let _ = kit::prefs::set("snap_frame", toml::Value::String(name.to_string()));
                 e.changed();
             }
         });
@@ -719,6 +721,11 @@ impl Ed {
                 b.set_active(*tool == t);
             }
         }
+        self.area.set_cursor_from_name(Some(match t {
+            Tool::Select => "default",
+            Tool::Text => "text",
+            _ => "crosshair",
+        }));
         self.area.queue_draw();
     }
 
@@ -1101,5 +1108,22 @@ impl Ed {
                 self.window.close();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_starts_with_pen() {
+        assert_eq!(DEFAULT_TOOL, Tool::Pen);
+        assert!(TOOLS.iter().any(|(tool, _, _, _)| *tool == DEFAULT_TOOL));
+    }
+
+    #[test]
+    fn editor_starts_without_background_frame() {
+        assert_eq!(DEFAULT_FRAME, 0);
+        assert_eq!(draw::FRAMES[DEFAULT_FRAME], ("None", "", ""));
     }
 }
