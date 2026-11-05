@@ -28,13 +28,13 @@ pub fn build() -> gtk::Widget {
     field(&kb, "tune", "Variants", "One per layout, or empty: intl, f, dvorak…", "hypr_kb_variant", &s("hypr_kb_variant", ""), "", variants);
     choice(&kb, "swap_horiz", "Switch layouts with", &kit::keybinds::shown("notch").map(|k| format!("{k} also opens the notch")).unwrap_or_default(), "hypr_layout_switch", &[("none", "Nothing"), ("alt_shift", "Alt+Shift"), ("ctrl_shift", "Ctrl+Shift"), ("win_space", "Super+Space"), ("caps", "Caps Lock")], &s("hypr_layout_switch", "none"));
     choice(&kb, "keyboard_capslock", "Caps Lock", "", "hypr_caps", &[("normal", "Caps Lock"), ("escape", "Escape"), ("ctrl", "Ctrl"), ("swapescape", "Swap with Escape")], &s("hypr_caps", "normal"));
-    slider(&kb, "timer", "Repeat delay", "Milliseconds before a held key repeats", "hypr_repeat_delay", (150.0, 800.0, 10.0), f("hypr_repeat_delay", 300.0), 0);
-    slider(&kb, "speed", "Repeat rate", "Repeats per second", "hypr_repeat_rate", (10.0, 60.0, 1.0), f("hypr_repeat_rate", 30.0), 0);
+    slider(&kb, "timer", "Repeat delay", "Milliseconds before a held key repeats", "hypr_repeat_delay", (150.0, 800.0, 10.0), f("hypr_repeat_delay", 300.0), 300.0, 0);
+    slider(&kb, "speed", "Repeat rate", "Repeats per second", "hypr_repeat_rate", (10.0, 60.0, 1.0), f("hypr_repeat_rate", 30.0), 30.0, 0);
     body.append(&kb);
 
     body.append(&ui::heading("Mouse and touchpad"));
     let mouse = ui::card();
-    slider(&mouse, "mouse", "Pointer speed", "0 keeps the device's own speed", "hypr_sensitivity", (-1.0, 1.0, 0.05), f("hypr_sensitivity", 0.0), 2);
+    slider(&mouse, "mouse", "Pointer speed", "0 keeps the device's own speed", "hypr_sensitivity", (-1.0, 1.0, 0.05), f("hypr_sensitivity", 0.0), 0.0, 2);
     choice(&mouse, "trending_up", "Acceleration", "", "hypr_accel", &[("adaptive", "Adaptive"), ("flat", "Flat")], &s("hypr_accel", "adaptive"));
     toggle(&mouse, "swap_vert", "Natural scrolling for mice", "Content follows the wheel, like a touchpad", "hypr_mouse_natural", b("hypr_mouse_natural", false));
     toggle(&mouse, "touch_app", "Natural scrolling for touchpads", "", "hypr_touch_natural", b("hypr_touch_natural", true));
@@ -70,7 +70,7 @@ pub fn build() -> gtk::Widget {
             save_many(&[("hypr_gaps_in", toml::Value::Float(GAPS[i].1)), ("hypr_gaps_out", toml::Value::Float(GAPS[i].2))])
         });
     }
-    slider(&win, "border_style", "Border width", "", "hypr_border", (0.0, 6.0, 1.0), f("hypr_border", 2.0), 0);
+    slider(&win, "border_style", "Border width", "", "hypr_border", (0.0, 6.0, 1.0), f("hypr_border", 2.0), 2.0, 0);
     if niri {
         choice(&win, "highlight", "Mark the focused window", "", "niri_highlight", &[("border", "Border"), ("ring", "Ring"), ("none", "Nothing")], &s("niri_highlight", "border"));
     }
