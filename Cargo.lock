@@ -273,15 +273,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "digit-rec"
-version = "0.1.0"
-dependencies = [
- "gtk4",
- "kit",
- "toml",
-]
-
-[[package]]
 name = "digit-settings"
 version = "0.1.0"
 dependencies = [

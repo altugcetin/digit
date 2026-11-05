@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
-const APP_ID: &str = "dev.digit.Rec";
+const APP_ID: &str = "dev.digit.Settings";
 
 /// What gpu-screen-recorder runs as. A regular recording can also run on top of a replay buffer
 /// or a stream (`-ro`); `Run::taping` tracks that one.
@@ -500,7 +500,7 @@ pub fn switch(app: &Rc<App>, mode: Mode, want: Option<bool>) -> Result<(), Strin
 }
 
 pub fn settings() {
-    let argv: [&OsStr; 2] = ["digit-rec".as_ref(), "settings".as_ref()];
+    let argv: [&OsStr; 2] = ["digit-settings".as_ref(), "recording".as_ref()];
     let _ = gio::Subprocess::newv(&argv, gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE);
 }
 

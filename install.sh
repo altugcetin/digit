@@ -6,7 +6,7 @@ PREFIX=${PREFIX:-$HOME/.local}
 BIN="$PREFIX/bin"
 CONF=${XDG_CONFIG_HOME:-$HOME/.config}
 DATA=${XDG_DATA_HOME:-$HOME/.local/share}
-APPS=(digit digitctl digit-settings digit-store digit-files digit-snap digit-rec)
+APPS=(digit digitctl digit-settings digit-store digit-files digit-snap)
 MIN_RUST=1.97
 MIN_GTK=4.18
 MIN_LAYER=1.2
@@ -348,7 +348,8 @@ build() {
         run install -m 755 "$ROOT/target/release/$a" "$BIN/$a.new"
         run mv -f "$BIN/$a.new" "$BIN/$a"
     done
-    for a in digit-settings digit-store digit-files digit-snap digit-rec; do
+    drop_rec
+    for a in digit-settings digit-store digit-files digit-snap; do
         run "$BIN/$a" --register >/dev/null 2>&1 || true
     done
 }
@@ -428,6 +429,11 @@ drop_dbus() {
     fi
 }
 
+# Recording lives in the shell, with its settings in Settings > Recording.
+drop_rec() {
+    run rm -f "$BIN/digit-rec" "$DATA/applications/dev.digit.Rec.desktop" "$DATA/icons/hicolor/scalable/apps/dev.digit.Rec.svg"
+}
+
 uninstall() {
     bold "Removing digit"
     run pkill -x digit 2>/dev/null || true
@@ -440,8 +446,9 @@ uninstall() {
         fi
     done
     drop_dbus
+    drop_rec
     local f
-    for f in Settings Store Files Snap Rec; do
+    for f in Settings Store Files Snap; do
         run rm -f "$DATA/applications/dev.digit.$f.desktop" "$DATA/icons/hicolor/scalable/apps/dev.digit.$f.svg"
     done
     info "Done. Your settings in ~/.config/digit and the fonts were kept."

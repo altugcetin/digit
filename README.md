@@ -10,7 +10,8 @@ A calm, fast desktop shell for Wayland, written in Rust and GTK 4. It runs on
 - **Control Center**: Wi-Fi, Bluetooth, Do Not Disturb, Night Light, power modes, volume, device batteries, system monitor, weather
 - **Lock screen and idle**: PAM checked in a separate process, dim before screen-off, lock before sleep
 - **Session menu**, polkit agent, notification server, wallpaper picker with generated colors
-- **Settings, Store, Files, screenshots and screen recording** as companion apps
+- **Settings, Store, Files and screenshots** as companion apps
+- **Screen recording, instant replay and streaming** in the shell recorder panel, configured in Settings > Recording
 - Desktop clock, Night Light, rounded screen corners, microphone guard for idle voice apps
 
 ## Install
@@ -85,6 +86,10 @@ with the previous log kept as `install.log.1`, including in engine mode.
 Requirements the installer checks: Rust 1.97+ (it falls back to rustup when the
 distribution's Rust is older), GTK 4.18+, gtk4-layer-shell 1.2+.
 
+Screen recording requires the optional `gpu-screen-recorder` package. Install it
+separately to enable recording, instant replay and streaming; the installer does
+not install it.
+
 ## Shortcuts
 
 | Keys | Action |
@@ -101,12 +106,23 @@ distribution's Rust is older), GTK 4.18+, gtk4-layer-shell 1.2+.
 | Super+Shift+E | Sleep, restart, shut down, log out |
 | Print | Screenshot an area |
 | Super+E | Files |
+| Alt+Z | Game Bar |
+| Super+Alt+R | Start or stop recording |
+| Super+Alt+S | Save the instant replay |
+
+Settings > Keyboard groups recorder shortcuts under Recording. Opening the
+recorder panel, pausing or resuming, toggling instant replay and starting or
+stopping a stream are off until you assign keys.
 
 ## Configuration
 
 Everything is in Settings (Alt+,). The file behind it is `~/.config/digit/config.toml`
 and changes apply live. Qt apps keep their own qt6ct colors unless you set
 `qt_theme = true` there.
+
+Recording options live in Settings > Recording (`digit-settings recording`). Open
+the shell recorder panel with `digitctl record panel`, or open those options with
+`digitctl record settings`.
 
 The command line talks to the running shell (`digit msg help` lists everything):
 
