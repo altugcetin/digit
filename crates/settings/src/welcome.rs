@@ -92,66 +92,6 @@ fn header(icon: &str, title: &str, lead: &str) -> gtk::Box {
     b
 }
 
-pub(crate) fn preview(style: &'static str) -> gtk::DrawingArea {
-    let area = gtk::DrawingArea::new();
-    area.set_content_width(188);
-    area.set_content_height(112);
-    area.set_draw_func(move |_, cr, w, h| {
-        let (w, h) = (w as f64, h as f64);
-        let rounded = |x: f64, y: f64, rw: f64, rh: f64, r: f64| {
-            cr.new_sub_path();
-            cr.arc(x + rw - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
-            cr.arc(x + rw - r, y + rh - r, r, 0.0, std::f64::consts::FRAC_PI_2);
-            cr.arc(x + r, y + rh - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
-            cr.arc(x + r, y + r, r, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
-            cr.close_path();
-        };
-        let sky = gtk::cairo::LinearGradient::new(0.0, 0.0, w, h);
-        sky.add_color_stop_rgb(0.0, 0.34, 0.43, 0.62);
-        sky.add_color_stop_rgb(1.0, 0.86, 0.55, 0.42);
-        rounded(0.0, 0.0, w, h, 12.0);
-        let _ = cr.set_source(&sky);
-        let _ = cr.fill();
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.16);
-        rounded(18.0, 30.0, w * 0.52, h - 46.0, 6.0);
-        let _ = cr.fill();
-        rounded(w * 0.52 + 26.0, 30.0, w - (w * 0.52 + 26.0) - 18.0, h - 46.0, 6.0);
-        let _ = cr.fill();
-        cr.set_source_rgb(0.0, 0.0, 0.0);
-        match style {
-            "dynamic" => {
-                rounded(w / 2.0 - 30.0, 5.0, 60.0, 14.0, 7.0);
-                let _ = cr.fill();
-            }
-            "bar" => {
-                cr.rectangle(0.0, 0.0, w, 16.0);
-                let _ = cr.fill();
-                cr.set_source_rgba(1.0, 1.0, 1.0, 0.8);
-                rounded(8.0, 6.0, 18.0, 4.0, 2.0);
-                let _ = cr.fill();
-                rounded(w - 30.0, 6.0, 22.0, 4.0, 2.0);
-                let _ = cr.fill();
-            }
-            _ => {
-                let (cx, half, depth, r, f) = (w / 2.0, 34.0, 15.0, 6.0, 5.0);
-                let pi = std::f64::consts::PI;
-                cr.new_sub_path();
-                cr.move_to(cx - half - f, 0.0);
-                cr.arc(cx - half - f, f, f, -pi / 2.0, 0.0);
-                cr.line_to(cx - half, depth - r);
-                cr.arc_negative(cx - half + r, depth - r, r, pi, pi / 2.0);
-                cr.line_to(cx + half - r, depth);
-                cr.arc_negative(cx + half - r, depth - r, r, pi / 2.0, 0.0);
-                cr.line_to(cx + half, f);
-                cr.arc(cx + half + f, f, f, pi, 1.5 * pi);
-                cr.close_path();
-                let _ = cr.fill();
-            }
-        }
-    });
-    area
-}
-
 fn styles(t: &toml::Table) -> gtk::Widget {
     let current = prefs::get_str(t, "notch_style", "island");
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 14);
@@ -159,7 +99,7 @@ fn styles(t: &toml::Table) -> gtk::Widget {
     let mut first: Option<gtk::ToggleButton> = None;
     for (key, name, sub) in [("island", "Notch", "Hugs the top edge"), ("dynamic", "Dynamic Island", "A floating pill"), ("bar", "Bar", "Spans the whole edge")] {
         let card = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        card.append(&preview(key));
+        card.append(&kit::pictures::notch(key));
         let n = ui::text(name, "name");
         n.set_xalign(0.5);
         card.append(&n);

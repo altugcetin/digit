@@ -187,42 +187,11 @@ fn searched(entry: &gtk::SearchEntry) {
 const APP_ID: &str = "dev.digit.Settings";
 
 fn brand() -> gtk::DrawingArea {
-    let (_, ww, _) = kit::pixel::cells("Digit");
-    let (_, mw, mh) = kit::pixel::cells("d");
-    let cell = 3.0;
-    let tile = 34.0;
-    let width = tile + 12.0 + ww as f64 * cell;
-    let area = gtk::DrawingArea::new();
-    area.set_content_width(width as i32);
-    area.set_content_height(tile as i32);
+    let area = kit::pictures::brand(3.0, 34.0);
     area.set_halign(gtk::Align::Start);
     area.set_margin_start(12);
     area.set_margin_top(6);
     area.set_margin_bottom(18);
-    area.set_draw_func(move |widget, cr, _, _| {
-        #[allow(deprecated)]
-        let color = |name| widget.style_context().lookup_color(name).unwrap_or_else(|| widget.color());
-        let set = |ink: gtk::gdk::RGBA| cr.set_source_rgb(ink.red() as f64, ink.green() as f64, ink.blue() as f64);
-        let r = 9.0;
-        cr.new_sub_path();
-        cr.arc(tile - r, r, r, -std::f64::consts::FRAC_PI_2, 0.0);
-        cr.arc(tile - r, tile - r, r, 0.0, std::f64::consts::FRAC_PI_2);
-        cr.arc(r, tile - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
-        cr.arc(r, r, r, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
-        cr.close_path();
-        set(color("accent_bg_color"));
-        let _ = cr.fill();
-        let ox = ((tile - mw as f64 * cell) / 2.0).round();
-        let oy = ((tile - mh as f64 * cell) / 2.0).round();
-        set(color("accent_fg_color"));
-        kit::pixel::trace(cr, "d", cell, ox, oy);
-        let _ = cr.fill();
-        let tx = tile + 12.0;
-        let ty = ((tile - 7.0 * cell) / 2.0).round();
-        set(color("d_ink_main"));
-        kit::pixel::trace(cr, "Digit", cell, tx, ty);
-        let _ = cr.fill();
-    });
     area
 }
 
