@@ -238,6 +238,12 @@ explain_setup() {
 
 install_wm() {
     step compositor "Compositor: $WM"
+    # The portal may need the same COPR even when Hyprland is already installed.
+    if [ "$FAMILY:$WM" = fedora:hyprland ]; then
+        if ! has_pkg hyprland || ! has_pkg xdg-desktop-portal-hyprland; then
+            superuser dnf copr enable -y solopasha/hyprland
+        fi
+    fi
     case $WM in
         niri) command -v niri >/dev/null 2>&1 && return 0 ;;
         hyprland) { command -v Hyprland || command -v hyprland; } >/dev/null 2>&1 && return 0 ;;
@@ -248,7 +254,6 @@ install_wm() {
             has_pkg niri || superuser dnf copr enable -y yalter/niri
             install_pkgs niri ;;
         fedora:hyprland)
-            has_pkg hyprland || superuser dnf copr enable -y solopasha/hyprland
             install_pkgs hyprland ;;
     esac
 }
@@ -267,12 +272,13 @@ package_lists() {
             build=(base-devel pkgconf gtk4 gtk4-layer-shell wayland)
             run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct archlinux-appstream-data) ;;
     esac
-    # Super+Return opens a terminal; bring a small one along if there is none yet.
-    local t has_term=false
-    for t in xdg-terminal-exec kitty foot alacritty wezterm ghostty konsole gnome-terminal ptyxis; do
-        command -v "$t" >/dev/null 2>&1 && has_term=true
-    done
-    $has_term || run_pkgs+=(foot)
+    run_pkgs+=(xdg-desktop-portal-gtk)
+    case $WM in
+        hyprland) run_pkgs+=(xdg-desktop-portal-hyprland) ;;
+        niri) run_pkgs+=(xdg-desktop-portal-gnome) ;;
+    esac
+    # Install kitty even if another terminal is available for Super+Return.
+    command -v kitty >/dev/null 2>&1 || run_pkgs+=(kitty)
 }
 
 deps() {
@@ -531,6 +537,9 @@ check_system() {
     distro
     local gpu=other devices w state rust_state=missing gtk free p
     local build run_pkgs missing=() sessions_found=()
+    # Report packages for --wm, or the same default as an unattended install.
+    local WM=$WM YES=true
+    pick_wm
     devices=$(LC_ALL=C lspci -nn 2>/dev/null | grep -Ei 'VGA|3D|Display' || true)
     # PCI vendor IDs also work without pciutils installed.
     if [ -z "$devices" ]; then

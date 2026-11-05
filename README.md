@@ -48,6 +48,14 @@ The installer:
 6. adds the “Hyprland with Digit” or “niri with Digit” login session in
    `/usr/share/wayland-sessions` (needs sudo) and prepares its config.
 
+Both text and graphical installs add `kitty` when it is missing, even if another
+terminal is installed. Super+Return keeps the existing terminal detection.
+On all supported distributions, Hyprland installs `xdg-desktop-portal-hyprland`
+and `xdg-desktop-portal-gtk`; niri installs `xdg-desktop-portal-gnome` and
+`xdg-desktop-portal-gtk` for screen sharing and file pickers. Only the selected
+compositor's portal is added. On Fedora, the existing `solopasha/hyprland` COPR
+is enabled if Hyprland or its portal is unavailable in the enabled repositories.
+
 Log out and select the Digit session on the login screen. Digit keeps its own
 config in `~/.config/digit/hyprland` or `~/.config/digit/niri`; your normal
 `~/.config/hypr` and `~/.config/niri` are never changed. Add personal settings to
@@ -85,6 +93,11 @@ missing build/runtime packages, free home disk space and installed Digit session
 Package checks use only the local pacman/RPM database. Installation output is also
 saved without colors in `~/.cache/digit/install.log` (`XDG_CACHE_HOME` is respected),
 with the previous log kept as `install.log.1`, including in engine mode.
+
+`--check` includes missing kitty and portal packages in `packages=`. Use
+`--check --wm hyprland` or `--check --wm niri` to check a specific compositor;
+without `--wm`, it uses the running compositor, the first installed compositor,
+or Hyprland when neither is found.
 
 Requirements the installer checks: Rust 1.97+ (it falls back to rustup when the
 distribution's Rust is older), GTK 4.18+, gtk4-layer-shell 1.2+.
