@@ -16,11 +16,31 @@ YES=false
 DRY=false
 DEPS=true
 REMOVE=false
+TUI=false
+ENGINE=false
+CHECK=false
+METHOD=""
+FAILED=false
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
-warn() { printf '\033[33m! %s\033[0m\n' "$*" >&2; }
-die() { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
+step() {
+    local id=$1; shift
+    if $ENGINE; then printf '@@digit step %s %s\n' "$id" "$*"; else bold "$*"; fi
+}
+warn() {
+    if $ENGINE; then printf '@@digit warn %s\n' "$*"; else printf '\033[33m! %s\033[0m\n' "$*" >&2; fi
+}
+die() {
+    FAILED=true
+    if $ENGINE; then printf '@@digit fail %s\n' "$*"; else printf '\033[31m✗ %s\033[0m\n' "$*" >&2; fi
+    exit "${FAIL_STATUS:-1}"
+}
+
+# Keep dry-run handling in run(), including privileged commands.
+superuser() {
+    if [ -n "${SUDO_ASKPASS:-}" ]; then run sudo -A "$@"; else run sudo "$@"; fi
+}
 
 run() {
     if $DRY; then
@@ -34,7 +54,11 @@ usage() {
     cat <<EOF
 digit installer
 
-  ./install.sh                  detect everything and install
+  ./install.sh                  graphical installer in a desktop, otherwise text
+  ./install.sh --tui            force the interactive text installer
+  ./install.sh --engine         non-interactive progress protocol for the GUI
+  ./install.sh --method source  compile locally (package is not available yet)
+  ./install.sh --check          fast, read-only local system report
   ./install.sh --wm hyprland    pick the compositor (hyprland | niri)
   ./install.sh --yes            do not ask, take the defaults
   ./install.sh --no-deps        skip system packages
@@ -49,8 +73,13 @@ EOF
 ARGS="$*"
 while [ $# -gt 0 ]; do
     case "$1" in
-        --wm) WM=${2:-}; shift ;;
+        --wm) [ $# -ge 2 ] || die "--wm needs a value"; WM=$2; shift ;;
         --wm=*) WM=${1#--wm=} ;;
+        --method) [ $# -ge 2 ] || die "--method needs a value"; METHOD=$2; shift ;;
+        --method=*) METHOD=${1#--method=} ;;
+        --tui) TUI=true ;;
+        --engine) ENGINE=true ;;
+        --check) CHECK=true ;;
         # Older installers had a full and a minimal setup; there is one now.
         --setup) shift ;;
         --setup=*) ;;
@@ -64,37 +93,40 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-[ "$(id -u)" -ne 0 ] || die "Run this as your normal user. sudo is used for packages and login sessions."
-
-# Everything the installer prints also goes to a log (without colors), kept for support.
-# The previous run's log stays next to it as install.log.1.
-LOG_DIR=${XDG_CACHE_HOME:-$HOME/.cache}/digit
-LOG="$LOG_DIR/install.log"
-if mkdir -p "$LOG_DIR" 2>/dev/null && touch "$LOG" 2>/dev/null; then
-    [ -s "$LOG" ] && mv -f "$LOG" "$LOG.1"
-    exec > >(tee >(sed -u 's/\x1b\[[0-9;]*m//g' >>"$LOG")) 2>&1
-    {
-        echo "digit installer · $(date '+%Y-%m-%d %H:%M:%S')"
-        echo "args: ${ARGS:-none} · user: $(id -un) · session: ${XDG_SESSION_TYPE:-?} ${XDG_CURRENT_DESKTOP:-?}"
-        echo "repo: $ROOT · $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo 'not a git checkout')"
-        echo "kernel: $(uname -r) · $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown system}")"
-        echo
-    } >>"$LOG"
-else
-    LOG=""
-fi
+# Check mode bypasses root restrictions and all filesystem writes, including logs.
+init_log() {
+    # Everything the installer prints also goes to a log (without colors), kept for support.
+    # The previous run's log stays next to it as install.log.1.
+    LOG_DIR=${XDG_CACHE_HOME:-$HOME/.cache}/digit
+    LOG="$LOG_DIR/install.log"
+    if mkdir -p "$LOG_DIR" 2>/dev/null && touch "$LOG" 2>/dev/null; then
+        [ -s "$LOG" ] && mv -f "$LOG" "$LOG.1"
+        exec > >(tee >(sed -u 's/\x1b\[[0-9;]*m//g' >>"$LOG")) 2>&1
+        {
+            echo "digit installer · $(date '+%Y-%m-%d %H:%M:%S')"
+            echo "args: ${ARGS:-none} · user: $(id -un) · session: ${XDG_SESSION_TYPE:-?} ${XDG_CURRENT_DESKTOP:-?}"
+            echo "repo: $ROOT · $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo 'not a git checkout')"
+            echo "kernel: $(uname -r) · $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown system}")"
+            echo
+        } >>"$LOG"
+    else
+        LOG=""
+    fi
+}
 on_exit() {
     local status=$?
+    if [ "$status" -ne 0 ] && $ENGINE && ! $FAILED; then
+        printf '@@digit fail Installer stopped (exit %s)\n' "$status"
+    fi
     if [ "$status" -ne 0 ] && [ -n "$LOG" ]; then
         printf '\033[31m✗ The installer stopped (exit %s). The full log is in %s\033[0m\n' "$status" "$LOG" >&2
     fi
     # Give tee a moment to flush the last lines into the log.
     sleep 0.2
 }
-trap on_exit EXIT
 
 confirm() {
-    $YES && return 0
+    { $YES || $ENGINE; } && return 0
     local reply
     read -rp "$1 [Y/n] " reply </dev/tty || reply=""
     [[ -z $reply || $reply =~ ^[YyEe] ]]
@@ -103,7 +135,7 @@ confirm() {
 choose() {
     local prompt=$1; shift
     local options=("$@") reply i
-    if $YES; then
+    if $YES || $ENGINE; then
         REPLY=${options[0]}
         return
     fi
@@ -133,9 +165,9 @@ distro() {
         *" opensuse"*|*" suse "*|*opensuse-tumbleweed*|*opensuse-slowroll*) FAMILY=suse ;;
         *" fedora "*|*" ultramarine "*|*" nobara "*) FAMILY=fedora ;;
         *" arch "*|*" cachyos "*|*" endeavouros "*|*" manjaro "*|*" garuda "*|*" artix "*) FAMILY=arch ;;
-        *) die "$NAME_SHOWN is not supported yet. Supported: openSUSE, Fedora, Arch and Arch-based." ;;
+        *) FAMILY=unsupported ;;
     esac
-    if [ "$FAMILY" = suse ] && [[ ${ID:-} == opensuse-leap ]]; then
+    if ! $CHECK && [ "$FAMILY" = suse ] && [[ ${ID:-} == opensuse-leap ]]; then
         warn "openSUSE Leap ships GTK older than $MIN_GTK; Tumbleweed or Slowroll is recommended."
     fi
 }
@@ -143,9 +175,9 @@ distro() {
 install_pkgs() {
     [ $# -gt 0 ] || return 0
     case $FAMILY in
-        suse) run sudo zypper --non-interactive install --no-recommends "$@" ;;
-        fedora) run sudo dnf install -y "$@" ;;
-        arch) run sudo pacman -S --needed --noconfirm "$@" ;;
+        suse) superuser zypper --non-interactive install --no-recommends "$@" ;;
+        fedora) superuser dnf install -y "$@" ;;
+        arch) superuser pacman -S --needed --noconfirm "$@" ;;
     esac
 }
 
@@ -205,24 +237,25 @@ explain_setup() {
 }
 
 install_wm() {
+    step compositor "Compositor: $WM"
     case $WM in
         niri) command -v niri >/dev/null 2>&1 && return 0 ;;
         hyprland) { command -v Hyprland || command -v hyprland; } >/dev/null 2>&1 && return 0 ;;
     esac
-    bold "Installing $WM"
     case "$FAMILY:$WM" in
         suse:niri|arch:niri|suse:hyprland|arch:hyprland) install_pkgs "$WM" ;;
         fedora:niri)
-            has_pkg niri || run sudo dnf copr enable -y yalter/niri
+            has_pkg niri || superuser dnf copr enable -y yalter/niri
             install_pkgs niri ;;
         fedora:hyprland)
-            has_pkg hyprland || run sudo dnf copr enable -y solopasha/hyprland
+            has_pkg hyprland || superuser dnf copr enable -y solopasha/hyprland
             install_pkgs hyprland ;;
     esac
 }
 
-deps() {
-    local build run_pkgs
+package_lists() {
+    build=()
+    run_pkgs=()
     case $FAMILY in
         suse)
             build=(gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel wayland-devel)
@@ -240,13 +273,20 @@ deps() {
         command -v "$t" >/dev/null 2>&1 && has_term=true
     done
     $has_term || run_pkgs+=(foot)
-    bold "System packages"
+}
+
+deps() {
+    local build run_pkgs
+    package_lists
+    # Bootstrap needs only the libraries and tools to compile the frontend.
+    if [ "${1:-}" = build ]; then run_pkgs=(); fi
+    step packages "System packages"
     info "${build[*]} ${run_pkgs[*]}"
     if confirm "Install them with your package manager (asks for your sudo password)?"; then
         install_pkgs "${build[@]}" "${run_pkgs[@]}"
         # Digit Store tells apps, tools and libraries apart from each package's file list.
-        if [ "$FAMILY" = arch ]; then
-            run sudo pacman -Fy
+        if [ "$FAMILY" = arch ] && [ "${1:-}" != build ]; then
+            superuser pacman -Fy
         fi
     else
         warn "Skipped. The build may fail if something is missing."
@@ -261,9 +301,9 @@ cargo_ok() {
 }
 
 rust() {
+    step rust "Rust $MIN_RUST or newer"
     if cargo_ok cargo; then CARGO=$(command -v cargo); return; fi
     if cargo_ok "$HOME/.cargo/bin/cargo"; then CARGO="$HOME/.cargo/bin/cargo"; return; fi
-    bold "Rust $MIN_RUST or newer"
     if ! command -v cargo >/dev/null 2>&1 && ! command -v rustup >/dev/null 2>&1 && $DEPS; then
         case $FAMILY in
             arch) install_pkgs rust ;;
@@ -298,9 +338,9 @@ libs() {
 }
 
 build() {
-    bold "Building digit (a few minutes the first time)"
+    step build "Building digit (a few minutes the first time)"
     (cd "$ROOT" && run "$CARGO" build --release --locked)
-    bold "Installing to $BIN"
+    step install "Installing to $BIN"
     run mkdir -p "$BIN"
     local a
     for a in "${APPS[@]}"; do
@@ -330,11 +370,11 @@ fetch() {
 }
 
 fonts() {
+    step fonts "Fonts (Readex Pro, Rubik, Material Symbols Rounded)"
     local dir="$DATA/fonts/digit"
     if fc-list 2>/dev/null | grep -qi "Material Symbols Rounded" && fc-list 2>/dev/null | grep -qi "Readex Pro" && fc-list 2>/dev/null | grep -qi "Rubik"; then
         return 0
     fi
-    bold "Fonts (Readex Pro, Rubik, Material Symbols Rounded)"
     run mkdir -p "$dir"
     local g=https://raw.githubusercontent.com/google/fonts/main/ofl
     local m=https://raw.githubusercontent.com/google/material-design-icons/master
@@ -351,7 +391,7 @@ fonts() {
 
 
 sessions() {
-    bold "Installing the $WM login session"
+    step session "Installing the $WM login session"
     run install -m 755 "$ROOT/data/session/digit-session" "$BIN/digit-session"
     local w tmp line
     # Login managers such as SDDM run Exec without unquoting it, so the path must need no quotes.
@@ -368,7 +408,7 @@ sessions() {
                 printf '%s\n' "$line"
             fi
         done <"$ROOT/data/session/digit-$w.desktop" >"$tmp"
-        if ! sudo install -D -m 644 "$tmp" "/usr/share/wayland-sessions/digit-$w.desktop"; then
+        if ! superuser install -D -m 644 "$tmp" "/usr/share/wayland-sessions/digit-$w.desktop"; then
             rm -f "$tmp"
             die "Could not install the $w login session."
         fi
@@ -391,7 +431,7 @@ drop_dbus() {
 uninstall() {
     bold "Removing digit"
     run pkill -x digit 2>/dev/null || true
-    run sudo rm -f /usr/share/wayland-sessions/digit-hyprland.desktop /usr/share/wayland-sessions/digit-niri.desktop
+    superuser rm -f /usr/share/wayland-sessions/digit-hyprland.desktop /usr/share/wayland-sessions/digit-niri.desktop
     run rm -f "$BIN/digit-session"
     local a
     for a in "${APPS[@]}"; do
@@ -407,18 +447,121 @@ uninstall() {
     info "Done. Your settings in ~/.config/digit and the fonts were kept."
 }
 
-main() {
+pick_method() {
+    if [ -z "$METHOD" ]; then
+        choose "How should Digit be installed?" "Compile on this machine" "Ready-made package (available with the public release)"
+        case $REPLY in
+            Ready-made*) info "Ready-made packages are not available yet; compiling on this machine." ;;
+        esac
+        METHOD=source
+    elif [ "$METHOD" = package ]; then
+        if $ENGINE; then
+            FAIL_STATUS=3 die "Ready-made packages come with the first public release"
+        fi
+        info "Ready-made packages are not available yet; compiling on this machine."
+        METHOD=source
+    fi
+    [ "$METHOD" = source ] || die "--method must be source or package"
+}
+
+summary() {
+    local name=Hyprland
+    [ "$WM" = niri ] && name=niri
+    bold "Installation summary"
+    info "Distribution: $NAME_SHOWN"
+    info "Compositor: $name"
+    info "Method: Compile on this machine (local checkout)"
+    info "Digit uses $CONF/digit/$WM and never touches your own compositor config."
+    info "Login session: \"$name with Digit\" will be added (needs sudo)."
+    confirm "Continue with installation?"
+}
+
+check_system() {
     distro
+    local gpu=other devices w state rust_state=missing gtk free p
+    local build run_pkgs missing=() sessions_found=()
+    devices=$(LC_ALL=C lspci -nn 2>/dev/null | grep -Ei 'VGA|3D|Display' || true)
+    # PCI vendor IDs also work without pciutils installed.
+    if [ -z "$devices" ]; then
+        local device class vendor
+        for device in /sys/bus/pci/devices/*; do
+            read -r class <"$device/class" 2>/dev/null || continue
+            [[ $class == 0x03* ]] || continue
+            read -r vendor <"$device/vendor" 2>/dev/null || continue
+            devices+=" $vendor"
+        done
+    fi
+    case ${devices,,} in
+        *nvidia*|*0x10de*) gpu=nvidia ;;
+        *amd*|*"advanced micro devices"*|*"ati technologies"*|*0x1002*) gpu=amd ;;
+        *intel*|*0x8086*) gpu=intel ;;
+    esac
+    printf 'distro=%s\nfamily=%s\nsupported=%s\ngpu=%s\n' "$NAME_SHOWN" "$FAMILY" "$([ "$FAMILY" = unsupported ] && echo no || echo yes)" "$gpu"
+    for w in hyprland niri; do
+        state=missing
+        if [ "$(running_wm)" = "$w" ]; then state=running
+        elif installed_wms | grep -qx "$w"; then state=installed; fi
+        printf '%s=%s\n' "$w" "$state"
+    done
+    # A rustup proxy must not try to install a missing toolchain during a check.
+    if RUSTUP_AUTO_INSTALL=0 cargo_ok cargo || RUSTUP_AUTO_INSTALL=0 cargo_ok "$HOME/.cargo/bin/cargo"; then rust_state=ok
+    elif command -v cargo >/dev/null 2>&1 || [ -x "$HOME/.cargo/bin/cargo" ]; then rust_state=old; fi
+    gtk=$(pkg-config --modversion gtk4 2>/dev/null || echo none)
+    package_lists
+    for p in "${build[@]}" "${run_pkgs[@]}"; do
+        case $FAMILY in
+            arch) pacman -Q "$p" >/dev/null 2>&1 || missing+=("$p") ;;
+            fedora|suse) rpm -q "$p" >/dev/null 2>&1 || missing+=("$p") ;;
+        esac
+    done
+    free=$(df -Pm "$HOME" 2>/dev/null | awk 'NR==2 {print $4}')
+    for w in hyprland niri; do
+        [ ! -f "/usr/share/wayland-sessions/digit-$w.desktop" ] || sessions_found+=("digit-$w")
+    done
+    printf 'rust=%s\ngtk=%s\npackages=%s\ndisk_free_mb=%s\nsessions=%s\n' "$rust_state" "$gtk" "${missing[*]}" "${free:-0}" "${sessions_found[*]}"
+}
+
+bootstrap() {
+    info "Preparing the graphical installer (one time, about a minute)"
+    if $DEPS; then deps build || return 1; fi
+    rust || return 1
+    libs || return 1
+    (cd "$ROOT" && "$CARGO" build --release -p digit-installer) || return 1
+    DIGIT_ROOT="$ROOT" exec "$ROOT/target/release/digit-installer"
+}
+
+main() {
+    if $CHECK; then check_system; return; fi
+    init_log
+    trap on_exit EXIT
+    # Reject the unavailable method before any dependency or privilege work.
+    if $ENGINE && [ "$METHOD" = package ]; then
+        FAIL_STATUS=3 die "Ready-made packages come with the first public release"
+    fi
+    [ "$(id -u)" -ne 0 ] || die "Run this as your normal user. sudo is used for packages and login sessions."
+    step system "Detecting system"
+    distro
+    [ "$FAMILY" != unsupported ] || die "$NAME_SHOWN is not supported yet. Supported: openSUSE, Fedora, Arch and Arch-based."
     if $REMOVE; then
         uninstall
-        exit 0
+        $ENGINE && echo '@@digit done'
+        return 0
+    fi
+    if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && ! $TUI && ! $YES && ! $ENGINE && ! $DRY; then
+        if bootstrap; then return 0; fi
+        warn "Could not build the graphical installer; continuing in text mode."
     fi
     bold "digit installer · $NAME_SHOWN"
     pick_wm
+    pick_method
+    summary || { info "Installation cancelled."; return 0; }
     explain_setup
     if $DEPS; then
         install_wm
         deps
+    else
+        step compositor "Skipping compositor installation"
+        step packages "Skipping system packages"
     fi
     rust
     libs
@@ -442,6 +585,7 @@ main() {
     if [ -n "$LOG" ]; then
         info "Install log: $LOG"
     fi
+    if $ENGINE; then echo '@@digit done'; fi
 }
 
 main
