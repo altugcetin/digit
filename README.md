@@ -82,8 +82,12 @@ digit msg mic
 digit msg brightness up
 digit msg lock
 digit msg status
+digit msg renderer
 digit theme --scheme content ~/Pictures/wallpaper.jpg
 ```
+
+`digit msg renderer` reports the requested backend, the GTK renderers on visible shell surfaces,
+and the DRM render devices opened by the shell process.
 
 ## Security
 
