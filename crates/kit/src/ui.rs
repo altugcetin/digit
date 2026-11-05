@@ -409,14 +409,17 @@ pub fn dropdown(labels: &[&str], selected: u32) -> gtk::DropDown {
     let pick = gtk::DropDown::new(Some(gtk::StringList::new(labels)), gtk::Expression::NONE);
     pick.add_css_class("picker");
     pick.set_valign(gtk::Align::Center);
+    // Reserve the same text slot for every selection, keeping long options ellipsized.
+    let width = labels.iter().map(|s| s.chars().count()).max().unwrap_or(0).min(28) as i32;
     let face = gtk::SignalListItemFactory::new();
-    face.connect_setup(|_, obj| {
+    face.connect_setup(move |_, obj| {
         let Some(item) = obj.downcast_ref::<gtk::ListItem>() else { return };
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         let l = gtk::Label::new(None);
         l.set_xalign(0.0);
         l.set_ellipsize(pango::EllipsizeMode::End);
-        l.set_max_width_chars(28);
+        l.set_width_chars(width);
+        l.set_max_width_chars(width);
         row.append(&l);
         let chevron = sym("expand_more");
         chevron.add_css_class("pick-chevron");
