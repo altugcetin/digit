@@ -4,6 +4,7 @@ mod look;
 mod ops;
 mod pane;
 mod popup;
+mod search;
 mod side;
 mod thumbs;
 mod tools;
@@ -1185,8 +1186,8 @@ fn header(window: &gtk::ApplicationWindow) -> (gtk::Widget, gtk::Box, gtk::Stack
     search.add_css_class("search");
     search.set_placeholder_text(Some("Search"));
     search.set_width_chars(18);
-    search.set_search_delay(220);
-    search.connect_search_changed(|s| {
+    // Pane debounces enumeration; observe edits immediately to cancel old IO.
+    search.connect_changed(|s| {
         if let Some(p) = active() {
             let q = s.text().to_string();
             p.search(&q, q.chars().count() >= 2);
