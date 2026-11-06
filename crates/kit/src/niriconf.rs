@@ -117,8 +117,8 @@ fn action(b: &Bind) -> Option<String> {
             Win::Overview => "toggle-overview;".into(),
             Win::Center => "center-column;".into(),
             // Moving and resizing with Super and the mouse is built into niri; it has no pinned
-            // windows or scratchpad.
-            Win::Drag | Win::Resize | Win::Pin | Win::Scratchpad | Win::ToScratchpad => return None,
+            // windows, pseudotiling or scratchpad.
+            Win::Drag | Win::Resize | Win::Pin | Win::Pseudo | Win::Scratchpad | Win::ToScratchpad => return None,
         },
     })
 }
