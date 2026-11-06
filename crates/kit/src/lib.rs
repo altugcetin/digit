@@ -7,6 +7,7 @@ pub mod color;
 pub mod corners;
 pub mod distro;
 pub mod effects;
+pub mod folder;
 pub mod fuzzy;
 pub mod hyprconf;
 pub mod niriconf;
