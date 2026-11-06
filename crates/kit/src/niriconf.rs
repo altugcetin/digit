@@ -426,7 +426,8 @@ fn generate() -> Result<bool, String> {
     let e = |e: std::io::Error| format!("Could not write {}: {e}", d.display());
     let binds = keybinds::effective();
     changed |= write_if_changed(&d.join("init.kdl"), INIT).map_err(e)?;
-    let gpu = crate::hyprconf::NVIDIA_ENV.iter().filter(|_| crate::hyprconf::nvidia()).map(|(k, v)| format!("    {k} \"{v}\"\n")).collect::<String>();
+    let enabled = crate::hyprconf::nvidia_env();
+    let gpu = crate::hyprconf::NVIDIA_ENV.iter().filter(|_| enabled).map(|(k, v)| format!("    {k} \"{v}\"\n")).collect::<String>();
     changed |= write_if_changed(&d.join("digit-base.kdl"), &fill(BASE, &[("gpu", &gpu)])).map_err(e)?;
     // niri wants one layout or input block per file, so the settings get their own.
     let settings = format!("// Settings > Compositor. Written by digit; change them in digit Settings.\n// niri can't switch a setting like tap-to-click off from here; turn those off in user.kdl.\n\n{}", compositor());

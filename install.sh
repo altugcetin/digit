@@ -20,6 +20,7 @@ TUI=false
 ENGINE=false
 CHECK=false
 METHOD=""
+NVIDIA_ENV=false
 FAILED=false
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
@@ -58,6 +59,7 @@ digit installer
   ./install.sh --tui            force the interactive text installer
   ./install.sh --engine         non-interactive progress protocol for the GUI
   ./install.sh --method source  compile locally (package is not available yet)
+  ./install.sh --nvidia-env     add NVIDIA's variables to Digit's compositor config
   ./install.sh --check          fast, read-only local system report
   ./install.sh --wm hyprland    pick the compositor (hyprland | niri)
   ./install.sh --yes            do not ask, take the defaults
@@ -77,6 +79,7 @@ while [ $# -gt 0 ]; do
         --wm=*) WM=${1#--wm=} ;;
         --method) [ $# -ge 2 ] || die "--method needs a value"; METHOD=$2; shift ;;
         --method=*) METHOD=${1#--method=} ;;
+        --nvidia-env) NVIDIA_ENV=true ;;
         --tui) TUI=true ;;
         --engine) ENGINE=true ;;
         --check) CHECK=true ;;
@@ -481,6 +484,7 @@ sessions() {
         rm -f "$tmp"
     fi
     # Write the config now, so it is there to look at before the first login.
+    if $NVIDIA_ENV; then run "$BIN/digit-settings" --nvidia-env on || warn "Could not add the NVIDIA variables; turn them on in Settings > Windows."; fi
     run "$BIN/digit-settings" --prepare-session "$w" || warn "Could not write Digit's $w config yet; the session writes it when it starts."
 }
 
@@ -536,25 +540,8 @@ pick_method() {
     [ "$METHOD" = source ] || die "--method must be source or package"
 }
 
-summary() {
-    local name=Hyprland
-    [ "$WM" = niri ] && name=niri
-    bold "Installation summary"
-    info "Distribution: $NAME_SHOWN"
-    info "Compositor: $name"
-    info "Method: Compile on this machine (local checkout)"
-    info "Digit uses $CONF/digit/$WM and never touches your own compositor config."
-    info "Login session: \"$name with Digit\" will be added (needs sudo)."
-    confirm "Continue with installation?"
-}
-
-check_system() {
-    distro
-    local gpu=other devices w state rust_state=missing gtk free p
-    local build run_pkgs missing=() sessions_found=()
-    # Report packages for --wm, or the same default as an unattended install.
-    local WM=$WM YES=true
-    pick_wm
+gpu_kind() {
+    local devices
     devices=$(LC_ALL=C lspci -nn 2>/dev/null | grep -Ei 'VGA|3D|Display' || true)
     # PCI vendor IDs also work without pciutils installed.
     if [ -z "$devices" ]; then
@@ -567,10 +554,43 @@ check_system() {
         done
     fi
     case ${devices,,} in
-        *nvidia*|*0x10de*) gpu=nvidia ;;
-        *amd*|*"advanced micro devices"*|*"ati technologies"*|*0x1002*) gpu=amd ;;
-        *intel*|*0x8086*) gpu=intel ;;
+        *nvidia*|*"[10de:"*|*0x10de*) echo nvidia ;;
+        *amd*|*"advanced micro devices"*|*"ati technologies"*|*"[1002:"*|*0x1002*) echo amd ;;
+        *intel*|*"[8086:"*|*0x8086*) echo intel ;;
+        *) echo other ;;
     esac
+}
+
+# Off unless asked for: only people who want the variables get them.
+pick_nvidia() {
+    { $NVIDIA_ENV || $YES || $ENGINE; } && return 0
+    [ "$(gpu_kind)" = nvidia ] || return 0
+    local reply
+    read -rp "Add NVIDIA variables (hardware video, older apps)? [y/N] " reply </dev/tty || reply=""
+    if [[ $reply =~ ^[YyEe] ]]; then NVIDIA_ENV=true; fi
+}
+
+summary() {
+    local name=Hyprland
+    [ "$WM" = niri ] && name=niri
+    bold "Installation summary"
+    info "Distribution: $NAME_SHOWN"
+    info "Compositor: $name"
+    info "Method: Compile on this machine (local checkout)"
+    info "Digit uses $CONF/digit/$WM and never touches your own compositor config."
+    info "Login session: \"$name with Digit\" will be added (needs sudo)."
+    if $NVIDIA_ENV; then info "NVIDIA variables: added"; fi
+    confirm "Continue with installation?"
+}
+
+check_system() {
+    distro
+    local gpu w state rust_state=missing gtk free p
+    local build run_pkgs missing=() sessions_found=()
+    # Report packages for --wm, or the same default as an unattended install.
+    local WM=$WM YES=true
+    pick_wm
+    gpu=$(gpu_kind)
     printf 'distro=%s\nfamily=%s\nsupported=%s\ngpu=%s\n' "$NAME_SHOWN" "$FAMILY" "$([ "$FAMILY" = unsupported ] && echo no || echo yes)" "$gpu"
     for w in hyprland niri; do
         state=missing
@@ -609,7 +629,7 @@ bootstrap() {
     # offline font fetch still allows the GUI to open. The install step reuses it.
     fonts
     (cd "$ROOT" && "$CARGO" build --release -p digit-installer) || return 1
-    DIGIT_ROOT="$ROOT" exec "$ROOT/target/release/digit-installer"
+    DIGIT_ROOT="$ROOT" DIGIT_INSTALLER_NVIDIA_ENV="$NVIDIA_ENV" exec "$ROOT/target/release/digit-installer"
 }
 
 main() {
@@ -636,6 +656,7 @@ main() {
     bold "digit installer · $NAME_SHOWN"
     pick_wm
     pick_method
+    pick_nvidia
     summary || { info "Installation cancelled."; return 0; }
     explain_setup
     if $DEPS; then

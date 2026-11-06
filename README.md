@@ -73,6 +73,7 @@ Options:
 ./install.sh --tui            force the interactive text installer
 ./install.sh --wm niri        force a compositor (niri | hyprland)
 ./install.sh --method source  compile from the local checkout
+./install.sh --nvidia-env     add NVIDIA's variables to Digit's compositor config
 ./install.sh --yes            take the defaults without asking
 ./install.sh --no-deps        skip system packages
 ./install.sh --dry-run        only show what would happen

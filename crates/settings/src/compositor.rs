@@ -2,6 +2,10 @@ use crate::desktop::{choice, field, save, save_many, slider, tiles, toggle};
 use crate::{prefs, ui};
 use gtk::prelude::*;
 
+fn show_nvidia_variables(driver_loaded: bool, enabled: bool) -> bool {
+    driver_loaded || enabled
+}
+
 pub fn build() -> gtk::Widget {
     let (scroll, body) = ui::page("Windows", "Keyboard, mouse and window settings for your Digit session. Changes apply right away.");
     crate::desktop::session(&body, &prefs::read());
@@ -124,6 +128,13 @@ pub fn build() -> gtk::Widget {
         });
     }
     body.append(&fx);
+
+    if show_nvidia_variables(kit::hyprconf::nvidia(), b("nvidia_env", false)) {
+        body.append(&ui::heading("Graphics"));
+        let gfx = ui::card();
+        toggle(&gfx, "developer_board", "NVIDIA variables", "For hardware video and older apps. Takes effect at the next login", "nvidia_env", b("nvidia_env", false));
+        body.append(&gfx);
+    }
     scroll.upcast()
 }
 
@@ -346,4 +357,15 @@ fn width_picture(share: f64) -> gtk::Widget {
             window(cr, nx, y0 + 3.0, x0 + sw - 3.0 - nx, sh - 6.0, ink, false);
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn nvidia_toggle_is_offered_for_loaded_driver_or_enabled_preference() {
+        assert!(!super::show_nvidia_variables(false, false));
+        assert!(super::show_nvidia_variables(true, false));
+        assert!(super::show_nvidia_variables(false, true));
+        assert!(super::show_nvidia_variables(true, true));
+    }
 }
