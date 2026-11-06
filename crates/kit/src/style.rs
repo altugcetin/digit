@@ -1,5 +1,39 @@
 use crate::palette::Rgb;
 
+/// Values and labels for the appearance glyph selector.
+pub const GLYPHS: [(&str, &str); 3] = [("rounded", "Rounded"), ("outlined", "Outlined"), ("sharp", "Sharp")];
+
+fn glyph_family_in(value: &str, installed: impl Fn(&str) -> bool) -> &'static str {
+    let family = match value {
+        "outlined" => "Material Symbols Outlined",
+        "sharp" => "Material Symbols Sharp",
+        _ => "Material Symbols Rounded",
+    };
+    if family == "Material Symbols Rounded" || installed(family) { family } else { "Material Symbols Rounded" }
+}
+
+fn selected_glyph_family() -> &'static str {
+    let value = crate::prefs::text(&crate::prefs::read(), "ui_glyphs", "rounded");
+    glyph_family_in(&value, |family| {
+        std::process::Command::new("fc-list").args(["--format=%{family}\n"]).output().is_ok_and(|out| String::from_utf8_lossy(&out.stdout).lines().flat_map(|line| line.split(',')).any(|name| name.trim().eq_ignore_ascii_case(family)))
+    })
+}
+
+thread_local! {
+    static GLYPH_FAMILY: std::cell::Cell<&'static str> = std::cell::Cell::new(selected_glyph_family());
+}
+
+/// Effective installed Material Symbols family; missing variants fall back to Rounded.
+pub fn glyph_family() -> &'static str {
+    GLYPH_FAMILY.with(std::cell::Cell::get)
+}
+
+/// Refresh the cached family after preferences change; true if artwork needs redrawing.
+pub fn refresh_glyphs() -> bool {
+    let family = selected_glyph_family();
+    GLYPH_FAMILY.with(|current| current.replace(family) != family)
+}
+
 pub struct Ink {
     pub main: String,
     pub meta: String,
@@ -111,12 +145,25 @@ pub fn live(display: &gtk::gdk::Display, build: fn() -> String) {
 
 /// Reload CSS and let custom artwork pick up the same colors.
 pub fn live_with(display: &gtk::gdk::Display, build: fn() -> String, changed: fn()) {
+    live_at(display, build, changed, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+}
+
+/// Keep shell widget glyphs (including lock and authentication views) in sync.
+pub fn live_glyphs(display: &gtk::gdk::Display, changed: fn()) {
+    live_at(display, || format!(".sym, .lock-glyph, .auth-mark {{ font-family: \"{}\"; }}", glyph_family()), changed, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 3);
+}
+
+fn live_at(display: &gtk::gdk::Display, build: fn() -> String, changed: fn(), priority: u32) {
     use gtk::{gio, glib, prelude::*};
-    let update_motion = || crate::motion::apply(crate::prefs::flag(&crate::prefs::read(), "reduce_motion", false));
+    let update_motion = || {
+        crate::motion::apply(crate::prefs::flag(&crate::prefs::read(), "reduce_motion", false));
+        refresh_glyphs();
+        crate::appearance::apply_gtk();
+    };
     update_motion();
     let provider = gtk::CssProvider::new();
     provider.load_from_string(&build());
-    gtk::style_context_add_provider_for_display(display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+    gtk::style_context_add_provider_for_display(display, &provider, priority);
     // The user's own gtk.css outranks the application's; these few resets must hold anyway.
     let resets = gtk::CssProvider::new();
     resets.load_from_string(RESETS);
@@ -152,6 +199,7 @@ pub fn css() -> String {
     let i = ink();
     let (main, meta, accent, on_accent, risk) = (&i.main, &i.meta, &i.accent, &i.on_accent, &i.risk);
     let font = crate::prefs::text(&crate::prefs::read(), "font", "Readex Pro").replace(['"', '\\', ';', '{', '}'], "");
+    let glyphs = glyph_family();
     let lk = look();
     let [base, card, raised, pop, field] = surfaces(&lk, accent);
     let px = |v: f64| format!("{}px", (v * lk.round).round());
@@ -253,7 +301,7 @@ entry.side-search {{ margin: 0 2px 10px 2px; }}
 .row.found {{ background: alpha({accent}, 0.18); }}
 .card .row {{ transition: background-color 700ms cubic-bezier(0.2, 0, 0, 1); }}
 
-.sym {{ font-family: "Material Symbols Rounded"; font-size: 20px; font-weight: 400; }}
+.sym {{ font-family: "{glyphs}"; font-size: 20px; font-weight: 400; }}
 .tile {{ color: #ffffff; border-radius: 8px; min-width: 28px; min-height: 28px; font-size: 18px; box-shadow: inset 0 1px alpha(#ffffff, 0.18); }}
 .tile.big {{ border-radius: 12px; min-width: 42px; min-height: 42px; font-size: 26px; }}
 .tile.small {{ border-radius: 7px; min-width: 24px; min-height: 24px; font-size: 16px; }}
@@ -350,4 +398,17 @@ scrollbar slider:active {{ background: alpha({main}, 0.5); }}
 {reduced}
 "#
     )
+}
+
+#[cfg(test)]
+mod glyph_tests {
+    use super::*;
+    #[test]
+    fn missing_glyph_variants_fall_back_to_rounded() {
+        for value in ["outlined", "sharp", "rounded", "unknown"] {
+            assert_eq!(glyph_family_in(value, |_| false), "Material Symbols Rounded");
+        }
+        assert_eq!(glyph_family_in("outlined", |_| true), "Material Symbols Outlined");
+        assert_eq!(glyph_family_in("sharp", |_| true), "Material Symbols Sharp");
+    }
 }

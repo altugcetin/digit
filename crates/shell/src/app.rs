@@ -588,6 +588,7 @@ impl App {
 
     pub fn apply_prefs(self: &Rc<Self>, next: crate::config::Prefs) {
         let before = self.prefs.replace(next.clone());
+        kit::appearance::apply_gtk();
         if before.reduce_motion != next.reduce_motion {
             kit::motion::apply(next.reduce_motion);
             if next.reduce_motion {
@@ -663,6 +664,9 @@ impl App {
         if before.dock != next.dock || before.icon_theme != next.icon_theme || before.corners != next.corners {
             crate::dock::apply(self);
         }
+            glib::spawn_future_local(async {
+                if let Ok(Err(e)) = gtk::gio::spawn_blocking(kit::appearance::apply).await { eprintln!("digit: {e}"); }
+            });
         if before.corners != next.corners {
             for notch in self.notches.borrow().iter() {
                 notch.refresh_corners();

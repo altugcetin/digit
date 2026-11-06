@@ -8,6 +8,17 @@ pub(crate) fn save(key: &str, value: toml::Value) -> bool {
     save_many(&[(key, value)])
 }
 
+/// Regenerates digit's part of the compositor config in the background.
+fn apply_compositor() {
+    glib::spawn_future_local(async {
+        match gio::spawn_blocking(kit::setup::apply).await {
+            Ok(Ok(())) => {},
+            Ok(Err(e)) => ui::fail(&format!("Saved, but could not apply to the compositor: {e}")),
+            Err(_) => ui::fail("Saved, but could not apply to the compositor"),
+        }
+    });
+}
+
 pub(crate) fn save_many(values: &[(&str, toml::Value)]) -> bool {
     if let Err(e) = prefs::set_many(values) {
         ui::fail(&format!("Could not save: {e}"));
@@ -15,14 +26,8 @@ pub(crate) fn save_many(values: &[(&str, toml::Value)]) -> bool {
     }
     // Compositor settings (and the accent, which colors niri's window border) go straight into
     // digit's part of the compositor config.
-    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "ui_accent" | "border_color" | "reduced_effects" | "terminal" | "nvidia_env")) {
-        glib::spawn_future_local(async {
-            match gio::spawn_blocking(kit::setup::apply).await {
-                Ok(Ok(())) => {},
-                Ok(Err(e)) => ui::fail(&format!("Saved, but could not apply to the compositor: {e}")),
-                Err(_) => ui::fail("Saved, but could not apply to the compositor"),
-            }
-        });
+    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "ui_accent" | "border_color" | "reduced_effects" | "terminal" | "nvidia_env" | "cursor_theme" | "cursor_size")) {
+        apply_compositor();
     }
     true
 }
@@ -598,7 +603,7 @@ fn shell_look(body: &gtk::Box, t: &toml::Table) {
     end.append(&pick);
     look.append(&row);
     let themes = icon_themes();
-    let (row, end) = ui::row(Some("interests"), "Icon theme", "Used by the dock, switcher and launcher");
+    let (row, end) = ui::row(Some("interests"), "Icon theme", "Apps, the dock, the switcher and Spotlight");
     let mut labels: Vec<String> = vec!["System default".into()];
     labels.extend(themes.iter().cloned());
     let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
@@ -618,10 +623,45 @@ fn shell_look(body: &gtk::Box, t: &toml::Table) {
             restoring.set(false);
         } else {
             accepted.set(p.selected());
+            apply_compositor();
         }
     });
     end.append(&pick);
     look.append(&row);
+    let glyphs = kit::style::GLYPHS;
+    choice(&look, "category", "Glyph style", "The small symbols across Digit, like the ones in this list", "ui_glyphs", &glyphs, &prefs::get_str(t, "ui_glyphs", "rounded"));
+    cursor(&look, t);
+}
+
+/// The pointer's theme and size: "" leaves the system's theme alone.
+fn cursor(card: &gtk::Box, t: &toml::Table) {
+    const SIZES: [(i64, &str); 4] = [(24, "Small"), (32, "Medium"), (48, "Large"), (64, "Extra large")];
+    let (current, size) = kit::cursors::current(t);
+    let themes = kit::cursors::themes();
+    if !themes.is_empty() {
+        let mut options: Vec<(&str, &str)> = vec![("", "System default")];
+        options.extend(themes.iter().map(|(id, name)| (id.as_str(), name.as_str())));
+        choice(card, "arrow_selector_tool", "Cursor", "", "cursor_theme", &options, &current);
+    }
+    let labels: Vec<&str> = SIZES.iter().map(|s| s.1).collect();
+    let (row, end) = ui::row(Some("open_with"), "Cursor size", "");
+    let at = SIZES.iter().position(|s| s.0 >= size as i64).unwrap_or(SIZES.len() - 1);
+    let pick = ui::dropdown(&labels, at as u32);
+    let accepted = Cell::new(at as u32);
+    let restoring = Cell::new(false);
+    pick.connect_selected_notify(move |p| {
+        if restoring.get() { return; }
+        let Some((value, _)) = SIZES.get(p.selected() as usize) else { return };
+        if save("cursor_size", toml::Value::Integer(*value)) {
+            accepted.set(p.selected());
+        } else {
+            restoring.set(true);
+            p.set_selected(accepted.get());
+            restoring.set(false);
+        }
+    });
+    end.append(&pick);
+    card.append(&row);
 }
 
 fn app_look(body: &gtk::Box, t: &toml::Table) {

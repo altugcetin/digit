@@ -484,9 +484,9 @@ fetch() {
 }
 
 fonts() {
-    step fonts "Fonts (Readex Pro, Rubik, Material Symbols Rounded)"
+    step fonts "Fonts (Readex Pro, Rubik, Material Symbols)"
     local dir="$DATA/fonts/digit"
-    if fc-list 2>/dev/null | grep -qi "Material Symbols Rounded" && fc-list 2>/dev/null | grep -qi "Readex Pro" && fc-list 2>/dev/null | grep -qi "Rubik"; then
+    if fc-list 2>/dev/null | grep -qi "Material Symbols Rounded" && fc-list 2>/dev/null | grep -qi "Material Symbols Outlined" && fc-list 2>/dev/null | grep -qi "Material Symbols Sharp" && fc-list 2>/dev/null | grep -qi "Readex Pro" && fc-list 2>/dev/null | grep -qi "Rubik"; then
         return 0
     fi
     run mkdir -p "$dir"
@@ -498,6 +498,8 @@ fonts() {
     fetch "$g/rubik/Rubik%5Bwght%5D.ttf" "$dir/Rubik[wght].ttf" &&
     fetch "$g/rubik/OFL.txt" "$dir/OFL-Rubik.txt" &&
     fetch "$m/variablefont/MaterialSymbolsRounded%5BFILL,GRAD,opsz,wght%5D.ttf" "$dir/MaterialSymbolsRounded.ttf" &&
+    fetch "$m/variablefont/MaterialSymbolsOutlined%5BFILL,GRAD,opsz,wght%5D.ttf" "$dir/MaterialSymbolsOutlined.ttf" &&
+    fetch "$m/variablefont/MaterialSymbolsSharp%5BFILL,GRAD,opsz,wght%5D.ttf" "$dir/MaterialSymbolsSharp.ttf" &&
     fetch "$m/LICENSE" "$dir/LICENSE-MaterialSymbols.txt" ||
         warn "Could not download the fonts; digit uses fallbacks until you run ./install.sh again online."
     run fc-cache -f "$dir" >/dev/null 2>&1 || true

@@ -16,6 +16,8 @@ fn isolated(name: &str, session: Option<&str>, check: impl FnOnce(&Path)) {
         .env("DIGIT_SESSION_TEST", name)
         .env("XDG_CONFIG_HOME", &root)
         .env("XDG_CACHE_HOME", root.join("cache"))
+        .env("GSETTINGS_BACKEND", "memory")
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .env("NIRI_SOCKET", root.join("unused-socket"))
         .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
         .env_remove("DIGIT_SESSION")
@@ -157,5 +159,34 @@ fn prepare_reports_write_failures() {
         assert!(prepare("hyprland").is_err());
         assert!(prepare("niri").is_err());
         assert!(prepare("unsupported").is_err());
+    });
+}
+
+#[test]
+fn cursor_configs_validate_with_selected_and_default_theme() {
+    isolated("cursor_configs_validate_with_selected_and_default_theme", None, |root| {
+        for theme in ["Breeze", ""] {
+            crate::prefs::set("cursor_theme", toml::Value::String(theme.into())).unwrap();
+            crate::prefs::set("cursor_size", toml::Value::Integer(32)).unwrap();
+            for wm in ["hyprland", "niri"] {
+                prepare(wm).unwrap();
+                let mut cmd = if wm == "niri" {
+                    let mut cmd = Command::new("niri");
+                    cmd.args(["validate", "-c"]).arg(root.join("digit/niri/config.kdl"));
+                    cmd
+                } else {
+                    let mut cmd = Command::new("Hyprland");
+                    cmd.args(["--verify-config", "-c"]).arg(root.join("digit/hyprland/hyprland.lua"));
+                    cmd
+                };
+                cmd.env("XDG_RUNTIME_DIR", root).env_remove("NIRI_SOCKET");
+                let out = match cmd.output() {
+                    Ok(out) => out,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => { eprintln!("{wm} validator unavailable; skipped"); continue; }
+                    Err(e) => panic!("{wm}: {e}"),
+                };
+                assert!(out.status.success(), "{wm}, cursor {theme:?}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            }
+        }
     });
 }

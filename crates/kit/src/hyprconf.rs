@@ -231,7 +231,7 @@ pub(crate) fn rounding() -> i64 {
 fn base() -> String {
     let enabled = nvidia_env();
     let gpu = NVIDIA_ENV.iter().filter(|_| enabled).map(|(k, v)| format!("hl.env(\"{k}\", \"{v}\")\n")).collect::<String>();
-    fill(BASE, &[("settings", &compositor()), ("gpu", &gpu)])
+    fill(BASE, &[("settings", &compositor()), ("gpu", &gpu), ("cursor", &crate::cursors::hypr(&crate::prefs::read()))])
 }
 
 /// What the NVIDIA driver needs for hardware video (screen sharing, players) and GLX apps.

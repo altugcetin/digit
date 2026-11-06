@@ -64,11 +64,14 @@ pub(crate) fn entry(root: &std::path::Path, main: &str, body: &str, user: &str, 
 
 /// Regenerates digit's part of the config after a setting or shortcut changed.
 pub fn apply() -> Result<(), String> {
-    match kind() {
+    crate::appearance::apply()?;
+    let result = match kind() {
         Some(Kind::Hyprland) => hyprconf::apply(),
         Some(Kind::Niri) => niriconf::sync().map(|_| ()),
         None => Ok(()),
-    }
+    };
+    if result.is_ok() { crate::cursors::apply_live(); }
+    result
 }
 
 /// Regenerates the active Digit session config, as the shell does at start.

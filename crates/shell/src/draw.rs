@@ -10,6 +10,7 @@ struct Key {
     text: String,
     px: u32,
     face: (u8, i32),
+    glyphs: &'static str,
     width: i32,
     align: u8,
 }
@@ -32,6 +33,7 @@ fn cached(widget: &impl IsA<gtk::Widget>, cfg: &Config, text: &str, px: f64, fac
         text: text.to_string(),
         px: (px * 64.0) as u32,
         face: face_key(face),
+        glyphs: kit::style::glyph_family(),
         width,
         align: match align {
             pango::Alignment::Left => 0,
@@ -57,6 +59,20 @@ fn cached(widget: &impl IsA<gtk::Widget>, cfg: &Config, text: &str, px: f64, fac
         c.insert(key, l.clone());
     });
     l
+}
+
+/// Invalidate hand-drawn glyphs in every open panel, including idle canvases.
+pub fn glyphs_changed() {
+    LAYOUTS.with(|cache| cache.borrow_mut().clear());
+    fn redraw(widget: &gtk::Widget) {
+        widget.queue_draw();
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            redraw(&widget);
+        }
+    }
+    for window in gtk::Window::list_toplevels() { redraw(&window); }
 }
 
 pub fn forget(widget: &impl IsA<gtk::Widget>) {
@@ -101,7 +117,7 @@ pub fn layout(widget: &impl IsA<gtk::Widget>, cfg: &Config, text: &str, px: f64,
             fd.set_weight(weight(w));
         }
         Face::Icon(fill) => {
-            fd.set_family(&cfg.icon_font);
+            fd.set_family(kit::style::glyph_family());
             fd.set_variations(Some(&format!("FILL={},wght=400,opsz={}", fill as i32, px.clamp(20.0, 48.0))));
         }
     }
