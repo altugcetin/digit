@@ -294,6 +294,9 @@ struct State {
     bar: Tween,
     bubbles: Tween,
     scroll: Tween,
+    // The selection pill, measured from the top of the list so it scrolls with the rows.
+    pill_y: Tween,
+    pill_h: Tween,
     glow: [Tween; 5],
     hovered: Option<usize>,
     tip: Tween,
@@ -510,6 +513,8 @@ impl Launcher {
             bar: Tween::still(NARROW),
             bubbles: Tween::still(1.0),
             scroll: Tween::still(0.0),
+            pill_y: Tween::still(0.0),
+            pill_h: Tween::still(ROW),
             glow: [Tween::still(0.0); 5],
             hovered: None,
             tip: Tween::still(0.0),
@@ -675,10 +680,13 @@ impl Launcher {
                     let mut s = me.0.borrow_mut();
                     let changed = s.selected != line;
                     s.selected = line;
+                    if changed {
+                        s.glide_pill();
+                    }
                     changed
                 };
                 if changed {
-                    me.0.borrow().canvas.queue_draw();
+                    me.kick();
                 }
             }
         });
@@ -922,6 +930,7 @@ impl Launcher {
         s.selected = picks[next];
         s.moved = true;
         s.reveal();
+        s.glide_pill();
         drop(s);
         self.kick();
     }
@@ -1165,6 +1174,7 @@ impl Launcher {
         s.card_hot = None;
         s.clear_on = mode == Mode::Clip && q.is_empty() && !crate::clip::history().is_empty();
         s.selected = s.lines.iter().position(Line::pickable).unwrap_or(0);
+        s.place_pill();
         let now = glib::monotonic_time();
         let height = if s.lines.is_empty() { 0.0 } else { (s.content() + 2.0 * INSET).min(MAX_PANEL) };
         let first = s.panel.target() < 1.0;
@@ -1232,6 +1242,7 @@ impl Launcher {
             let at = s.lines.iter().position(|l| matches!(l, Line::Item(i) if s.items.get(*i).is_some_and(|it| it.title == title && it.detail == detail)));
             if let Some(at) = at {
                 s.selected = at;
+                s.place_pill();
             }
         }
     }
@@ -1441,6 +1452,26 @@ impl State {
         self.lines.iter().map(Line::height).sum()
     }
 
+    /// Where the selected line sits in the list, and how tall it is.
+    fn pill_target(&self) -> (f64, f64) {
+        let top = self.lines.iter().take(self.selected).map(Line::height).sum();
+        (top, self.lines.get(self.selected).map_or(ROW, Line::height))
+    }
+
+    /// The selection moved within the same results: the pill slides there.
+    fn glide_pill(&mut self) {
+        let ((y, h), now) = (self.pill_target(), glib::monotonic_time());
+        self.pill_y.go(y, now, 150, motion::STANDARD);
+        self.pill_h.go(h, now, 150, motion::STANDARD);
+    }
+
+    /// New results: nothing to slide from, so the pill starts on the selected line.
+    fn place_pill(&mut self) {
+        let (y, h) = self.pill_target();
+        self.pill_y.set(y);
+        self.pill_h.set(h);
+    }
+
     fn reveal(&mut self) {
         let mut top = 0.0;
         for (i, line) in self.lines.iter().enumerate() {
@@ -1514,7 +1545,7 @@ impl State {
                 self.region = rect;
             }
         }
-        let moving = [&self.fade, &self.rise, &self.panel, &self.bar, &self.bubbles, &self.scroll, &self.tip].iter().any(|t| !t.settled(now))
+        let moving = [&self.fade, &self.rise, &self.panel, &self.bar, &self.bubbles, &self.scroll, &self.pill_y, &self.pill_h, &self.tip].iter().any(|t| !t.settled(now))
             || self.glow.iter().any(|t| !t.settled(now))
             || !self.clear_glow.settled(now)
             || self.app.palette_moving(now);
@@ -1630,21 +1661,17 @@ impl State {
         s.pop();
     }
 
-    fn draw_card(&mut self, s: &gtk::Snapshot, pal: &Palette, top: f64, at: usize, on: bool) {
+    fn draw_card(&mut self, s: &gtk::Snapshot, pal: &Palette, top: f64, at: usize, covered: f64) {
         let cfg = self.app.cfg.clone();
         let canvas = self.canvas.clone();
         let Some(c) = self.colors.get(at).cloned() else { return };
         let g = CardGeometry::new(top);
         let hot = self.card_hot.filter(|(i, _)| *i == at).map(|(_, h)| h);
-        // Selected like any other row: an accent fill with its own ink on top.
-        if on {
-            let row = rounded(g.card.x, g.card.y, g.card.w, g.card.h, PANEL_R - INSET);
-            s.push_rounded_clip(&row);
-            s.append_color(&pal.accent.rgba(), row.bounds());
-            s.pop();
-        }
-        let (title_ink, detail_ink) = if on { (pal.on_accent, pal.on_accent.mix(pal.accent, 0.72)) } else { (pal.ink_main, pal.ink_meta) };
-        let chip_ink = if on { pal.on_accent } else { pal.ink_main };
+        // Selected like any other row: the pill sits under it, with its own ink on top.
+        let on = covered > 0.5;
+        let title_ink = pal.on_accent.mix(pal.ink_main, covered);
+        let detail_ink = pal.on_accent.mix(pal.accent, 0.72).mix(pal.ink_meta, covered);
+        let chip_ink = title_ink;
         let sw = rounded(g.swatch.x, g.swatch.y, g.swatch.w, g.swatch.h, 8.0);
         s.push_rounded_clip(&sw);
         s.append_color(&gdk::RGBA::new(c.color.r as f32, c.color.g as f32, c.color.b as f32, c.color.a as f32), sw.bounds());
@@ -1678,6 +1705,17 @@ impl State {
         let canvas = self.canvas.clone();
         let mut top = PANEL_TOP + INSET - self.scroll.value(now).round();
         let bottom = PANEL_TOP + height;
+        // One pill for the selection, under the rows, so it can slide between them.
+        let picked = self.lines.get(self.selected).is_some_and(Line::pickable);
+        let (pill_top, pill_h) = (top + self.pill_y.value(now).round(), self.pill_h.value(now).round());
+        if picked {
+            let pill = rounded(PAD + INSET, pill_top, WIDTH - 2.0 * INSET, pill_h, PANEL_R - INSET);
+            s.push_rounded_clip(&pill);
+            s.append_color(&pal.accent.rgba(), pill.bounds());
+            s.pop();
+        }
+        // How much of a line the pill covers: its ink follows, so text stays readable mid-slide.
+        let covered = |top: f64, h: f64| if picked { (((top + h).min(pill_top + pill_h) - top.max(pill_top)) / h.min(pill_h).max(1.0)).clamp(0.0, 1.0) } else { 0.0 };
         for li in 0..self.lines.len() {
             let h = self.lines[li].height();
             if top + h < PANEL_TOP || top > bottom {
@@ -1685,25 +1723,18 @@ impl State {
                 continue;
             }
             match self.lines[li] {
-                Line::Palette(c) => self.draw_card(s, pal, top, c, li == self.selected),
+                Line::Palette(c) => self.draw_card(s, pal, top, c, covered(top, h)),
                 Line::Head(ref title) => {
                     let title = title.clone();
                     draw::text(s, &canvas, &cfg, &title, 12.5, Face::Text(560), pal.ink_meta, PAD + INSET + 14.0, top + HEAD / 2.0 + 3.0, WIDTH - 60.0, pango::Alignment::Left);
                 }
                 Line::Item(i) => {
-                    let on = li == self.selected;
+                    let lit = covered(top, ROW);
+                    let on = lit > 0.5;
                     let mid = top + ROW / 2.0;
-                    if on {
-                        let row = rounded(PAD + INSET, top, WIDTH - 2.0 * INSET, ROW, PANEL_R - INSET);
-                        s.push_rounded_clip(&row);
-                        s.append_color(&pal.accent.rgba(), row.bounds());
-                        s.pop();
-                    }
-                    let (title_ink, detail_ink, symbol_ink) = if on {
-                        (pal.on_accent, pal.on_accent.mix(pal.accent, 0.72), pal.on_accent)
-                    } else {
-                        (pal.ink_main, pal.ink_meta, pal.ink_sec)
-                    };
+                    let title_ink = pal.on_accent.mix(pal.ink_main, lit);
+                    let detail_ink = pal.on_accent.mix(pal.accent, 0.72).mix(pal.ink_meta, lit);
+                    let symbol_ink = pal.on_accent.mix(pal.ink_sec, lit);
                     let (title, detail) = (self.items[i].title.clone(), self.items[i].detail.clone());
                     let icon = match &self.items[i].look {
                         Look::Glyph(g) => {
