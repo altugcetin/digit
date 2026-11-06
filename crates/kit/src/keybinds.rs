@@ -37,6 +37,8 @@ pub enum Act {
 pub enum Win {
     Close,
     Float,
+    /// Hyprland: toggle pseudotiling in dwindle.
+    Pseudo,
     Maximize,
     Fullscreen,
     Focus(Dir),
@@ -161,6 +163,7 @@ pub fn defaults() -> Vec<Bind> {
         bind("terminal", "Windows", "Terminal", "SUPER + RETURN", Act::Terminal, n, true),
         bind("close", "Windows", "Close the window", "SUPER + Q", Act::Window(Win::Close), n, true),
         bind("float", "Windows", "Float or tile the window", "SUPER + V", Act::Window(Win::Float), n, true),
+        bind("pseudo", "Windows", "Pseudotile the window", "SUPER + SHIFT + V", Act::Window(Win::Pseudo), n, true),
         bind("maximize", "Windows", "Maximize", "SUPER + F", Act::Window(Win::Maximize), n, true),
         bind("fullscreen", "Windows", "Fullscreen", "SUPER + SHIFT + F", Act::Window(Win::Fullscreen), n, true),
         bind("drag", "Windows", "Move a window with the mouse", "SUPER + mouse:272", Act::Window(Win::Drag), MOUSE, true),

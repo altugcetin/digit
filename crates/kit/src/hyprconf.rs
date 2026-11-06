@@ -67,6 +67,7 @@ fn action(b: &Bind) -> String {
         Act::Window(w) => match w {
             Win::Close => "hl.dsp.window.close()".into(),
             Win::Float => "hl.dsp.window.float({ action = \"toggle\" })".into(),
+            Win::Pseudo => "hl.dsp.window.pseudo()".into(),
             Win::Maximize => "per_layout({ default = hl.dsp.window.fullscreen({ mode = 1 }), scrolling = column_maximize })".into(),
             Win::Fullscreen => "hl.dsp.window.fullscreen({ mode = 0 })".into(),
             Win::Focus(d) => scrolling(*d, format!("hl.dsp.focus({{ direction = \"{}\" }})", d.name()), "focus"),
@@ -472,6 +473,22 @@ mod tests {
         assert!(rendered.contains("workspace = \"1\", monitor = \"DP-1\", default = true"));
         assert!(rendered.contains("workspace = \"3\", monitor = \"DP-1\" })"));
         assert!(rendered.contains("workspace = \"7\", monitor = \"HDMI-A-1\", default = true"));
+    #[test]
+    fn pseudotile_default_renders_only_for_hyprland_without_key_conflicts() {
+        let binds = keybinds::defaults();
+        let pseudo = binds.iter().find(|b| b.id == "pseudo").unwrap();
+        assert_eq!(pseudo.group, "Windows");
+        assert_eq!(pseudo.label, "Pseudotile the window");
+        assert_eq!(pseudo.keys, "SUPER + SHIFT + V");
+        assert_eq!(pseudo.act, Act::Window(Win::Pseudo));
+        assert_eq!(binds.iter().filter(|b| keybinds::normalize(&b.keys) == keybinds::normalize(&pseudo.keys)).count(), 1);
+        assert!(supports(pseudo));
+        let rendered = render_keybinds(std::slice::from_ref(pseudo));
+        assert!(rendered.lines().any(|line| line == "bind(\"SUPER + SHIFT + V\", hl.dsp.window.pseudo()) -- Pseudotile the window"));
+        assert!(!crate::niriconf::supports(pseudo));
+        assert!(!crate::niriconf::render_keybinds(std::slice::from_ref(pseudo)).contains("Super+Shift+V"));
+    }
+
         assert!(rendered.contains("workspace = \"10\", monitor = \"HDMI-A-1\" })"));
         assert_eq!(rendered.matches("hl.workspace_rule(").count(), 5);
         assert_eq!(rendered.matches("default = true").count(), 2);
