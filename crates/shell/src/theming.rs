@@ -204,6 +204,10 @@ fn settings_ini(old: &str, theme: &str) -> String {
 }
 
 fn qt_config(old: &str) -> String {
+    qt_config_for(old, &kit::appearance::icon_theme(&kit::prefs::read()))
+}
+
+fn qt_config_for(old: &str, icons: &str) -> String {
     fn set_appearance(old: &str, values: &[(&str, &str)]) -> String {
         let mut lines: Vec<String> = old.lines().map(str::to_owned).collect();
         let start = lines.iter().position(|line| line.trim() == "[Appearance]");
@@ -217,10 +221,12 @@ fn qt_config(old: &str) -> String {
         format!("{}\n", lines.join("\n"))
     }
     let path = qt_colors().to_string_lossy().into_owned();
-    set_appearance(old, &[("style", "Breeze"), ("icon_theme", "Adwaita"), ("color_scheme_path", &path)])
+    set_appearance(old, &[("style", "Breeze"), ("icon_theme", icons), ("color_scheme_path", &path)])
 }
 
 fn apply_gtk_settings() {
+    if !kit::setup::installed() { return; }
+    if let Err(e) = kit::appearance::apply() { eprintln!("digit: {e}"); }
     let Some((theme, _)) = theme_name() else { return };
     for dir in gtk_dirs().into_iter().filter(|d| d.is_dir()) {
         let file = dir.join("settings.ini");
@@ -254,6 +260,7 @@ fn write_if_changed(path: &PathBuf, text: &str) {
 }
 
 pub fn write(t: &Theme) {
+    if !kit::setup::installed() { return; }
     for (dir, gtk4) in gtk_dirs().into_iter().zip([true, false]) {
         if dir.is_dir() {
             write_if_changed(&dir.join("digit.css"), &gtk_css(t, gtk4));
@@ -273,6 +280,7 @@ pub fn write(t: &Theme) {
 }
 
 pub fn take() {
+    if !kit::setup::installed() { return; }
     apply_gtk_settings();
     for dir in gtk_dirs().into_iter().filter(|d| d.is_dir()) {
         let file = dir.join("gtk.css");
@@ -299,6 +307,7 @@ pub fn take() {
 }
 
 pub fn give_back() {
+    if !kit::setup::installed() { return; }
     for dir in gtk_dirs().into_iter().filter(|d| d.is_dir()) {
         let file = dir.join("gtk.css");
         let Ok(text) = std::fs::read_to_string(&file) else { continue };
@@ -368,9 +377,10 @@ mod tests {
 
     #[test]
     fn qt6ct_configuration_uses_breeze_sample_and_digit_fallback() {
-        let config = qt_config("[Appearance]\nstyle=Fusion\nicon_theme=old\n");
+        let config = qt_config_for("[Appearance]\nstyle=Fusion\nicon_theme=old\n", "Adwaita");
         assert!(config.contains("style=Breeze"));
         assert!(config.contains("icon_theme=Adwaita"));
+        assert!(qt_config_for("[Appearance]\nicon_theme=old\n", "Papirus-Dark").contains("icon_theme=Papirus-Dark\n"));
         assert!(config.contains("color_scheme_path="));
         assert_eq!(config.matches("[Appearance]").count(), 1);
         let sample = "[Colors:Window]\nForegroundNormal=220,221,222\nBackgroundNormal=30,31,32\n[Colors:Button]\nBackgroundNormal=40,41,42\nForegroundNormal=230,231,232\n[Colors:View]\nForegroundNormal=240,241,242\nBackgroundNormal=50,51,52\nBackgroundAlternate=60,61,62\nForegroundLink=70,71,72\nForegroundVisited=80,81,82\nForegroundInactive=90,91,92\n[Colors:Selection]\nBackgroundNormal=100,101,102\nForegroundNormal=110,111,112\n[Colors:Tooltip]\nBackgroundNormal=120,121,122\nForegroundNormal=130,131,132\n";

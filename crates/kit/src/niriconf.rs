@@ -336,10 +336,7 @@ fn compositor() -> String {
     if !layout.is_empty() {
         out.push_str(&format!("layout {{\n{}\n}}\n\n", layout.join("\n")));
     }
-    let mut cursor = Vec::new();
-    if let Some(size) = niri_text("cursor_size", "small") {
-        cursor.push(format!("    xcursor-size {}", match size.as_str() { "large" => 48, "medium" => 32, _ => 24 }));
-    }
+    let mut cursor = crate::cursors::niri(&t);
     if niri_flag("hide_cursor", false) == Some(true) {
         cursor.push("    hide-when-typing".into());
     }

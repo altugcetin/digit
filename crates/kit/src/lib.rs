@@ -1,3 +1,5 @@
+pub mod appearance;
+pub mod cursors;
 pub mod app;
 pub mod bluez;
 pub mod calc;

@@ -1,7 +1,7 @@
 -- Session defaults: environment, layouts and small fixes. Written by digit;
 -- change any of it in user.lua, which loads after this.
 
-hl.env("XCURSOR_SIZE", "24")
+{{cursor}}
 hl.env("QT_QPA_PLATFORMTHEME", "qt6ct")
 {{gpu}}
 hl.config({

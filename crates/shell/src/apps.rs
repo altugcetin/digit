@@ -133,6 +133,13 @@ pub fn pretty(app_id: &str) -> String {
 }
 
 pub fn prepare(context: &gio::AppLaunchContext) {
+    if kit::setup::installed() {
+        let (theme, size) = kit::cursors::current(&kit::prefs::read());
+        for key in ["XCURSOR_THEME", "HYPRCURSOR_THEME"] {
+            if theme.is_empty() { context.unsetenv(key); } else { context.setenv(key, &theme); }
+        }
+        for key in ["XCURSOR_SIZE", "HYPRCURSOR_SIZE"] { context.setenv(key, size.to_string()); }
+    }
     for (key, value) in crate::gpu::child_env() {
         match value {
             Some(v) => context.setenv(&key, &v),

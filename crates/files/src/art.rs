@@ -27,6 +27,7 @@ thread_local! {
         v
     };
     static ACCENT: RefCell<Option<String>> = const { RefCell::new(None) };
+    static GLYPHS: std::cell::Cell<&'static str> = const { std::cell::Cell::new("Material Symbols Rounded") };
 }
 
 pub fn glyph(file: &gio::File) -> &'static str {
@@ -106,7 +107,7 @@ pub fn folder(glyph: &str, size: i32) -> Option<gdk::Texture> {
         cr.set_line_width(1.0_f64.max(s / 96.0));
         cr.stroke().ok()?;
         if !glyph.is_empty() && size >= 28 {
-            let l = layout(&cr, glyph, &format!("Material Symbols Rounded {}px", (s * 0.32).round()));
+            let l = layout(&cr, glyph, &format!("{} {}px", kit::style::glyph_family(), (s * 0.32).round()));
             let (tw, th) = l.pixel_size();
             let (gx, gy) = (s / 2.0 - tw as f64 / 2.0, s * 0.57 - th as f64 / 2.0);
             let ink = mix(a, [0.0, 0.0, 0.0], 0.52);
@@ -136,7 +137,9 @@ pub fn refresh_accent() {
         *current = Some(next);
         true
     });
-    if !changed {
+    let family = kit::style::glyph_family();
+    let glyphs_changed = GLYPHS.with(|current| current.replace(family) != family);
+    if !changed && !glyphs_changed {
         return;
     }
 

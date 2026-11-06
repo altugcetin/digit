@@ -19,8 +19,8 @@ pub fn install(display: &gdk::Display) {
 
 pub fn theme(name: Option<&str>) {
     let Some(settings) = gtk::Settings::default() else { return };
-    match name.filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' '))) {
+    match name.filter(|n| !n.is_empty() && !n.chars().any(char::is_control)) {
         Some(n) => settings.set_gtk_icon_theme_name(Some(n)),
-        None => settings.reset_property("gtk-icon-theme-name"),
+        None => settings.set_gtk_icon_theme_name(Some("Adwaita")),
     }
 }
