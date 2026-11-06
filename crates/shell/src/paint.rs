@@ -71,7 +71,7 @@ pub fn refresh_palette(until: i64) {
         }
         if !matches!(window.namespace().as_deref(), Some(
             "digit-control" | "digit-dock" | "digit-dock-menu" | "digit-layouts" |
-            "digit-menu" | "digit-session" | "digit-spaces" | "digit-switcher" | "digit-wallpapers"
+            "digit-desktop-icons" | "digit-menu" | "digit-session" | "digit-spaces" | "digit-switcher" | "digit-wallpapers"
         )) {
             continue;
         }

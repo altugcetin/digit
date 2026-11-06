@@ -113,7 +113,6 @@ struct Net {
     online: bool,
 }
 
-const GREEN: Rgb = Rgb::new(0.19, 0.82, 0.35);
 const RED: Rgb = Rgb::new(1.0, 0.27, 0.23);
 const CELL: f64 = 96.0;
 const PER_ROW: usize = 4;
@@ -807,24 +806,13 @@ impl State {
         t
     }
 
-    /// Device batteries, plus the phone's while KDE Connect reaches it.
-    fn batteries(&self) -> Vec<crate::devices::Gadget> {
-        let mut list = self.app.gadgets.borrow().clone();
-        if let Some(p) = crate::phone::phone().filter(|p| p.reachable) {
-            if let Some((level, charging)) = p.battery {
-                list.push(crate::devices::Gadget { path: format!("kdeconnect:{}", p.id), glyph: p.glyph(), name: p.name, level: level.clamp(0, 100) as u8, coarse: None, charging, own: false });
-            }
-        }
-        list
-    }
-
     fn content(&self) -> f64 {
         let rows = self.tiles().len().div_ceil(2) as f64;
         let tiles = rows * TILE_H + (rows - 1.0).max(0.0) * TILE_GAP;
         let n = self.app.history.borrow().len();
         let list = if n == 0 { EMPTY } else { n as f64 * ROW };
         let detail = self.expand.map(|t| self.detail_height(t) * self.reveal.target()).unwrap_or(0.0);
-        let cells = self.batteries().len();
+        let cells = crate::batteries::list(&self.app).len();
         let batteries = if cells == 0 { 0.0 } else { HEAD + cells.div_ceil(PER_ROW) as f64 * CELL + 6.0 };
         let system = HEAD + CELL + 6.0;
         let weather = if self.app.weather.borrow().is_some() { 58.0 } else { 0.0 };
@@ -999,7 +987,7 @@ impl State {
             }
             y += CELL + 6.0;
         }
-        let gadgets = self.batteries();
+        let gadgets = crate::batteries::list(&self.app);
         if !gadgets.is_empty() {
             draw::text(s, &canvas, &cfg, "Batteries", 14.0, Face::Text(600), pal.ink_main, x0 + 4.0, y + HEAD / 2.0, 220.0, pango::Alignment::Left);
             y += HEAD;
@@ -1007,32 +995,7 @@ impl State {
             for (i, g) in gadgets.iter().enumerate() {
                 let cx = x0 + cw * (i % PER_ROW) as f64 + cw / 2.0;
                 let cy = y + (i / PER_ROW) as f64 * CELL + 28.0;
-                let low = !g.charging && g.level <= 20;
-                let tint = if g.charging { GREEN } else if low { RED } else { pal.ink_main };
-                fill(s, &rounded(cx - 26.0, cy - 26.0, 52.0, 52.0, 26.0), pal.ink_main.mix(pal.body, 0.05));
-                let ring = |frac: f64| {
-                    let pb = gsk::PathBuilder::new();
-                    let r = 22.0f64;
-                    let start = -std::f64::consts::FRAC_PI_2;
-                    let steps = (64.0 * frac).ceil().max(1.0) as usize;
-                    for k in 0..=steps {
-                        let a = start + frac * std::f64::consts::TAU * k as f64 / steps as f64;
-                        let (px, py) = ((cx + r * a.cos()) as f32, (cy + r * a.sin()) as f32);
-                        if k == 0 { pb.move_to(px, py) } else { pb.line_to(px, py) }
-                    }
-                    pb.to_path()
-                };
-                let stroke = gsk::Stroke::new(3.5);
-                stroke.set_line_cap(gsk::LineCap::Round);
-                s.append_stroke(&ring(1.0), &stroke, &pal.ink_main.alpha(0.12).rgba());
-                s.append_stroke(&ring((g.level as f64 / 100.0).clamp(0.02, 1.0)), &stroke, &tint.rgba());
-                draw::icon(s, &canvas, &cfg, g.glyph, 20.0, true, pal.ink_main, cx, cy);
-                let value = match g.coarse {
-                    Some(l) => l.to_string(),
-                    None => format!("{}%", g.level),
-                };
-                draw::text(s, &canvas, &cfg, &value, 13.0, Face::Number(560), if low { RED } else { pal.ink_main }, cx - cw / 2.0 + 3.0, cy + 39.0, cw - 6.0, pango::Alignment::Center);
-                draw::text(s, &canvas, &cfg, &g.name, 11.5, Face::Text(450), pal.ink_meta, cx - cw / 2.0 + 3.0, cy + 56.0, cw - 6.0, pango::Alignment::Center);
+                crate::batteries::cell(s, &canvas, &cfg, &pal, g, cx, cy, cw, true);
             }
             y += gadgets.len().div_ceil(PER_ROW) as f64 * CELL + 6.0;
         }

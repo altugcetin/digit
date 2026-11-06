@@ -191,6 +191,15 @@ impl Menu {
 }
 
 pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, x: f64, y: f64, title: &str, rows: Vec<Row>) {
+    show_inner(app, monitor, x, y, title, rows, true);
+}
+
+/// Desktop clicks near the top edge still need an outside-click scrim over the entire output.
+pub fn show_desktop(app: &Rc<App>, monitor: Option<gdk::Monitor>, x: f64, y: f64, rows: Vec<Row>) {
+    show_inner(app, monitor, x, y, "", rows, false);
+}
+
+fn show_inner(app: &Rc<App>, monitor: Option<gdk::Monitor>, x: f64, y: f64, title: &str, rows: Vec<Row>, leave_bar: bool) {
     close();
     crate::datepop::close();
     let hook = NEXT.with(|n| n.borrow_mut().take());
@@ -214,7 +223,7 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, x: f64, y: f64, title:
     window.set_anchor(Edge::Left, true);
     let scrim = crate::paint::scrim(monitor.as_ref(), close);
     // A menu from the menu bar leaves the bar uncovered, so moving to the next menu still works.
-    if y < 80.0 {
+    if leave_bar && y < 80.0 {
         scrim.set_margin(Edge::Top, y.max(0.0) as i32);
     }
     SCRIM.with(|s| *s.borrow_mut() = Some(scrim));
