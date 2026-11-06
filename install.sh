@@ -22,6 +22,7 @@ CHECK=false
 METHOD=""
 NVIDIA_ENV=false
 FAILED=false
+PACKAGES_INSTALLED=false
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
@@ -175,13 +176,41 @@ distro() {
     fi
 }
 
+# Only local databases: -T also accepts Arch providers, and RPM's
+# --whatprovides accepts capabilities such as curl from curl-minimal.
+missing_pkgs() {
+    local p member group
+    for p in "$@"; do
+        case $FAMILY in
+            arch)
+                pacman -Q "$p" >/dev/null 2>&1 && continue
+                # Older Arch releases shipped base-devel as a group. Its local
+                # membership alone cannot tell us whether every member is present;
+                # read the cached sync group and test each member locally.
+                if [ "$p" = base-devel ] && group=$(pacman -Sgq "$p" 2>/dev/null) && [ -n "$group" ]; then
+                    while IFS= read -r member; do
+                        pacman -T "$member" >/dev/null 2>&1 || printf '%s\n' "$member"
+                    done <<<"$group"
+                else
+                    pacman -T "$p" >/dev/null 2>&1 || printf '%s\n' "$p"
+                fi ;;
+            fedora|suse)
+                rpm -q "$p" >/dev/null 2>&1 ||
+                    rpm -q --whatprovides "$p" >/dev/null 2>&1 || printf '%s\n' "$p" ;;
+        esac
+    done
+}
+
 install_pkgs() {
-    [ $# -gt 0 ] || return 0
+    local missing=()
+    mapfile -t missing < <(missing_pkgs "$@")
+    [ "${#missing[@]}" -gt 0 ] || return 0
     case $FAMILY in
-        suse) superuser zypper --non-interactive install --no-recommends "$@" ;;
-        fedora) superuser dnf install -y "$@" ;;
-        arch) superuser pacman -S --needed --noconfirm "$@" ;;
+        suse) superuser zypper --non-interactive install --no-recommends "${missing[@]}" ;;
+        fedora) superuser dnf install -y "${missing[@]}" ;;
+        arch) superuser pacman -S --needed --noconfirm "${missing[@]}" ;;
     esac
+    PACKAGES_INSTALLED=true
 }
 
 has_pkg() {
@@ -243,14 +272,22 @@ install_wm() {
     step compositor "Compositor: $WM"
     # The portal may need the same COPR even when Hyprland is already installed.
     if [ "$FAMILY:$WM" = fedora:hyprland ]; then
-        if ! has_pkg hyprland || ! has_pkg xdg-desktop-portal-hyprland; then
-            superuser dnf copr enable -y solopasha/hyprland
-        fi
+        local p missing=()
+        mapfile -t missing < <(missing_pkgs hyprland xdg-desktop-portal-hyprland)
+        for p in "${missing[@]}"; do
+            if ! has_pkg "$p"; then
+                superuser dnf copr enable -y solopasha/hyprland
+                break
+            fi
+        done
     fi
     case $WM in
         niri) command -v niri >/dev/null 2>&1 && return 0 ;;
         hyprland) { command -v Hyprland || command -v hyprland; } >/dev/null 2>&1 && return 0 ;;
     esac
+    local wm_missing=()
+    mapfile -t wm_missing < <(missing_pkgs "$WM")
+    [ "${#wm_missing[@]}" -gt 0 ] || return 0
     case "$FAMILY:$WM" in
         suse:niri|arch:niri|suse:hyprland|arch:hyprland) install_pkgs "$WM" ;;
         fedora:niri)
@@ -285,17 +322,27 @@ package_lists() {
 }
 
 deps() {
-    local build run_pkgs p available=()
+    local build run_pkgs p missing=() available=()
     package_lists
     step packages "System packages"
-    info "${build[*]} ${run_pkgs[*]}"
+    mapfile -t missing < <(missing_pkgs "${build[@]}" "${run_pkgs[@]}")
+    if [ "${#missing[@]}" -eq 0 ]; then
+        info "System packages are already installed"
+        # Keep an entirely satisfied run free of privileged package commands,
+        # even on systems that have never synced Store's optional file lists.
+        if [ "$FAMILY" = arch ] && $PACKAGES_INSTALLED; then
+            superuser pacman -Fy
+        fi
+        return 0
+    fi
+    info "${missing[*]}"
     if confirm "Install them with your package manager (asks for your sudo password)?"; then
         # Upstream lists this community COPR for Fedora:
         # https://git.dec05eba.com/gpu-screen-recorder/about/#unofficial-install-methods
-        if [ "$FAMILY" = fedora ] && ! has_pkg gpu-screen-recorder; then
+        if [ "$FAMILY" = fedora ] && [[ " ${missing[*]} " == *" gpu-screen-recorder "* ]] && ! has_pkg gpu-screen-recorder; then
             superuser dnf copr enable -y brycensranch/gpu-screen-recorder-git
         fi
-        for p in "${run_pkgs[@]}"; do
+        for p in "${missing[@]}"; do
             case $p in
                 gpu-screen-recorder|cava)
                     if ! has_pkg "$p"; then
@@ -305,9 +352,9 @@ deps() {
             esac
             available+=("$p")
         done
-        install_pkgs "${build[@]}" "${available[@]}"
+        install_pkgs "${available[@]}"
         # Digit Store tells apps, tools and libraries apart from each package's file list.
-        if [ "$FAMILY" = arch ]; then
+        if [ "$FAMILY" = arch ] && { $PACKAGES_INSTALLED || ! compgen -G '/var/lib/pacman/sync/*.files' >/dev/null; }; then
             superuser pacman -Fy
         fi
     else
@@ -316,7 +363,7 @@ deps() {
 }
 
 bootstrap_deps() {
-    local packages=() missing=() p
+    local packages=() missing=()
     case $FAMILY in
         suse|fedora)
             packages=(gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel wayland-devel) ;;
@@ -332,14 +379,12 @@ bootstrap_deps() {
         packages+=(fontconfig)
     fi
     command -v sudo >/dev/null 2>&1 || packages+=(sudo)
-    for p in "${packages[@]}"; do
-        case $FAMILY in
-            arch) pacman -Q "$p" >/dev/null 2>&1 || missing+=("$p") ;;
-            fedora|suse) rpm -q "$p" >/dev/null 2>&1 || missing+=("$p") ;;
-        esac
-    done
-    [ "${#missing[@]}" -gt 0 ] || return 0
+    mapfile -t missing < <(missing_pkgs "${packages[@]}")
     step packages "Graphical installer prerequisites"
+    if [ "${#missing[@]}" -eq 0 ]; then
+        info "System packages are already installed"
+        return 0
+    fi
     info "${missing[*]}"
     local auth="sudo password"
     command -v sudo >/dev/null 2>&1 || auth="root password via su (sudo is not installed yet)"
@@ -585,7 +630,7 @@ summary() {
 
 check_system() {
     distro
-    local gpu w state rust_state=missing gtk free p
+    local gpu w state rust_state=missing gtk free
     local build run_pkgs missing=() sessions_found=()
     # Report packages for --wm, or the same default as an unattended install.
     local WM=$WM YES=true
@@ -603,12 +648,7 @@ check_system() {
     elif command -v cargo >/dev/null 2>&1 || [ -x "$HOME/.cargo/bin/cargo" ]; then rust_state=old; fi
     gtk=$(pkg-config --modversion gtk4 2>/dev/null || echo none)
     package_lists
-    for p in "${build[@]}" "${run_pkgs[@]}"; do
-        case $FAMILY in
-            arch) pacman -Q "$p" >/dev/null 2>&1 || missing+=("$p") ;;
-            fedora|suse) rpm -q "$p" >/dev/null 2>&1 || missing+=("$p") ;;
-        esac
-    done
+    mapfile -t missing < <(missing_pkgs "${build[@]}" "${run_pkgs[@]}")
     free=$(df -Pm "$HOME" 2>/dev/null | awk 'NR==2 {print $4}')
     for w in hyprland niri; do
         [ ! -f "/usr/share/wayland-sessions/digit-$w.desktop" ] || sessions_found+=("digit-$w")

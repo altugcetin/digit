@@ -91,8 +91,12 @@ unavailable and exits 3; text mode explains this and uses source compilation.
 
 `--check` reports distro/family/support, GPU, compositor availability, Rust and GTK,
 missing build/runtime packages, free home disk space and installed Digit sessions.
-Package checks use only the local pacman/RPM database. Installation output is also
-saved without colors in `~/.cache/digit/install.log` (`XDG_CACHE_HOME` is respected),
+Package checks use local pacman/RPM databases (including providers and cached Arch
+group membership). Only missing packages are offered and installed; when all are
+present, the package prompt and privileged package commands are skipped. Arch file
+lists for Store are refreshed after package installation, or initialized during
+a dependency transaction if absent; a fully satisfied run leaves them alone.
+Installation output is also saved without colors in `~/.cache/digit/install.log` (`XDG_CACHE_HOME` is respected),
 with the previous log kept as `install.log.1`, including in engine mode.
 
 `--check` includes missing kitty, portal, `gpu-screen-recorder` and `cava` packages
@@ -110,8 +114,8 @@ system dependencies. `--no-deps` skips all system packages.
 
 On Fedora, the installer enables the community COPR
 [`brycensranch/gpu-screen-recorder-git`](https://copr.fedorainfracloud.org/coprs/brycensranch/gpu-screen-recorder-git/)
-if `gpu-screen-recorder` is unavailable in the enabled repositories. This is the
-Fedora COPR linked in [upstream's installation documentation](https://git.dec05eba.com/gpu-screen-recorder/about/#unofficial-install-methods).
+if `gpu-screen-recorder` is missing and unavailable in the enabled repositories.
+This is the Fedora COPR linked in [upstream's installation documentation](https://git.dec05eba.com/gpu-screen-recorder/about/#unofficial-install-methods).
 
 Before installing dependencies, the installer checks repository availability for
 `gpu-screen-recorder` and `cava`. If either is unavailable (for example on openSUSE
