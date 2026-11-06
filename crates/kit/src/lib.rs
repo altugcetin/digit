@@ -2,6 +2,7 @@ pub mod app;
 pub mod bluez;
 pub mod calc;
 pub mod color;
+pub mod corners;
 pub mod distro;
 pub mod effects;
 pub mod fuzzy;

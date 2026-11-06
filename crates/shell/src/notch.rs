@@ -209,8 +209,7 @@ struct View {
     hush: Tween,
     spot: Tween,
     spots: usize,
-    corner: Option<gtk::Window>,
-    control_corner: Option<gtk::Window>,
+    panel_triggers: Vec<gtk::Window>,
     /// Catches clicks elsewhere while the notch is open in "click" mode; the notch itself is cut out of it.
     scrim: Option<gtk::Window>,
     tab: Tab,
@@ -316,8 +315,7 @@ impl Notch {
             hush: Tween::still(1.0),
             spot: Tween::still(0.0),
             spots: 0,
-            corner: None,
-            control_corner: None,
+            panel_triggers: Vec::new(),
             scrim: None,
             tab: Tab::Nook,
             day: 0,
@@ -341,8 +339,7 @@ impl Notch {
         window.present();
         {
             let mut v = notch.0.borrow_mut();
-            v.corner = Some(crate::spaces::corner(app, monitor));
-            v.control_corner = Some(crate::control::corner(app, monitor));
+            v.panel_triggers = crate::panel_corner::triggers(app, monitor);
         }
         notch.refresh();
         notch
@@ -572,19 +569,20 @@ impl Notch {
             let motion = gtk::EventControllerMotion::new();
             let hover = st.clone();
             let slide = open_menu.clone();
-            let cornered = Rc::new(Cell::new(false));
+            let cornered = Rc::new(Cell::new(None));
+            let motion_cornered = cornered.clone();
             let weak = Rc::downgrade(&self.0);
             motion.connect_motion(move |_, x, y| {
-                let edge = x <= 1.5 && y <= 1.5 && hover.width() as f64 >= hover.root().map(|r| r.width() as f64).unwrap_or(0.0) - 1.0;
-                if edge && !cornered.replace(true) {
-                    if let Some(v) = weak.upgrade() {
-                        let (app, output) = { let v = v.borrow(); (v.app.clone(), v.output.clone()) };
-                        if app.prefs.borrow().hot_corner && app.edges_live(&output) {
-                            crate::spaces::toggle(&app, Some(output));
-                        }
-                    }
-                } else if !edge {
-                    cornered.set(false);
+                let full = hover.width() as f64 >= hover.root().map(|r| r.width() as f64).unwrap_or(0.0) - 1.0;
+                let corner = if full && y <= 1.5 {
+                    if x <= 1.5 { Some(kit::corners::Corner::TopLeft) }
+                    else if x >= hover.width() as f64 - 1.5 { Some(kit::corners::Corner::TopRight) }
+                    else { None }
+                } else { None };
+                let previous = motion_cornered.replace(corner);
+                if let Some(corner) = corner && previous != Some(corner) && let Some(v) = weak.upgrade() {
+                    let (app, output) = { let v = v.borrow(); (v.app.clone(), v.output.clone()) };
+                    crate::panel_corner::activate(&app, &output, corner);
                 }
                 let zone = hover.zone_at(x, y);
                 hover.hover(zone);
@@ -595,7 +593,10 @@ impl Notch {
                 }
             });
             let hover = st.clone();
-            motion.connect_leave(move |_| hover.hover(None));
+            motion.connect_leave(move |_| {
+                cornered.set(None);
+                hover.hover(None);
+            });
             st.add_controller(motion);
             let click = gtk::GestureClick::new();
             click.set_button(0);
@@ -661,11 +662,8 @@ impl Notch {
         if let Some(st) = self.0.borrow().strip.as_ref() {
             draw::forget(st);
         }
-        if let Some(corner) = self.0.borrow_mut().corner.take() {
-            corner.destroy();
-        }
-        if let Some(c) = self.0.borrow_mut().control_corner.take() {
-            c.destroy();
+        for trigger in std::mem::take(&mut self.0.borrow_mut().panel_triggers) {
+            trigger.destroy();
         }
         if let Some(c) = self.0.borrow_mut().scrim.take() {
             c.destroy();
@@ -675,6 +673,15 @@ impl Notch {
             blur.detach(effect);
         }
         window.destroy();
+    }
+
+    pub fn refresh_corners(&self) {
+        let (app, monitor, old) = {
+            let mut v = self.0.borrow_mut();
+            (v.app.clone(), v.monitor.clone(), std::mem::take(&mut v.panel_triggers))
+        };
+        for window in old { window.destroy(); }
+        self.0.borrow_mut().panel_triggers = crate::panel_corner::triggers(&app, &monitor);
     }
 
     pub fn surface(&self) -> Option<gdk::Surface> {

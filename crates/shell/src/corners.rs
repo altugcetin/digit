@@ -2,6 +2,7 @@ use crate::app::App;
 use crate::paint::Paint;
 use gtk::{cairo, gdk, gsk, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use kit::corners::Corner;
 use std::cell::{Cell, RefCell};
 
 thread_local! {
@@ -39,19 +40,9 @@ pub fn apply(app: &App) {
             let paint = Paint::new(r, r);
             let (top, left) = (v == Edge::Top, h == Edge::Left);
             paint.on_draw(move |s| {
-                let rf = r as f32;
-                let (cx, cy) = (if left { rf } else { 0.0 }, if top { rf } else { 0.0 });
-                let (ex, ey) = (if left { 0.0 } else { rf }, if top { 0.0 } else { rf });
-                let pb = gsk::PathBuilder::new();
-                pb.move_to(ex, ey);
-                pb.line_to(if left { rf } else { 0.0 }, ey);
-                let k = 0.552_284_8 * rf;
-                let sx = if left { -1.0 } else { 1.0 };
-                let sy = if top { -1.0 } else { 1.0 };
-                pb.cubic_to(cx + sx * k, cy + sy * rf, cx + sx * rf, cy + sy * k, cx + sx * rf, cy);
-                pb.line_to(ex, ey);
-                pb.close();
-                s.append_fill(&pb.to_path(), gsk::FillRule::Winding, &gdk::RGBA::BLACK);
+                draw_mask(s, if top {
+                    if left { Corner::TopLeft } else { Corner::TopRight }
+                } else if left { Corner::BottomLeft } else { Corner::BottomRight }, r as f32);
             });
             window.set_child(Some(&paint));
             window.connect_realize(|w| {
@@ -64,4 +55,22 @@ pub fn apply(app: &App) {
         }
     }
     CORNERS.with(|c| *c.borrow_mut() = made);
+}
+
+/// Also used by overlay panels mapped above the screen-corner surfaces.
+pub fn draw_mask(s: &gtk::Snapshot, corner: Corner, radius: f32) {
+    let (top, left) = (corner.is_top(), corner.is_left());
+    let rf = radius;
+    let (cx, cy) = (if left { rf } else { 0.0 }, if top { rf } else { 0.0 });
+    let (ex, ey) = (if left { 0.0 } else { rf }, if top { 0.0 } else { rf });
+    let pb = gsk::PathBuilder::new();
+    pb.move_to(ex, ey);
+    pb.line_to(if left { rf } else { 0.0 }, ey);
+    let k = 0.552_284_8 * rf;
+    let sx = if left { -1.0 } else { 1.0 };
+    let sy = if top { -1.0 } else { 1.0 };
+    pb.cubic_to(cx + sx * k, cy + sy * rf, cx + sx * rf, cy + sy * k, cx + sx * rf, cy);
+    pb.line_to(ex, ey);
+    pb.close();
+    s.append_fill(&pb.to_path(), gsk::FillRule::Winding, &gdk::RGBA::BLACK);
 }

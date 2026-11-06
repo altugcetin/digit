@@ -142,6 +142,7 @@ struct State {
     region: Option<(i32, i32, i32, i32)>,
     reserved: i32,
     triggers: Vec<gtk::Window>,
+    panel_triggers: Vec<gtk::Window>,
     edge: Option<gtk::Window>,
 }
 
@@ -201,7 +202,9 @@ fn teardown(st: &Shared) {
     close_menu();
     let (keep, window, paint, triggers, edge) = {
         let mut s = st.borrow_mut();
-        (s.keep.clone(), s.window.clone(), s.paint.clone(), std::mem::take(&mut s.triggers), s.edge.take())
+        let mut triggers = std::mem::take(&mut s.triggers);
+        triggers.append(&mut s.panel_triggers);
+        (s.keep.clone(), s.window.clone(), s.paint.clone(), triggers, s.edge.take())
     };
     for t in triggers.into_iter().chain(edge) {
         t.destroy();
@@ -246,26 +249,25 @@ fn trigger(app: &Rc<App>, monitor: &gdk::Monitor, side: Side) -> gtk::Window {
     let probe = w.clone();
     let corner_app = weak.clone();
     let corner_out = output.clone();
-    let check = move |x: f64| {
-        let far = probe.width() as f64 - 3.0;
-        if side == Side::Bottom && x >= far {
-            if let Some(app) = corner_app.upgrade() {
-                if app.prefs.borrow().control_corner {
-                    if app.edges_live(&corner_out) {
-                        crate::control::show_on(&app, Some(corner_out.clone()));
-                    }
-                    return true;
-                }
-            }
-        }
-        false
+    let check = move |x: f64, y: f64| {
+        use kit::corners::Corner;
+        let corner = match side {
+            Side::Bottom if x <= 3.0 => Some(Corner::BottomLeft),
+            Side::Bottom if x >= probe.width() as f64 - 3.0 => Some(Corner::BottomRight),
+            Side::Left if y <= 3.0 => Some(Corner::TopLeft),
+            Side::Left if y >= probe.height() as f64 - 3.0 => Some(Corner::BottomLeft),
+            Side::Right if y <= 3.0 => Some(Corner::TopRight),
+            Side::Right if y >= probe.height() as f64 - 3.0 => Some(Corner::BottomRight),
+            _ => None,
+        };
+        corner.is_some_and(|corner| corner_app.upgrade().is_some_and(|app| crate::panel_corner::activate(&app, &corner_out, corner)))
     };
     let near = check.clone();
-    motion.connect_motion(move |_, x, _| {
-        near(x);
+    motion.connect_motion(move |_, x, y| {
+        near(x, y);
     });
-    motion.connect_enter(move |_, x, _| {
-        if check(x) {
+    motion.connect_enter(move |_, x, y| {
+        if check(x, y) {
             return;
         }
         let generation = flag.get() + 1;
@@ -325,6 +327,7 @@ pub fn apply(app: &Rc<App>) {
             ONE.with(|one| one.borrow_mut().take());
             App::trim();
         }
+        crate::panel_corner::refresh(app);
         return;
     };
     let layer = if mode == Mode::On { Layer::Top } else { Layer::Overlay };
@@ -369,8 +372,18 @@ pub fn apply(app: &Rc<App>) {
         s.art.clear();
         crate::art::forget();
     }
+    // Notches own triggers on configured shell outputs. The dock historically also
+    // offered Control Center on its other outputs; keep that scope at any corner.
+    for trigger in std::mem::take(&mut st.borrow_mut().panel_triggers) { trigger.destroy(); }
+    let extra: Vec<gdk::Monitor> = gdk::Display::default()
+        .map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).filter(|m| {
+            let name = m.connector().map(|c| c.to_string()).unwrap_or_default();
+            !app.cfg.outputs.is_empty() && !app.cfg.outputs.contains(&name) && (prefs.output.is_none() || name == output)
+        }).collect()).unwrap_or_default();
+    st.borrow_mut().panel_triggers = extra.iter().flat_map(|m| crate::panel_corner::triggers(app, m)).collect();
     rebuild(&st);
     settle(&st);
+    crate::panel_corner::refresh(app);
 }
 
 pub fn changed() {
@@ -527,6 +540,7 @@ fn build(app: &Rc<App>, geo: Geo, monitor: Option<&gdk::Monitor>, output: String
         order: Vec::new(),
         reserved: -1,
         triggers: Vec::new(),
+        panel_triggers: Vec::new(),
         edge: None,
     }));
     wire(&st);

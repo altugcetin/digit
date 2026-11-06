@@ -271,6 +271,17 @@ fn settings_controls_and_dialogs() {
     enabled.set_active(true);
     assert!(logo_row.is_sensitive());
 
+    let corner = |name: &str| {
+        let row = widgets(&notch_page).into_iter().filter_map(|w| w.downcast::<gtk::Label>().ok()).find(|l| l.text() == name).unwrap().parent().unwrap().parent().unwrap();
+        widgets(&row).into_iter().find_map(|w| w.downcast::<gtk::DropDown>().ok()).unwrap()
+    };
+    let (top_left, top_right) = (corner("Top left corner"), corner("Top right corner"));
+    assert_eq!((top_left.selected(), top_right.selected()), (1, 0));
+    top_right.set_selected(1);
+    assert_eq!(top_left.selected(), 0, "a panel lives in one corner, so its old corner clears");
+    assert_eq!(prefs::get_str(&prefs::read(), "corner_top_right", ""), "workspaces");
+    assert_eq!(prefs::get_str(&prefs::read(), "corner_top_left", ""), "none");
+
     let appearance = desktop::build("appearance", "Appearance", "");
     let color_row = widgets(&appearance).into_iter().filter_map(|w| w.downcast::<gtk::Label>().ok()).find(|l| l.text() == "Color scheme").unwrap().parent().unwrap().parent().unwrap();
     let color = widgets(&color_row).into_iter().find_map(|w| w.downcast::<gtk::DropDown>().ok()).unwrap();
