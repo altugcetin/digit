@@ -150,8 +150,8 @@ stopping a stream are off until you assign keys.
 ## Configuration
 
 Everything is in Settings (Alt+,). The file behind it is `~/.config/digit/config.toml`
-and changes apply live. Qt apps keep their own qt6ct colors unless you set
-`qt_theme = true` there.
+and changes apply live. Qt apps use the Breeze widget style with a Breeze-based
+color scheme generated from the wallpaper accent.
 
 Recording options live in Settings > Recording (`digit-settings recording`). Open
 the shell recorder panel with `digitctl record panel`, or open those options with

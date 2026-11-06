@@ -217,7 +217,7 @@ fn run() {
     if app.cfg.polkit {
         polkit::start(&app);
     }
-    theming::take(app.cfg.qt_theme);
+    theming::take();
     if app.cfg.wallpaper && !app.wallpapers.is_empty() {
         app.wallpapers.when_ready(|| hooks::spawn("start"));
     } else {
@@ -474,6 +474,7 @@ fn watch_palette(app: &Rc<App>) {
     watch(app, kit::theme::state_dir(), Some("theme.json"), |app| {
         if !app.retheming.get() {
             load_palette(app);
+            theming::restyle();
         }
     });
     watch(app, kit::palette::gtk_dir(), None, |app| {

@@ -85,7 +85,7 @@ pub fn card_color(surface: &str, accent: Rgb) -> Rgb {
     if surface == "tinted" { accent.mix(base, CARD_TINT) } else { base }
 }
 
-fn surfaces(look: &Look, accent: &str) -> [String; 5] {
+pub fn surfaces(look: &Look, accent: &str) -> [String; 5] {
     let card = card_base(&look.surface);
     match look.surface.as_str() {
         "graphite" => ["#121214".into(), card.into(), "#25252a".into(), "#1f1f24".into(), "#202025".into()],
