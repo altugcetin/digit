@@ -183,7 +183,7 @@ install_pkgs() {
 
 has_pkg() {
     case $FAMILY in
-        suse) zypper --non-interactive --quiet info "$1" 2>/dev/null | grep -q "^Name *: *$1\$" ;;
+        suse) LC_ALL=C zypper --non-interactive --quiet info "$1" 2>/dev/null | grep -q "^Name *: *$1\$" ;;
         fedora) dnf -q info "$1" >/dev/null 2>&1 ;;
         arch) pacman -Si "$1" >/dev/null 2>&1 ;;
     esac
@@ -264,13 +264,13 @@ package_lists() {
     case $FAMILY in
         suse)
             build=(gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel wayland-devel)
-            run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct) ;;
+            run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct gpu-screen-recorder cava) ;;
         fedora)
             build=(gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel wayland-devel)
-            run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct) ;;
+            run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct gpu-screen-recorder cava) ;;
         arch)
             build=(base-devel pkgconf gtk4 gtk4-layer-shell wayland)
-            run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct archlinux-appstream-data) ;;
+            run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct gpu-screen-recorder cava archlinux-appstream-data) ;;
     esac
     run_pkgs+=(xdg-desktop-portal-gtk)
     case $WM in
@@ -282,12 +282,27 @@ package_lists() {
 }
 
 deps() {
-    local build run_pkgs
+    local build run_pkgs p available=()
     package_lists
     step packages "System packages"
     info "${build[*]} ${run_pkgs[*]}"
     if confirm "Install them with your package manager (asks for your sudo password)?"; then
-        install_pkgs "${build[@]}" "${run_pkgs[@]}"
+        # Upstream lists this community COPR for Fedora:
+        # https://git.dec05eba.com/gpu-screen-recorder/about/#unofficial-install-methods
+        if [ "$FAMILY" = fedora ] && ! has_pkg gpu-screen-recorder; then
+            superuser dnf copr enable -y brycensranch/gpu-screen-recorder-git
+        fi
+        for p in "${run_pkgs[@]}"; do
+            case $p in
+                gpu-screen-recorder|cava)
+                    if ! has_pkg "$p"; then
+                        warn "Required package $p is not available in the enabled repositories; skipping it. Install it later from Digit Store."
+                        continue
+                    fi ;;
+            esac
+            available+=("$p")
+        done
+        install_pkgs "${build[@]}" "${available[@]}"
         # Digit Store tells apps, tools and libraries apart from each package's file list.
         if [ "$FAMILY" = arch ]; then
             superuser pacman -Fy
