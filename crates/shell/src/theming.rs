@@ -352,6 +352,7 @@ pub fn refresh(chosen: Option<&str>, fallback: &str, image: Option<String>, forc
 
 pub fn restyle() {
     if let Some(theme) = theme::load() { write(&theme); }
+    crate::deskicons::restyle();
 }
 
 #[cfg(test)]

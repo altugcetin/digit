@@ -14,7 +14,7 @@ use kit::palette::Rgb;
 use serde::{Deserialize, Serialize};
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     rc::Rc,
     time::Duration,
@@ -25,14 +25,28 @@ const CELL_H: i32 = 116;
 const PAD: i32 = 24;
 const ICON: i32 = 64;
 const LABEL_INSET: i32 = 6;
-type Positions = BTreeMap<String, CellPos>;
+type Positions = BTreeMap<String, FreePos>;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-struct CellPos {
-    col: u32,
-    row: u32,
+/// Logical pixels of the icon cell's top-left on the desktop surface.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+struct FreePos {
+    x: f64,
+    y: f64,
     #[serde(default)]
     page: u32,
+}
+impl FreePos {
+    fn rect(self) -> Rect {
+        Rect {
+            x: self.x,
+            y: self.y,
+            w: CELL_W as f64,
+            h: CELL_H as f64,
+        }
+    }
+    fn overlaps(self, other: Self) -> bool {
+        self.page == other.page && self.rect().intersects(other.rect())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -40,71 +54,52 @@ struct Grid {
     cols: u32,
     rows: u32,
     width: i32,
+    height: i32,
     top: i32,
     reserved: Option<Rect>,
 }
 impl Grid {
     fn new(width: i32, height: i32, top: i32) -> Self {
-        let top = top.max(PAD).min((height - CELL_H - PAD).max(0));
+        let top = top.max(PAD).min((height - CELL_H).max(0));
         Self {
             cols: ((width - 2 * PAD) / CELL_W).max(1) as u32,
             rows: ((height - top - 88) / CELL_H).max(1) as u32,
             width,
+            height,
             top,
             reserved: None,
         }
     }
-    fn point(self, p: CellPos) -> (f64, f64) {
-        (
-            (self.width - PAD - CELL_W - p.col as i32 * CELL_W).max(0) as f64,
-            (self.top + p.row as i32 * CELL_H) as f64,
-        )
-    }
-    fn snap(self, x: f64, y: f64, page: u32) -> CellPos {
-        CellPos {
-            col: (((self.width - PAD - CELL_W) as f64 - x) / CELL_W as f64)
-                .round()
-                .clamp(0.0, (self.cols - 1) as f64) as u32,
-            row: ((y - self.top as f64) / CELL_H as f64)
-                .round()
-                .clamp(0.0, (self.rows - 1) as f64) as u32,
-            page,
+    fn clamp(self, p: FreePos) -> FreePos {
+        FreePos {
+            x: p.x.clamp(0.0, (self.width - CELL_W).max(0) as f64),
+            y: p.y
+                .clamp(self.top as f64, (self.height - CELL_H).max(self.top) as f64),
+            page: p.page.min(u32::MAX - 1),
         }
     }
-    fn nth(self, n: usize) -> CellPos {
+    // The grid is only an automatic-placement policy; manual positions never snap.
+    fn nth(self, n: usize) -> FreePos {
         let n = n as u32;
-        CellPos {
-            row: n % self.rows,
-            col: (n / self.rows) % self.cols,
+        self.clamp(FreePos {
+            x: (self.width - PAD - CELL_W - ((n / self.rows) % self.cols) as i32 * CELL_W) as f64,
+            y: (self.top + (n % self.rows) as i32 * CELL_H) as f64,
             page: n / (self.rows * self.cols),
-        }
-    }
-    fn reserved(self, p: CellPos) -> bool {
-        let (x, y) = self.point(p);
-        self.reserved.is_some_and(|r| {
-            r.intersects(Rect {
-                x,
-                y,
-                w: CELL_W as f64,
-                h: CELL_H as f64,
-            })
         })
     }
-    fn automatic_cells(self) -> Vec<CellPos> {
+    fn reserved(self, p: FreePos) -> bool {
+        self.reserved.is_some_and(|r| r.intersects(p.rect()))
+    }
+    fn automatic_cells(self) -> Vec<FreePos> {
         (0..(self.cols * self.rows) as usize)
             .map(|n| self.nth(n))
             .filter(|p| !self.reserved(*p))
             .collect()
     }
-    fn free(self, occupied: &BTreeSet<CellPos>) -> CellPos {
-        (0..=occupied.len())
-            .map(|n| self.nth(n))
-            .find(|p| !occupied.contains(p))
-            .unwrap_or_default()
-    }
 }
 
-/// Preserve valid cells before assigning new or displaced items, in name order.
+/// Restore free positions, including overlaps, before assigning automatic cells.
+/// Persisting the result makes later additions independent of the current name order.
 fn place(names: &[String], saved: &Positions, grid: Grid) -> Positions {
     let mut cells = grid.automatic_cells();
     // On very small displays there may be no room beside the card. Keep icons reachable.
@@ -112,27 +107,32 @@ fn place(names: &[String], saved: &Positions, grid: Grid) -> Positions {
         cells.extend((0..(grid.cols * grid.rows) as usize).map(|n| grid.nth(n)));
     }
     let mut out = Positions::new();
-    let mut occupied = BTreeSet::new();
     for name in names {
         if let Some(&p) = saved.get(name)
-            && p.col < grid.cols
-            && p.row < grid.rows
-            && p.page <= (names.len() / cells.len()) as u32
-            && occupied.insert(p)
+            && p.x.is_finite()
+            && p.y.is_finite()
         {
-            out.insert(name.clone(), p);
+            out.insert(name.clone(), grid.clamp(p));
         }
     }
+    let mut next = 0;
     for name in names {
         if !out.contains_key(name) {
-            let p = (0..=occupied.len())
-                .map(|n| CellPos {
-                    page: (n / cells.len()) as u32,
-                    ..cells[n % cells.len()]
+            // Rejected cells stay blocked as icons are added. Scan each candidate once.
+            // With at most out.len() occupied pages, one additional page is always free.
+            let (n, p) = (next..(out.len() + 1) * cells.len())
+                .map(|n| {
+                    (
+                        n,
+                        FreePos {
+                            page: (n / cells.len()) as u32,
+                            ..cells[n % cells.len()]
+                        },
+                    )
                 })
-                .find(|p| !occupied.contains(p))
-                .expect("one more candidate than occupied cells");
-            occupied.insert(p);
+                .find(|(_, p)| !out.values().any(|other| p.overlaps(*other)))
+                .expect("one more page than occupied icons");
+            next = n + 1;
             out.insert(name.clone(), p);
         }
     }
@@ -185,17 +185,25 @@ fn encode(positions: &Positions) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec_pretty(positions)
 }
 fn decode(bytes: &[u8]) -> Result<Positions, serde_json::Error> {
-    serde_json::from_slice(bytes)
+    let entries: BTreeMap<String, serde_json::Value> = serde_json::from_slice(bytes)?;
+    Ok(entries
+        .into_iter()
+        .filter_map(|(name, value)| {
+            // Old col/row entries (and malformed entries) have no free position to restore.
+            let p: FreePos = serde_json::from_value(value).ok()?;
+            (p.x.is_finite() && p.y.is_finite()).then_some((name, p))
+        })
+        .collect())
 }
 fn state_path() -> PathBuf {
     kit::theme::state_dir().join("desktop-icons.json")
 }
 fn read_positions(path: &Path) -> Result<Positions, String> {
-    match std::fs::read(path) {
-        Ok(bytes) => decode(&bytes).map_err(|e| e.to_string()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Positions::new()),
-        Err(e) => Err(e.to_string()),
-    }
+    // Missing, unreadable or corrupt state always starts from the default layout.
+    Ok(std::fs::read(path)
+        .ok()
+        .and_then(|bytes| decode(&bytes).ok())
+        .unwrap_or_default())
 }
 fn write_positions(path: &Path, positions: &Positions) -> Result<(), String> {
     use std::io::Write;
@@ -306,7 +314,49 @@ struct Drag {
     start: (f64, f64),
     origins: BTreeMap<String, (f64, f64)>,
 }
+impl Drag {
+    fn dropped(&self, grid: Grid, x: f64, y: f64, page: u32) -> Positions {
+        let mut dx = x - self.start.0;
+        let mut dy = y - self.start.1;
+        let mut min_x = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        for &(ox, oy) in self.origins.values() {
+            min_x = min_x.min(ox);
+            max_x = max_x.max(ox);
+            min_y = min_y.min(oy);
+            max_y = max_y.max(oy);
+        }
+        let right = (grid.width - CELL_W).max(0) as f64;
+        let bottom = (grid.height - CELL_H).max(grid.top) as f64;
+        // One translation preserves relative offsets even when dropped at an edge.
+        // If a screen change made the group larger than the output, individual
+        // clamping below takes priority over preserving those offsets.
+        if max_x - min_x <= right {
+            dx = dx.clamp(-min_x, right - max_x);
+        }
+        if max_y - min_y <= bottom - grid.top as f64 {
+            dy = dy.clamp(grid.top as f64 - min_y, bottom - max_y);
+        }
+        self.origins
+            .iter()
+            .map(|(name, &(ox, oy))| {
+                (
+                    name.clone(),
+                    grid.clamp(FreePos {
+                        x: ox + dx,
+                        y: oy + dy,
+                        page,
+                    }),
+                )
+            })
+            .collect()
+    }
+}
 struct Desktop {
+    // The item being renamed: its label is the editor while that lasts.
+    renaming: Option<String>,
     app: std::rc::Weak<App>,
     window: gtk::Window,
     paint: Paint,
@@ -338,6 +388,19 @@ thread_local! {
     static TO_WRITE: RefCell<Option<Positions>> = const { RefCell::new(None) };
 }
 
+/// Renaming happens in the icon's label: plain text with a thin plate, no field around it.
+pub fn style(display: &gdk::Display) {
+    let css = gtk::CssProvider::new();
+    css.load_from_string(
+        "entry.desk-rename { background: rgba(0,0,0,0.58); color: white; caret-color: white; border: none; outline: none; box-shadow: none; \
+         border-radius: 6px; min-height: 0; padding: 1px 6px; margin: 0; font-size: 13px; font-weight: 520; } \
+         entry.desk-rename text selection { background: rgba(255,255,255,0.32); color: white; } \
+         entry.desk-rename.error { box-shadow: inset 0 0 0 1px rgb(255,69,58); } \
+         label.desk-rename-error { color: white; font-size: 12px; text-shadow: 0 1px 3px rgba(0,0,0,0.6); }",
+    );
+    gtk::style_context_add_provider_for_display(display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+}
+
 pub fn apply(app: &Rc<App>) {
     let enabled = app.prefs.borrow().desktop_icons;
     let target = gdk::Display::default().and_then(|d| {
@@ -367,11 +430,14 @@ pub fn apply(app: &Rc<App>) {
     let keep = enabled
         && target.as_ref().is_some_and(|m| {
             current.as_ref().is_some_and(|d| {
-                let Ok(d) = d.try_borrow() else { return false };
+                let (monitor, geometry, paint) = {
+                    let Ok(d) = d.try_borrow() else { return false };
+                    (d.monitor.clone(), d.geometry, d.paint.clone())
+                };
                 let g = m.geometry();
-                d.monitor == *m
-                    && d.geometry == (g.width(), g.height(), app.reserve())
-                    && d.paint.scale_factor() == m.scale_factor()
+                monitor == *m
+                    && geometry == (g.width(), g.height(), app.reserve())
+                    && paint.scale_factor() == m.scale_factor()
             })
         });
     if keep {
@@ -386,6 +452,7 @@ pub fn apply(app: &Rc<App>) {
                     state.dirty = true;
                 }
             }
+            save(&d);
             animate(&d);
         }
         return;
@@ -420,7 +487,9 @@ pub fn apply(app: &Rc<App>) {
     window.set_layer(Layer::Bottom);
     window.set_namespace(Some("digit-desktop-icons"));
     window.set_monitor(Some(&monitor));
-    window.set_keyboard_mode(KeyboardMode::OnDemand);
+    // Never takes the keyboard: holding it on this layer keeps new windows from getting focus
+    // until the pointer moves. Menus and rename open on their own surfaces instead.
+    window.set_keyboard_mode(KeyboardMode::None);
     window.set_exclusive_zone(-1);
     for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
         window.set_anchor(edge, true);
@@ -429,7 +498,6 @@ pub fn apply(app: &Rc<App>) {
     let paint = Paint::new(1, 1);
     paint.set_hexpand(true);
     paint.set_vexpand(true);
-    paint.set_focusable(true);
     window.set_child(Some(&paint));
     let folder = glib::user_special_dir(glib::UserDirectory::Desktop)
         .unwrap_or_else(|| glib::home_dir().join("Desktop"));
@@ -456,6 +524,7 @@ pub fn apply(app: &Rc<App>) {
         monitor_file: None,
         pending: None,
         rename_window: None,
+        renaming: None,
         rename_pending: None,
     }));
     let weak = Rc::downgrade(&desktop);
@@ -509,7 +578,18 @@ impl Desktop {
         let now = glib::monotonic_time();
         self.items
             .iter()
-            .position(|i| self.visible(i) && i.rect(now).contains(x, y))
+            .rposition(|i| self.visible(i) && i.rect(now).contains(x, y))
+    }
+    fn raise(&mut self, at: usize) {
+        let item = self.items.remove(at);
+        self.items.push(item);
+    }
+    fn sort_by_name(&mut self) {
+        self.items
+            .sort_by_cached_key(|i| (i.data.label.to_lowercase(), i.data.name.clone()));
+        self.saved.clear();
+        self.page = 0;
+        self.layout(true);
     }
     fn paths(&self) -> Vec<PathBuf> {
         self.items
@@ -531,7 +611,9 @@ impl Desktop {
         }
     }
     fn layout(&mut self, animate: bool) {
-        let names: Vec<_> = self.items.iter().map(|i| i.data.name.clone()).collect();
+        let mut ordered: Vec<_> = self.items.iter().map(|i| &i.data).collect();
+        ordered.sort_by_cached_key(|data| (data.label.to_lowercase(), data.name.clone()));
+        let names: Vec<_> = ordered.into_iter().map(|data| data.name.clone()).collect();
         self.grid.reserved = self.app.upgrade().and_then(|app| {
             let prefs = app.prefs.borrow();
             if !app.cfg.wallpaper {
@@ -552,21 +634,14 @@ impl Desktop {
             })
         });
         self.positions = place(&names, &self.saved, self.grid);
-        // Recovered saved positions remain saved; automatic positions remain free to reflow.
-        self.saved.retain(|name, p| {
-            if let Some(&placed) = self.positions.get(name) {
-                *p = placed;
-                true
-            } else {
-                false
-            }
-        });
+        // Save automatic placements too: new files must never reshuffle existing icons.
+        self.saved = self.positions.clone();
         self.page = self
             .page
             .min(self.positions.values().map(|p| p.page).max().unwrap_or(0));
         let now = glib::monotonic_time();
         for i in &mut self.items {
-            let (x, y) = self.grid.point(self.positions[&i.data.name]);
+            let FreePos { x, y, .. } = self.positions[&i.data.name];
             if animate {
                 i.x.go(x, now, 180, motion::STANDARD);
                 i.y.go(y, now, 180, motion::STANDARD);
@@ -604,6 +679,7 @@ fn draw_desktop(d: &Rc<RefCell<Desktop>>, s: &gtk::Snapshot) {
                     i.label.clone(),
                     i.rect(now),
                     i.selected.value(now),
+                    state.renaming.as_ref() == Some(&i.data.name),
                 )
             })
             .collect();
@@ -630,7 +706,7 @@ fn draw_desktop(d: &Rc<RefCell<Desktop>>, s: &gtk::Snapshot) {
             paint.height().max(1) as f32,
         ),
     );
-    for (icon, label, r, selected) in items {
+    for (icon, label, r, selected, editing) in items {
         let x = r.x.round();
         let y = r.y.round();
         // Finder's look: a soft tile behind the icon and a pill around the words when selected,
@@ -638,6 +714,10 @@ fn draw_desktop(d: &Rc<RefCell<Desktop>>, s: &gtk::Snapshot) {
         let (w, h) = label.pixel_size();
         let (w, h) = (w as f64, h as f64);
         let label_y = y + ICON as f64 + 6.0;
+        if editing {
+            draw::paintable(s, &icon, x + (CELL_W - ICON) as f64 / 2.0, y, ICON as f64);
+            continue;
+        }
         let plate = 6.0;
         s.push_opacity(selected);
         draw::fill(
@@ -833,6 +913,13 @@ fn watch(d: &Rc<RefCell<Desktop>>) {
         m.cancel();
     }
 }
+/// The accent changed: folders are drawn in it.
+pub fn restyle() {
+    if let Some(d) = DESKTOP.with(|d| d.borrow().clone()) {
+        refresh(&d);
+    }
+}
+
 fn refresh(d: &Rc<RefCell<Desktop>>) {
     let Ok(mut state) = d.try_borrow_mut() else {
         let weak = Rc::downgrade(d);
@@ -872,6 +959,8 @@ fn refresh(d: &Rc<RefCell<Desktop>>) {
                 let paint = d.borrow().paint.clone();
                 let scale = paint.scale_factor().max(1);
                 let theme = gtk::IconTheme::for_display(&paint.display());
+                let accent = kit::style::ink().accent;
+                let mut folders: HashMap<&'static str, gdk::Texture> = HashMap::new();
                 let mut items = Vec::with_capacity(files.len());
                 for (n, data) in files.into_iter().enumerate() {
                     let icon = data
@@ -886,15 +975,25 @@ fn refresh(d: &Rc<RefCell<Desktop>>) {
                             })
                             .upcast()
                         });
-                    let icon = theme
-                        .lookup_by_gicon(
-                            &icon,
-                            ICON,
-                            scale,
-                            gtk::TextDirection::Ltr,
-                            gtk::IconLookupFlags::empty(),
-                        )
-                        .upcast();
+                    // Folders are drawn like the ones in Files, in the accent color.
+                    let drawn = data.directory.then(|| kit::folder::glyph(&gio::File::for_path(&data.path))).and_then(|glyph| {
+                        if !folders.contains_key(glyph) {
+                            folders.insert(glyph, kit::folder::texture(&accent, glyph, ICON * scale)?);
+                        }
+                        folders.get(glyph).cloned()
+                    });
+                    let icon: gdk::Paintable = match drawn {
+                        Some(texture) => texture.upcast(),
+                        None => theme
+                            .lookup_by_gicon(
+                                &icon,
+                                ICON,
+                                scale,
+                                gtk::TextDirection::Ltr,
+                                gtk::IconLookupFlags::empty(),
+                            )
+                            .upcast(),
+                    };
                     let label = draw::layout(&paint, &app.cfg, &data.label, 13.0, Face::Text(520));
                     label.set_width((CELL_W - 2 * LABEL_INSET) * pango::SCALE);
                     label.set_height(-2);
@@ -920,6 +1019,9 @@ fn refresh(d: &Rc<RefCell<Desktop>>) {
                     let mut state = d.borrow_mut();
                     // An interaction begun while metadata was loading must not be overwritten.
                     if state.drag.is_none() && state.rubber.is_none() {
+                        let order: BTreeMap<_, _> = state.items.iter().enumerate()
+                            .map(|(n, i)| (i.data.name.clone(), n)).collect();
+                        items.sort_by_key(|i| order.get(&i.data.name).copied().unwrap_or(usize::MAX));
                         state.items = items;
                         let names: BTreeSet<_> =
                             state.items.iter().map(|i| i.data.name.clone()).collect();
@@ -1063,11 +1165,14 @@ fn close_rename(d: &Rc<RefCell<Desktop>>, expected: Option<&gtk::Window>) {
         if expected.is_some_and(|w| state.rename_window.as_ref() != Some(w)) {
             return;
         }
-        state.rename_window.take()
+        state.renaming = None;
+        (state.rename_window.take(), state.paint.clone())
     };
+    let (window, paint) = window;
     if let Some(window) = window {
         window.destroy();
     }
+    paint.queue_draw();
 }
 
 fn rename_error(d: &Rc<RefCell<Desktop>>, entry: &gtk::Entry, error: &gtk::Label, text: &str) {
@@ -1112,6 +1217,7 @@ fn rename(d: &Rc<RefCell<Desktop>>) {
     let Some((path, old, directory, r, monitor, position)) = target else {
         return;
     };
+    let old_name = old.clone();
     // Like popmenu's scrim, cover the whole output without a popup or an xdg_popup grab.
     let window = gtk::Window::new();
     window.init_layer_shell();
@@ -1129,13 +1235,12 @@ fn rename(d: &Rc<RefCell<Desktop>>) {
     fixed.set_vexpand(true);
     window.set_child(Some(&fixed));
     let geometry = monitor.geometry();
-    let width = 180.min(geometry.width().max(1));
     let entry = gtk::Entry::new();
-    entry.add_css_class("search");
+    entry.add_css_class("desk-rename");
+    entry.set_has_frame(false);
     gtk::prelude::EntryExt::set_alignment(&entry, 0.5);
     entry.set_width_chars(1);
     entry.set_max_width_chars(1);
-    entry.set_size_request(width, 38);
     let filename = path
         .file_name()
         .unwrap_or_default()
@@ -1144,17 +1249,30 @@ fn rename(d: &Rc<RefCell<Desktop>>) {
     entry.set_text(&filename);
     let selection = rename_selection(&filename, directory);
     let error = gtk::Label::new(None);
-    error.add_css_class("error");
+    error.add_css_class("desk-rename-error");
     error.set_wrap(true);
     error.set_max_width_chars(22);
     error.set_visible(false);
     let editor = gtk::Box::new(gtk::Orientation::Vertical, 4);
     editor.append(&entry);
     editor.append(&error);
-    let x = (r.x + CELL_W as f64 / 2.0 - width as f64 / 2.0)
-        .clamp(0.0, (geometry.width() - width).max(0) as f64);
-    let y = (r.y + 70.0).clamp(0.0, (geometry.height() - 38).max(0) as f64);
-    fixed.put(&editor, x.round(), y.round());
+    // Sits exactly on the label and grows from its center with the name, like the label would.
+    let y = (r.y + (ICON + 5) as f64).clamp(0.0, (geometry.height() - 24).max(0) as f64).round();
+    let screen = geometry.width();
+    let place = {
+        let (fixed, editor) = (fixed.downgrade(), editor.downgrade());
+        move |entry: &gtk::Entry| {
+            let (Some(fixed), Some(editor)) = (fixed.upgrade(), editor.upgrade()) else { return };
+            let text = entry.text();
+            let width = (entry.create_pango_layout(Some(&text)).pixel_size().0 + 20).clamp(44, 260).min(screen.max(1));
+            entry.set_size_request(width, -1);
+            let x = (r.x + CELL_W as f64 / 2.0 - width as f64 / 2.0).clamp(0.0, (screen - width).max(0) as f64).round();
+            fixed.move_(&editor, x, y);
+        }
+    };
+    fixed.put(&editor, r.x.round(), y);
+    place(&entry);
+    entry.connect_changed(place);
 
     // Weak widget references avoid cycles through the entry and its controllers.
     let weak = Rc::downgrade(d);
@@ -1301,7 +1419,13 @@ fn rename(d: &Rc<RefCell<Desktop>>) {
             close_rename(&d, Some(window));
         }
     });
-    d.borrow_mut().rename_window = Some(window.clone());
+    let paint = {
+        let mut state = d.borrow_mut();
+        state.rename_window = Some(window.clone());
+        state.renaming = Some(old_name);
+        state.paint.clone()
+    };
+    paint.queue_draw();
     let mapped = Cell::new(false);
     let e = entry.downgrade();
     window.connect_map(move |window| {
@@ -1403,17 +1527,6 @@ fn menu_entries(on_icon: bool, selected: usize) -> Vec<MenuAction> {
         vec![Open, Reveal, Rename, CopyPath, Trash]
     }
 }
-fn selected_files(d: &Rc<RefCell<Desktop>>) -> Vec<FileData> {
-    let Ok(state) = d.try_borrow() else {
-        return Vec::new();
-    };
-    state
-        .items
-        .iter()
-        .filter(|i| state.selected.contains(&i.data.name))
-        .map(|i| i.data.clone())
-        .collect()
-}
 fn menu(d: &Rc<RefCell<Desktop>>, on_icon: bool, x: f64, y: f64) {
     let (app, monitor, folder, entries, files, clipboard) = {
         let Ok(state) = d.try_borrow() else { return };
@@ -1492,8 +1605,7 @@ fn menu(d: &Rc<RefCell<Desktop>>, on_icon: bool, x: f64, y: f64) {
                             let Ok(mut state) = d.try_borrow_mut() else {
                                 return;
                             };
-                            state.saved.clear();
-                            state.layout(true);
+                            state.sort_by_name();
                         }
                         save(&d);
                         animate(&d);
@@ -1585,7 +1697,7 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
         let ctrl = g
             .current_event_state()
             .contains(gdk::ModifierType::CONTROL_MASK);
-        let (on_icon, paint, open_file) = {
+        let (on_icon, open_file) = {
             let Ok(mut state) = d.try_borrow_mut() else {
                 return;
             };
@@ -1610,10 +1722,11 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
             let open_file = (button == 1 && n == 2)
                 .then(|| at.map(|i| state.items[i].data.clone()))
                 .flatten();
-            (at.is_some(), state.paint.clone(), open_file)
+            if let Some(at) = at {
+                state.raise(at);
+            }
+            (at.is_some(), open_file)
         };
-        // Focus and gesture arbitration can synchronously emit cancel/drag-end.
-        paint.grab_focus();
         animate(&d);
         if button == 3 {
             g.set_state(gtk::EventSequenceState::Claimed);
@@ -1699,9 +1812,10 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
             let mut state = d.try_borrow_mut().ok()?;
             let at = state.hit(x, y)?;
             let name = state.items[at].data.name.clone();
+            let icon = state.items[at].icon.clone();
             // Ctrl-click toggles selection; dragging an unselected icon still exports it.
             if !state.selected.contains(&name) {
-                state.select([name].into_iter().collect());
+                state.select([name.clone()].into_iter().collect());
             }
             let now = glib::monotonic_time();
             state.drag = Some(Drag {
@@ -1713,7 +1827,11 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
                     .map(|i| (i.data.name.clone(), (i.x.value(now), i.y.value(now))))
                     .collect(),
             });
-            (state.items[at].icon.clone(), state.paths())
+            let selected = state.selected.clone();
+            state.items.sort_by_key(|i| selected.contains(&i.data.name));
+            let at = state.items.iter().position(|i| i.data.name == name)?;
+            state.raise(at);
+            (icon, state.paths())
         };
         source.set_icon(Some(&icon), 32, 32);
         let files: Vec<_> = paths.iter().map(gio::File::for_path).collect();
@@ -1815,58 +1933,6 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
     });
     paint.add_controller(target);
 
-    let keys = gtk::EventControllerKey::new();
-    let weak = Rc::downgrade(d);
-    keys.connect_key_pressed(move |_, key, _, mods| {
-        let Some(d) = weak.upgrade() else {
-            return glib::Propagation::Proceed;
-        };
-        match key {
-            gdk::Key::Return | gdk::Key::KP_Enter => {
-                let files = selected_files(&d);
-                files.iter().for_each(open);
-            }
-            gdk::Key::Delete | gdk::Key::KP_Delete => {
-                let paths = {
-                    let Ok(state) = d.try_borrow() else {
-                        return glib::Propagation::Proceed;
-                    };
-                    state.paths()
-                };
-                trash(paths);
-            }
-            gdk::Key::F2 => rename(&d),
-            gdk::Key::Escape => {
-                cancel_drag(&d);
-                {
-                    let Ok(mut state) = d.try_borrow_mut() else {
-                        return glib::Propagation::Proceed;
-                    };
-                    state.rubber = None;
-                    state.select(BTreeSet::new());
-                }
-                animate(&d);
-            }
-            gdk::Key::a if mods.contains(gdk::ModifierType::CONTROL_MASK) => {
-                {
-                    let Ok(mut state) = d.try_borrow_mut() else {
-                        return glib::Propagation::Proceed;
-                    };
-                    let selected = state
-                        .items
-                        .iter()
-                        .filter(|i| state.visible(i))
-                        .map(|i| i.data.name.clone())
-                        .collect();
-                    state.select(selected);
-                }
-                animate(&d);
-            }
-            _ => return glib::Propagation::Proceed,
-        }
-        glib::Propagation::Stop
-    });
-    paint.add_controller(keys);
     let scroll = gtk::EventControllerScroll::new(
         gtk::EventControllerScrollFlags::VERTICAL | gtk::EventControllerScrollFlags::DISCRETE,
     );
@@ -1954,21 +2020,15 @@ fn finish_drag(d: &Rc<RefCell<Desktop>>, x: f64, y: f64) {
     let Some(drag) = state.drag.take() else {
         return;
     };
-    let grid = state.grid;
-    let page = state.page;
-    let mut occupied: BTreeSet<_> = state
-        .positions
-        .iter()
-        .filter(|(n, _)| !drag.origins.contains_key(*n))
-        .map(|(_, p)| *p)
-        .collect();
-    for (name, (ox, oy)) in drag.origins {
-        let desired = grid.snap(ox + x - drag.start.0, oy + y - drag.start.1, page);
-        let cell = nearest_free(grid, desired, &occupied);
-        occupied.insert(cell);
-        state.saved.insert(name, cell);
+    let dropped = drag.dropped(state.grid, x, y, state.page);
+    for i in &mut state.items {
+        if let Some(p) = dropped.get(&i.data.name) {
+            i.x.set(p.x);
+            i.y.set(p.y);
+        }
     }
-    state.layout(true);
+    state.saved.extend(dropped.clone());
+    state.positions.extend(dropped);
     let refresh_needed = state.dirty;
     drop(state);
     save(d);
@@ -1976,19 +2036,6 @@ fn finish_drag(d: &Rc<RefCell<Desktop>>, x: f64, y: f64) {
     if refresh_needed {
         refresh(d);
     }
-}
-fn nearest_free(grid: Grid, desired: CellPos, occupied: &BTreeSet<CellPos>) -> CellPos {
-    if !occupied.contains(&desired) {
-        return desired;
-    }
-    (0..grid.cols as usize * grid.rows as usize)
-        .map(|n| CellPos {
-            page: desired.page,
-            ..grid.nth(n)
-        })
-        .filter(|p| !occupied.contains(p))
-        .min_by_key(|p| p.col.abs_diff(desired.col) + p.row.abs_diff(desired.row))
-        .unwrap_or_else(|| grid.free(occupied))
 }
 fn import(file: &gio::File, folder: &Path) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
@@ -2071,6 +2118,12 @@ mod tests {
             glib::random_int()
         ))
     }
+    fn assert_separate(positions: &Positions) {
+        let positions: Vec<_> = positions.values().collect();
+        for (n, p) in positions.iter().enumerate() {
+            assert!(positions[n + 1..].iter().all(|other| !p.overlaps(**other)));
+        }
+    }
     #[test]
     fn new_items_fill_down_from_top_right_without_displacing_saved_items() {
         let g = grid();
@@ -2079,13 +2132,8 @@ mod tests {
         let p = place(&names, &saved, g);
         assert_eq!(p[&names[2]], g.nth(0));
         assert_eq!(p[&names[0]], g.nth(1));
-        let (right, _) = g.point(g.nth(0));
-        let (left, _) = g.point(g.nth(g.rows as usize));
-        assert!(right > left);
-        assert_eq!(
-            p.values().copied().collect::<BTreeSet<_>>().len(),
-            names.len()
-        );
+        assert!(g.nth(0).x > g.nth(g.rows as usize).x);
+        assert_separate(&p);
     }
     fn battery_grid(placement: &str, clock: &str) -> Grid {
         let mut g = grid();
@@ -2110,91 +2158,199 @@ mod tests {
         for corner in ["top_left", "top_right", "bottom_left", "bottom_right"] {
             for clock in ["off", "left"] {
                 let g = battery_grid(corner, clock);
-                // A bottom card can sit below the last row, leaving nothing to skip.
                 assert!(
                     !corner.starts_with("top")
                         || (0..(g.cols * g.rows) as usize).any(|n| g.reserved(g.nth(n)))
                 );
                 let p = place(&names, &Positions::new(), g);
                 assert!(p.values().all(|p| !g.reserved(*p)), "{corner}, {clock}");
-                assert_eq!(
-                    p.values().copied().collect::<BTreeSet<_>>().len(),
-                    names.len()
-                );
+                assert_separate(&p);
                 assert_eq!(place(&names, &p, g), p);
             }
         }
     }
     #[test]
-    fn saved_positions_inside_battery_card_stay_while_unsaved_icons_reflow() {
-        let names = names(2);
+    fn automatic_placement_skips_free_saved_rectangles_and_the_battery_card() {
+        let g = battery_grid("top_left", "off");
+        let names = names(20);
+        let saved_pos = FreePos {
+            x: g.nth(0).x - 10.5,
+            y: 65.25,
+            page: 0,
+        };
+        let saved = [(names[10].clone(), saved_pos)].into_iter().collect();
+        let p = place(&names, &saved, g);
+        assert_eq!(p[&names[10]], saved_pos);
+        assert!(!p.values().any(|p| g.reserved(*p)));
+        assert_separate(&p);
+        assert_ne!(p[&names[0]], g.nth(0));
+        assert_ne!(p[&names[1]], g.nth(1));
+    }
+    #[test]
+    fn saved_positions_inside_battery_card_and_overlaps_stay_put() {
+        let names = names(3);
         let g = battery_grid("top_right", "off");
-        let saved = [(names[0].clone(), g.nth(0))].into_iter().collect();
+        let saved = [(names[0].clone(), g.nth(0)), (names[1].clone(), g.nth(0))]
+            .into_iter()
+            .collect();
         assert!(g.reserved(g.nth(0)));
         let p = place(&names, &saved, g);
         assert_eq!(p[&names[0]], g.nth(0));
-        assert!(!g.reserved(p[&names[1]]));
-        let off = place(&names, &saved, grid());
-        assert_eq!(off[&names[0]], g.nth(0));
-        assert_eq!(off[&names[1]], g.nth(1));
-        assert_ne!(p[&names[1]], off[&names[1]]);
+        assert_eq!(p[&names[1]], g.nth(0));
+        assert!(!g.reserved(p[&names[2]]));
     }
     #[test]
-    fn offscreen_saved_positions_recover_outside_battery_card() {
-        let names = names(1);
-        let g = battery_grid("top_right", "off");
-        let saved = [(
-            names[0].clone(),
-            CellPos {
-                col: 100,
-                row: 100,
-                page: 0,
-            },
-        )]
-        .into_iter()
-        .collect();
-        let p = place(&names, &saved, g);
-        assert!(!g.reserved(p[&names[0]]));
-    }
-    #[test]
-    fn resolution_change_recovers_invalid_and_colliding_cells() {
-        let g = grid();
+    fn smaller_screen_pulls_restored_positions_to_the_nearest_edge_without_regridding() {
         let names = names(3);
+        let old = Grid::new(1920, 1080, 50);
+        let edge = FreePos {
+            x: 1700.5,
+            y: 900.25,
+            page: 2,
+        };
+        let untouched = FreePos {
+            x: 223.75,
+            y: 101.5,
+            page: 0,
+        };
         let saved = [
-            (
-                names[0].clone(),
-                CellPos {
-                    col: 100,
-                    row: 99,
-                    page: 0,
-                },
-            ),
-            (names[1].clone(), g.nth(0)),
-            (names[2].clone(), g.nth(0)),
+            (names[0].clone(), edge),
+            (names[1].clone(), untouched),
+            (names[2].clone(), edge),
         ]
         .into_iter()
         .collect();
-        let p = place(&names, &saved, g);
-        assert_eq!(p[&names[1]], g.nth(0));
-        assert!(p.values().all(|p| p.col < g.cols && p.row < g.rows));
-        assert_eq!(p.values().copied().collect::<BTreeSet<_>>().len(), 3);
+        assert_eq!(place(&names, &saved, old), saved);
+        let p = place(&names, &saved, grid());
+        assert_eq!(
+            p[&names[0]],
+            FreePos {
+                x: 688.0,
+                y: 484.0,
+                page: 2
+            }
+        );
+        assert_eq!(p[&names[1]], untouched);
+        assert_eq!(p[&names[2]], p[&names[0]]);
     }
     #[test]
-    fn five_hundred_items_get_unique_reachable_pages() {
+    fn automatic_results_stay_stable_when_earlier_names_arrive_or_card_changes() {
+        let old_names = vec!["b".into(), "c".into()];
+        let saved = place(&old_names, &Positions::new(), grid());
+        let new_names = vec!["a".into(), "b".into(), "c".into()];
+        let p = place(&new_names, &saved, battery_grid("top_right", "off"));
+        for name in old_names {
+            assert_eq!(p[&name], saved[&name]);
+        }
+        assert_eq!(place(&new_names, &p, grid()), p);
+    }
+    #[test]
+    fn five_hundred_items_get_separate_reachable_pages() {
         let names = names(500);
-        let p = place(&names, &Positions::new(), grid());
+        let g = grid();
+        let p = place(&names, &Positions::new(), g);
         assert_eq!(p.len(), 500);
-        assert_eq!(p.values().copied().collect::<BTreeSet<_>>().len(), 500);
-        assert_eq!(place(&names, &p, grid()), p);
+        assert_separate(&p);
+        assert!(p.values().all(|p| g.clamp(*p) == *p));
+        assert!(p.values().any(|p| p.page > 0));
+        assert_eq!(place(&names, &p, g), p);
     }
     #[test]
-    fn snap_clamps_and_nearest_cell_avoids_other_icons() {
+    fn drop_keeps_exact_fractional_coordinates_and_selection_offsets() {
+        let drag = Drag {
+            start: (230.0, 120.0),
+            origins: [("a".into(), (200.0, 100.0)), ("b".into(), (323.5, 211.25))]
+                .into_iter()
+                .collect(),
+        };
+        let p = drag.dropped(grid(), 247.25, 149.5, 1);
+        assert_eq!(
+            p["a"],
+            FreePos {
+                x: 217.25,
+                y: 129.5,
+                page: 1
+            }
+        );
+        assert_eq!(
+            p["b"],
+            FreePos {
+                x: 340.75,
+                y: 240.75,
+                page: 1
+            }
+        );
+        // Dropping onto an existing icon is allowed; restoration keeps both there.
+        let mut saved = p.clone();
+        saved.insert("c".into(), p["a"]);
+        assert_eq!(
+            place(&["a".into(), "b".into(), "c".into()], &saved, grid()),
+            saved
+        );
+    }
+    #[test]
+    fn clamping_keeps_icons_below_reserve_and_group_offsets_at_edges() {
         let g = grid();
-        let pos = g.snap(-9999.0, 9999.0, 0);
-        assert_eq!(pos.col, g.cols - 1);
-        assert_eq!(pos.row, g.rows - 1);
-        let occupied = [pos].into_iter().collect();
-        assert_ne!(nearest_free(g, pos, &occupied), pos);
+        assert_eq!(
+            g.clamp(FreePos {
+                x: -20.5,
+                y: -10.0,
+                page: 0
+            }),
+            FreePos {
+                x: 0.0,
+                y: 50.0,
+                page: 0
+            }
+        );
+        assert_eq!(
+            g.clamp(FreePos {
+                x: 9999.0,
+                y: 9999.0,
+                page: 0
+            }),
+            FreePos {
+                x: 688.0,
+                y: 484.0,
+                page: 0
+            }
+        );
+        let drag = Drag {
+            start: (230.0, 120.0),
+            origins: [("a".into(), (200.0, 100.0)), ("b".into(), (323.5, 211.25))]
+                .into_iter()
+                .collect(),
+        };
+        for pointer in [(-9999.0, -9999.0), (9999.0, 9999.0)] {
+            let p = drag.dropped(g, pointer.0, pointer.1, 0);
+            assert_eq!(p["b"].x - p["a"].x, 123.5);
+            assert_eq!(p["b"].y - p["a"].y, 111.25);
+            assert!(p.values().all(|p| g.clamp(*p) == *p));
+        }
+    }
+    #[test]
+    fn sort_by_name_discards_free_positions_and_restores_grid_order() {
+        let names = names(30);
+        let saved = names
+            .iter()
+            .map(|name| {
+                (
+                    name.clone(),
+                    FreePos {
+                        x: 123.25,
+                        y: 111.5,
+                        page: 5,
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(place(&names, &saved, grid()), saved);
+        // Sort clears saved positions before using the same name-ordered placement.
+        let sorted = place(&names, &Positions::new(), grid());
+        for (n, name) in names.iter().enumerate() {
+            assert_eq!(sorted[name], grid().nth(n));
+        }
+        assert_eq!(place(&names, &sorted, grid()), sorted);
     }
     #[test]
     fn rubber_band_works_in_both_directions_and_preserves_ctrl_selection() {
@@ -2233,7 +2389,36 @@ mod tests {
             .collect();
         assert_eq!(decode(&encode(&p).unwrap()).unwrap(), p);
         assert!(decode(b"truncated {").is_err());
-        assert!(decode(br#"{"bad":{"col":-1,"row":0}}"#).is_err());
+        assert!(decode(br#"{"bad":{"col":-1,"row":0}}"#).unwrap().is_empty());
+    }
+    #[test]
+    fn old_format_entries_are_ignored_without_losing_new_positions() {
+        let old = br#"{"a":{"col":1,"row":2,"page":0},"b":{"col":0,"row":0}}"#;
+        assert!(decode(old).unwrap().is_empty());
+        let mixed = br#"{"old":{"col":1,"row":2},"new":{"x":123.5,"y":99.25}}"#;
+        assert_eq!(
+            decode(mixed).unwrap(),
+            [(
+                "new".into(),
+                FreePos {
+                    x: 123.5,
+                    y: 99.25,
+                    page: 0
+                }
+            )]
+            .into_iter()
+            .collect()
+        );
+    }
+    #[test]
+    fn unreadable_or_corrupt_state_uses_defaults() {
+        let dir = temp();
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(read_positions(&dir).unwrap().is_empty());
+        assert!(read_positions(&dir.join("missing")).unwrap().is_empty());
+        std::fs::write(dir.join("broken.json"), b"truncated {").unwrap();
+        assert!(read_positions(&dir.join("broken.json")).unwrap().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn atomic_save_replaces_complete_state_and_reports_failure() {
