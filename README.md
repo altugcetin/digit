@@ -94,7 +94,8 @@ Package checks use only the local pacman/RPM database. Installation output is al
 saved without colors in `~/.cache/digit/install.log` (`XDG_CACHE_HOME` is respected),
 with the previous log kept as `install.log.1`, including in engine mode.
 
-`--check` includes missing kitty and portal packages in `packages=`. Use
+`--check` includes missing kitty, portal, `gpu-screen-recorder` and `cava` packages
+in `packages=` (space-separated, empty when none are missing). Use
 `--check --wm hyprland` or `--check --wm niri` to check a specific compositor;
 without `--wm`, it uses the running compositor, the first installed compositor,
 or Hyprland when neither is found.
@@ -102,9 +103,20 @@ or Hyprland when neither is found.
 Requirements the installer checks: Rust 1.97+ (it falls back to rustup when the
 distribution's Rust is older), GTK 4.18+, gtk4-layer-shell 1.2+.
 
-Screen recording requires the optional `gpu-screen-recorder` package. Install it
-separately to enable recording, instant replay and streaming; the installer does
-not install it.
+`gpu-screen-recorder` (recording, instant replay and streaming) and `cava` (the
+notch's audio spectrum) are required runtime packages, installed with the other
+system dependencies. `--no-deps` skips all system packages.
+
+On Fedora, the installer enables the community COPR
+[`brycensranch/gpu-screen-recorder-git`](https://copr.fedorainfracloud.org/coprs/brycensranch/gpu-screen-recorder-git/)
+if `gpu-screen-recorder` is unavailable in the enabled repositories. This is the
+Fedora COPR linked in [upstream's installation documentation](https://git.dec05eba.com/gpu-screen-recorder/about/#unofficial-install-methods).
+
+Before installing dependencies, the installer checks repository availability for
+`gpu-screen-recorder` and `cava`. If either is unavailable (for example on openSUSE
+Slowroll), it names the package in a warning (`@@digit warn` in engine mode) and
+leaves it out of the transaction so the remaining dependencies can install.
+Install the missing package later from Digit Store when it becomes available.
 
 ## Shortcuts
 
