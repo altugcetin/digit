@@ -35,7 +35,10 @@ pub struct Config {
     pub dock_running: bool,
     pub dock_badges: bool,
     pub dock_icons: String,
-    pub hot_corner: bool,
+    pub corner_top_left: String,
+    pub corner_top_right: String,
+    pub corner_bottom_left: String,
+    pub corner_bottom_right: String,
     pub icon_theme: Option<String>,
     pub hover: bool,
     pub intro: bool,
@@ -75,7 +78,6 @@ pub struct Config {
     pub screen_corners: f64,
     pub tray: bool,
     pub mic_guard: bool,
-    pub control_corner: bool,
 }
 
 impl Default for Config {
@@ -104,7 +106,10 @@ impl Default for Config {
             dock_running: true,
             dock_badges: true,
             dock_icons: "light".into(),
-            hot_corner: true,
+            corner_top_left: "workspaces".into(),
+            corner_top_right: "none".into(),
+            corner_bottom_left: "none".into(),
+            corner_bottom_right: "control".into(),
             icon_theme: None,
             hover: true,
             intro: true,
@@ -144,7 +149,6 @@ impl Default for Config {
             screen_corners: 0.0,
             tray: true,
             mic_guard: true,
-            control_corner: true,
         }
     }
 }
@@ -166,7 +170,7 @@ pub struct Prefs {
     pub dock: DockPrefs,
     pub surface: String,
     pub hover: bool,
-    pub hot_corner: bool,
+    pub corners: [kit::corners::Panel; 4],
     pub icon_theme: Option<String>,
     pub style: String,
     pub menubar: bool,
@@ -188,7 +192,6 @@ pub struct Prefs {
     pub screen_corners: f64,
     pub tray: bool,
     pub mic_guard: bool,
-    pub control_corner: bool,
     pub fullscreen_edges: bool,
     /// Spotlight draws a caret that glides between positions and blinks softly.
     pub smooth_caret: bool,
@@ -223,7 +226,12 @@ impl From<&Config> for Prefs {
             dock,
             surface: c.surface.clone(),
             hover: c.hover,
-            hot_corner: c.hot_corner,
+            corners: kit::corners::read(&[
+                ("corner_top_left".into(), toml::Value::String(c.corner_top_left.clone())),
+                ("corner_top_right".into(), toml::Value::String(c.corner_top_right.clone())),
+                ("corner_bottom_left".into(), toml::Value::String(c.corner_bottom_left.clone())),
+                ("corner_bottom_right".into(), toml::Value::String(c.corner_bottom_right.clone())),
+            ].into_iter().collect()),
             icon_theme: c.icon_theme.clone(),
             style: c.notch_style.clone(),
             menubar: c.menubar,
@@ -245,7 +253,6 @@ impl From<&Config> for Prefs {
             screen_corners: c.screen_corners,
             tray: c.tray,
             mic_guard: c.mic_guard,
-            control_corner: c.control_corner,
             fullscreen_edges: c.fullscreen_edges,
             smooth_caret: c.smooth_caret,
             reduce_motion: c.reduce_motion,

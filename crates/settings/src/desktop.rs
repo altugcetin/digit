@@ -757,10 +757,48 @@ fn panels(body: &gtk::Box, t: &toml::Table) {
     choice(&panels, "calendar_month", "Calendar", "When the calendar under the date closes", "calendar_close", &close, &prefs::get_str(&t, "calendar_close", "leave"));
 }
 
+/// What each screen corner opens. A panel opens from its corner and lives in one corner at
+/// most, so choosing it for another clears the old one, and the rows show that right away.
+fn corners_picker(card: &gtk::Box, t: &toml::Table) {
+    use kit::corners::{self, Corner, Panel};
+    const PANELS: [(Panel, &str); 3] = [(Panel::None, "Nothing"), (Panel::Workspaces, "Workspaces"), (Panel::Control, "Control Center")];
+    const ROWS: [(Corner, &str, &str); 4] = [
+        (Corner::TopLeft, "north_west", "Top left corner"),
+        (Corner::TopRight, "north_east", "Top right corner"),
+        (Corner::BottomLeft, "south_west", "Bottom left corner"),
+        (Corner::BottomRight, "south_east", "Bottom right corner"),
+    ];
+    let at = |panel: Panel| PANELS.iter().position(|p| p.0 == panel).unwrap_or(0) as u32;
+    let labels: Vec<&str> = PANELS.iter().map(|p| p.1).collect();
+    let now = corners::read(t);
+    let picks: Rc<std::cell::RefCell<Vec<gtk::DropDown>>> = Rc::default();
+    let syncing = Rc::new(Cell::new(false));
+    for (corner, icon, title) in ROWS {
+        let (row, end) = ui::row(Some(icon), title, "");
+        let slot = Corner::ALL.iter().position(|c| *c == corner).unwrap_or(0);
+        let pick = ui::dropdown(&labels, at(now[slot]));
+        let (picks2, syncing) = (picks.clone(), syncing.clone());
+        pick.connect_selected_notify(move |p| {
+            if syncing.get() { return; }
+            let panel = PANELS.get(p.selected() as usize).map_or(Panel::None, |p| p.0);
+            let next = corners::assign(corners::read(&prefs::read()), corner, panel);
+            // A failed save shows what is really stored again.
+            let shown = if save_many(&corners::values(&next)) { next } else { corners::read(&prefs::read()) };
+            syncing.set(true);
+            for (pick, panel) in picks2.borrow().iter().zip(shown) {
+                pick.set_selected(at(panel));
+            }
+            syncing.set(false);
+        });
+        end.append(&pick);
+        card.append(&row);
+        picks.borrow_mut().push(pick);
+    }
+}
+
 fn screen_edges(body: &gtk::Box, t: &toml::Table) {
     let edge = section(body, "Screen corners");
-    toggle(&edge, "north_west", "Workspace corner", "Move the pointer to the top-left corner to see workspaces", "hot_corner", prefs::get_bool(&t, "hot_corner", true));
-    toggle(&edge, "south_east", "Control Center corner", "Move the pointer to the bottom-right corner to open Control Center", "control_corner", prefs::get_bool(&t, "control_corner", true));
+    corners_picker(&edge, t);
     toggle(&edge, "fullscreen", "Over fullscreen apps", "Let the dock edge and screen corners open panels while an app or game is fullscreen. Spotlight always opens", "fullscreen_edges", prefs::get_bool(&t, "fullscreen_edges", false));
 }
 

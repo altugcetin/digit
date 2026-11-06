@@ -41,6 +41,7 @@ mod night;
 mod notch;
 mod notify;
 mod paint;
+mod panel_corner;
 mod phone;
 mod picker;
 mod polkit;

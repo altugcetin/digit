@@ -2,14 +2,15 @@ use crate::app::App;
 use crate::audio::{self, Ask};
 use crate::compositor;
 use crate::draw::{self, Face};
+use crate::panel_corner;
 use gtk::subclass::prelude::*;
 use gtk::{cairo, gdk, glib, graphene, gsk, pango, prelude::*};
-use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
 use kit::bluez;
+use kit::corners::{Corner, Panel};
 use kit::motion::{self, Tween};
 use kit::nm;
 use kit::palette::Rgb;
-use kit::shape;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
@@ -123,6 +124,9 @@ struct State {
     canvas: Canvas,
     open: bool,
     max_h: f64,
+    screen: (f64, f64),
+    corner: Corner,
+    margins: [i32; 4],
     net: Net,
     bt: bluez::Snapshot,
     busy: Vec<String>,
@@ -166,36 +170,6 @@ pub fn show_on(app: &Rc<App>, output: Option<String>) {
     if !control.0.borrow().open {
         control.open_on(output);
     }
-}
-
-pub fn corner(app: &Rc<App>, monitor: &gdk::Monitor) -> gtk::Window {
-    let window = gtk::Window::new();
-    window.init_layer_shell();
-    window.set_layer(Layer::Overlay);
-    window.set_namespace(Some("digit-corner"));
-    window.set_anchor(Edge::Bottom, true);
-    window.set_anchor(Edge::Right, true);
-    window.set_exclusive_zone(-1);
-    window.set_keyboard_mode(KeyboardMode::None);
-    window.set_monitor(Some(monitor));
-    window.add_css_class("digit");
-    window.set_default_size(2, 2);
-    let paint = crate::paint::Paint::new(2, 2);
-    paint.present();
-    window.set_child(Some(&paint));
-    let motion = gtk::EventControllerMotion::new();
-    let weak = Rc::downgrade(app);
-    let output = monitor.connector().map(|c| c.to_string());
-    motion.connect_enter(move |_, _, _| {
-        if let Some(app) = weak.upgrade() {
-            if app.prefs.borrow().control_corner && output.as_deref().is_none_or(|o| app.edges_live(o)) {
-                show_on(&app, output.clone());
-            }
-        }
-    });
-    paint.add_controller(motion);
-    window.present();
-    window
 }
 
 pub fn toggle(app: &Rc<App>) {
@@ -273,8 +247,7 @@ impl Control {
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
         window.set_namespace(Some("digit-control"));
-        window.set_anchor(Edge::Bottom, true);
-        window.set_anchor(Edge::Right, true);
+        panel_corner::anchor(&window, panel_corner::selected(app, Panel::Control));
         window.set_exclusive_zone(-1);
         window.set_keyboard_mode(KeyboardMode::None);
         window.add_css_class("digit");
@@ -286,6 +259,9 @@ impl Control {
             canvas: canvas.clone(),
             open: false,
             max_h: 600.0,
+            screen: (1920.0, 1080.0),
+            corner: panel_corner::selected(app, Panel::Control),
+            margins: [0; 4],
             net: Net::default(),
             bt: bluez::Snapshot::default(),
             busy: Vec::new(),
@@ -452,9 +428,14 @@ impl Control {
     pub fn changed(&self) {
         let open = self.0.borrow().open;
         if open {
-            self.resize();
-            self.kick();
+            self.reposition();
         }
+    }
+
+    pub fn reposition(&self) {
+        self.0.borrow_mut().reposition();
+        self.resize();
+        self.kick();
     }
 
     fn toggle(&self) {
@@ -472,14 +453,11 @@ impl Control {
             let display = gdk::Display::default();
             let monitors: Vec<gdk::Monitor> = display.map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect()).unwrap_or_default();
             let monitor = monitors.iter().find(|m| output.as_deref().is_some_and(|o| m.connector().as_deref() == Some(o))).or(monitors.first()).cloned();
-            let screen_h = monitor.as_ref().map(|m| m.geometry().height() as f64).unwrap_or(1080.0);
-            s.max_h = (screen_h - 38.0 - 2.0 * FILLET - 12.0).min(820.0);
-            let (w, h) = ((W + FILLET) as i32, (s.max_h + FILLET) as i32);
-            s.window.set_default_size(w, h);
-            s.canvas.set_size_request(w, h);
+            s.screen = monitor.as_ref().map(|m| (m.geometry().width() as f64, m.geometry().height() as f64)).unwrap_or((1920.0, 1080.0));
             if !s.window.is_visible() {
                 s.window.set_monitor(monitor.as_ref());
             }
+            s.reposition();
             s.open = true;
             s.scroll = 0.0;
             s.expand = None;
@@ -621,6 +599,7 @@ impl Control {
 
     fn hit(&self, x: f64, y: f64) -> Option<Hit> {
         let s = self.0.borrow();
+        if !s.placement(glib::monotonic_time()).contains(x, y) { return None; }
         s.hits.iter().rev().find(|(_, hx, hy, hw, hh)| x >= *hx && x <= hx + hw && y >= *hy && y <= hy + hh).map(|h| h.0)
     }
 
@@ -737,9 +716,7 @@ impl Control {
 
     fn inside(&self, x: f64, y: f64) -> bool {
         let s = self.0.borrow();
-        let h = s.height.target();
-        let bottom = s.max_h + FILLET;
-        x >= FILLET && y >= bottom - h
+        s.placement(glib::monotonic_time()).contains(x, y)
     }
 
     fn set_property(&self, dest: &'static str, path: &str, iface: &'static str, name: &'static str, value: bool) {
@@ -785,7 +762,31 @@ impl Control {
     }
 }
 
+// Keep HEAD's height budget even for bottom corners, which have no top margin.
+fn max_height(screen_h: f64) -> f64 {
+    (screen_h - 38.0 - 2.0 * FILLET - 12.0).min(820.0)
+}
+
 impl State {
+    fn reposition(&mut self) {
+        self.corner = panel_corner::selected(&self.app, Panel::Control);
+        self.margins = panel_corner::position(&self.window, self.corner);
+        self.max_h = max_height(self.screen.1);
+        let (w, h) = ((W + FILLET) as i32, (self.max_h + FILLET) as i32);
+        self.window.set_default_size(w, h);
+        self.canvas.set_size_request(w, h);
+        self.hits.clear();
+    }
+
+    fn surface_size(&self) -> (f64, f64) {
+        let (w, h) = (self.canvas.width(), self.canvas.height());
+        (if w > 1 { w as f64 } else { W + FILLET }, if h > 1 { h as f64 } else { self.max_h + FILLET })
+    }
+
+    fn placement(&self, now: i64) -> panel_corner::Rect {
+        panel_corner::placement(self.corner, self.surface_size(), (W, self.height.value(now).max(1.0)), self.rise.value(now), FILLET)
+    }
+
     fn bt_on(&self) -> bool {
         self.bt.chosen().is_some_and(|a| a.powered)
     }
@@ -834,12 +835,15 @@ impl State {
         if self.reveal.target() == 0.0 && self.reveal.settled(now) {
             self.expand = None;
         }
-        let rect = if self.open { (0, 0, (W + FILLET) as i32, (self.max_h + FILLET) as i32) } else { (0, 0, 1, 1) };
-        if rect != self.region {
-            if let Some(surface) = self.window.surface() {
-                surface.set_input_region(Some(&cairo::Region::create_rectangle(&cairo::RectangleInt::new(rect.0, rect.1, rect.2, rect.3))));
-                self.region = rect;
-            }
+        let r = if self.open {
+            panel_corner::envelope(self.corner, self.placement(now), self.surface_size(), FILLET).region()
+        } else {
+            cairo::RectangleInt::new(0, 0, 0, 0)
+        };
+        let rect = (r.x(), r.y(), r.width(), r.height());
+        if rect != self.region && let Some(surface) = self.window.surface() {
+            surface.set_input_region(Some(&cairo::Region::create_rectangle(&r)));
+            self.region = rect;
         }
         let moving = [&self.rise, &self.fade, &self.height, &self.reveal].iter().any(|t| !t.settled(now)) || self.app.palette_moving(now);
         if !moving && !self.open && self.window.is_visible() {
@@ -909,26 +913,17 @@ impl State {
         let pal = self.app.palette_at(now);
         let cfg = self.app.cfg.clone();
         let canvas = self.canvas.clone();
-        let right = W + FILLET;
-        let bottom = self.max_h + FILLET;
         let h = self.height.value(now).max(1.0);
-        let shift = ((1.0 - rise) * (h + FILLET)).round();
+        let shift = ((1.0 - rise) * (h + FILLET)).round() * if self.corner.is_top() { -1.0 } else { 1.0 };
+        let placed = self.placement(now);
+        let rect = panel_corner::Rect { x: placed.x, y: placed.y - shift, w: W, h };
+        let right = rect.x + W;
+        let bottom = rect.y + h;
         s.save();
         s.translate(&graphene::Point::new(0.0, shift as f32));
-        let solid = pal.body.a >= 1.0;
         let radius = RADIUS * self.app.round();
-        let parts = if solid { shape::cornered_parts(right, bottom, W, h, radius, FILLET) } else { None };
-        let path = if solid { None } else { shape::cornered(right, bottom, W, h, radius, FILLET) };
-        if let Some(p) = &parts {
-            draw::slab(s, p, pal.body);
-            s.push_rounded_clip(&p.0);
-        } else if let Some(p) = &path {
-            s.append_fill(p, gsk::FillRule::Winding, &pal.body.rgba());
-            s.push_fill(p, gsk::FillRule::Winding);
-        } else {
-            s.restore();
-            return;
-        }
+        panel_corner::slab(s, self.corner, rect, radius, FILLET, pal.body);
+        s.push_rounded_clip(&panel_corner::clip(self.corner, rect, radius, FILLET));
         s.push_opacity(self.fade.value(now).clamp(0.0, 1.0));
         let left = right - W;
         let x0 = left + PAD;
@@ -1119,8 +1114,9 @@ impl State {
         s.pop();
         s.pop();
         s.restore();
-        let floor = bottom - h;
-        self.hits = hits.into_iter().filter(|(_, _, hy, _, hh)| hy + hh > floor && *hy < bottom).collect();
+        let floor = bottom - h + shift;
+        self.hits = hits.into_iter().filter(|(_, _, hy, _, hh)| hy + hh > floor && *hy < bottom + shift).collect();
+        panel_corner::screen_mask(s, &self.app, self.corner, self.surface_size(), self.margins);
     }
 }
 
@@ -1162,4 +1158,29 @@ glib::wrapper! {
     pub struct Canvas(ObjectSubclass<imp::Canvas>)
         @extends gtk::Widget,
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_corner_keeps_heads_unscaled_size_and_height_limit() {
+        assert_eq!(W + FILLET, 392.0);
+        for (screen_h, expected_max, expected_surface_h) in [(1080.0, 820.0, 832.0), (894.0, 820.0, 832.0), (720.0, 646.0, 658.0), (600.0, 526.0, 538.0)] {
+            let max_h = max_height(screen_h);
+            assert_eq!(max_h, expected_max);
+            let surface = (W + FILLET, max_h + FILLET);
+            assert_eq!(surface, (392.0, expected_surface_h));
+            assert_eq!(panel_corner::margins(Corner::BottomRight), [0; 4]);
+            // HEAD drew at right = W + FILLET, bottom = max_h + FILLET.
+            assert_eq!(panel_corner::placement(Corner::BottomRight, surface, (W, max_h), 1.0, FILLET),
+                panel_corner::Rect { x: 12.0, y: 12.0, w: 380.0, h: expected_max });
+            for corner in Corner::ALL {
+                let rect = panel_corner::placement(corner, surface, (W, max_h), 1.0, FILLET);
+                assert_eq!(rect.x, if corner.is_left() { 0.0 } else { 12.0 });
+                assert_eq!(rect.y, if corner.is_top() { 0.0 } else { 12.0 });
+            }
+        }
+    }
 }

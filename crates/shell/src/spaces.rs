@@ -2,10 +2,11 @@ use crate::app::App;
 use crate::compositor;
 use crate::draw::{self, Face};
 use crate::paint::Paint;
+use crate::panel_corner;
 use gtk::{cairo, gdk, gio, glib, graphene, pango, prelude::*};
-use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
+use kit::corners::{Corner, Panel};
 use kit::motion::{self, Tween};
-use kit::shape;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -60,6 +61,8 @@ struct State {
     window: gtk::Window,
     paint: Paint,
     output: String,
+    corner: Corner,
+    margins: [i32; 4],
     open: bool,
     inside: bool,
     leave: u64,
@@ -102,39 +105,28 @@ pub fn changed(_app: &App) {
         let open = st.borrow().open;
         if open {
             load(&st);
+            region(&st);
             st.borrow().paint.queue_draw();
         }
     }
 }
 
-pub fn corner(app: &Rc<App>, monitor: &gdk::Monitor) -> gtk::Window {
-    let window = gtk::Window::new();
-    window.init_layer_shell();
-    window.set_layer(Layer::Overlay);
-    window.set_namespace(Some("digit-corner"));
-    window.set_anchor(Edge::Top, true);
-    window.set_anchor(Edge::Left, true);
-    window.set_exclusive_zone(-1);
-    window.set_keyboard_mode(KeyboardMode::None);
-    window.set_monitor(Some(monitor));
-    window.add_css_class("digit");
-    window.set_default_size(2, 2);
-    let paint = Paint::new(2, 2);
-    paint.present();
-    window.set_child(Some(&paint));
-    let motion = gtk::EventControllerMotion::new();
-    let weak = Rc::downgrade(app);
-    let output = monitor.connector().map(|c| c.to_string());
-    motion.connect_enter(move |_, _, _| {
-        if let Some(app) = weak.upgrade() {
-            if app.prefs.borrow().hot_corner && output.as_deref().is_none_or(|o| app.edges_live(o)) {
-                toggle(&app, output.clone());
-            }
+pub fn show_on(app: &Rc<App>, output: Option<String>) {
+    let st = get(app);
+    if !st.borrow().open {
+        show(&st, output);
+    }
+}
+
+pub fn reposition() {
+    if let Some(st) = ONE.with(|one| one.borrow().clone()) {
+        {
+            let mut s = st.borrow_mut();
+            s.reposition();
         }
-    });
-    paint.add_controller(motion);
-    window.present();
-    window
+        region(&st);
+        st.borrow().paint.queue_draw();
+    }
 }
 
 fn build(app: &Rc<App>) -> Shared {
@@ -142,8 +134,7 @@ fn build(app: &Rc<App>) -> Shared {
     window.init_layer_shell();
     window.set_layer(Layer::Overlay);
     window.set_namespace(Some("digit-spaces"));
-    window.set_anchor(Edge::Top, true);
-    window.set_anchor(Edge::Left, true);
+    panel_corner::anchor(&window, panel_corner::selected(app, Panel::Workspaces));
     window.set_exclusive_zone(-1);
     window.set_keyboard_mode(KeyboardMode::None);
     window.add_css_class("digit");
@@ -155,6 +146,8 @@ fn build(app: &Rc<App>) -> Shared {
         window: window.clone(),
         paint: paint.clone(),
         output: String::new(),
+        corner: panel_corner::selected(app, Panel::Workspaces),
+        margins: [0; 4],
         open: false,
         inside: false,
         leave: 0,
@@ -365,6 +358,7 @@ fn show(st: &Shared, output: Option<String>) {
         if !s.window.is_visible() {
             s.window.set_monitor(monitor.as_ref());
         }
+        s.reposition();
         s.open = true;
         s.inside = false;
         s.leave += 1;
@@ -487,13 +481,7 @@ fn nudge(st: &Shared, by: i32) {
 fn region(st: &Shared) {
     let s = st.borrow();
     let Some(surface) = s.window.surface() else { return };
-    let r = if s.open {
-        let (w, h) = s.size();
-        cairo::Region::create_rectangle(&cairo::RectangleInt::new(0, 0, (w + FILLET).ceil() as i32, (h + FILLET).ceil() as i32))
-    } else {
-        cairo::Region::create()
-    };
-    surface.set_input_region(Some(&r));
+    surface.set_input_region(Some(&s.input_region(glib::monotonic_time())));
 }
 
 fn kick(st: &Shared) {
@@ -510,6 +498,9 @@ fn kick(st: &Shared) {
         let Some(st) = weak.upgrade() else { return glib::ControlFlow::Break };
         let Ok(mut s) = st.try_borrow_mut() else { return glib::ControlFlow::Continue };
         let now = clock.frame_time();
+        if let Some(surface) = s.window.surface() {
+            surface.set_input_region(Some(&s.input_region(now)));
+        }
         w.queue_draw();
         let busy = [&s.rise, &s.fade].into_iter().chain(s.glow.iter()).any(|t| !t.settled(now));
         if busy {
@@ -539,6 +530,32 @@ fn kick(st: &Shared) {
 }
 
 impl State {
+    fn reposition(&mut self) {
+        self.corner = panel_corner::selected(&self.app, Panel::Workspaces);
+        self.margins = panel_corner::position(&self.window, self.corner);
+        let (w, h) = (SURFACE_W as i32, SURFACE_H as i32);
+        self.window.set_default_size(w, h);
+        self.paint.set_size_request(w, h);
+    }
+
+    fn surface_size(&self) -> (f64, f64) {
+        let (w, h) = (self.paint.width(), self.paint.height());
+        (if w > 1 { w as f64 } else { SURFACE_W }, if h > 1 { h as f64 } else { SURFACE_H })
+    }
+
+    fn placement(&self, now: i64) -> panel_corner::Rect {
+        let (w, h) = self.size();
+        panel_corner::placement(self.corner, self.surface_size(), (w, h), self.rise.value(now), FILLET)
+    }
+
+    fn input_region(&self, now: i64) -> cairo::Region {
+        if self.open {
+            cairo::Region::create_rectangle(&panel_corner::envelope(self.corner, self.placement(now), self.surface_size(), FILLET).region())
+        } else {
+            cairo::Region::create()
+        }
+    }
+
     fn size(&self) -> (f64, f64) {
         let n = self.cards.len().max(1);
         let cols = n.min(PER_ROW) as f64;
@@ -566,6 +583,11 @@ impl State {
     }
 
     fn spot_at(&self, x: f64, y: f64) -> Option<Spot> {
+        let rect = self.placement(glib::monotonic_time());
+        if !rect.contains(x, y) {
+            return None;
+        }
+        let (x, y) = (x - rect.x, y - rect.y);
         for k in 0..self.chips.len() {
             let (cx, cy, cw) = self.chip_rect(k);
             if x >= cx && x <= cx + cw && y >= cy && y <= cy + CHIP_H {
@@ -597,26 +619,13 @@ impl State {
         }
         let pal = self.app.palette_at(now);
         let cfg = &self.app.cfg;
-        let (w, h) = self.size();
-        let lift = ((1.0 - rise) * (h + FILLET)).round();
-        s.save();
-        s.translate(&graphene::Point::new(0.0, -lift as f32));
-        s.save();
-        s.translate(&graphene::Point::new((w + FILLET) as f32, (h + FILLET) as f32));
-        s.scale(-1.0, -1.0);
+        let (w, _) = self.size();
+        let rect = self.placement(now);
         let radius = RADIUS * self.app.round();
-        let parts = shape::cornered_parts(w + FILLET, h + FILLET, w, h, radius, FILLET);
-        if let Some(p) = &parts {
-            draw::slab(s, p, pal.body.alpha(1.0));
-        }
-        s.restore();
-        s.push_rounded_clip(&gtk::gsk::RoundedRect::new(
-            graphene::Rect::new(0.0, 0.0, w as f32, h as f32),
-            graphene::Size::zero(),
-            graphene::Size::zero(),
-            graphene::Size::new(radius as f32, radius as f32),
-            graphene::Size::zero(),
-        ));
+        s.save();
+        panel_corner::slab(s, self.corner, rect, radius, FILLET, pal.body.alpha(1.0));
+        s.push_rounded_clip(&panel_corner::clip(self.corner, rect, radius, FILLET));
+        s.translate(&graphene::Point::new(rect.x as f32, rect.y as f32));
         s.push_opacity(fade);
         let left = pango::Alignment::Left;
         draw::text(s, &self.paint, cfg, "Workspaces", 16.0, Face::Text(600), pal.ink_main, PAD + 2.0, 27.0, 200.0, left);
@@ -662,15 +671,14 @@ impl State {
             draw::text(s, &self.paint, cfg, &card.title, 12.0, Face::Text(450), pal.ink_meta, x + 14.0, y + CARD_H - 20.0, CARD_W - 28.0, left);
         }
         // The dragged window rides under the pointer, a touch larger.
-        if let Some(d) = self.drag.as_ref().filter(|d| d.moving) {
-            if let Some((_, app_id, icon)) = self.cards.get(d.card).and_then(|c| c.windows.get(d.win)) {
-                let size = ICON + 8.0;
-                let (ix, iy) = (d.at.0 - size / 2.0, d.at.1 - size / 2.0);
-                draw::fill(s, &draw::round(ix - 6.0, iy - 6.0, size + 12.0, size + 12.0, 14.0), pal.body.mix(pal.ink_main, 0.12).alpha(0.92));
-                match icon {
-                    Some(p) => draw::paintable(s, p, ix, iy, size),
-                    None => draw::monogram(s, &self.paint, cfg, &crate::apps::pretty(app_id), ix, iy, size, pal.raised, pal.ink_main),
-                }
+        if let Some(d) = self.drag.as_ref().filter(|d| d.moving)
+            && let Some((_, app_id, icon)) = self.cards.get(d.card).and_then(|c| c.windows.get(d.win)) {
+            let size = ICON + 8.0;
+            let (ix, iy) = (d.at.0 - rect.x - size / 2.0, d.at.1 - rect.y - size / 2.0);
+            draw::fill(s, &draw::round(ix - 6.0, iy - 6.0, size + 12.0, size + 12.0, 14.0), pal.body.mix(pal.ink_main, 0.12).alpha(0.92));
+            match icon {
+                Some(p) => draw::paintable(s, p, ix, iy, size),
+                None => draw::monogram(s, &self.paint, cfg, &crate::apps::pretty(app_id), ix, iy, size, pal.raised, pal.ink_main),
             }
         }
         for (k, chip) in self.chips.iter().enumerate() {
@@ -694,5 +702,23 @@ impl State {
         s.pop();
         s.pop();
         s.restore();
+        panel_corner::screen_mask(s, &self.app, self.corner, self.surface_size(), self.margins);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_corner_keeps_heads_fixed_surface_and_unscaled_placement() {
+        assert_eq!((SURFACE_W, SURFACE_H), (870.0, 522.0));
+        assert_eq!(panel_corner::margins(Corner::TopLeft), [0; 4]);
+        for (w, h) in [(232.0, 192.0), (856.0, 508.0)] {
+            let rect = panel_corner::placement(Corner::TopLeft, (SURFACE_W, SURFACE_H), (w, h), 1.0, FILLET);
+            assert_eq!(rect, panel_corner::Rect { x: 0.0, y: 0.0, w, h });
+            assert_eq!(panel_corner::envelope(Corner::TopLeft, rect, (SURFACE_W, SURFACE_H), FILLET),
+                panel_corner::Rect { x: 0.0, y: 0.0, w: w + 14.0, h: h + 14.0 });
+        }
     }
 }
