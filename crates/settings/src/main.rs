@@ -552,6 +552,24 @@ fn main() -> glib::ExitCode {
             }
         };
     }
+    // The installer's "Add NVIDIA variables", set before it writes the session config.
+    if std::env::args().nth(1).as_deref() == Some("--nvidia-env") {
+        let on = match std::env::args().nth(2).as_deref() {
+            Some("on") => true,
+            Some("off") => false,
+            _ => {
+                eprintln!("Usage: digit-settings --nvidia-env on|off");
+                return glib::ExitCode::FAILURE;
+            }
+        };
+        return match prefs::set("nvidia_env", toml::Value::Boolean(on)) {
+            Ok(()) => glib::ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e}");
+                glib::ExitCode::FAILURE
+            }
+        };
+    }
     if matches!(std::env::args().nth(1).as_deref(), Some("--hypr-setup" | "--niri-setup")) {
         println!("Log out and select Hyprland with Digit or niri with Digit.");
         return glib::ExitCode::SUCCESS;

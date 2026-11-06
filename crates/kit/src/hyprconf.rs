@@ -229,15 +229,22 @@ pub(crate) fn rounding() -> i64 {
 /// digit-base.lua: what the config needs to be usable on its own: input, layouts, gestures,
 /// environment.
 fn base() -> String {
-    let gpu = NVIDIA_ENV.iter().filter(|_| nvidia()).map(|(k, v)| format!("hl.env(\"{k}\", \"{v}\")\n")).collect::<String>();
+    let enabled = nvidia_env();
+    let gpu = NVIDIA_ENV.iter().filter(|_| enabled).map(|(k, v)| format!("hl.env(\"{k}\", \"{v}\")\n")).collect::<String>();
     fill(BASE, &[("settings", &compositor()), ("gpu", &gpu)])
 }
 
 /// What the NVIDIA driver needs for hardware video (screen sharing, players) and GLX apps.
 pub(crate) const NVIDIA_ENV: [(&str, &str); 3] = [("LIBVA_DRIVER_NAME", "nvidia"), ("__GLX_VENDOR_LIBRARY_NAME", "nvidia"), ("NVD_BACKEND", "direct")];
 
-pub(crate) fn nvidia() -> bool {
+/// Whether the NVIDIA driver is loaded, so Settings can offer the variables.
+pub fn nvidia() -> bool {
     Path::new("/sys/module/nvidia_drm").exists()
+}
+
+/// Whether the user asked for the NVIDIA variables, in the installer or in Settings.
+pub(crate) fn nvidia_env() -> bool {
+    crate::prefs::flag(&crate::prefs::read(), "nvidia_env", false)
 }
 
 /// Settings > Compositor, as Lua: every value, with digit's defaults for the ones never changed.
@@ -467,13 +474,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workspace_rules_choose_the_lowest_default_and_keep_unplugged_connectors() {
-        let prefs = "primary_monitor = 'DP-1'\n[monitor_workspaces]\nDP-1 = [5, 3, 3, 0, 11]\nHDMI-A-1 = [10, 7]\n".parse().unwrap();
-        let rendered = workspaces(&prefs);
-        assert!(rendered.contains("workspace = \"1\", monitor = \"DP-1\", default = true"));
-        assert!(rendered.contains("workspace = \"3\", monitor = \"DP-1\" })"));
-        assert!(rendered.contains("workspace = \"7\", monitor = \"HDMI-A-1\", default = true"));
-    #[test]
     fn pseudotile_default_renders_only_for_hyprland_without_key_conflicts() {
         let binds = keybinds::defaults();
         let pseudo = binds.iter().find(|b| b.id == "pseudo").unwrap();
@@ -489,6 +489,13 @@ mod tests {
         assert!(!crate::niriconf::render_keybinds(std::slice::from_ref(pseudo)).contains("Super+Shift+V"));
     }
 
+    #[test]
+    fn workspace_rules_choose_the_lowest_default_and_keep_unplugged_connectors() {
+        let prefs = "primary_monitor = 'DP-1'\n[monitor_workspaces]\nDP-1 = [5, 3, 3, 0, 11]\nHDMI-A-1 = [10, 7]\n".parse().unwrap();
+        let rendered = workspaces(&prefs);
+        assert!(rendered.contains("workspace = \"1\", monitor = \"DP-1\", default = true"));
+        assert!(rendered.contains("workspace = \"3\", monitor = \"DP-1\" })"));
+        assert!(rendered.contains("workspace = \"7\", monitor = \"HDMI-A-1\", default = true"));
         assert!(rendered.contains("workspace = \"10\", monitor = \"HDMI-A-1\" })"));
         assert_eq!(rendered.matches("hl.workspace_rule(").count(), 5);
         assert_eq!(rendered.matches("default = true").count(), 2);

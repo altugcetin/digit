@@ -76,7 +76,7 @@ pub fn askpass() -> Result<PathBuf, String> {
     result.map(|()| path)
 }
 
-pub fn start(root: &Path, wm: &str) -> Result<gio::Subprocess, String> {
+pub fn start(root: &Path, wm: &str, nvidia_env: bool) -> Result<gio::Subprocess, String> {
     let helper = askpass()?;
     let launcher = gio::SubprocessLauncher::new(
         gio::SubprocessFlags::STDOUT_PIPE | gio::SubprocessFlags::STDERR_MERGE,
@@ -84,17 +84,19 @@ pub fn start(root: &Path, wm: &str) -> Result<gio::Subprocess, String> {
     launcher.set_cwd(root);
     launcher.setenv("SUDO_ASKPASS", helper, true);
     let script = root.join("install.sh");
-    launcher
-        .spawn(&[
-            script.as_os_str(),
-            OsStr::new("--engine"),
-            OsStr::new("--yes"),
-            OsStr::new("--wm"),
-            OsStr::new(wm),
-            OsStr::new("--method"),
-            OsStr::new("source"),
-        ])
-        .map_err(|e| e.to_string())
+    let mut argv = vec![
+        script.as_os_str(),
+        OsStr::new("--engine"),
+        OsStr::new("--yes"),
+        OsStr::new("--wm"),
+        OsStr::new(wm),
+        OsStr::new("--method"),
+        OsStr::new("source"),
+    ];
+    if nvidia_env {
+        argv.push(OsStr::new("--nvidia-env"));
+    }
+    launcher.spawn(&argv).map_err(|e| e.to_string())
 }
 
 pub async fn follow(process: &gio::Subprocess, event: impl Fn(Event)) -> Result<(), String> {

@@ -109,6 +109,48 @@ fn sync_only_writes_the_active_digit_session() {
 }
 
 #[test]
+fn nvidia_variables_require_opt_in_and_can_be_removed() {
+    isolated(
+        "nvidia_variables_require_opt_in_and_can_be_removed",
+        None,
+        |root| {
+            assert!(!crate::prefs::path().exists());
+            // Missing preferences default off; regenerate the same files when toggled.
+            for enabled in [None, Some(true), Some(false)] {
+                if let Some(enabled) = enabled {
+                    crate::prefs::set("nvidia_env", toml::Value::Boolean(enabled)).unwrap();
+                }
+                for (wm, ext) in [("hyprland", "lua"), ("niri", "kdl")] {
+                    // Preparing again, as a later install does, preserves the opt-in.
+                    for _ in 0..2 {
+                        prepare(wm).unwrap();
+                        let path = root.join(format!("digit/{wm}/digit/digit-base.{ext}"));
+                        let base = std::fs::read_to_string(path).unwrap();
+                        for (key, value) in [
+                            ("LIBVA_DRIVER_NAME", "nvidia"),
+                            ("__GLX_VENDOR_LIBRARY_NAME", "nvidia"),
+                            ("NVD_BACKEND", "direct"),
+                        ] {
+                            let line = if wm == "hyprland" {
+                                format!("hl.env(\"{key}\", \"{value}\")")
+                            } else {
+                                format!("    {key} \"{value}\"")
+                            };
+                            assert_eq!(
+                                base.lines().filter(|l| *l == line).count(),
+                                usize::from(enabled.unwrap_or(false)),
+                                "{wm}: {key}, preference {enabled:?}"
+                            );
+                            assert_eq!(base.contains(key), enabled.unwrap_or(false));
+                        }
+                    }
+                }
+            }
+        },
+    );
+}
+
+#[test]
 fn prepare_reports_write_failures() {
     isolated("prepare_reports_write_failures", None, |root| {
         std::fs::write(root.join("digit"), "not a directory").unwrap();

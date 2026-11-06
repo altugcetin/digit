@@ -31,6 +31,7 @@ struct Installer {
     root: Result<PathBuf, String>,
     check: RefCell<Option<Check>>,
     wm: RefCell<String>,
+    nvidia_env: Cell<bool>,
     busy: Cell<bool>,
     process: RefCell<Option<gio::Subprocess>>,
 }
@@ -314,6 +315,18 @@ impl Installer {
         let (row, _) = ui::row(Some("verified_user"), &format!("Your {name} settings"), "Stay exactly as they are");
         card.append(&row);
         body.append(&card);
+        if self.check.borrow().as_ref().is_some_and(|c| c.get("gpu") == "nvidia") {
+            let graphics = ui::card();
+            let (row, end) = ui::row(Some("developer_board"), "Add NVIDIA variables", "For hardware video and older apps. You can change this in Settings");
+            let sw = gtk::Switch::new();
+            sw.set_valign(gtk::Align::Center);
+            sw.set_active(self.nvidia_env.get());
+            let this = self.clone();
+            sw.connect_active_notify(move |s| this.nvidia_env.set(s.is_active()));
+            end.append(&sw);
+            graphics.append(&row);
+            body.append(&graphics);
+        }
     }
 
     fn install(self: &Wizard, body: &gtk::Box) {
@@ -364,7 +377,7 @@ impl Installer {
             let wm = this.wm.borrow().clone();
             let result = match &this.root {
                 Err(e) => Err(e.clone()),
-                Ok(root) => match run::start(root, &wm) {
+                Ok(root) => match run::start(root, &wm, this.nvidia_env.get()) {
                     Ok(process) => {
                         *this.process.borrow_mut() = Some(process.clone());
                         run::follow(&process, |event| match event {
@@ -512,6 +525,7 @@ pub fn open(app: &gtk::Application, root: Result<PathBuf, String>) {
         root,
         check: RefCell::new(None),
         wm: RefCell::new("hyprland".into()),
+        nvidia_env: Cell::new(std::env::var("DIGIT_INSTALLER_NVIDIA_ENV").as_deref() == Ok("true")),
         busy: Cell::new(false),
         process: RefCell::new(None),
     });
