@@ -76,7 +76,6 @@ pub struct Config {
     pub tray: bool,
     pub mic_guard: bool,
     pub control_corner: bool,
-    pub qt_theme: bool,
 }
 
 impl Default for Config {
@@ -146,7 +145,6 @@ impl Default for Config {
             tray: true,
             mic_guard: true,
             control_corner: true,
-            qt_theme: false,
         }
     }
 }

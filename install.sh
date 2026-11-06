@@ -304,13 +304,13 @@ package_lists() {
     case $FAMILY in
         suse)
             build=(gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel wayland-devel)
-            run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct gpu-screen-recorder cava) ;;
+            run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct breeze6-style adw-gtk3 adw-gtk3-dark gpu-screen-recorder cava) ;;
         fedora)
             build=(gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel wayland-devel)
-            run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct gpu-screen-recorder cava) ;;
+            run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct plasma-breeze-qt6 plasma-breeze-common adw-gtk3-theme gpu-screen-recorder cava) ;;
         arch)
             build=(base-devel pkgconf gtk4 gtk4-layer-shell wayland)
-            run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct gpu-screen-recorder cava archlinux-appstream-data) ;;
+            run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct breeze adw-gtk-theme gpu-screen-recorder cava archlinux-appstream-data) ;;
     esac
     run_pkgs+=(xdg-desktop-portal-gtk)
     case $WM in
@@ -344,9 +344,9 @@ deps() {
         fi
         for p in "${missing[@]}"; do
             case $p in
-                gpu-screen-recorder|cava)
+                gpu-screen-recorder|cava|adw-gtk3|adw-gtk3-dark|adw-gtk3-theme)
                     if ! has_pkg "$p"; then
-                        warn "Required package $p is not available in the enabled repositories; skipping it. Install it later from Digit Store."
+                        warn "Optional package $p is not available in the enabled repositories; skipping it. GTK will keep its current theme."
                         continue
                     fi ;;
             esac

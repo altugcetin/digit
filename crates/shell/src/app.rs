@@ -622,6 +622,9 @@ impl App {
         if rounding || before.ui_surface != next.ui_surface || before.ui_accent != next.ui_accent {
             crate::gamebar::appearance_changed();
         }
+        if before.ui_surface != next.ui_surface || before.ui_accent != next.ui_accent {
+            crate::theming::restyle();
+        }
         if before.ui_round != next.ui_round {
             // Window corners in a full Hyprland setup follow the same Corners setting.
             glib::spawn_future_local(async {
