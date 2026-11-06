@@ -18,7 +18,10 @@ mod config;
 mod control;
 mod corners;
 mod datepop;
+mod batteries;
+mod batterywidget;
 mod desk;
+mod deskicons;
 mod devices;
 mod dock;
 mod draw;
@@ -141,10 +144,10 @@ fn run() {
     let display = gdk::Display::default().expect("digit: no display");
     gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
     icons::install(&display);
+    kit::style::live_glyphs(&display, draw::glyphs_changed);
 
     let cfg = config::load();
     kit::motion::apply(cfg.reduce_motion);
-    kit::style::live_glyphs(&display, draw::glyphs_changed);
     let gtk_owns_blur = (gtk::major_version(), gtk::minor_version(), gtk::micro_version()) >= (4, 23, 3);
     let frost = if cfg.dock == config::Dock::Screen && !gtk_owns_blur { blur::Blur::new(&display) } else { None };
     let app = App::new(cfg, frost);
@@ -173,6 +176,8 @@ fn run() {
                 if let Some(app) = later.upgrade() {
                     night::apply(&app);
                     desk::apply(&app);
+                    deskicons::apply(&app);
+                    batterywidget::apply(&app);
                     corners::apply(&app);
                 }
             });
@@ -201,6 +206,8 @@ fn run() {
     sni::start(&app);
     weather::start(&app);
     desk::apply(&app);
+    deskicons::apply(&app);
+    batterywidget::apply(&app);
     corners::apply(&app);
     if app.cfg.clipboard {
         clip::start(&app);
@@ -300,6 +307,8 @@ fn reshape(app: &Rc<App>, display: &gdk::Display, output: &str) {
     dock::apply(app);
     night::apply(app);
     desk::apply(app);
+    deskicons::apply(app);
+    batterywidget::apply(app);
     corners::apply(app);
 }
 
