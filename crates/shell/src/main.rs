@@ -143,6 +143,7 @@ fn run() {
     css.load_from_string("window.digit { background: transparent; } window.digit-wallpaper { background: black; } window.digit:drop(active), window.digit *:drop(active), window.digit *:drop(active):focus { box-shadow: none; outline: none; border-color: transparent; }");
     let display = gdk::Display::default().expect("digit: no display");
     gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+    deskicons::style(&display);
     icons::install(&display);
     kit::style::live_glyphs(&display, draw::glyphs_changed);
 
