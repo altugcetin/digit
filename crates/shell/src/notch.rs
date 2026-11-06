@@ -105,6 +105,24 @@ enum Landing {
     Sender(usize),
 }
 
+enum DropLanding {
+    Files,
+    Device(crate::share::Device),
+    Sender(crate::share::Sender),
+}
+
+impl DropLanding {
+    fn capture(landing: Landing) -> Self {
+        let devices = crate::share::devices();
+        match landing {
+            Landing::Device(i) => devices.get(i).cloned().map_or(Self::Files, Self::Device),
+            Landing::Sender(i) => crate::share::senders().get(i).cloned().map_or(Self::Files, Self::Sender),
+            Landing::Share if devices.len() == 1 => Self::Device(devices[0].clone()),
+            _ => Self::Files,
+        }
+    }
+}
+
 struct Tuner {
     icon: Rect,
     track: Rect,
@@ -382,15 +400,15 @@ impl Notch {
         });
         canvas.add_controller(scroll);
         // Hyprland offers MOVE as the only action before any negotiation; files are still only read.
-        let target = gtk::DropTarget::new(glib::Type::INVALID, gdk::DragAction::COPY | gdk::DragAction::MOVE);
-        target.set_types(&[gdk::FileList::static_type(), gdk::Texture::static_type(), String::static_type()]);
+        let target = gtk::DropTargetAsync::new(None, gdk::DragAction::COPY | gdk::DragAction::MOVE);
+        target.connect_accept(|_, drop| crate::tray::accepts_drop(drop));
         let host: gtk::Widget = self.0.borrow().window.child().unwrap_or_else(|| canvas.clone().upcast());
         let to_canvas = {
             let (host, canvas) = (host.clone(), canvas.clone());
             move |x: f64, y: f64| host.compute_point(&canvas, &graphene::Point::new(x as f32, y as f32)).map(|p| (p.x() as f64, p.y() as f64)).unwrap_or((x, y))
         };
         let weak = Rc::downgrade(&self.0);
-        target.connect_enter(move |_, _, _| {
+        target.connect_drag_enter(move |_, _, _, _| {
             if let Some(v) = weak.upgrade() {
                 Notch(v).drag_enter();
             }
@@ -398,7 +416,7 @@ impl Notch {
         });
         let weak = Rc::downgrade(&self.0);
         let map = to_canvas.clone();
-        target.connect_motion(move |_, x, y| {
+        target.connect_drag_motion(move |_, _, x, y| {
             if let Some(v) = weak.upgrade() {
                 let (x, y) = map(x, y);
                 let y = lifted(&v, y);
@@ -407,27 +425,33 @@ impl Notch {
             gdk::DragAction::COPY
         });
         let weak = Rc::downgrade(&self.0);
-        target.connect_leave(move |_| {
+        target.connect_drag_leave(move |_, _| {
             if let Some(v) = weak.upgrade() {
                 Notch(v).drag_leave();
             }
         });
         let weak = Rc::downgrade(&self.0);
         let map = to_canvas.clone();
-        target.connect_drop(move |_, value, x, y| {
+        target.connect_drop(move |_, drop, x, y| {
             let Some(v) = weak.upgrade() else { return false };
             let (x, y) = map(x, y);
-            let paths: Vec<std::path::PathBuf> = if let Ok(list) = value.get::<gdk::FileList>() {
-                list.files().iter().filter_map(|f| f.path()).collect()
-            } else if let Ok(texture) = value.get::<gdk::Texture>() {
-                crate::tray::keep_texture(&texture).into_iter().collect()
-            } else if let Ok(text) = value.get::<String>() {
-                crate::tray::keep_text(&text)
-            } else {
-                Vec::new()
+            let landing = {
+                let y = lifted(&v, y);
+                let mut view = v.borrow_mut();
+                let at = view.landing_at(x, y).unwrap_or(Landing::Files);
+                view.dropping = false;
+                view.landing = None;
+                view.canvas.queue_draw();
+                DropLanding::capture(at)
             };
-            let y = lifted(&v, y);
-            Notch(v).dropped(paths, x, y)
+            let weak = Rc::downgrade(&v);
+            let drop = drop.clone();
+            glib::spawn_future_local(async move {
+                let paths = crate::tray::receive_drop(&drop).await;
+                let ok = weak.upgrade().is_some_and(|v| Notch(v).dropped(paths, landing));
+                drop.finish(if ok { gdk::DragAction::COPY } else { gdk::DragAction::empty() });
+            });
+            true
         });
         host.add_controller(target);
         let source = gtk::DragSource::new();
@@ -1043,24 +1067,19 @@ impl Notch {
         });
     }
 
-    fn dropped(&self, paths: Vec<std::path::PathBuf>, x: f64, y: f64) -> bool {
-        let (app, landing) = {
-            let mut v = self.0.borrow_mut();
-            v.dropping = false;
-            let at = v.landing_at(x, y).unwrap_or(Landing::Files);
-            v.landing = None;
-            (v.app.clone(), at)
-        };
+    fn dropped(&self, paths: Vec<std::path::PathBuf>, landing: DropLanding) -> bool {
+        let app = self.0.borrow().app.clone();
         if paths.is_empty() {
+            crate::share::failed(&app, "Couldn't add image");
+            if !self.is_open() {
+                app.request(crate::app::Peek::Note { text: "Couldn't add image".into() });
+            }
             return false;
         }
-        let devices = crate::share::devices();
-        let senders = crate::share::senders();
         match landing {
-            Landing::Device(i) if i < devices.len() => crate::share::send(&app, &devices[i], paths),
-            Landing::Sender(i) if i < senders.len() => crate::share::send_with(&app, &senders[i], paths),
-            Landing::Share if devices.len() == 1 => crate::share::send(&app, &devices[0], paths),
-            _ => crate::tray::add(paths),
+            DropLanding::Device(device) => crate::share::send(&app, &device, paths),
+            DropLanding::Sender(sender) => crate::share::send_with(&app, &sender, paths),
+            DropLanding::Files => crate::tray::add(paths),
         }
         self.0.borrow().canvas.queue_draw();
         true

@@ -2,6 +2,11 @@ use gtk::{gdk, gio, prelude::*};
 use std::cell::RefCell;
 use std::path::PathBuf;
 
+mod drop;
+mod drop_data;
+
+pub use drop::{accepts_drop, receive_drop};
+
 pub struct Item {
     pub path: PathBuf,
     pub name: String,

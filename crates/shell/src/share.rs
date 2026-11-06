@@ -70,6 +70,17 @@ fn set_status(app: &std::rc::Weak<App>, status: Option<Status>) {
     }
 }
 
+pub fn failed(app: &Rc<App>, message: &str) {
+    let weak = Rc::downgrade(app);
+    let status = Status::Failed(message.into());
+    set_status(&weak, Some(status.clone()));
+    glib::timeout_add_local_once(Duration::from_secs(8), move || {
+        if STATE.with(|s| s.borrow().status.as_ref() == Some(&status)) {
+            set_status(&weak, None);
+        }
+    });
+}
+
 pub fn send(app: &Rc<App>, device: &Device, files: Vec<PathBuf>) {
     if files.is_empty() {
         return;
