@@ -70,11 +70,17 @@ fn action(b: &Bind) -> String {
             Win::Pseudo => "hl.dsp.window.pseudo()".into(),
             Win::Maximize => "per_layout({ default = hl.dsp.window.fullscreen({ mode = 1 }), scrolling = column_maximize })".into(),
             Win::Fullscreen => "hl.dsp.window.fullscreen({ mode = 0 })".into(),
+            Win::Focus(keybinds::Dir::Up) => "hl.dsp.focus({ workspace = \"e-1\" })".into(),
+            Win::Focus(keybinds::Dir::Down) => "hl.dsp.focus({ workspace = \"e+1\" })".into(),
             Win::Focus(d) => scrolling(*d, format!("hl.dsp.focus({{ direction = \"{}\" }})", d.name()), "focus"),
             Win::Move(d) => scrolling(*d, format!("hl.dsp.window.move({{ direction = \"{}\" }})", d.name()), "swapcol"),
             Win::Workspace(i) => format!("hl.dsp.focus({{ workspace = {i} }})"),
             Win::ToWorkspace(i) => format!("hl.dsp.window.move({{ workspace = {i} }})"),
-            Win::StepWindow(i) => format!("hl.dsp.window.cycle_next({{ next = {} }})", *i > 0),
+            // cycle_next doesn't scroll the view, so the scrolling layout steps through columns.
+            Win::StepWindow(i) => {
+                let d = if *i > 0 { keybinds::Dir::Right } else { keybinds::Dir::Left };
+                scrolling(d, format!("hl.dsp.window.cycle_next({{ next = {} }})", *i > 0), "focus")
+            }
             Win::StepWorkspace(i) => format!("hl.dsp.focus({{ workspace = \"e{i:+}\" }})"),
             Win::Drag => "hl.dsp.window.drag()".into(),
             Win::Resize => "hl.dsp.window.resize()".into(),
@@ -547,10 +553,10 @@ mod tests {
     fn wheel_focus_and_window_defaults_render_to_hyprland_actions() {
         let binds: Vec<_> = keybinds::defaults().into_iter().filter(|b| b.id.starts_with("focus-scroll-") || b.id.starts_with("window-")).collect();
         let rendered = render_keybinds(&binds);
-        assert!(rendered.contains("bind(\"SUPER + mouse_up\", hl.dsp.focus({ direction = \"up\" }))"));
-        assert!(rendered.contains("bind(\"SUPER + mouse_down\", hl.dsp.focus({ direction = \"down\" }))"));
-        assert!(rendered.contains("bind(\"SUPER + SHIFT + mouse_down\", hl.dsp.window.cycle_next({ next = true }))"));
-        assert!(rendered.contains("bind(\"SUPER + SHIFT + mouse_up\", hl.dsp.window.cycle_next({ next = false }))"));
+        assert!(rendered.contains("bind(\"SUPER + mouse_up\", hl.dsp.focus({ workspace = \"e-1\" }))"));
+        assert!(rendered.contains("bind(\"SUPER + mouse_down\", hl.dsp.focus({ workspace = \"e+1\" }))"));
+        assert!(rendered.contains("bind(\"SUPER + SHIFT + mouse_down\", per_layout({ default = hl.dsp.window.cycle_next({ next = true }), scrolling = hl.dsp.layout(\"focus r\") }))"));
+        assert!(rendered.contains("bind(\"SUPER + SHIFT + mouse_up\", per_layout({ default = hl.dsp.window.cycle_next({ next = false }), scrolling = hl.dsp.layout(\"focus l\") }))"));
     }
 }
 
