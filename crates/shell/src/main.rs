@@ -57,6 +57,7 @@ mod providers;
 mod quit;
 mod session;
 mod share;
+mod snapzone;
 mod sni;
 mod spaces;
 mod spectrum;

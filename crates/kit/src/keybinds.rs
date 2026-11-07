@@ -51,6 +51,8 @@ pub enum Win {
     StepWindow(i8),
     Drag,
     Resize,
+    /// Hyprland floating-window zones, including restore.
+    Snap(&'static str),
     Grow(Dir),
     Pin,
     Group,
@@ -192,6 +194,9 @@ pub fn defaults() -> Vec<Bind> {
         out.push(bind(&format!("focus-{}", d.name()), "Windows", &match d { Dir::Up | Dir::Down => format!("Focus workspace {}", d.name()), _ => format!("Focus {}", d.name()) }, &format!("SUPER + {key}"), Act::Window(Win::Focus(d)), n, true));
         out.push(bind(&format!("move-{}", d.name()), "Windows", &format!("Move window {}", d.name()), &format!("SUPER + SHIFT + {key}"), Act::Window(Win::Move(d)), n, true));
         out.push(bind(&format!("grow-{}", d.name()), "Windows", &format!("Resize window {}", d.name()), &format!("SUPER + CTRL + {key}"), Act::Window(Win::Grow(d)), Opts { repeating: true, ..n }, true));
+    }
+    for (zone, key, label) in [("left", "LEFT", "Snap left"), ("right", "RIGHT", "Snap right"), ("max", "UP", "Maximize floating window"), ("restore", "DOWN", "Restore floating window")] {
+        out.push(bind(&format!("hypr-snap-{zone}"), "Windows", label, &format!("SUPER + ALT + {key}"), Act::Window(Win::Snap(zone)), n, true));
     }
     for i in 1..=10u8 {
         let key = i % 10;

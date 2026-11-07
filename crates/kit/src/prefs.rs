@@ -59,12 +59,20 @@ fn write(table: &toml::Table) -> Result<(), String> {
 }
 
 pub fn set(key: &str, value: toml::Value) -> Result<(), String> {
+    set_many(&[(key, value)])
+}
+
+/// Save related values together, preserving the old file if any part cannot be written.
+pub fn set_many(values: &[(&str, toml::Value)]) -> Result<(), String> {
     let mut table = for_writing()?;
-    if table.get(key) == Some(&value) {
-        return Ok(());
+    let mut changed = false;
+    for (key, value) in values {
+        if table.get(*key) != Some(value) {
+            table.insert((*key).into(), value.clone());
+            changed = true;
+        }
     }
-    table.insert(key.to_string(), value);
-    write(&table)
+    if changed { write(&table) } else { Ok(()) }
 }
 
 pub fn home(path: &str) -> PathBuf {
@@ -87,9 +95,14 @@ mod tests {
             set("answer", 42.into()).unwrap();
             assert_eq!(read().get("answer").and_then(toml::Value::as_integer), Some(42));
             assert!(problem().is_none());
+            set_many(&[("hypr_tiling", "floating".into()), ("hypr_tiled_layout", "master".into())]).unwrap();
+            let prefs = read();
+            assert_eq!(text(&prefs, "hypr_tiling", ""), "floating");
+            assert_eq!(text(&prefs, "hypr_tiled_layout", ""), "master");
             for body in [b"answer = 42\n\xff".as_slice(), b"answer = 42\nbroken = [".as_slice()] {
                 std::fs::write(path(), body).unwrap();
                 assert!(set("answer", 43.into()).is_err());
+                assert!(set_many(&[("hypr_tiling", "dwindle".into()), ("hypr_tiled_layout", "scrolling".into())]).is_err());
                 assert!(problem().is_some());
                 if body.is_ascii() {
                     assert!(problem().unwrap().contains("line 2"));
