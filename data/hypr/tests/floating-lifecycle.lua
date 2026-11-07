@@ -13,6 +13,7 @@ local function event(name, ...) for _, cb in ipairs(callbacks[name] or {}) do cb
 local function factory(name) return function(args) return { name = name, args = args } end end
 local moves, resizes = 0, 0
 hl = {
+    config = function() end,
     dsp = { window = { tag = factory('tag'), float = factory('float'), move = factory('move'), resize = factory('resize'), drag = factory('drag') } },
     on = function(name, callback) callbacks[name] = callbacks[name] or {}; table.insert(callbacks[name], callback) end,
     get_config = function(key)

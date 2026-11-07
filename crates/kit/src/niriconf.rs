@@ -118,7 +118,7 @@ fn action(b: &Bind) -> Option<String> {
             Win::Center => "center-column;".into(),
             // Moving and resizing with Super and the mouse is built into niri; it has no pinned
             // windows, pseudotiling or scratchpad.
-            Win::Drag | Win::Resize | Win::Snap(_) | Win::Pin | Win::Pseudo | Win::Scratchpad | Win::ToScratchpad => return None,
+            Win::Drag | Win::Resize | Win::Snap(_) | Win::ToMonitor(_) | Win::Pin | Win::Pseudo | Win::Scratchpad | Win::ToScratchpad => return None,
         },
     })
 }
@@ -492,8 +492,8 @@ mod tests {
     fn wheel_focus_actions_use_native_niri_focus_and_cooldown() {
         let binds: Vec<_> = keybinds::defaults().into_iter().filter(|b| b.id.starts_with("focus-scroll-") || b.id.starts_with("window-")).collect();
         let rendered = render_keybinds(&binds);
-        assert!(rendered.contains("Super+WheelScrollUp cooldown-ms=150 hotkey-overlay-title=\"Focus workspace up\" { focus-window-or-workspace-up; }"));
-        assert!(rendered.contains("Super+WheelScrollDown cooldown-ms=150 hotkey-overlay-title=\"Focus workspace down\" { focus-window-or-workspace-down; }"));
+        assert!(rendered.contains("Super+WheelScrollUp cooldown-ms=150 hotkey-overlay-title=\"Focus above\" { focus-window-or-workspace-up; }"));
+        assert!(rendered.contains("Super+WheelScrollDown cooldown-ms=150 hotkey-overlay-title=\"Focus below\" { focus-window-or-workspace-down; }"));
         assert!(rendered.contains("Super+Shift+WheelScrollDown cooldown-ms=150 hotkey-overlay-title=\"Next window\" { focus-window-down-or-column-right; }"));
         assert!(rendered.contains("Super+Shift+WheelScrollUp cooldown-ms=150 hotkey-overlay-title=\"Previous window\" { focus-window-up-or-column-left; }"));
     }

@@ -53,6 +53,8 @@ pub enum Win {
     Resize,
     /// Hyprland floating-window zones, including restore.
     Snap(&'static str),
+    /// Hyprland: to the next or previous monitor, keeping a floating window's place.
+    ToMonitor(i8),
     Grow(Dir),
     Pin,
     Group,
@@ -178,8 +180,8 @@ pub fn defaults() -> Vec<Bind> {
         bind("overview", "Workspaces", "Overview of all workspaces", "SUPER + O", Act::Window(Win::Overview), n, true),
         bind("center", "Windows", "Center the column", "", Act::Window(Win::Center), n, true),
         // Keep the workspace-only ids for saved overrides; the wheel now follows spatial focus.
-        bind("focus-scroll-up", "Windows", "Focus workspace up", "SUPER + mouse_up", Act::Window(Win::Focus(Dir::Up)), n, true),
-        bind("focus-scroll-down", "Windows", "Focus workspace down", "SUPER + mouse_down", Act::Window(Win::Focus(Dir::Down)), n, true),
+        bind("focus-scroll-up", "Windows", "Focus above", "SUPER + mouse_up", Act::Window(Win::Focus(Dir::Up)), n, true),
+        bind("focus-scroll-down", "Windows", "Focus below", "SUPER + mouse_down", Act::Window(Win::Focus(Dir::Down)), n, true),
         bind("window-next", "Windows", "Next window", "SUPER + SHIFT + mouse_down", Act::Window(Win::StepWindow(1)), n, true),
         bind("window-prev", "Windows", "Previous window", "SUPER + SHIFT + mouse_up", Act::Window(Win::StepWindow(-1)), n, true),
         bind("workspace-next", "Workspaces", "Next workspace", "", Act::Window(Win::StepWorkspace(1)), n, true),
@@ -191,13 +193,18 @@ pub fn defaults() -> Vec<Bind> {
         bind("mic-mute", "Media keys", "Mute the microphone", "XF86AudioMicMute", Act::Shell("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle".into()), LOCKED, true),
     ];
     for (d, key) in [(Dir::Left, "LEFT"), (Dir::Right, "RIGHT"), (Dir::Up, "UP"), (Dir::Down, "DOWN")] {
-        out.push(bind(&format!("focus-{}", d.name()), "Windows", &match d { Dir::Up | Dir::Down => format!("Focus workspace {}", d.name()), _ => format!("Focus {}", d.name()) }, &format!("SUPER + {key}"), Act::Window(Win::Focus(d)), n, true));
+        out.push(bind(&format!("focus-{}", d.name()), "Windows", &format!("Focus {}", d.name()), &format!("SUPER + {key}"), Act::Window(Win::Focus(d)), n, true));
         out.push(bind(&format!("move-{}", d.name()), "Windows", &format!("Move window {}", d.name()), &format!("SUPER + SHIFT + {key}"), Act::Window(Win::Move(d)), n, true));
         out.push(bind(&format!("grow-{}", d.name()), "Windows", &format!("Resize window {}", d.name()), &format!("SUPER + CTRL + {key}"), Act::Window(Win::Grow(d)), Opts { repeating: true, ..n }, true));
     }
     for (zone, key, label) in [("left", "LEFT", "Snap left"), ("right", "RIGHT", "Snap right"), ("max", "UP", "Maximize floating window"), ("restore", "DOWN", "Restore floating window")] {
         out.push(bind(&format!("hypr-snap-{zone}"), "Windows", label, &format!("SUPER + ALT + {key}"), Act::Window(Win::Snap(zone)), n, true));
     }
+    for (zone, key, label) in [("center", "C", "Center floating window"), ("grow", "EQUAL", "Grow floating window"), ("shrink", "MINUS", "Shrink floating window")] {
+        out.push(bind(&format!("hypr-snap-{zone}"), "Windows", label, &format!("SUPER + ALT + {key}"), Act::Window(Win::Snap(zone)), n, true));
+    }
+    out.push(bind("hypr-monitor-next", "Windows", "Move window to the next monitor", "SUPER + ALT + PERIOD", Act::Window(Win::ToMonitor(1)), n, true));
+    out.push(bind("hypr-monitor-prev", "Windows", "Move window to the previous monitor", "SUPER + ALT + COMMA", Act::Window(Win::ToMonitor(-1)), n, true));
     for i in 1..=10u8 {
         let key = i % 10;
         out.push(bind(&format!("workspace-{i}"), "Workspaces", &format!("Go to workspace {i}"), &format!("SUPER + {key}"), Act::Window(Win::Workspace(i)), n, true));

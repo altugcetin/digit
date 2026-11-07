@@ -75,9 +75,13 @@ end
 function G.cascade(area, index, occupied)
     local x, y = math.ceil(area.x), math.ceil(area.y)
     area = { x = x, y = y, w = math.max(1, math.floor(area.x + area.w) - x), h = math.max(1, math.floor(area.y + area.h) - y) }
-    local w, h = math.min(1040, round(area.w * 0.68)), math.min(740, round(area.h * 0.72))
+    local w, h = math.min(1280, round(area.w * 0.7)), math.min(860, round(area.h * 0.7))
     w, h = math.max(1, w), math.max(1, h)
     local dx, dy = math.max(0, area.w - w), math.max(0, area.h - h)
+    -- A window alone on the workspace sits in the middle.
+    if occupied and #occupied == 0 then
+        return { x = area.x + math.floor(dx / 2), y = area.y + math.floor(dy / 2), w = w, h = h }
+    end
     -- Co-prime steps traverse the available positions without a short repeating stack.
     occupied = occupied or {}
     for offset = 0, #occupied do
@@ -90,6 +94,19 @@ function G.cascade(area, index, occupied)
         end
         if not covered or offset == #occupied then return r end
     end
+end
+-- Centred in the area at a new scale, never larger than the area or too small to use.
+function G.scaled(area, size, scale)
+    local w = clamp(round(size.w * scale), math.min(240, area.w), area.w)
+    local h = clamp(round(size.h * scale), math.min(160, area.h), area.h)
+    return { x = area.x + math.floor((area.w - w) / 2), y = area.y + math.floor((area.h - h) / 2), w = w, h = h }
+end
+-- The same place and share of the work area on another monitor.
+function G.relative(from, to, r)
+    local w = clamp(round(r.w / from.w * to.w), 1, to.w)
+    local h = clamp(round(r.h / from.h * to.h), 1, to.h)
+    return { x = clamp(to.x + round((r.x - from.x) / from.w * to.w), to.x, to.x + to.w - w),
+        y = clamp(to.y + round((r.y - from.y) / from.h * to.h), to.y, to.y + to.h - h), w = w, h = h }
 end
 function G.restore(saved, cursor, grab, monitor)
     return { x = round(cursor.x - monitor.x - saved.w * grab.x),
@@ -256,7 +273,12 @@ function M.snap(zone)
         local w = hl.get_active_window()
         if not eligible(w) or not w.monitor then return end
         cancel()
-        if zone == 'restore' then
+        local scale = ({ center = 1, grow = 1.2, shrink = 0.8 })[zone]
+        if scale then
+            local work, _, border = area(w.monitor)
+            remember(w)
+            place(w, w.monitor, G.scaled(G.inset(work, border), { w = w.size.x, h = w.size.y }, scale))
+        elseif zone == 'restore' then
             local back = saved[w.address]
             if back then
                 local m = w.monitor
@@ -267,6 +289,47 @@ function M.snap(zone)
             local work, inner, border = area(w.monitor)
             remember(w)
             place(w, w.monitor, G.rect(work, zone, inner, border))
+        end
+    end
+end
+
+-- On a floating workspace the side arrows snap; everywhere else they do what they always did.
+function M.arrow(zone, otherwise)
+    local snap = M.snap(zone)
+    return function()
+        local w = hl.get_active_window()
+        if snap_enabled and eligible(w) and floating(w.workspace) then return snap() end
+        if type(otherwise) == 'function' then return otherwise() end
+        return hl.dispatch(otherwise)
+    end
+end
+-- Everything on a floating workspace floats, so toggling would tile a window there.
+function M.outside(action)
+    return function()
+        local w = hl.get_active_window()
+        if w and floating(w.workspace) then return end
+        return hl.dispatch(action)
+    end
+end
+function M.to_monitor(step)
+    return function()
+        local w = hl.get_active_window()
+        if not w or not w.monitor then return end
+        local list = {}
+        for _, m in ipairs(hl.get_monitors()) do
+            if m.enabled and not m.is_mirror then list[#list + 1] = m end
+        end
+        table.sort(list, function(a, b) return a.x < b.x or (a.x == b.x and a.y < b.y) end)
+        local at
+        for i, m in ipairs(list) do if m.name == w.monitor.name then at = i end end
+        if not at or #list < 2 then return end
+        local from, to = w.monitor, list[(at - 1 + step) % #list + 1]
+        local keep = eligible(w) and { x = w.at.x - from.x, y = w.at.y - from.y, w = w.size.x, h = w.size.y }
+        local old = keep and area(from)
+        hl.dispatch(hl.dsp.window.move({ monitor = to.name }))
+        if keep then
+            forget(w)
+            place(w, to, G.relative(old, (area(to)), keep))
         end
     end
 end
@@ -376,6 +439,10 @@ hl.on('config.reloaded', function()
     for _, w in ipairs(hl.get_windows()) do rebuild_saved(w) end
     arrange(hl.get_windows())
 end)
+-- Magnetic edges for free placement; the zones above take over at the screen edge.
+if snap_enabled then
+    hl.config({ general = { snap = { enabled = true, respect_gaps = true } } })
+end
 for id, mode in pairs(modes) do
     hl.workspace_rule({ workspace = tostring(id), layout = mode == 'floating' and underlying[id] or mode })
 end
