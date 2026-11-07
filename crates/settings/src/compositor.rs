@@ -61,8 +61,17 @@ pub fn build() -> gtk::Widget {
         let current = s("hypr_tiling", "dwindle");
         let at = TILING.iter().position(|t| t.0 == current).unwrap_or(0);
         let items = TILING.iter().map(|(v, name)| (*name, tiling_picture(v))).collect();
-        tiles(&win, "dashboard", "Tiling", "How new windows share the screen", items, at, |i| save("hypr_tiling", toml::Value::String(TILING[i].0.into())));
+        let tiled = if current == "floating" { s("hypr_tiled_layout", "dwindle") } else { current };
+        tiles(&win, "dashboard", "Layout", "How new windows share the screen", items, at, move |i| {
+            let next = TILING[i].0;
+            if next == "floating" {
+                save_many(&[("hypr_tiled_layout", toml::Value::String(tiled.clone())), ("hypr_tiling", toml::Value::String(next.into()))])
+            } else {
+                save("hypr_tiling", toml::Value::String(next.into()))
+            }
+        });
         cycle(&win, &t);
+        toggle(&win, "dock_to_right", "Snap floating windows", "Drag with Super to an edge or corner, or use Super Alt and the arrows", "hypr_snap", b("hypr_snap", true));
     }
     toggle(&win, "arrow_selector_tool", "Focus follows the mouse", "The window under the pointer takes the keyboard", "hypr_follow_mouse", b("hypr_follow_mouse", true));
     {
@@ -202,7 +211,7 @@ fn cycle(card: &gtk::Box, t: &toml::Table) {
     card.append(&row);
 }
 
-const TILING: [(&str, &str); 3] = [("dwindle", "Dwindle"), ("master", "Master"), ("scrolling", "Scrolling")];
+const TILING: [(&str, &str); 4] = [("dwindle", "Dwindle"), ("master", "Master"), ("scrolling", "Scrolling"), ("floating", "Floating")];
 const GAPS: [(&str, f64, f64); 4] = [("None", 0.0, 0.0), ("Tight", 2.0, 4.0), ("Comfortable", 4.0, 8.0), ("Wide", 8.0, 16.0)];
 const SHADOWS: [(&str, &str, f64); 4] = [("off", "Off", 0.0), ("soft", "Soft", 5.0), ("medium", "Medium", 9.0), ("large", "Large", 14.0)];
 const BLURS: [(&str, &str, f64); 4] = [("off", "Off", 0.0), ("light", "Light", 0.35), ("medium", "Medium", 0.65), ("strong", "Strong", 1.0)];
@@ -249,6 +258,10 @@ fn tiling_picture(kind: &'static str) -> gtk::Widget {
                 for i in 0..3 {
                     window(cr, sx, y0 + i as f64 * (sh + g), x1 - sx, sh, ink, false);
                 }
+            }
+            "floating" => {
+                window(cr, x0 + wd * 0.04, y0 + ht * 0.04, wd * 0.56, ht * 0.62, ink, false);
+                window(cr, x0 + wd * 0.36, y0 + ht * 0.30, wd * 0.60, ht * 0.66, ink, true);
             }
             "scrolling" => {
                 // Columns run past the screen edges; the dashed frame is the screen.
