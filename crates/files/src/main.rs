@@ -1,4 +1,5 @@
 mod art;
+mod audio;
 mod info;
 mod look;
 mod ops;
@@ -1560,6 +1561,14 @@ fn install() {
             let _ = std::fs::rename(&tmp, &file);
         }
     }
+}
+
+/// GStreamer's GL sink shares GTK's EGL display and terminates it when a video closes.
+/// On NVIDIA the window can never draw again, so this wins over libEGL's symbol (see build.rs).
+#[unsafe(no_mangle)]
+#[allow(non_snake_case)]
+pub extern "C" fn eglTerminate(_display: *mut std::ffi::c_void) -> u32 {
+    1
 }
 
 fn main() -> glib::ExitCode {
