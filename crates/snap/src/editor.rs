@@ -9,6 +9,28 @@ use std::rc::Rc;
 const DEFAULT_TOOL: Tool = Tool::Pen;
 const DEFAULT_FRAME: usize = 0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditorMode {
+    Window,
+    Overlay,
+}
+
+impl EditorMode {
+    fn parse(value: &str) -> Self {
+        if value == "overlay" { Self::Overlay } else { Self::Window }
+    }
+}
+
+// Logical screenshot size, with room for the header, toolbars and canvas insets.
+fn initial_window_size(image: (f64, f64), monitor: (i32, i32)) -> (i32, i32) {
+    let max_w = (monitor.0.max(1) as f64 * 0.8).floor().max(1.0);
+    let max_h = (monitor.1.max(1) as f64 * 0.8).floor().max(1.0);
+    let scale = ((max_w - 96.0).max(1.0) / image.0.max(1.0))
+        .min((max_h - 200.0).max(1.0) / image.1.max(1.0)).min(1.0);
+    ((image.0 * scale + 96.0).max(1040.0).min(max_w) as i32,
+     (image.1 * scale + 200.0).max(600.0).min(max_h) as i32)
+}
+
 #[derive(Clone)]
 struct State {
     marks: Vec<Mark>,
@@ -17,6 +39,7 @@ struct State {
 }
 
 struct Ed {
+    mode: EditorMode,
     app: gtk::Application,
     window: gtk::ApplicationWindow,
     area: gtk::DrawingArea,
@@ -95,17 +118,24 @@ fn pixbuf_base(pb: &gtk::gdk_pixbuf::Pixbuf) -> Option<draw::Base> {
 fn open_base(app: &gtk::Application, base: draw::Base, output: String, origin: Rect) {
     let prefs = out::prefs();
     let window = gtk::ApplicationWindow::builder().application(app).title("Screenshot").build();
-    window.add_css_class("digit-dialog");
+    let mode = EditorMode::parse(&kit::prefs::text(&kit::prefs::read(), "snap_editor", "window"));
     window.add_css_class("snap-editor");
-    // A full-screen overlay rather than a window; Esc, Ctrl+W or a click beside it closes it.
-    window.init_layer_shell();
-    window.set_namespace(Some("digit-snap-editor"));
-    window.set_layer(Layer::Overlay);
-    window.set_keyboard_mode(KeyboardMode::Exclusive);
-    for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
-        window.set_anchor(edge, true);
+    window.set_decorated(false);
+    window.set_resizable(true);
+    if mode == EditorMode::Overlay {
+        window.add_css_class("digit-dialog");
+        window.init_layer_shell();
+        window.set_namespace(Some("digit-snap-editor"));
+        window.set_layer(Layer::Overlay);
+        window.set_keyboard_mode(KeyboardMode::Exclusive);
+        for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+            window.set_anchor(edge, true);
+        }
+        window.set_exclusive_zone(-1);
+    } else {
+        window.add_css_class("digit-settings");
+        window.add_css_class("snap-window");
     }
-    window.set_exclusive_zone(-1);
     let area = gtk::DrawingArea::new();
     area.set_hexpand(true);
     area.set_vexpand(true);
@@ -118,6 +148,7 @@ fn open_base(app: &gtk::Application, base: draw::Base, output: String, origin: R
     toast.set_can_target(false);
     let color = prefs.palette.first().map(|c| rgba(c)).unwrap_or([1.0, 0.23, 0.19, 1.0]);
     let ed = Rc::new(Ed {
+        mode,
         app: app.clone(),
         window: window.clone(),
         area: area.clone(),
@@ -158,12 +189,33 @@ fn open_base(app: &gtk::Application, base: draw::Base, output: String, origin: R
     unfocus(&top);
     unfocus(&bottom);
     let col = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    col.append(&top);
-    col.append(&stage);
-    col.append(&bottom);
-    let (layer, backdrop) = kit::ui::overlay_card(&col);
-    window.set_child(Some(&layer));
-    kit::ui::overlay_handling(window.upcast_ref(), &backdrop, &col, None);
+    let backdrop = if mode == EditorMode::Overlay {
+        col.append(&top);
+        col.append(&stage);
+        col.append(&bottom);
+        let (layer, backdrop) = kit::ui::overlay_card(&col);
+        window.set_child(Some(&layer));
+        kit::ui::overlay_handling(window.upcast_ref(), &backdrop, &col, None);
+        Some(backdrop)
+    } else {
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        header.add_css_class("editbar");
+        let title = kit::ui::text("Screenshot", "name");
+        title.set_hexpand(true);
+        let handle = gtk::WindowHandle::new();
+        handle.set_hexpand(true);
+        handle.set_child(Some(&title));
+        header.append(&handle);
+        header.append(&kit::app::controls(&window, crate::APP_ID));
+        unfocus(&header);
+        col.append(&header);
+        // Toolbars remain accessible when tiled narrower than their natural width.
+        col.append(&scroll_bar(&top));
+        col.append(&stage);
+        col.append(&scroll_bar(&bottom));
+        window.set_child(Some(&col));
+        None
+    };
     let weak = Rc::downgrade(&ed);
     area.set_draw_func(move |_, cr, w, h| {
         if let Some(e) = weak.upgrade() {
@@ -171,16 +223,30 @@ fn open_base(app: &gtk::Application, base: draw::Base, output: String, origin: R
         }
     });
     wire(&ed);
-    let mon = gdk::Display::default().and_then(|d| d.monitors().item(0)).and_downcast::<gdk::Monitor>().map(|m| m.geometry());
+    let mon = gdk::Display::default().and_then(|d| {
+        let monitors = d.monitors();
+        (0..monitors.n_items()).filter_map(|i| monitors.item(i).and_downcast::<gdk::Monitor>())
+            .find(|m| mode == EditorMode::Window && m.connector().as_deref() == Some(ed.output.as_str()))
+            .or_else(|| monitors.item(0).and_downcast::<gdk::Monitor>())
+    }).map(|m| m.geometry());
     let (mw, mh) = mon.map(|g| (g.width() as f64, g.height() as f64)).unwrap_or((1600.0, 900.0));
     let k = ed.base.w as f64 / origin.2.max(1.0);
     let (iw, ih) = (ed.base.w as f64 / k.max(1.0), ed.base.h as f64 / k.max(1.0));
-    col.set_size_request((iw + 96.0).clamp(1040.0, mw * 0.86) as i32, (ih + 200.0).clamp(600.0, mh * 0.86) as i32);
+    if mode == EditorMode::Overlay {
+        col.set_size_request((iw + 96.0).clamp(1040.0, mw * 0.86) as i32, (ih + 200.0).clamp(600.0, mh * 0.86) as i32);
+    } else {
+        let (w, h) = initial_window_size((iw, ih), (mw as i32, mh as i32));
+        window.set_default_size(w, h);
+    }
     ed.select_tool(DEFAULT_TOOL);
     ed.sync_style();
-    backdrop.set_opacity(0.0);
+    if let Some(backdrop) = &backdrop {
+        backdrop.set_opacity(0.0);
+    }
     window.present();
-    kit::ui::settle(&backdrop, &col, 0, true, || {});
+    if let Some(backdrop) = &backdrop {
+        kit::ui::settle(backdrop, &col, 0, true, || {});
+    }
     area.grab_focus();
     let weak = Rc::downgrade(&ed);
     let closing = Rc::new(Cell::new(false));
@@ -199,14 +265,25 @@ fn open_base(app: &gtk::Application, base: draw::Base, output: String, origin: R
             return glib::Propagation::Stop;
         }
         closing.set(true);
-        let w = w.clone();
-        kit::ui::settle(&backdrop, &col, 0, false, move || w.close());
-        glib::Propagation::Stop
+        if let Some(backdrop) = &backdrop {
+            let w = w.clone();
+            kit::ui::settle(backdrop, &col, 0, false, move || w.close());
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
     });
     let keep = ed.clone();
     window.connect_destroy(move |_| {
         keep.marks.borrow_mut().clear();
     });
+}
+
+fn scroll_bar(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+    scroll.set_child(Some(child));
+    scroll
 }
 
 fn unfocus(w: &impl IsA<gtk::Widget>) {
@@ -285,11 +362,13 @@ fn toolbar(ed: &Rc<Ed>) -> gtk::Widget {
     let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
     bar.append(&spacer);
-    let close = kit::app::control("close", "close");
-    close.set_tooltip_text(Some("Close (Esc)"));
-    let w = ed.window.clone();
-    close.connect_clicked(move |_| w.close());
-    bar.append(&close);
+    if ed.mode == EditorMode::Overlay {
+        let close = kit::app::control("close", "close");
+        close.set_tooltip_text(Some("Close (Esc)"));
+        let w = ed.window.clone();
+        close.connect_clicked(move |_| w.close());
+        bar.append(&close);
+    }
     bar.upcast()
 }
 
@@ -609,7 +688,8 @@ impl Ed {
         let (cx, cy, cw, ch) = self.region();
         let pad = self.pad_now();
         let (tw, th) = (cw + pad * 2.0, ch + pad * 2.0);
-        let scale = ((aw - 48.0) / tw).min((ah - 48.0) / th).min(1.0).max(0.05);
+        let min_scale = if self.mode == EditorMode::Overlay { 0.05 } else { f64::EPSILON };
+        let scale = ((aw - 48.0) / tw).min((ah - 48.0) / th).min(1.0).max(min_scale);
         let (ox, oy) = ((aw - tw * scale) / 2.0, (ah - th * scale) / 2.0);
         self.view.set((scale, ox + (pad - cx) * scale, oy + (pad - cy) * scale));
         cr.save().ok();
@@ -1077,12 +1157,17 @@ impl Ed {
                 let toast = self.toast.clone();
                 let w = self.window.clone();
                 // The file chooser is an ordinary window, so step below it until it closes.
-                w.set_layer(Layer::Bottom);
-                w.set_keyboard_mode(KeyboardMode::None);
+                let overlay = self.mode == EditorMode::Overlay;
+                if overlay {
+                    w.set_layer(Layer::Bottom);
+                    w.set_keyboard_mode(KeyboardMode::None);
+                }
                 let back = w.clone();
                 out::save_as(tex, Some(w.upcast_ref()), move |p| {
-                    back.set_layer(Layer::Overlay);
-                    back.set_keyboard_mode(KeyboardMode::Exclusive);
+                    if overlay {
+                        back.set_layer(Layer::Overlay);
+                        back.set_keyboard_mode(KeyboardMode::Exclusive);
+                    }
                     if let Some(p) = p {
                         toast.set_text(&format!("Saved to {}", p.display()));
                         toast.set_visible(true);
@@ -1114,6 +1199,31 @@ impl Ed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_is_default_and_overlay_is_explicit() {
+        assert_eq!(EditorMode::parse("window"), EditorMode::Window);
+        assert_eq!(EditorMode::parse(""), EditorMode::Window);
+        assert_eq!(EditorMode::parse("unknown"), EditorMode::Window);
+        assert_eq!(EditorMode::parse("overlay"), EditorMode::Overlay);
+    }
+
+    #[test]
+    fn initial_size_fits_image_and_chrome() {
+        assert_eq!(initial_window_size((1200.0, 700.0), (2560, 1440)), (1296, 900));
+        assert_eq!(initial_window_size((200.0, 100.0), (1920, 1080)), (1040, 600));
+    }
+
+    #[test]
+    fn initial_size_caps_large_images_and_small_monitors() {
+        for monitor in [(1920, 1080), (800, 600), (1, 1)] {
+            for image in [(8000.0, 1000.0), (1000.0, 8000.0), (0.0, 0.0)] {
+                let (w, h) = initial_window_size(image, monitor);
+                assert!(w > 0 && w <= (monitor.0 as f64 * 0.8).max(1.0) as i32);
+                assert!(h > 0 && h <= (monitor.1 as f64 * 0.8).max(1.0) as i32);
+            }
+        }
+    }
 
     #[test]
     fn editor_starts_with_pen() {

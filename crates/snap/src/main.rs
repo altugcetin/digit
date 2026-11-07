@@ -24,6 +24,8 @@ fn css() -> String {
     format!(
         r#"{base}
 window.snap, window.snap.background {{ background: transparent; }}
+window.snap-window, window.snap-window.background {{ background: @d_base; border-radius: var(--r-card); }}
+window.snap-window .stage {{ border-radius: var(--r-row); }}
 window.pin, window.pin.background {{ background: transparent; }}
 .pinned {{ border-radius: 14px; box-shadow: 0 10px 34px rgba(0,0,0,0.55), 0 0 0 1px alpha(#ffffff, 0.10); margin: 18px; }}
 .snapbar {{ background: alpha(@d_pop, 0.94); border-radius: 999px; padding: 5px 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }}
