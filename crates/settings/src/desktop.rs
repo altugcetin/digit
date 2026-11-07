@@ -1017,6 +1017,7 @@ fn screenshots(body: &gtk::Box, t: &toml::Table) {
     end.append(&change);
     snap.append(&row);
     choice(&snap, "keyboard_return", "Enter after selecting", "Double-click inside the selection does the same", "snap_after", &[("copy", "Copy"), ("save", "Save"), ("edit", "Mark up"), ("pin", "Pin to screen")], &prefs::get_str(&t, "snap_after", "copy"));
+    choice(&snap, "open_in_new", "Mark-up editor", "A window you can move and tile, or a layer over everything", "snap_editor", &[("window", "Window"), ("overlay", "Overlay")], &prefs::get_str(&t, "snap_editor", "window"));
     toggle(&snap, "save", "Also save copies", "Keep a file every time a screenshot is copied", "snap_save_on_copy", prefs::get_bool(&t, "snap_save_on_copy", true));
     let dir = prefs::get_str(&t, "snap_dir", "");
     let default = glib::user_special_dir(glib::UserDirectory::Pictures).unwrap_or_else(glib::home_dir).join("Screenshots").display().to_string();
