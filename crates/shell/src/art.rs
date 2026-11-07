@@ -38,9 +38,26 @@ struct Look {
     bbox: (f64, f64, f64, f64),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct CacheKey {
+    app: String,
+    source: String,
+    name: String,
+    style: Style,
+    size: i32,
+    tint: u32,
+}
+
+fn cache_key(app: &str, source: &str, name: &str, style: Style, size: i32, accent: Rgb) -> CacheKey {
+    let tint = if style == Style::Tinted {
+        ((accent.r * 255.0) as u32) << 16 | ((accent.g * 255.0) as u32) << 8 | (accent.b * 255.0) as u32
+    } else { 0 };
+    CacheKey { app: app.into(), source: source.into(), name: name.into(), style, size, tint }
+}
+
 thread_local! {
-    static LOOKS: RefCell<HashMap<String, Look>> = RefCell::new(HashMap::new());
-    static CACHE: RefCell<HashMap<(String, Style, i32, u32), gdk::Texture>> = RefCell::new(HashMap::new());
+    static LOOKS: RefCell<HashMap<(String, String), Look>> = RefCell::new(HashMap::new());
+    static CACHE: RefCell<HashMap<CacheKey, gdk::Texture>> = RefCell::new(HashMap::new());
     static CPU: RefCell<Option<gsk::Renderer>> = const { RefCell::new(None) };
 }
 
@@ -280,15 +297,21 @@ pub fn texture(widget: &impl IsA<gtk::Widget>, key: &str, icon: Option<&gdk::Pai
     let renderer = cpu()?;
     let scale = widget.scale_factor().max(1);
     let size = (px * scale as f64).ceil();
-    let tint = ((accent.r * 255.0) as u32) << 16 | ((accent.g * 255.0) as u32) << 8 | (accent.b * 255.0) as u32;
-    let id = (key.to_string(), style, size as i32, if style == Style::Tinted { tint } else { 0 });
+    // File identity separates analysis and textures if the resolved artwork
+    // changes. Non-file paintables use object identity instead of sharing a slot.
+    let source = icon.map(|p| {
+        p.downcast_ref::<gtk::IconPaintable>().and_then(|p| p.file()).map(|f| f.uri().to_string())
+            .unwrap_or_else(|| format!("{:p}", p.as_ptr()))
+    }).unwrap_or_default();
+    let id = cache_key(key, &source, name, style, size as i32, accent);
+    let look_id = (key.to_owned(), source);
     if let Some(t) = CACHE.with(|c| c.borrow().get(&id).cloned()) {
         return Some(t);
     }
     let look = match icon {
-        Some(p) => LOOKS.with(|l| l.borrow().get(key).copied()).unwrap_or_else(|| {
+        Some(p) => LOOKS.with(|l| l.borrow().get(&look_id).copied()).unwrap_or_else(|| {
             let look = analyze(&renderer, p);
-            LOOKS.with(|l| l.borrow_mut().insert(key.to_string(), look));
+            LOOKS.with(|l| l.borrow_mut().insert(look_id, look));
             look
         }),
         None => Look { shape: Shape::Free, color: None, bbox: (0.0, 0.0, 1.0, 1.0) },
@@ -304,4 +327,30 @@ pub fn texture(widget: &impl IsA<gtk::Widget>, key: &str, icon: Option<&gdk::Pai
         c.insert(id, tex.clone());
     });
     Some(tex)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn texture_cache_separates_artwork_style_size_and_monogram() {
+        let accent = Rgb::new(0.2, 0.4, 0.6);
+        let key = cache_key("app", "file:///hicolor/app.svg", "App", Style::Light, 64, accent);
+        assert_ne!(key, cache_key("other", "file:///hicolor/app.svg", "App", Style::Light, 64, accent));
+        assert_ne!(key, cache_key("app", "file:///Papirus/app.svg", "App", Style::Light, 64, accent));
+        assert_ne!(key, cache_key("app", "file:///hicolor/app.svg", "App", Style::Graphite, 64, accent));
+        assert_ne!(key, cache_key("app", "file:///hicolor/app.svg", "App", Style::Light, 128, accent));
+        assert_ne!(cache_key("app", "", "App", Style::Light, 64, accent), cache_key("app", "", "Other", Style::Light, 64, accent));
+    }
+
+    #[test]
+    fn only_tinted_cache_depends_on_accent() {
+        let a = Rgb::new(0.2, 0.4, 0.6);
+        let b = Rgb::new(0.8, 0.6, 0.4);
+        for style in [Style::Light, Style::Graphite, Style::Mono, Style::Native] {
+            assert_eq!(cache_key("app", "source", "App", style, 64, a), cache_key("app", "source", "App", style, 64, b));
+        }
+        assert_ne!(cache_key("app", "source", "App", Style::Tinted, 64, a), cache_key("app", "source", "App", Style::Tinted, 64, b));
+    }
 }
