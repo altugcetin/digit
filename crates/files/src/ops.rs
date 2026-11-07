@@ -84,12 +84,17 @@ pub fn open(files: &[gio::File]) {
 }
 
 pub fn dropped(files: Vec<gio::File>, dest: &gio::File, copy: bool) {
-    let same = files.first().is_some_and(|f| same_fs(f, dest));
-    if copy || !same {
-        run("Copying", Plan::Copy(files, dest.clone()));
-    } else {
-        run("Moving", Plan::Move(files, dest.clone()));
-    }
+    let dest = dest.clone();
+    glib::spawn_future_local(async move {
+        let target = dest.clone();
+        let Ok((moving, copying)) = gio::spawn_blocking(move || files.into_iter().partition::<Vec<_>, _>(|f| !copy && same_fs(f, &target))).await else { return };
+        if !copying.is_empty() {
+            run("Copying", Plan::Copy(copying, dest.clone()));
+        }
+        if !moving.is_empty() {
+            run("Moving", Plan::Move(moving, dest));
+        }
+    });
 }
 
 fn same_fs(a: &gio::File, b: &gio::File) -> bool {
@@ -189,17 +194,22 @@ fn name(f: &gio::File) -> String {
 
 pub fn unique(dir: &gio::File, wanted: &str) -> gio::File {
     let first = dir.child(wanted);
-    if !first.query_exists(None::<&gio::Cancellable>) {
+    if !exists(&first, None) {
         return first;
     }
     let (stem, ext) = split_ext(wanted);
     for n in 2..10_000 {
         let candidate = dir.child(format!("{stem} ({n}){ext}"));
-        if !candidate.query_exists(None::<&gio::Cancellable>) {
+        if !exists(&candidate, None) {
             return candidate;
         }
     }
     first
+}
+
+async fn unique_off_thread(dir: &gio::File, wanted: String) -> gio::File {
+    let (folder, name) = (dir.clone(), wanted.clone());
+    gio::spawn_blocking(move || unique(&folder, &name)).await.unwrap_or_else(|_| dir.child(wanted))
 }
 
 pub fn split_ext(name: &str) -> (String, String) {
@@ -228,6 +238,53 @@ fn measure(f: &gio::File, cancel: &gio::Cancellable) -> u64 {
         }
     }
     sum
+}
+
+/// Also true for a symlink whose target is gone.
+fn exists(f: &gio::File, cancel: Option<&gio::Cancellable>) -> bool {
+    f.query_info("standard::name", gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS, cancel).is_ok()
+}
+
+/// The same file reached by two names: a symlink to it, or a hard link.
+fn same_item(a: &gio::File, b: &gio::File, cancel: &gio::Cancellable) -> bool {
+    let id = |f: &gio::File| f.query_info("id::file", gio::FileQueryInfoFlags::NONE, Some(cancel)).ok().and_then(|i| i.attribute_string("id::file"));
+    matches!((id(a), id(b)), (Some(x), Some(y)) if x == y)
+}
+
+/// Every name in a folder, or the error: a partial list must never look complete.
+fn children(dir: &gio::File, cancel: &gio::Cancellable) -> Result<Vec<PathBuf>, String> {
+    let list = dir.enumerate_children("standard::name", gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS, Some(cancel)).map_err(|e| format!("{}: {}", name(dir), e.message()))?;
+    let mut names = Vec::new();
+    loop {
+        match list.next_file(Some(cancel)) {
+            Ok(Some(child)) => names.push(child.name()),
+            Ok(None) => return Ok(names),
+            Err(e) => return Err(format!("{}: {}", name(dir), e.message())),
+        }
+    }
+}
+
+/// Moves `dst` out of the way, so a failed replace can put it back.
+fn set_aside(dst: &gio::File, cancel: &gio::Cancellable) -> Result<Option<gio::File>, String> {
+    let aside = dst.parent().map(|p| p.child(format!(".digit-replacing-{}", glib::random_int())));
+    let Some(aside) = aside else { return Err(format!("{}: can't be replaced", name(dst))) };
+    let flags = gio::FileCopyFlags::NOFOLLOW_SYMLINKS | gio::FileCopyFlags::NO_FALLBACK_FOR_MOVE;
+    match dst.move_(&aside, flags, Some(cancel), None) {
+        Ok(()) => Ok(Some(aside)),
+        Err(e) if e.matches(gio::IOErrorEnum::NotSupported) => remove_tree(dst, cancel).map(|()| None).map_err(|e| format!("{}: {e}", name(dst))),
+        Err(e) => Err(format!("{}: {}", name(dst), e.message())),
+    }
+}
+
+/// The outermost items of a depth-first list, so nothing is undone twice.
+fn tops_of(made: &[gio::File]) -> Vec<gio::File> {
+    let mut tops: Vec<gio::File> = Vec::new();
+    for file in made {
+        if !tops.last().is_some_and(|top| file.has_prefix(top)) {
+            tops.push(file.clone());
+        }
+    }
+    tops
 }
 
 fn is_real_dir(f: &gio::File, cancel: &gio::Cancellable) -> bool {
@@ -266,12 +323,8 @@ impl Ctx<'_> {
                 Err(e) if e.matches(gio::IOErrorEnum::Exists) && is_real_dir(dst, self.cancel) => {}
                 Err(e) => return Err(format!("{}: {}", name(dst), e.message())),
             }
-            let children = src
-                .enumerate_children("standard::name", gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS, Some(self.cancel))
-                .map_err(|e| format!("{}: {}", name(src), e.message()))?;
-            while let Ok(Some(c)) = children.next_file(Some(self.cancel)) {
-                let (s, d) = (src.child(c.name()), dst.child(c.name()));
-                self.place(&s, d, false)?;
+            for child in children(src, self.cancel)? {
+                self.place(&src.child(&child), dst.child(&child), false)?;
             }
             return Ok(());
         }
@@ -289,46 +342,74 @@ impl Ctx<'_> {
     }
 
     fn place(&mut self, src: &gio::File, mut dst: gio::File, moving: bool) -> Result<(), String> {
-        if dst.query_exists(Some(self.cancel)) {
+        let mut aside = None;
+        if exists(&dst, Some(self.cancel)) {
             let merge = is_real_dir(src, self.cancel) && is_real_dir(&dst, self.cancel);
             match self.decide(&dst) {
                 Answer::Skip => return Ok(()),
                 Answer::Stop => return Err("Cancelled".into()),
                 Answer::Both => dst = unique(&dst.parent().unwrap_or_else(|| dst.clone()), &name(&dst)),
-                Answer::Replace if merge => {}
-                Answer::Replace => remove_tree(&dst, self.cancel).map_err(|e| format!("{}: {e}", name(&dst)))?,
+                Answer::Replace if merge && moving => return self.merge(src, &dst),
+                Answer::Replace if merge => return self.copy_tree(src, &dst),
+                Answer::Replace if inside(src, &dst) || same_item(src, &dst, self.cancel) => return Err(format!("“{}” can't replace itself or a folder it's in", name(src))),
+                Answer::Replace => aside = set_aside(&dst, self.cancel)?,
             }
         }
-        if moving {
-            let flags = gio::FileCopyFlags::NOFOLLOW_SYMLINKS | gio::FileCopyFlags::ALL_METADATA | gio::FileCopyFlags::NO_FALLBACK_FOR_MOVE;
-            if !dst.query_exists(Some(self.cancel)) {
-                match src.move_(&dst, flags, Some(self.cancel), None) {
-                    Ok(()) => {
-                        self.moved.push((src.clone(), dst.clone()));
-                        self.base += measure(&dst, self.cancel);
-                        note(self.st, |s| s.done = self.base);
-                        return Ok(());
-                    }
-                    Err(e) if e.matches(gio::IOErrorEnum::NotSupported) || e.matches(gio::IOErrorEnum::WouldRecurse) || e.matches(gio::IOErrorEnum::WouldMerge) => {}
-                    Err(e) => return Err(format!("{}: {}", name(src), e.message())),
-                }
-            }
-            let before = self.made.len();
-            self.copy_tree(src, &dst)?;
-            self.made.truncate(before);
-            remove_tree(src, self.cancel).map_err(|e| format!("{}: {e}", name(src)))?;
-            self.moved.push((src.clone(), dst.clone()));
-            return Ok(());
+        let before = self.made.len();
+        let result = self.transfer(src, &dst, moving);
+        let Some(aside) = aside else { return result };
+        let cleanup = gio::Cancellable::new();
+        if result.is_ok() {
+            return remove_tree(&aside, &cleanup).map_err(|e| format!("{}: {e}", name(&dst)));
         }
-        self.copy_tree(src, &dst)
+        self.made.truncate(before);
+        let _ = remove_tree(&dst, &cleanup);
+        let flags = gio::FileCopyFlags::NOFOLLOW_SYMLINKS | gio::FileCopyFlags::NO_FALLBACK_FOR_MOVE;
+        if let Err(e) = aside.move_(&dst, flags, Some(&cleanup), None) {
+            return Err(format!("{}: the old item is kept as {}: {}", name(&dst), name(&aside), e.message()));
+        }
+        result
+    }
+
+    fn transfer(&mut self, src: &gio::File, dst: &gio::File, moving: bool) -> Result<(), String> {
+        if !moving {
+            return self.copy_tree(src, dst);
+        }
+        let flags = gio::FileCopyFlags::NOFOLLOW_SYMLINKS | gio::FileCopyFlags::ALL_METADATA | gio::FileCopyFlags::NO_FALLBACK_FOR_MOVE;
+        match src.move_(dst, flags, Some(self.cancel), None) {
+            Ok(()) => {
+                self.moved.push((src.clone(), dst.clone()));
+                self.base += measure(dst, self.cancel);
+                note(self.st, |s| s.done = self.base);
+                return Ok(());
+            }
+            Err(e) if e.matches(gio::IOErrorEnum::NotSupported) || e.matches(gio::IOErrorEnum::WouldRecurse) || e.matches(gio::IOErrorEnum::WouldMerge) => {}
+            Err(e) => return Err(format!("{}: {}", name(src), e.message())),
+        }
+        let before = self.made.len();
+        self.copy_tree(src, dst)?;
+        self.made.truncate(before);
+        remove_tree(src, self.cancel).map_err(|e| format!("{}: {e}", name(src)))?;
+        self.moved.push((src.clone(), dst.clone()));
+        Ok(())
+    }
+
+    /// Moves a folder's items one by one; whatever was skipped stays where it was.
+    fn merge(&mut self, src: &gio::File, dst: &gio::File) -> Result<(), String> {
+        for child in children(src, self.cancel)? {
+            self.place(&src.child(&child), dst.child(&child), true)?;
+        }
+        match src.delete(Some(self.cancel)) {
+            Err(e) if !e.matches(gio::IOErrorEnum::NotEmpty) => Err(format!("{}: {}", name(src), e.message())),
+            _ => Ok(()),
+        }
     }
 }
 
 fn remove_tree(f: &gio::File, cancel: &gio::Cancellable) -> Result<(), String> {
     if is_real_dir(f, cancel) {
-        let children = f.enumerate_children("standard::name", gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS, Some(cancel)).map_err(|e| e.message().to_string())?;
-        while let Ok(Some(c)) = children.next_file(Some(cancel)) {
-            remove_tree(&f.child(c.name()), cancel)?;
+        for child in children(f, cancel)? {
+            remove_tree(&f.child(child), cancel)?;
         }
     }
     f.delete(Some(cancel)).map_err(|e| e.message().to_string())
@@ -363,9 +444,7 @@ fn work(plan: Plan, st: &State, cancel: &gio::Cancellable) {
                         break;
                     }
                 }
-                if let Some(first) = ctx.made.get(before) {
-                    tops.push(first.clone());
-                }
+                tops.extend(tops_of(&ctx.made[before..]));
             }
             note(st, |s| s.undo = (!tops.is_empty()).then(|| Undo::Created(tops)));
         }
@@ -444,36 +523,36 @@ fn work(plan: Plan, st: &State, cancel: &gio::Cancellable) {
         Plan::Run(argv, cwd, made) => {
             note(st, |s| s.now = argv.first().cloned().unwrap_or_default());
             match std::process::Command::new(&argv[0]).args(&argv[1..]).current_dir(&cwd).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn() {
-                Ok(mut child) => loop {
-                    if cancel.is_cancelled() {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        if let Some(m) = &made {
-                            let _ = remove_tree(&gio::File::for_path(m), &gio::Cancellable::new());
-                        }
-                        break;
-                    }
-                    match child.try_wait() {
-                        Ok(Some(status)) => {
-                            if !status.success() {
-                                let mut err = String::new();
-                                if let Some(mut e) = child.stderr.take() {
-                                    use std::io::Read;
-                                    let _ = e.read_to_string(&mut err);
-                                }
-                                errors.push(err.lines().rev().find(|l| !l.trim().is_empty()).map(str::to_string).unwrap_or_else(|| format!("{} failed", argv[0])));
-                            } else if let Some(m) = made {
-                                note(st, |s| s.undo = Some(Undo::Created(vec![gio::File::for_path(m)])));
+                Ok(mut child) => {
+                    // Read while it runs: a full pipe would stop the tool for good.
+                    let complaint = child.stderr.take().map(|e| std::thread::spawn(move || last_line(e)));
+                    loop {
+                        if cancel.is_cancelled() {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            if let Some(m) = &made {
+                                let _ = remove_tree(&gio::File::for_path(m), &gio::Cancellable::new());
                             }
                             break;
                         }
-                        Ok(None) => std::thread::sleep(Duration::from_millis(80)),
-                        Err(e) => {
-                            errors.push(e.to_string());
-                            break;
+                        match child.try_wait() {
+                            Ok(Some(status)) => {
+                                if !status.success() {
+                                    let err = complaint.and_then(|c| c.join().ok()).flatten();
+                                    errors.push(err.unwrap_or_else(|| format!("{} failed", argv[0])));
+                                } else if let Some(m) = made {
+                                    note(st, |s| s.undo = Some(Undo::Created(vec![gio::File::for_path(m)])));
+                                }
+                                break;
+                            }
+                            Ok(None) => std::thread::sleep(Duration::from_millis(80)),
+                            Err(e) => {
+                                errors.push(e.to_string());
+                                break;
+                            }
                         }
                     }
-                },
+                }
                 Err(e) => errors.push(format!("{}: {e}", argv[0])),
             }
         }
@@ -533,6 +612,12 @@ pub fn empty_trash() {
             run("Emptying trash", Plan::Delete(items));
         }
     });
+}
+
+fn last_line(stream: impl std::io::Read) -> Option<String> {
+    use std::io::BufRead;
+    let lines = std::io::BufReader::new(stream).split(b'\n').map_while(Result::ok);
+    lines.map(|l| String::from_utf8_lossy(&l).trim().to_string()).filter(|l| !l.is_empty()).last()
 }
 
 pub fn undo() {
@@ -616,6 +701,7 @@ pub fn paste(dest: gio::File) {
                     if !files.is_empty() {
                         if cut {
                             crate::set_cut(Vec::new());
+                            let _ = clipboard.set_content(None::<&gdk::ContentProvider>);
                             run("Moving", Plan::Move(files, dest));
                         } else {
                             run("Copying", Plan::Copy(files, dest));
@@ -639,7 +725,7 @@ pub fn paste(dest: gio::File) {
         let stamp = glib::DateTime::now_local().ok().and_then(|d| d.format("%Y-%m-%d %H.%M.%S").ok()).map(|s| s.to_string()).unwrap_or_default();
         if formats.contains_type(gdk::Texture::static_type()) {
             if let Ok(Some(tex)) = clipboard.read_texture_future().await {
-                let target = unique(&dest, &format!("Pasted image {stamp}.png"));
+                let target = unique_off_thread(&dest, format!("Pasted image {stamp}.png")).await;
                 match target.path().map(|p| tex.save_to_png(p)) {
                     Some(Ok(())) => {
                         push_undo(Undo::Created(vec![target.clone()]));
@@ -651,7 +737,7 @@ pub fn paste(dest: gio::File) {
             }
         }
         if let Ok(Some(text)) = clipboard.read_text_future().await {
-            let target = unique(&dest, &format!("Pasted text {stamp}.txt"));
+            let target = unique_off_thread(&dest, format!("Pasted text {stamp}.txt")).await;
             match target.replace_contents(text.as_bytes(), None, false, gio::FileCreateFlags::NONE, None::<&gio::Cancellable>) {
                 Ok(_) => {
                     push_undo(Undo::Created(vec![target.clone()]));
@@ -869,8 +955,14 @@ pub fn rename(info: gio::FileInfo) {
 }
 
 pub fn new_folder(dest: gio::File) {
-    let initial = name(&unique(&dest, "New Folder"));
-    ask_name("New Folder", &initial, "Create", false, None, move |n, _| {
+    glib::spawn_future_local(async move {
+        let initial = name(&unique_off_thread(&dest, "New Folder".into()).await);
+        ask_new_folder(dest, &initial);
+    });
+}
+
+fn ask_new_folder(dest: gio::File, initial: &str) {
+    ask_name("New Folder", initial, "Create", false, None, move |n, _| {
         let f = dest.child(&n);
         match f.make_directory(None::<&gio::Cancellable>) {
             Ok(()) => {
@@ -898,8 +990,14 @@ pub fn templates() -> Vec<PathBuf> {
 
 pub fn new_file(dest: gio::File, template: Option<PathBuf>) {
     let wanted = template.as_ref().and_then(|t| t.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "New File.txt".into());
-    let initial = name(&unique(&dest, &wanted));
-    ask_name("New File", &initial, "Create", true, None, move |n, _| {
+    glib::spawn_future_local(async move {
+        let initial = name(&unique_off_thread(&dest, wanted).await);
+        ask_new_file(dest, template, &initial);
+    });
+}
+
+fn ask_new_file(dest: gio::File, template: Option<PathBuf>, initial: &str) {
+    ask_name("New File", initial, "Create", true, None, move |n, _| {
         let f = dest.child(&n);
         if f.query_exists(None::<&gio::Cancellable>) {
             crate::toast(&format!("“{n}” already exists"));
@@ -1365,3 +1463,148 @@ pub fn is_trash(f: &gio::File) -> bool {
     f.uri_scheme().is_some_and(|s| s == "trash")
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("digit-ops-{tag}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn write(&self, path: &str, text: &str) -> PathBuf {
+            let file = self.0.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, text).unwrap();
+            file
+        }
+
+        fn names(&self, path: &str) -> Vec<String> {
+            let mut names: Vec<_> = fs::read_dir(self.0.join(path)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+            names.sort();
+            names
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn state() -> State {
+        Arc::new((Mutex::new(Shared::default()), Condvar::new()))
+    }
+
+    fn file(path: &std::path::Path) -> gio::File {
+        gio::File::for_path(path)
+    }
+
+    fn place(policy: Answer, src: &std::path::Path, dst: &std::path::Path, moving: bool) -> Result<(), String> {
+        let (st, cancel) = (state(), gio::Cancellable::new());
+        let mut ctx = Ctx { st: &st, cancel: &cancel, policy: Some(policy), made: Vec::new(), moved: Vec::new(), base: 0 };
+        ctx.place(&file(src), file(dst), moving)
+    }
+
+    #[test]
+    fn a_skipped_file_stays_in_the_folder_being_merged() {
+        let t = Scratch::new("skip");
+        t.write("a/box/same.txt", "source");
+        t.write("a/box/new.txt", "new");
+        t.write("b/box/same.txt", "other");
+        let (st, cancel) = (state(), gio::Cancellable::new());
+        let mut ctx = Ctx { st: &st, cancel: &cancel, policy: Some(Answer::Skip), made: Vec::new(), moved: Vec::new(), base: 0 };
+        ctx.merge(&file(&t.0.join("a/box")), &file(&t.0.join("b/box"))).unwrap();
+        assert_eq!(fs::read_to_string(t.0.join("a/box/same.txt")).unwrap(), "source");
+        assert_eq!(fs::read_to_string(t.0.join("b/box/same.txt")).unwrap(), "other");
+        assert_eq!(t.names("b/box"), ["new.txt", "same.txt"]);
+    }
+
+    #[test]
+    fn undoing_a_merge_only_touches_what_was_moved() {
+        let t = Scratch::new("undo");
+        t.write("a/box/new.txt", "new");
+        t.write("b/box/old.txt", "old");
+        let (st, cancel) = (state(), gio::Cancellable::new());
+        let mut ctx = Ctx { st: &st, cancel: &cancel, policy: Some(Answer::Replace), made: Vec::new(), moved: Vec::new(), base: 0 };
+        ctx.place(&file(&t.0.join("a/box")), file(&t.0.join("b/box")), true).unwrap();
+        assert!(!t.0.join("a/box").exists());
+        assert_eq!(ctx.moved.len(), 1);
+        assert_eq!(ctx.moved[0].1.path().unwrap(), t.0.join("b/box/new.txt"));
+    }
+
+    #[test]
+    fn a_file_cant_replace_the_folder_it_is_in() {
+        let t = Scratch::new("parent");
+        let src = t.write("b/b", "precious");
+        assert!(place(Answer::Replace, &src, &t.0.join("b"), true).is_err());
+        assert!(place(Answer::Replace, &src, &t.0.join("b"), false).is_err());
+        assert_eq!(fs::read_to_string(src).unwrap(), "precious");
+    }
+
+    #[test]
+    fn a_link_cant_replace_its_own_target() {
+        let t = Scratch::new("link");
+        let target = t.write("b/file", "precious");
+        fs::create_dir(t.0.join("a")).unwrap();
+        std::os::unix::fs::symlink(&target, t.0.join("a/file")).unwrap();
+        assert!(place(Answer::Replace, &t.0.join("a/file"), &target, false).is_err());
+        assert_eq!(fs::read_to_string(target).unwrap(), "precious");
+    }
+
+    #[test]
+    fn a_failed_replace_puts_the_old_item_back() {
+        let t = Scratch::new("restore");
+        let dst = t.write("b/file", "old");
+        assert!(place(Answer::Replace, &t.0.join("missing"), &dst, true).is_err());
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "old");
+        assert_eq!(t.names("b"), ["file"]);
+    }
+
+    #[test]
+    fn replacing_leaves_only_the_new_item() {
+        let t = Scratch::new("replace");
+        let src = t.write("a/file", "new");
+        let dst = t.write("b/file", "old");
+        place(Answer::Replace, &src, &dst, true).unwrap();
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "new");
+        assert_eq!(t.names("b"), ["file"]);
+        assert!(!src.exists());
+    }
+
+    #[test]
+    fn a_dangling_link_counts_as_taken() {
+        let t = Scratch::new("dangling");
+        std::os::unix::fs::symlink(t.0.join("gone"), t.0.join("name")).unwrap();
+        assert_eq!(unique(&file(&t.0), "name").path().unwrap(), t.0.join("name (2)"));
+    }
+
+    #[test]
+    fn undo_keeps_only_the_outermost_items() {
+        let made: Vec<_> = ["/x/a", "/x/a/1", "/x/a/1/2", "/x/b", "/x/c/1"].map(gio::File::for_path).to_vec();
+        let tops: Vec<_> = tops_of(&made).iter().map(|f| f.path().unwrap()).collect();
+        assert_eq!(tops, ["/x/a", "/x/b", "/x/c/1"].map(PathBuf::from));
+    }
+
+    #[test]
+    fn a_noisy_tool_finishes_and_reports_its_last_line() {
+        let st = state();
+        let script = "yes noise | head -c 300000 >&2; echo broken >&2; exit 3";
+        let plan = Plan::Run(["sh", "-c", script].map(String::from).to_vec(), std::env::temp_dir(), None);
+        let (done, finished) = std::sync::mpsc::channel();
+        let job = st.clone();
+        std::thread::spawn(move || {
+            work(plan, &job, &gio::Cancellable::new());
+            let _ = done.send(());
+        });
+        finished.recv_timeout(Duration::from_secs(10)).expect("the tool hung on its own output");
+        assert_eq!(st.0.lock().unwrap().errors, ["broken"]);
+    }
+}
