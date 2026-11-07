@@ -112,6 +112,10 @@ fn show() {
     update();
 }
 
+fn showing(stage: &gtk::Box, uri: &str) -> bool {
+    LOOK.with(|l| l.borrow().as_ref().is_some_and(|look| look.stage == *stage && look.shown.borrow().as_deref() == Some(uri)))
+}
+
 pub fn update() {
     let Some(look) = LOOK.with(|l| l.borrow().clone()) else { return };
     let Some(p) = crate::active() else { return };
@@ -125,7 +129,7 @@ pub fn update() {
     if look.shown.borrow().as_deref() == Some(uri.as_str()) {
         return;
     }
-    *look.shown.borrow_mut() = Some(uri);
+    *look.shown.borrow_mut() = Some(uri.clone());
     if let Some(b) = look.busy.borrow_mut().take() {
         b.store(true, std::sync::atomic::Ordering::Relaxed);
     }
@@ -170,11 +174,31 @@ pub fn update() {
         });
         return;
     }
-    if ct.starts_with("video/") || ct.starts_with("audio/") {
+    if ct.starts_with("video/") {
         let v = gtk::Video::for_file(Some(&file));
         v.set_autoplay(true);
-        v.set_size_request(maxw.min(960), if ct.starts_with("audio/") { 120 } else { maxh.min(560) });
+        v.set_size_request(maxw.min(960), maxh.min(560));
         look.stage.append(&v);
+        return;
+    }
+    if let Some(path) = file.path().filter(|_| ct.starts_with("audio/")) {
+        let stage = look.stage.clone();
+        let opened_for = uri.clone();
+        glib::spawn_future_local(async move {
+            let opened = gio::spawn_blocking(move || crate::audio::open(&path)).await.ok().and_then(Result::ok);
+            if !showing(&stage, &opened_for) {
+                return;
+            }
+            let Some((source, audio)) = opened else {
+                stage.append(&kit::ui::text("Can't read this file", "sub"));
+                return;
+            };
+            let media = gtk::MediaFile::for_input_stream(&crate::audio::Tagless::new(source, audio));
+            let v = gtk::Video::for_media_stream(Some(&media));
+            v.set_autoplay(true);
+            v.set_size_request(maxw.min(960), 120);
+            stage.append(&v);
+        });
         return;
     }
     let texty = ct.starts_with("text/") || ["application/json", "application/xml", "application/javascript", "application/x-shellscript", "application/toml", "application/x-yaml", "application/x-desktop", "application/sql", "application/x-php", "application/x-perl", "application/x-ruby", "application/x-python"].contains(&ct.as_str()) || ct.ends_with("+xml") || ct.ends_with("+json");
