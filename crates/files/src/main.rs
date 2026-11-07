@@ -1571,6 +1571,8 @@ pub extern "C" fn eglTerminate(_display: *mut std::ffi::c_void) -> u32 {
     1
 }
 
+kit::layer_shell_first!();
+
 fn main() -> glib::ExitCode {
     if std::env::args().nth(1).as_deref() == Some("--register") {
         install();

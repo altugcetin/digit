@@ -33,3 +33,16 @@ pub mod nm;
 pub mod wm;
 pub mod terminal;
 pub mod theme;
+
+/// Goes in every binary, with a build.rs naming gtk4-layer-shell: the reference has to sit in
+/// the binary's own object, or `--as-needed` drops that early library again.
+#[macro_export]
+macro_rules! layer_shell_first {
+    () => {
+        unsafe extern "C" {
+            fn gtk_layer_get_protocol_version() -> u32;
+        }
+        #[used]
+        static LAYER_SHELL_FIRST: unsafe extern "C" fn() -> u32 = gtk_layer_get_protocol_version;
+    };
+}

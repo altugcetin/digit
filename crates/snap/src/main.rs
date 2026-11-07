@@ -174,6 +174,8 @@ fn finish(app: &gtk::Application, shot: capture::Shot, r: windows::Rect) {
     }
 }
 
+kit::layer_shell_first!();
+
 fn main() -> glib::ExitCode {
     if std::env::args().nth(1).as_deref() == Some("--register") {
         install();
