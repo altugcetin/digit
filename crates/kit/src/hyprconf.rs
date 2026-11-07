@@ -66,14 +66,26 @@ fn action(b: &Bind, snap: bool) -> String {
         Act::Terminal => exec(terminal()),
         Act::Window(w) => match w {
             Win::Close => "hl.dsp.window.close()".into(),
-            Win::Float => "hl.dsp.window.float({ action = \"toggle\" })".into(),
+            Win::Float => "require(\"digit.digit-floating\").outside(hl.dsp.window.float({ action = \"toggle\" }))".into(),
             Win::Pseudo => "hl.dsp.window.pseudo()".into(),
             Win::Maximize => "per_layout({ default = hl.dsp.window.fullscreen({ mode = 1 }), scrolling = column_maximize })".into(),
             Win::Fullscreen => "hl.dsp.window.fullscreen({ mode = 0 })".into(),
-            Win::Focus(keybinds::Dir::Up) => "hl.dsp.focus({ workspace = \"e-1\" })".into(),
-            Win::Focus(keybinds::Dir::Down) => "hl.dsp.focus({ workspace = \"e+1\" })".into(),
+            // Scrolling has no rows, so up and down step through its workspaces instead.
+            Win::Focus(d @ (keybinds::Dir::Up | keybinds::Dir::Down)) => {
+                let step = if *d == keybinds::Dir::Up { "e-1" } else { "e+1" };
+                format!("per_layout({{ default = hl.dsp.focus({{ direction = \"{}\" }}), scrolling = hl.dsp.focus({{ workspace = \"{step}\" }}) }})", d.name())
+            }
             Win::Focus(d) => scrolling(*d, format!("hl.dsp.focus({{ direction = \"{}\" }})", d.name()), "focus"),
-            Win::Move(d) => scrolling(*d, format!("hl.dsp.window.move({{ direction = \"{}\" }})", d.name()), "swapcol"),
+            Win::Move(d) => {
+                let swap = scrolling(*d, format!("hl.dsp.window.move({{ direction = \"{}\" }})", d.name()), "swapcol");
+                let zone = match d {
+                    keybinds::Dir::Left => "left",
+                    keybinds::Dir::Right => "right",
+                    keybinds::Dir::Up => "max",
+                    keybinds::Dir::Down => "restore",
+                };
+                if snap { format!("require(\"digit.digit-floating\").arrow({}, {swap})", lua_str(zone)) } else { swap }
+            }
             Win::Workspace(i) => format!("hl.dsp.focus({{ workspace = {i} }})"),
             Win::ToWorkspace(i) => format!("hl.dsp.window.move({{ workspace = {i} }})"),
             // cycle_next doesn't scroll the view, so the scrolling layout steps through columns.
@@ -85,6 +97,7 @@ fn action(b: &Bind, snap: bool) -> String {
             Win::Drag if snap => "require(\"digit.digit-floating\").drag()".into(),
             Win::Drag => "hl.dsp.window.drag()".into(),
             Win::Snap(zone) => format!("require(\"digit.digit-floating\").snap({})", lua_str(zone)),
+            Win::ToMonitor(step) => format!("require(\"digit.digit-floating\").to_monitor({step})"),
             Win::Resize => "hl.dsp.window.resize()".into(),
             Win::Grow(d) => {
                 let (x, y) = match d {
@@ -93,12 +106,14 @@ fn action(b: &Bind, snap: bool) -> String {
                     keybinds::Dir::Up => (0, -40),
                     keybinds::Dir::Down => (0, 40),
                 };
-                let tiled = format!("hl.dsp.window.resize({{ x = {x}, y = {y}, relative = true }})");
+                let resize = |k: i32| format!("hl.dsp.window.resize({{ x = {}, y = {}, relative = true }})", x * k, y * k);
+                // Dwindle turns pixels into a split ratio, so it needs longer steps to be felt.
+                let (tiled, dwindle) = (resize(1), resize(3));
                 match d {
                     // Scrolling columns grow and shrink by a share of the screen instead.
-                    keybinds::Dir::Left => format!("per_layout({{ default = {tiled}, scrolling = hl.dsp.layout(\"colresize -0.1\") }})"),
-                    keybinds::Dir::Right => format!("per_layout({{ default = {tiled}, scrolling = hl.dsp.layout(\"colresize +0.1\") }})"),
-                    _ => tiled,
+                    keybinds::Dir::Left => format!("per_layout({{ default = {tiled}, dwindle = {dwindle}, scrolling = hl.dsp.layout(\"colresize -0.1\") }})"),
+                    keybinds::Dir::Right => format!("per_layout({{ default = {tiled}, dwindle = {dwindle}, scrolling = hl.dsp.layout(\"colresize +0.1\") }})"),
+                    _ => format!("per_layout({{ default = {tiled}, dwindle = {dwindle} }})"),
                 }
             }
             Win::Pin => "hl.dsp.window.pin()".into(),
@@ -125,7 +140,7 @@ fn render_keybinds_with_prefs(binds: &[Bind], prefs: &toml::Table) -> String {
          local function bind(keys, action, opts)\n    hl.unbind(keys)\n    hl.bind(keys, action, opts)\nend\n\n\
          -- Picks the action for the layout of the workspace in front when the keys are pressed,\n\
          -- so one shortcut can mean different things in dwindle and scrolling.\n\
-         local function per_layout(actions)\n    return function()\n        local ws = hl.get_active_special_workspace() or hl.get_active_workspace()\n        local action = ws and actions[ws.tiled_layout] or actions.default\n        if type(action) == \"function\" then\n            action()\n        elseif action then\n            hl.dispatch(action)\n        end\n    end\nend\n\n\
+         local function per_layout(actions)\n    return function()\n        local ws = hl.get_active_special_workspace() or hl.get_active_workspace()\n        local w = hl.get_active_window()\n        -- A floating window isn't part of the layout underneath it.\n        local action = ws and not (w and w.floating) and actions[ws.tiled_layout] or actions.default\n        if type(action) == \"function\" then\n            action()\n        elseif action then\n            hl.dispatch(action)\n        end\n    end\nend\n\n\
          -- In scrolling, maximize widens the column to the whole screen and back to the width it had.\n\
          local widths = {}\n\
          local function column_maximize()\n    local w = hl.get_active_window()\n    local m = hl.get_active_monitor()\n    if not w or not m then\n        return\n    end\n    local share = w.size.x / (m.width / m.scale)\n    if share < 0.9 then\n        -- Remember the width to the nearest 5%, as the window itself is a little narrower than its column.\n        widths[w.address] = string.format(\"%.2f\", math.floor(share * 20 + 0.5) / 20)\n        hl.dispatch(hl.dsp.layout(\"colresize 1.0\"))\n    else\n        local back = widths[w.address] or tostring(hl.get_config(\"scrolling.column_width\") or 0.5)\n        widths[w.address] = nil\n        hl.dispatch(hl.dsp.layout(\"colresize \" .. back))\n    end\nend\n\n\
@@ -546,9 +561,14 @@ mod tests {
         let rendered = render_keybinds_with_prefs(&binds, &prefs);
         assert!(rendered.contains("bind(\"SUPER + mouse:272\", hl.dsp.window.drag(), { mouse = true })"));
         assert!(!rendered.contains("floating\").drag()"));
-        let before: Vec<_> = binds.iter().filter(|b| !matches!(b.act, Act::Window(Win::Snap(_)))).cloned().collect();
+        let hypr_only = |b: &&Bind| !matches!(b.act, Act::Window(Win::Snap(_) | Win::ToMonitor(_)));
+        let before: Vec<_> = binds.iter().filter(hypr_only).cloned().collect();
         assert_eq!(crate::niriconf::render_keybinds(&before), crate::niriconf::render_keybinds(&binds));
-        for b in binds.iter().filter(|b| matches!(b.act, Act::Window(Win::Snap(_)))) {
+        assert!(rendered.contains("hl.dsp.focus({ direction = \"left\" })"));
+        assert!(!rendered.contains(".arrow("));
+        let snapping = render_keybinds_with_prefs(&binds, &toml::Table::new());
+        assert!(snapping.contains("floating\").arrow(\"left\", per_layout("));
+        for b in binds.iter().filter(|b| matches!(b.act, Act::Window(Win::Snap(_) | Win::ToMonitor(_)))) {
             assert!(supports(b));
             assert!(!crate::niriconf::supports(b));
             assert_eq!(binds.iter().filter(|other| keybinds::normalize(&b.keys) == keybinds::normalize(&other.keys)).count(), 1, "conflict: {}", b.keys);
@@ -659,8 +679,8 @@ mod tests {
     fn wheel_focus_and_window_defaults_render_to_hyprland_actions() {
         let binds: Vec<_> = keybinds::defaults().into_iter().filter(|b| b.id.starts_with("focus-scroll-") || b.id.starts_with("window-")).collect();
         let rendered = render_keybinds(&binds);
-        assert!(rendered.contains("bind(\"SUPER + mouse_up\", hl.dsp.focus({ workspace = \"e-1\" }))"));
-        assert!(rendered.contains("bind(\"SUPER + mouse_down\", hl.dsp.focus({ workspace = \"e+1\" }))"));
+        assert!(rendered.contains("bind(\"SUPER + mouse_up\", per_layout({ default = hl.dsp.focus({ direction = \"up\" }), scrolling = hl.dsp.focus({ workspace = \"e-1\" }) }))"));
+        assert!(rendered.contains("bind(\"SUPER + mouse_down\", per_layout({ default = hl.dsp.focus({ direction = \"down\" }), scrolling = hl.dsp.focus({ workspace = \"e+1\" }) }))"));
         assert!(rendered.contains("bind(\"SUPER + SHIFT + mouse_down\", per_layout({ default = hl.dsp.window.cycle_next({ next = true }), scrolling = hl.dsp.layout(\"focus r\") }))"));
         assert!(rendered.contains("bind(\"SUPER + SHIFT + mouse_up\", per_layout({ default = hl.dsp.window.cycle_next({ next = false }), scrolling = hl.dsp.layout(\"focus l\") }))"));
     }
