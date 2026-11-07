@@ -15,6 +15,7 @@ mod child;
 mod clip;
 mod compositor;
 mod config;
+mod confignote;
 mod control;
 mod corners;
 mod datepop;
@@ -360,6 +361,7 @@ fn place(app: &Rc<App>, display: &gdk::Display) {
 
 fn watch_config(app: &Rc<App>) {
     let _ = std::fs::create_dir_all(config::dir());
+    glib::timeout_add_seconds_local_once(3, confignote::check);
     let dir = gio::File::for_path(config::dir());
     let Ok(monitor) = dir.monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE) else { return };
     let weak = Rc::downgrade(app);
@@ -379,6 +381,7 @@ fn watch_config(app: &Rc<App>) {
         glib::timeout_add_local_once(std::time::Duration::from_millis(90), move || {
             pending.set(false);
             if let Some(app) = weak.upgrade() {
+                confignote::check();
                 app.apply_prefs(config::Prefs::from(&config::load()));
                 let next = kit::prefs::text(&kit::prefs::read(), "primary_monitor", "");
                 if primary.replace(next.clone()) != next && kit::setup::installed() {
