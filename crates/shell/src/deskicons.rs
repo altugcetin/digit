@@ -711,7 +711,7 @@ fn release_surface_for(d: &Rc<RefCell<Desktop>>, event: KeyboardEvent) -> bool {
         if !d.keyboard {
             return false;
         }
-        d.keyboard = keyboard_requested(!d.selected.is_empty(), event);
+        d.keyboard = keyboard_requested(!d.selected.is_empty() || can_undo(), event);
         d.acquiring = false;
         (d.window.clone(), d.retiring.take())
     };
@@ -788,12 +788,9 @@ fn focus_selection(d: &Rc<RefCell<Desktop>>) {
     FOCUS_GENERATION.set(FOCUS_GENERATION.get().wrapping_add(1));
     let target = {
         let mut d = d.borrow_mut();
-        let event = if d.selected.is_empty() {
-            KeyboardEvent::Clear
-        } else {
-            KeyboardEvent::Select
-        };
-        let requested = keyboard_requested(!d.selected.is_empty(), event);
+        let wanted = !d.selected.is_empty() || can_undo();
+        let event = if wanted { KeyboardEvent::Select } else { KeyboardEvent::Clear };
+        let requested = keyboard_requested(wanted, event);
         d.acquiring |= requested && !d.keyboard;
         d.keyboard = requested;
         d.keyboard.then(|| (d.window.clone(), d.paint.clone()))
@@ -1860,17 +1857,184 @@ fn reveal_file(path: &Path) {
         eprintln!("digit: show in Files: {e}");
     }
 }
-fn trash(paths: Vec<PathBuf>) {
+/// Something the trash took from the desktop, and where it sat.
+#[derive(Clone)]
+struct Trashed {
+    path: PathBuf,
+    position: Option<FreePos>,
+}
+
+const UNDO_DEPTH: usize = 20;
+
+thread_local! {
+    static UNDO: RefCell<Vec<Vec<Trashed>>> = const { RefCell::new(Vec::new()) };
+}
+
+fn can_undo() -> bool {
+    UNDO.with(|u| !u.borrow().is_empty())
+}
+
+fn trash(d: &Rc<RefCell<Desktop>>, paths: Vec<PathBuf>) {
+    let entries: Vec<Trashed> = {
+        let state = d.borrow();
+        paths
+            .into_iter()
+            .map(|path| {
+                let position = path.file_name().and_then(|n| state.saved.get(&name_key(n)).copied());
+                Trashed { path, position }
+            })
+            .collect()
+    };
     glib::spawn_future_local(async move {
-        for path in paths {
-            if let Err(e) = gio::File::for_path(path)
+        let mut gone = Vec::new();
+        for entry in entries {
+            match gio::File::for_path(&entry.path)
                 .trash_future(glib::Priority::DEFAULT)
                 .await
             {
-                eprintln!("digit: desktop trash: {e}");
+                Ok(()) => gone.push(entry),
+                Err(e) => eprintln!("digit: desktop trash: {e}"),
             }
         }
+        if !gone.is_empty() {
+            UNDO.with(|u| {
+                let mut undo = u.borrow_mut();
+                undo.push(gone);
+                let extra = undo.len().saturating_sub(UNDO_DEPTH);
+                undo.drain(..extra);
+            });
+        }
     });
+}
+
+/// The newest copy in the trash of what was at `original` goes back there, or beside it if
+/// something took that name since.
+fn restore_from_trash(original: &Path) -> Result<PathBuf, String> {
+    let trash = gio::File::for_uri("trash:///");
+    let list = trash
+        .enumerate_children("standard::name,trash::orig-path,trash::deletion-date", gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS, gio::Cancellable::NONE)
+        .map_err(|e| e.to_string())?;
+    let mut found: Option<(String, gio::File)> = None;
+    while let Some(info) = list.next_file(gio::Cancellable::NONE).map_err(|e| e.to_string())? {
+        if info.attribute_byte_string("trash::orig-path").is_some_and(|p| Path::new(p.as_str()) == original) {
+            let when = info.attribute_string("trash::deletion-date").map(|d| d.to_string()).unwrap_or_default();
+            if found.as_ref().is_none_or(|(newest, _)| when >= *newest) {
+                found = Some((when, trash.child(info.name())));
+            }
+        }
+    }
+    let (_, file) = found.ok_or("It's no longer in the trash")?;
+    let name = original.file_name().ok_or("Missing file name")?;
+    let directory = file.query_file_type(gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS, gio::Cancellable::NONE) == gio::FileType::Directory;
+    let free = collision_name(name, directory, |candidate| original.with_file_name(candidate).symlink_metadata().is_ok());
+    let dest = original.with_file_name(free);
+    file.move_(&gio::File::for_path(&dest), gio::FileCopyFlags::NONE, gio::Cancellable::NONE, None).map_err(|e| e.to_string())?;
+    Ok(dest)
+}
+
+/// Ctrl+Z: what went to the trash last comes back to the place it had.
+fn undo_trash(d: &Rc<RefCell<Desktop>>) {
+    let Some(entries) = UNDO.with(|u| u.borrow_mut().pop()) else { return };
+    {
+        let mut state = d.borrow_mut();
+        for entry in &entries {
+            if let (Some(name), Some(pos)) = (entry.path.file_name().map(name_key), entry.position) {
+                state.saved.insert(name.clone(), pos);
+                state.positions.insert(name.clone(), pos);
+                let output = state.output.clone();
+                let mut shared = state.shared.borrow_mut();
+                shared.saved.insert(name.clone(), pos);
+                shared.outputs.insert(name, output);
+            }
+        }
+    }
+    save(d);
+    let weak = Rc::downgrade(d);
+    glib::spawn_future_local(async move {
+        let paths: Vec<PathBuf> = entries.into_iter().map(|e| e.path).collect();
+        let results = gio::spawn_blocking(move || paths.iter().map(|p| restore_from_trash(p)).collect::<Vec<_>>()).await;
+        let Some(d) = weak.upgrade() else { return };
+        for error in results.into_iter().flatten().filter_map(Result::err) {
+            let app = d.borrow().app.upgrade();
+            if let Some(app) = app {
+                app.request(crate::app::Peek::Note { text: format!("Couldn't restore: {error}") });
+            }
+        }
+        refresh(&d);
+    });
+}
+
+const COPIED_FILES: &str = "x-special/gnome-copied-files";
+
+/// The same clipboard formats as Files, so cut and copy work between the two.
+fn clip(paint: &Paint, files: &[FileData], cut: bool) {
+    if files.is_empty() {
+        return;
+    }
+    let list: Vec<gio::File> = files.iter().map(|f| gio::File::for_path(&f.path)).collect();
+    let uris: Vec<String> = list.iter().map(|f| f.uri().to_string()).collect();
+    let gnome = format!("{}\n{}", if cut { "cut" } else { "copy" }, uris.join("\n"));
+    let text = files.iter().map(|f| f.path.to_string_lossy().into_owned()).collect::<Vec<_>>().join("\n");
+    let provider = gdk::ContentProvider::new_union(&[
+        gdk::ContentProvider::for_value(&gdk::FileList::from_array(&list).to_value()),
+        gdk::ContentProvider::for_bytes(COPIED_FILES, &glib::Bytes::from_owned(gnome.into_bytes())),
+        gdk::ContentProvider::for_bytes("text/uri-list", &glib::Bytes::from_owned(format!("{}\r\n", uris.join("\r\n")).into_bytes())),
+        gdk::ContentProvider::for_bytes("text/plain;charset=utf-8", &glib::Bytes::from_owned(text.into_bytes())),
+    ]);
+    let _ = paint.clipboard().set_content(Some(&provider));
+}
+
+/// Files from the clipboard land at `pointer`: cut ones move here, copied ones are copied.
+fn paste(d: &Rc<RefCell<Desktop>>, pointer: (f64, f64)) {
+    let clipboard = d.borrow().paint.clipboard();
+    let weak = Rc::downgrade(d);
+    glib::spawn_future_local(async move {
+        let formats = clipboard.formats();
+        let mut found: Option<(Vec<String>, bool)> = None;
+        if formats.contain_mime_type(COPIED_FILES)
+            && let Ok((stream, _)) = clipboard.read_future(&[COPIED_FILES], glib::Priority::DEFAULT).await
+        {
+            let out = gio::MemoryOutputStream::new_resizable();
+            let flags = gio::OutputStreamSpliceFlags::CLOSE_SOURCE | gio::OutputStreamSpliceFlags::CLOSE_TARGET;
+            if out.splice_future(&stream, flags, glib::Priority::DEFAULT).await.is_ok() {
+                let bytes = out.steal_as_bytes();
+                let text = String::from_utf8_lossy(&bytes).to_string();
+                let mut lines = text.lines();
+                let cut = lines.next() == Some("cut");
+                found = Some((lines.filter(|l| !l.is_empty()).map(str::to_string).collect(), cut));
+            }
+        }
+        if found.as_ref().is_none_or(|(uris, _)| uris.is_empty())
+            && formats.contains_type(gdk::FileList::static_type())
+            && let Ok(value) = clipboard.read_value_future(gdk::FileList::static_type(), glib::Priority::DEFAULT).await
+            && let Ok(list) = value.get::<gdk::FileList>()
+        {
+            found = Some((list.files().iter().map(|f| f.uri().to_string()).collect(), false));
+        }
+        if let (Some((uris, cut)), Some(d)) = (found, weak.upgrade())
+            && !uris.is_empty()
+        {
+            import_drop(&d, uris, pointer, !cut);
+        }
+    });
+}
+
+fn select_all(d: &Rc<RefCell<Desktop>>) {
+    let selected = surfaces()
+        .iter()
+        .flat_map(|d| {
+            let d = d.borrow();
+            d.items.iter().filter(|i| d.visible(i)).map(|i| i.data.name.clone()).collect::<Vec<_>>()
+        })
+        .collect();
+    d.borrow_mut().select(selected);
+    animate(d);
+}
+
+/// Where keyboard paste lands: the middle of this screen.
+fn screen_middle(d: &Rc<RefCell<Desktop>>) -> (f64, f64) {
+    let state = d.borrow();
+    (state.grid.width as f64 / 2.0, state.geometry.1 as f64 / 2.0)
 }
 /// True means a filesystem change is needed; empty and unchanged names just dismiss.
 fn rename_name_changed(name: &str, original: &str) -> Result<bool, &'static str> {
@@ -2077,6 +2241,12 @@ fn rename(d: &Rc<RefCell<Desktop>>) {
             }
             Ok(true) => {}
         }
+        // A name already in use gets a number, the way New Folder and drops do: "test (2)".
+        let name = collision_name(std::ffi::OsStr::new(&name), directory, |candidate| {
+            path.with_file_name(candidate).symlink_metadata().is_ok()
+        })
+        .to_string_lossy()
+        .into_owned();
         busy.set(true);
         entry.set_editable(false);
         let source_path = path.clone();
@@ -2257,14 +2427,20 @@ enum MenuAction {
     DisplaySettings,
     Open,
     Reveal,
-    Rename,
+    Cut,
+    Copy,
     CopyPath,
+    Rename,
+    Duplicate,
     Trash,
+    Undo,
+    Paste,
+    SelectAll,
 }
 impl MenuAction {
     fn label(self) -> &'static str {
         match self {
-            Self::NewFolder => "New Folder",
+            Self::NewFolder => "New Folder…",
             Self::Wallpaper => "Change Wallpaper",
             Self::Terminal => "Open Terminal Here",
             Self::Sort => "Sort by Name",
@@ -2274,29 +2450,70 @@ impl MenuAction {
             Self::DisplaySettings => "Display Settings",
             Self::Open => "Open",
             Self::Reveal => "Show in Files",
-            Self::Rename => "Rename",
+            Self::Cut => "Cut",
+            Self::Copy => "Copy",
             Self::CopyPath => "Copy Path",
+            Self::Rename => "Rename…",
+            Self::Duplicate => "Duplicate",
             Self::Trash => "Move to Trash",
+            Self::Undo => "Undo",
+            Self::Paste => "Paste",
+            Self::SelectAll => "Select All",
+        }
+    }
+
+    /// The same glyphs Files uses for these.
+    fn glyph(self) -> &'static str {
+        match self {
+            Self::NewFolder => "create_new_folder",
+            Self::Wallpaper => "wallpaper",
+            Self::Terminal => "terminal",
+            Self::Sort => "sort",
+            Self::OpenFolder => "folder_open",
+            Self::Separator => "",
+            Self::DesktopSettings => "settings",
+            Self::DisplaySettings => "monitor",
+            Self::Open => "open_in_new",
+            Self::Reveal => "folder_open",
+            Self::Cut => "content_cut",
+            Self::Copy => "content_copy",
+            Self::CopyPath => "link",
+            Self::Rename => "edit",
+            Self::Duplicate => "library_add",
+            Self::Trash => "delete",
+            Self::Undo => "undo",
+            Self::Paste => "content_paste",
+            Self::SelectAll => "select_all",
+        }
+    }
+
+    fn keys(self) -> &'static str {
+        match self {
+            Self::Cut => "Ctrl+X",
+            Self::Copy => "Ctrl+C",
+            Self::Paste => "Ctrl+V",
+            Self::SelectAll => "Ctrl+A",
+            Self::Undo => "Ctrl+Z",
+            Self::Rename => "F2",
+            Self::Trash => "Delete",
+            Self::Open => "Enter",
+            _ => "",
         }
     }
 }
-fn menu_entries(on_icon: bool, selected: usize) -> Vec<MenuAction> {
+fn menu_entries(on_icon: bool, selected: usize, undo: bool) -> Vec<MenuAction> {
     use MenuAction::*;
     if !on_icon {
-        vec![
-            NewFolder,
-            Wallpaper,
-            Terminal,
-            Sort,
-            OpenFolder,
-            Separator,
-            DesktopSettings,
-            DisplaySettings,
-        ]
+        let mut rows = vec![NewFolder, Paste, SelectAll];
+        if undo {
+            rows.push(Undo);
+        }
+        rows.extend([Separator, Terminal, Sort, OpenFolder, Separator, Wallpaper, DesktopSettings, DisplaySettings]);
+        rows
     } else if selected > 1 {
-        vec![Open, Trash]
+        vec![Open, Separator, Cut, Copy, Duplicate, Separator, Trash]
     } else {
-        vec![Open, Reveal, Rename, CopyPath, Trash]
+        vec![Open, Reveal, Separator, Cut, Copy, CopyPath, Separator, Rename, Duplicate, Separator, Trash]
     }
 }
 fn menu(d: &Rc<RefCell<Desktop>>, on_icon: bool, x: f64, y: f64) {
@@ -2310,7 +2527,7 @@ fn menu(d: &Rc<RefCell<Desktop>>, on_icon: bool, x: f64, y: f64) {
             app,
             state.monitor.clone(),
             state.folder.clone(),
-            menu_entries(on_icon, state.selected.len()),
+            menu_entries(on_icon, state.selected.len(), can_undo()),
             state
                 .items
                 .iter()
@@ -2332,6 +2549,28 @@ fn menu(d: &Rc<RefCell<Desktop>>, on_icon: bool, x: f64, y: f64) {
             let files = files.clone();
             let paint = clipboard.clone();
             let row = Row::item(action.label(), move || match action {
+                MenuAction::Cut | MenuAction::Copy => clip(&paint, &files, action == MenuAction::Cut),
+                MenuAction::Paste => {
+                    if let Some(d) = weak.upgrade() {
+                        paste(&d, (x, y));
+                    }
+                }
+                MenuAction::Duplicate => {
+                    if let Some(d) = weak.upgrade() {
+                        let uris = files.iter().map(|f| gio::File::for_path(&f.path).uri().to_string()).collect();
+                        import_drop(&d, uris, (x + 24.0, y + 24.0), true);
+                    }
+                }
+                MenuAction::SelectAll => {
+                    if let Some(d) = weak.upgrade() {
+                        select_all(&d);
+                    }
+                }
+                MenuAction::Undo => {
+                    if let Some(d) = weak.upgrade() {
+                        undo_trash(&d);
+                    }
+                }
                 MenuAction::NewFolder => {
                     let folder = folder.clone();
                     let weak = weak.clone();
@@ -2423,9 +2662,14 @@ fn menu(d: &Rc<RefCell<Desktop>>, on_icon: bool, x: f64, y: f64) {
                         paint.clipboard().set_text(&file.path.to_string_lossy());
                     }
                 }
-                MenuAction::Trash => trash(files.iter().map(|f| f.path.clone()).collect()),
+                MenuAction::Trash => {
+                    if let Some(d) = weak.upgrade() {
+                        trash(&d, files.iter().map(|f| f.path.clone()).collect());
+                    }
+                }
                 MenuAction::Separator => {}
             });
+            let row = row.glyph(action.glyph()).hint(action.keys());
             if action == MenuAction::Trash {
                 row.danger()
             } else {
@@ -2805,7 +3049,7 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
         if uris.is_empty() {
             return false;
         }
-        import_drop(&d, uris, (x, y));
+        import_drop(&d, uris, (x, y), false);
         true
     });
     paint.add_controller(target);
@@ -2826,9 +3070,22 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
                 files.iter().for_each(open);
             }
             gdk::Key::Delete | gdk::Key::KP_Delete => {
-                trash(selected_files(&d).into_iter().map(|f| f.path).collect());
+                trash(&d, selected_files(&d).into_iter().map(|f| f.path).collect());
             }
             gdk::Key::F2 => rename(&d),
+            gdk::Key::z | gdk::Key::Z if mods.contains(gdk::ModifierType::CONTROL_MASK) => undo_trash(&d),
+            gdk::Key::c | gdk::Key::C if mods.contains(gdk::ModifierType::CONTROL_MASK) => {
+                let paint = d.borrow().paint.clone();
+                clip(&paint, &selected_files(&d), false);
+            }
+            gdk::Key::x | gdk::Key::X if mods.contains(gdk::ModifierType::CONTROL_MASK) => {
+                let paint = d.borrow().paint.clone();
+                clip(&paint, &selected_files(&d), true);
+            }
+            gdk::Key::v | gdk::Key::V if mods.contains(gdk::ModifierType::CONTROL_MASK) => {
+                let middle = screen_middle(&d);
+                paste(&d, middle);
+            }
             gdk::Key::Escape => {
                 cancel_drag(&d);
                 {
@@ -2838,21 +3095,7 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
                 }
                 animate(&d);
             }
-            gdk::Key::a | gdk::Key::A if mods.contains(gdk::ModifierType::CONTROL_MASK) => {
-                let selected = surfaces()
-                    .iter()
-                    .flat_map(|d| {
-                        let d = d.borrow();
-                        d.items
-                            .iter()
-                            .filter(|i| d.visible(i))
-                            .map(|i| i.data.name.clone())
-                            .collect::<Vec<_>>()
-                    })
-                    .collect();
-                d.borrow_mut().select(selected);
-                animate(&d);
-            }
+            gdk::Key::a | gdk::Key::A if mods.contains(gdk::ModifierType::CONTROL_MASK) => select_all(&d),
             _ => return glib::Propagation::Proceed,
         }
         glib::Propagation::Stop
@@ -3538,13 +3781,14 @@ fn plan_imports(
     uris: Vec<String>,
     folder: &Path,
     mut reserved: BTreeSet<String>,
+    copy: bool,
 ) -> Vec<ImportPlan> {
     uris.into_iter()
         .filter_map(|uri| {
             let file = gio::File::for_uri(&uri);
             let name = file.basename()?;
             let original = folder.join(&name);
-            let dest = if file.equal(&gio::File::for_path(&original)) {
+            let dest = if !copy && file.equal(&gio::File::for_path(&original)) {
                 original // Already on the desktop: reposition the existing item.
             } else {
                 let directory = file
@@ -3562,7 +3806,7 @@ fn plan_imports(
         .collect()
 }
 
-fn import_drop(d: &Rc<RefCell<Desktop>>, uris: Vec<String>, pointer: (f64, f64)) {
+fn import_drop(d: &Rc<RefCell<Desktop>>, uris: Vec<String>, pointer: (f64, f64), copy: bool) {
     let (grid, page) = {
         let state = d.borrow();
         (state.grid, state.page)
@@ -3597,7 +3841,7 @@ fn import_drop(d: &Rc<RefCell<Desktop>>, uris: Vec<String>, pointer: (f64, f64))
                 state.shared.borrow().saved.keys().cloned().collect(),
             )
         };
-        let plans = gio::spawn_blocking(move || plan_imports(uris, &folder, reserved)).await;
+        let plans = gio::spawn_blocking(move || plan_imports(uris, &folder, reserved, copy)).await;
         let Ok(plans) = plans else {
             {
                 let mut state = d.borrow_mut();
@@ -3643,7 +3887,7 @@ fn import_drop(d: &Rc<RefCell<Desktop>>, uris: Vec<String>, pointer: (f64, f64))
         let results = gio::spawn_blocking(move || {
             plans
                 .into_iter()
-                .map(|plan| import(&gio::File::for_uri(&plan.uri), &plan.dest))
+                .map(|plan| import(&gio::File::for_uri(&plan.uri), &plan.dest, copy))
                 .collect::<Vec<_>>()
         })
         .await;
@@ -3673,12 +3917,18 @@ fn import_drop(d: &Rc<RefCell<Desktop>>, uris: Vec<String>, pointer: (f64, f64))
     });
 }
 
-fn import(file: &gio::File, dest: &Path) -> Result<(), String> {
+fn import(file: &gio::File, dest: &Path, copy: bool) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
     let folder = dest.parent().ok_or("Missing destination folder")?;
     let target = gio::File::for_path(dest);
     if file.equal(&target) {
         return Ok(());
+    }
+    if copy {
+        return match file.path() {
+            Some(path) => copy_tree(&path, dest).map_err(|e| e.to_string()),
+            None => file.copy(&target, gio::FileCopyFlags::NONE, gio::Cancellable::NONE, None).map_err(|e| e.to_string()),
+        };
     }
     if let Some(path) = file.path() {
         // Compare devices without following the source symlink; a cross-device drop is a
@@ -4162,7 +4412,7 @@ mod tests {
             .iter()
             .map(|p| gio::File::for_path(p).uri().to_string())
             .collect();
-        let plans = plan_imports(uris, &desktop, BTreeSet::new());
+        let plans = plan_imports(uris, &desktop, BTreeSet::new(), false);
         assert_eq!(
             plans.iter().map(|p| p.dest.clone()).collect::<Vec<_>>(),
             [
@@ -4174,7 +4424,7 @@ mod tests {
         assert!(!desktop.join("a (3).txt").exists());
         assert!(!desktop.join("a (4).txt").exists());
         for plan in plans {
-            import(&gio::File::for_uri(&plan.uri), &plan.dest).unwrap();
+            import(&gio::File::for_uri(&plan.uri), &plan.dest, false).unwrap();
         }
         assert_eq!(std::fs::read(desktop.join("a.txt")).unwrap(), b"desktop");
         assert_eq!(std::fs::read(desktop.join("a (3).txt")).unwrap(), b"first");
@@ -4658,13 +4908,13 @@ mod tests {
         let source = dir.join("a");
         let dest = dir.join("Desktop/a");
         std::fs::write(&source, b"original").unwrap();
-        import(&gio::File::for_path(&source), &dest).unwrap();
+        import(&gio::File::for_path(&source), &dest, false).unwrap();
         assert!(!source.exists());
         std::fs::write(&source, b"replacement").unwrap();
-        assert!(import(&gio::File::for_path(&source), &dest).is_err());
+        assert!(import(&gio::File::for_path(&source), &dest, false).is_err());
         assert_eq!(std::fs::read(&dest).unwrap(), b"original");
         assert_eq!(std::fs::read(&source).unwrap(), b"replacement");
-        import(&gio::File::for_path(&dest), &dest).unwrap();
+        import(&gio::File::for_path(&dest), &dest, false).unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
@@ -4687,58 +4937,35 @@ mod tests {
         assert!(!crate::config::Prefs::from(&disabled).desktop_icons);
     }
     #[test]
-    fn desktop_menu_entries_follow_context_and_order() {
+    fn a_name_in_use_gets_the_next_number_and_copies_leave_the_source() {
+        let root = std::env::temp_dir().join(format!("digit-desk-names-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("test")).unwrap();
+        std::fs::create_dir_all(root.join("test (2)")).unwrap();
+        let free = collision_name(std::ffi::OsStr::new("test"), true, |c| root.join(c).symlink_metadata().is_ok());
+        assert_eq!(free, "test (3)");
+        std::fs::write(root.join("a.txt"), "x").unwrap();
+        let uri = gio::File::for_path(root.join("a.txt")).uri().to_string();
+        let plans = plan_imports(vec![uri], &root, BTreeSet::new(), true);
+        assert_eq!(plans[0].dest, root.join("a (2).txt"), "a copy onto itself is a duplicate");
+        import(&gio::File::for_uri(&plans[0].uri), &plans[0].dest, true).unwrap();
+        assert!(root.join("a.txt").exists() && root.join("a (2).txt").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn menus_follow_files_order_and_undo_shows_only_when_possible() {
         use MenuAction::*;
-        for count in [0, 1, 3] {
-            assert_eq!(
-                menu_entries(false, count),
-                vec![
-                    NewFolder,
-                    Wallpaper,
-                    Terminal,
-                    Sort,
-                    OpenFolder,
-                    Separator,
-                    DesktopSettings,
-                    DisplaySettings
-                ]
-            );
+        let empty = menu_entries(false, 0, false);
+        assert_eq!(&empty[..3], &[NewFolder, Paste, SelectAll]);
+        assert!(!empty.contains(&Undo));
+        assert!(menu_entries(false, 3, true).contains(&Undo));
+        assert_eq!(menu_entries(true, 1, true), vec![Open, Reveal, Separator, Cut, Copy, CopyPath, Separator, Rename, Duplicate, Separator, Trash]);
+        for count in [2, 20] {
+            assert_eq!(menu_entries(true, count, false), vec![Open, Separator, Cut, Copy, Duplicate, Separator, Trash]);
         }
-        assert_eq!(
-            menu_entries(true, 1),
-            vec![Open, Reveal, Rename, CopyPath, Trash]
-        );
-        assert_eq!(menu_entries(true, 2), vec![Open, Trash]);
-        assert_eq!(menu_entries(true, 20), vec![Open, Trash]);
-        assert_eq!(
-            menu_entries(false, 0)
-                .iter()
-                .map(|a| a.label())
-                .collect::<Vec<_>>(),
-            vec![
-                "New Folder",
-                "Change Wallpaper",
-                "Open Terminal Here",
-                "Sort by Name",
-                "Open Desktop Folder",
-                "",
-                "Desktop Settings",
-                "Display Settings",
-            ]
-        );
-        assert_eq!(
-            menu_entries(true, 1)
-                .iter()
-                .map(|a| a.label())
-                .collect::<Vec<_>>(),
-            vec![
-                "Open",
-                "Show in Files",
-                "Rename",
-                "Copy Path",
-                "Move to Trash",
-            ]
-        );
+        for action in menu_entries(true, 1, false).into_iter().chain(menu_entries(false, 0, true)) {
+            assert_eq!(action.glyph().is_empty(), action == Separator);
+        }
     }
     #[test]
     fn next_folder_name_starts_at_two_and_fills_gaps() {
