@@ -250,10 +250,13 @@ fn commit(st: &Shared) {
         }
         s.items.get(s.selected).map(|i| i.id)
     };
+    if id.is_some() {
+        compositor::hold_focus();
+    }
     close(st);
     if let Some(id) = id {
         glib::spawn_future_local(async move {
-            let _ = gio::spawn_blocking(move || compositor::focus(id)).await;
+            let _ = gio::spawn_blocking(move || compositor::focus_after_panel(id)).await;
         });
     }
 }

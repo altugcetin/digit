@@ -260,7 +260,7 @@ pub fn switcher(app: Rc<App>, ids: Vec<String>, entry: Option<usize>, query: Str
             fresh = true;
         }
         let Some(id) = target else { return };
-        let _ = blocking(move || compositor::focus(id)).await;
+        let _ = blocking(move || compositor::focus_after_panel(id)).await;
         glib::timeout_future(Duration::from_millis(if fresh { 4500 } else { 280 })).await;
         let focused = blocking(compositor::focused_app).await.flatten().unwrap_or_default();
         if !wanted(&focused) {

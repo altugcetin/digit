@@ -1370,7 +1370,7 @@ impl Launcher {
             }
             Act::Window(id) => {
                 glib::spawn_future_local(async move {
-                    let _ = gio::spawn_blocking(move || compositor::focus(id)).await;
+                    let _ = gio::spawn_blocking(move || compositor::focus_after_panel(id)).await;
                 });
             }
             Act::Copy(text) => {

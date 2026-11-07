@@ -121,6 +121,23 @@ pub fn focus(id: u64) {
     kit::wm::focus(id);
 }
 
+/// Keeps the pointer from taking focus away for a second after a keyboard switch.
+pub fn hold_focus() {
+    kit::wm::hold_pointer_focus(Duration::from_secs(1));
+}
+
+/// For a panel that just gave up the keyboard. Hyprland refuses focus until it has seen that
+/// commit, and as the panel goes it may refocus what's under the pointer, so watch that moment.
+pub fn focus_after_panel(id: u64) {
+    hold_focus();
+    for _ in 0..15 {
+        if focused_id() != Some(id) {
+            focus(id);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 pub fn overview() {
     match kit::wm::which() {
         kit::wm::Wm::Niri => {

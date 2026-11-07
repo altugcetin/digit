@@ -434,7 +434,7 @@ fn pick(st: &Shared, spot: Spot) {
     close(st);
     if let Some((space, id)) = target {
         glib::spawn_future_local(async move {
-            let _ = gio::spawn_blocking(move || if space { compositor::focus_space(id) } else { compositor::focus(id) }).await;
+            let _ = gio::spawn_blocking(move || if space { compositor::focus_space(id) } else { compositor::focus_after_panel(id) }).await;
         });
     }
 }

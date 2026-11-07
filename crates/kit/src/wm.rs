@@ -2,7 +2,8 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -262,8 +263,53 @@ pub fn focused_window() -> Option<Win> {
 pub fn focus(id: u64) -> bool {
     match which() {
         Wm::Niri => niri(json!({ "Action": { "FocusWindow": { "id": id } } })).is_some(),
-        Wm::Hyprland => hypr_dispatch(&format!("focuswindow address:0x{id:x}"), &format!("hl.dsp.focus({{ window = \"address:0x{id:x}\" }})")),
+        Wm::Hyprland => {
+            let focused = hypr_dispatch(&format!("focuswindow address:0x{id:x}"), &format!("hl.dsp.focus({{ window = \"address:0x{id:x}\" }})"));
+            // Focus alone leaves a floating window behind the ones over it.
+            if focused {
+                hypr_dispatch(&format!("alterzorder top,address:0x{id:x}"), &format!("hl.dsp.window.alter_zorder({{ mode = \"top\", window = \"address:0x{id:x}\" }})"));
+            }
+            focused
+        }
         Wm::Other => false,
+    }
+}
+
+static HOLDS: AtomicU64 = AtomicU64::new(0);
+static FOLLOW_MOUSE: Mutex<Option<i64>> = Mutex::new(None);
+
+fn set_follow_mouse(value: i64) {
+    hypr(&format!("eval hl.config({{ input = {{ follow_mouse = {value} }} }})"));
+}
+
+/// Hyprland: for this long the pointer can't move focus, only a click can. Asking again extends it.
+pub fn hold_pointer_focus(span: Duration) {
+    if which() != Wm::Hyprland {
+        return;
+    }
+    let hold = HOLDS.fetch_add(1, Ordering::Relaxed) + 1;
+    let Ok(mut before) = FOLLOW_MOUSE.lock() else { return };
+    if before.is_none() {
+        *before = hypr_json("getoption input:follow_mouse").and_then(|o| o.get("int")?.as_i64());
+        if before.is_none_or(|value| value == 0) {
+            *before = None;
+            return;
+        }
+        set_follow_mouse(0);
+    }
+    drop(before);
+    std::thread::spawn(move || {
+        std::thread::sleep(span);
+        if HOLDS.load(Ordering::Relaxed) == hold {
+            release_pointer_focus();
+        }
+    });
+}
+
+pub fn release_pointer_focus() {
+    let before = FOLLOW_MOUSE.lock().ok().and_then(|mut before| before.take());
+    if let Some(value) = before {
+        set_follow_mouse(value);
     }
 }
 
