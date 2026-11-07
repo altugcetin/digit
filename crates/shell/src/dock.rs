@@ -125,6 +125,7 @@ struct State {
     /// Order of the running, unpinned apps after the user rearranged them.
     order: Vec<String>,
     icons: HashMap<String, Option<gdk::Paintable>>,
+    icon_key: Option<crate::icons::DockKey>,
     slide: HashMap<String, Tween>,
     appear: HashMap<String, Tween>,
     pointer: Option<(f64, f64)>,
@@ -332,8 +333,11 @@ pub fn apply(app: &Rc<App>) {
     };
     let layer = if mode == Mode::On { Layer::Top } else { Layer::Overlay };
     let reuse = old.filter(|st| {
-        let s = st.borrow();
-        s.geo.side == geo.side && s.output == output && s.window.layer() == layer
+        let (side, old_output, window) = {
+            let s = st.borrow();
+            (s.geo.side, s.output.clone(), s.window.clone())
+        };
+        side == geo.side && old_output == output && window.layer() == layer
     });
     let st = match reuse {
         Some(st) => st,
@@ -358,11 +362,12 @@ pub fn apply(app: &Rc<App>) {
             st
         }
     };
+    let resize = {
+        let s = st.borrow();
+        (s.geo != geo).then(|| s.paint.clone())
+    };
     {
         let mut s = st.borrow_mut();
-        if s.geo != geo {
-            s.paint.set_size_request(if geo.side == Side::Bottom { 1 } else { geo.depth() as i32 }, if geo.side == Side::Bottom { geo.depth() as i32 } else { 1 });
-        }
         s.geo = geo;
         s.mode = mode;
         s.running = prefs.running;
@@ -372,15 +377,20 @@ pub fn apply(app: &Rc<App>) {
         s.art.clear();
         crate::art::forget();
     }
+    if let Some(paint) = resize {
+        paint.set_size_request(if geo.side == Side::Bottom { 1 } else { geo.depth() as i32 }, if geo.side == Side::Bottom { geo.depth() as i32 } else { 1 });
+    }
     // Notches own triggers on configured shell outputs. The dock historically also
     // offered Control Center on its other outputs; keep that scope at any corner.
-    for trigger in std::mem::take(&mut st.borrow_mut().panel_triggers) { trigger.destroy(); }
+    let triggers = std::mem::take(&mut st.borrow_mut().panel_triggers);
+    for trigger in triggers { trigger.destroy(); }
     let extra: Vec<gdk::Monitor> = gdk::Display::default()
         .map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).filter(|m| {
             let name = m.connector().map(|c| c.to_string()).unwrap_or_default();
             !app.cfg.outputs.is_empty() && !app.cfg.outputs.contains(&name) && (prefs.output.is_none() || name == output)
         }).collect()).unwrap_or_default();
-    st.borrow_mut().panel_triggers = extra.iter().flat_map(|m| crate::panel_corner::triggers(app, m)).collect();
+    let triggers = extra.iter().flat_map(|m| crate::panel_corner::triggers(app, m)).collect();
+    st.borrow_mut().panel_triggers = triggers;
     rebuild(&st);
     settle(&st);
     crate::panel_corner::refresh(app);
@@ -522,6 +532,7 @@ fn build(app: &Rc<App>, geo: Geo, monitor: Option<&gdk::Monitor>, output: String
         items: Vec::new(),
         pins: load_pins(app),
         icons: HashMap::new(),
+        icon_key: None,
         slide: HashMap::new(),
         appear: HashMap::new(),
         pointer: None,
@@ -634,7 +645,8 @@ fn wire(st: &Shared) {
             glib::idle_add_local_once(move || {
                 if let Some(st) = weak.upgrade() {
                     paint_art(&st);
-                    st.borrow().paint.queue_draw();
+                    let paint = st.borrow().paint.clone();
+                    paint.queue_draw();
                 }
             });
         }
@@ -642,7 +654,7 @@ fn wire(st: &Shared) {
 }
 
 fn rebuild(st: &Shared) {
-    let mut s = st.borrow_mut();
+    let s = st.borrow();
     let now = glib::monotonic_time();
     let before = s.centers(now);
     let app = s.app.clone();
@@ -678,18 +690,38 @@ fn rebuild(st: &Shared) {
     for it in items.iter_mut() {
         it.badge = badges.get(&it.name).copied().unwrap_or(0);
     }
-    let scale = s.window.scale_factor().max(1);
+    // Resolve through GTK only after releasing the state borrow: lookups and
+    // rendering can synchronously emit signals back into the dock.
+    let window = s.window.clone();
+    let style = s.style;
     let px = s.geo.icon_px();
-    for it in &items {
-        if !s.icons.contains_key(&it.key) {
-            let icon = it.entry.and_then(|i| list.get(i)?.icon.clone()).and_then(|g| {
-                let display = gdk::Display::default()?;
-                Some(gtk::IconTheme::for_display(&display).lookup_by_gicon(&g, px, scale, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty()).upcast::<gdk::Paintable>())
-            });
-            let icon = icon.or_else(|| draw::app_icon(&app.apps, &it.key, px, scale));
-            s.icons.insert(it.key.clone(), icon);
+    let wanted: Vec<_> = items.iter().map(|it| {
+        (it.key.clone(), it.entry.and_then(|i| list.get(i)?.icon.clone()))
+    }).collect();
+    drop(s);
+    let scale = window.scale_factor().max(1);
+    let active = gtk::Settings::default().and_then(|s| s.gtk_icon_theme_name()).unwrap_or_else(|| "Adwaita".into());
+    let key = crate::icons::DockKey::new(style, &active, px, scale);
+    {
+        let mut s = st.borrow_mut();
+        if s.icon_key.as_ref() != Some(&key) {
+            s.icons.clear();
+            s.art.clear();
+            s.icon_key = Some(key.clone());
         }
     }
+    let missing: Vec<_> = {
+        let s = st.borrow();
+        wanted.into_iter().filter(|(id, _)| !s.icons.contains_key(id)).collect()
+    };
+    if let Some(display) = gdk::Display::default() {
+        let theme = crate::icons::dock_theme(&display, &key);
+        for (id, icon) in missing {
+            let icon = crate::icons::dock_icon(&theme, icon.as_ref(), &id, &key);
+            st.borrow_mut().icons.insert(id, icon);
+        }
+    }
+    let mut s = st.borrow_mut();
     let live: Vec<String> = items.iter().filter(|i| !i.windows.is_empty()).map(|i| i.key.clone()).collect();
     s.bounce.retain(|(k, t)| !live.contains(k) && now - t < 4 * BOUNCE);
     if s.icons.len() > 64 {
@@ -726,31 +758,27 @@ fn rebuild(st: &Shared) {
     drop(s);
     paint_art(st);
     region(st);
-    st.borrow().paint.queue_draw();
+    let paint = st.borrow().paint.clone();
+    paint.queue_draw();
 }
 
 fn paint_art(st: &Shared) {
-    let mut s = st.borrow_mut();
-    if s.paint.native().and_then(|n| n.renderer()).is_none() {
+    let (paint, app, px, style, wanted) = {
+        let s = st.borrow();
+        let wanted: Vec<_> = s.items.iter().map(|i| (i.key.clone(), i.name.clone(), s.icons.get(&i.key).cloned().flatten())).collect();
+        (s.paint.clone(), s.app.clone(), s.geo.icon_px() as f64, s.style, wanted)
+    };
+    if paint.native().and_then(|n| n.renderer()).is_none() {
         return;
     }
-    let px = s.geo.icon_px() as f64;
-    let accent = s.app.palette.get().accent;
-    let style = s.style;
-    let paint = s.paint.clone();
-    let app = s.app.clone();
-    let wanted: Vec<(String, String)> = s.items.iter().filter(|i| !s.art.contains_key(&i.key)).map(|i| (i.key.clone(), i.name.clone())).collect();
-    for (key, name) in wanted {
-        let icon = s.icons.get(&key).cloned().flatten();
-        if matches!(style, crate::art::Style::Light | crate::art::Style::Graphite) && themed(icon.as_ref()) {
-            continue;
-        }
+    let accent = app.palette.get().accent;
+    let mut art = HashMap::new();
+    for (key, name, icon) in wanted {
         if let Some(t) = crate::art::texture(&paint, &key, icon.as_ref(), &name, px, style, accent, &app.cfg) {
-            s.art.insert(key, t);
+            art.insert(key, t);
         }
     }
-    let keep: Vec<String> = s.items.iter().map(|i| i.key.clone()).collect();
-    s.art.retain(|k, _| keep.contains(k));
+    st.borrow_mut().art = art;
 }
 
 fn wants(s: &State) -> bool {
@@ -796,12 +824,6 @@ fn settle(st: &Shared) {
             region(&st);
         }
     });
-}
-
-fn themed(icon: Option<&gdk::Paintable>) -> bool {
-    let Some(theme) = gtk::Settings::default().and_then(|s| s.gtk_icon_theme_name()) else { return false };
-    let Some(path) = icon.and_then(|p| p.downcast_ref::<gtk::IconPaintable>()).and_then(|p| p.file()).and_then(|f| f.path()) else { return false };
-    path.to_string_lossy().contains(&format!("/icons/{theme}/"))
 }
 
 fn enter(st: &Shared, x: f64, y: f64) {

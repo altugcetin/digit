@@ -1,4 +1,5 @@
-use gtk::{gdk, glib};
+use crate::art::Style;
+use gtk::{gdk, gio, glib, prelude::*};
 
 const BUNDLED: &[(&str, &[u8])] = &[("niri", include_bytes!("../../../data/icons/niri.svg"))];
 
@@ -22,5 +23,74 @@ pub fn theme(name: Option<&str>) {
     match name.filter(|n| !n.is_empty() && !n.chars().any(char::is_control)) {
         Some(n) => settings.set_gtk_icon_theme_name(Some(n)),
         None => settings.set_gtk_icon_theme_name(Some("Adwaita")),
+    }
+}
+
+/// Styled icons use the original application artwork (Adwaita/hicolor), never
+/// replacements from the desktop's selected icon pack.
+pub fn source_theme(style: Style, active: &str) -> &str {
+    if style == Style::Native { active } else { "Adwaita" }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DockKey {
+    pub style: Style,
+    pub theme: String,
+    pub px: i32,
+    pub scale: i32,
+}
+
+impl DockKey {
+    pub fn new(style: Style, active: &str, px: i32, scale: i32) -> Self {
+        Self { style, theme: source_theme(style, active).to_owned(), px, scale }
+    }
+}
+
+pub fn dock_theme(display: &gdk::Display, key: &DockKey) -> gtk::IconTheme {
+    let active = gtk::IconTheme::for_display(display);
+    if key.style == Style::Native {
+        return active;
+    }
+    let theme = gtk::IconTheme::new();
+    let paths = active.search_path();
+    theme.set_search_path(&paths.iter().map(|p| p.as_path()).collect::<Vec<_>>());
+    let paths = active.resource_path();
+    theme.set_resource_path(&paths.iter().map(|p| p.as_str()).collect::<Vec<_>>());
+    theme.set_theme_name(Some(&key.theme));
+    theme
+}
+
+pub fn dock_icon(theme: &gtk::IconTheme, icon: Option<&gio::Icon>, app_id: &str, key: &DockKey) -> Option<gdk::Paintable> {
+    let paintable = match icon {
+        Some(icon) => theme.lookup_by_gicon(icon, key.px, key.scale, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty()),
+        None if !app_id.is_empty() && theme.has_icon(app_id) => theme.lookup_icon(app_id, &[], key.px, key.scale, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty()),
+        None => return None,
+    };
+    Some(paintable.upcast())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_original_uses_the_selected_icon_pack() {
+        for active in ["Adwaita", "Papirus-Dark", "Tela-circle-dark"] {
+            assert_eq!(source_theme(Style::Native, active), active);
+            for preference in ["light", "graphite", "tile", "mono", "tinted"] {
+                assert_eq!(source_theme(Style::parse(preference), active), "Adwaita");
+            }
+            assert_eq!(source_theme(Style::parse("native"), active), active);
+        }
+    }
+
+    #[test]
+    fn dock_cache_tracks_style_source_size_and_scale() {
+        let key = DockKey::new(Style::Light, "Adwaita", 64, 1);
+        assert_eq!(key, DockKey::new(Style::Light, "Papirus", 64, 1));
+        assert_ne!(key, DockKey::new(Style::Graphite, "Adwaita", 64, 1));
+        assert_ne!(key, DockKey::new(Style::Light, "Adwaita", 96, 1));
+        assert_ne!(key, DockKey::new(Style::Light, "Adwaita", 64, 2));
+        assert_ne!(DockKey::new(Style::Native, "Adwaita", 64, 1), DockKey::new(Style::Native, "Papirus", 64, 1));
     }
 }
