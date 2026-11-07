@@ -6,6 +6,11 @@ use std::time::{Duration, Instant};
 
 pub const ATTRS: &str = "standard::name,standard::display-name,standard::edit-name,standard::type,standard::size,standard::icon,standard::fast-content-type,standard::is-hidden,standard::is-backup,standard::is-symlink,standard::target-uri,time::modified,access::can-write,access::can-trash,access::can-rename,trash::orig-path,trash::deletion-date,unix::mode";
 pub const SIZES: [i32; 6] = [40, 56, 72, 96, 128, 176];
+// Match the desktop cell, regardless of Files zoom or grid/list allocation.
+const DRAG_ICON: f64 = 64.0;
+const DRAG_CELL: (f64, f64) = (112.0, 116.0);
+const DRAG_NAME_Y: f64 = DRAG_ICON + 6.0;
+type DragRect = (f64, f64, f64, f64);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -44,6 +49,7 @@ pub struct Pane {
     search_cache: RefCell<Option<search::Cache>>,
     pub cut: Rc<RefCell<Vec<String>>>,
     pending: RefCell<Option<String>>,
+    dragging: RefCell<Vec<gio::FileInfo>>,
 }
 
 fn position(item: &glib::WeakRef<glib::Object>) -> Option<u32> {
@@ -149,6 +155,101 @@ fn icon_for(info: &gio::FileInfo) -> gio::Icon {
     info.icon().unwrap_or_else(|| gio::ThemedIcon::new(if is_dir(info) { "folder" } else { "text-x-generic" }).upcast())
 }
 
+// Factory children are tagged in attach(); walk only realized widgets, never the
+// model's offscreen items. A list tag covers its icon + name cell, not metadata.
+fn item_widgets(view: &gtk::Widget) -> Vec<(u32, gtk::Widget)> {
+    fn visit(widget: &gtk::Widget, out: &mut Vec<(u32, gtk::Widget)>) {
+        if let Some(item) = unsafe { widget.data::<glib::WeakRef<glib::Object>>("digit-item") } {
+            if let Some(pos) = position(unsafe { item.as_ref() }) {
+                out.push((pos, widget.clone()));
+            }
+            return;
+        }
+        let mut child = widget.first_child();
+        while let Some(w) = child {
+            child = w.next_sibling();
+            visit(&w, out);
+        }
+    }
+    let mut out = Vec::new();
+    visit(view, &mut out);
+    out
+}
+
+fn stack_offset(index: usize) -> f64 {
+    index.min(2) as f64 * 8.0
+}
+
+fn preview_regions(artwork: (f64, f64), name_height: f64) -> [DragRect; 2] {
+    [((DRAG_CELL.0 - artwork.0) / 2.0, (DRAG_ICON - artwork.1) / 2.0, artwork.0, artwork.1),
+     (6.0, DRAG_NAME_Y, DRAG_CELL.0 - 12.0, name_height)]
+}
+
+fn artwork_size(aspect: f64, size: f64) -> (f64, f64) {
+    if !aspect.is_finite() || aspect <= 0.0 {
+        (size, size)
+    } else if aspect > 1.0 {
+        (size, size / aspect)
+    } else {
+        (size * aspect, size)
+    }
+}
+
+/// Preserve the relative press inside the artwork or name. Padding and list
+/// metadata have no counterpart on the card: use the nearest content edge.
+fn preview_grab(pointer: (f64, f64), source: [DragRect; 2], target: [DragRect; 2]) -> (f64, f64) {
+    let nearest = |r: DragRect| (pointer.0.clamp(r.0, r.0 + r.2), pointer.1.clamp(r.1, r.1 + r.3));
+    let distance = |r| {
+        let p = nearest(r);
+        (pointer.0 - p.0).powi(2) + (pointer.1 - p.1).powi(2)
+    };
+    let index = usize::from(distance(source[1]) < distance(source[0]));
+    let (x, y, w, h) = source[index];
+    let (tx, ty, tw, th) = target[index];
+    let p = nearest(source[index]);
+    (tx + (p.0 - x) / w.max(1.0) * tw, ty + (p.1 - y) / h.max(1.0) * th)
+}
+
+fn item_image(widget: &gtk::Widget) -> Option<gtk::Image> {
+    let first = widget.first_child()?;
+    first.clone().downcast::<gtk::Image>().ok()
+        .or_else(|| first.first_child().and_downcast::<gtk::Image>())
+}
+
+#[derive(Debug)]
+struct DragGeometry {
+    size: (f64, f64),
+    hotspot: (i32, i32),
+    shift: (f64, f64),
+}
+
+/// Align outer bounds to device pixels; keep drawing and the hotspot logical.
+fn drag_geometry(sizes: &[(f64, f64)], grab: (f64, f64), badge: Option<(f64, f64)>, scale: i32) -> DragGeometry {
+    let scale = scale.max(1) as f64;
+    let mut min = (0.0_f64.min(grab.0), 0.0_f64.min(grab.1));
+    let mut max = (grab.0, grab.1);
+    for (i, &(w, h)) in sizes.iter().take(3).enumerate() {
+        let offset = stack_offset(i);
+        max.0 = max.0.max(w + offset);
+        max.1 = max.1.max(h + offset);
+    }
+    if let (Some(&(w, _)), Some((bw, bh))) = (sizes.first(), badge) {
+        min.0 = min.0.min(w - bw);
+        max.1 = max.1.max(bh);
+    }
+    min = ((min.0 * scale).floor() / scale, (min.1 * scale).floor() / scale);
+    max = ((max.0 * scale).ceil() / scale, (max.1 * scale).ceil() / scale);
+    let hotspot = ((grab.0 - min.0).round() as i32, (grab.1 - min.1).round() as i32);
+    let shift = (hotspot.0 as f64 - grab.0, hotspot.1 as f64 - grab.1);
+    // Fractional compensation can extend either edge by up to half a logical px.
+    // Reserve a pixel around all contents so nothing is clipped.
+    DragGeometry {
+        size: ((max.0 - min.0 + 2.0).ceil(), (max.1 - min.1 + 2.0).ceil()),
+        hotspot: (hotspot.0 + 1, hotspot.1 + 1),
+        shift: (shift.0 + 1.0, shift.1 + 1.0),
+    }
+}
+
 impl Pane {
     pub fn new(start: &gio::File) -> Rc<Pane> {
         let dir = gtk::DirectoryList::new(Some(ATTRS), Some(start));
@@ -240,6 +341,7 @@ impl Pane {
             search_cache: RefCell::new(None),
             cut: Rc::new(RefCell::new(Vec::new())),
             pending: RefCell::new(None),
+            dragging: RefCell::new(Vec::new()),
         });
         let columns = p.build_columns();
         if let Some(cs) = p.list.sorter() {
@@ -314,8 +416,8 @@ impl Pane {
                 }
             }
             l.set_text(&info.display_name());
-            let cut = me.upgrade().is_some_and(|p| file_of(&info).is_some_and(|f| p.cut.borrow().contains(&f.uri().to_string())));
-            b.set_opacity(if info.is_hidden() || cut { 0.55 } else { 1.0 });
+            let opacity = me.upgrade().map_or(1.0, |p| p.item_opacity(&info));
+            b.set_opacity(opacity);
             if px >= 56 {
                 thumbs::load(&img, &info, px);
             }
@@ -377,8 +479,8 @@ impl Pane {
                             }
                         }
                         l.set_text(&info.display_name());
-                        let cut = me.upgrade().is_some_and(|p| file_of(&info).is_some_and(|f| p.cut.borrow().contains(&f.uri().to_string())));
-                        b.set_opacity(if info.is_hidden() || cut { 0.55 } else { 1.0 });
+                        let opacity = me.upgrade().map_or(1.0, |p| p.item_opacity(&info));
+                        b.set_opacity(opacity);
                     }
                     1 => l.set_text(&if is_dir(&info) { "—".to_string() } else { size_text(info.size().max(0) as u64) }),
                     2 => l.set_text(&info.modification_date_time().map(|d| when(&d)).unwrap_or_default()),
@@ -485,9 +587,11 @@ impl Pane {
         let drag = gtk::DragSource::new();
         drag.set_propagation_phase(gtk::PropagationPhase::Capture);
         drag.set_actions(gdk::DragAction::COPY | gdk::DragAction::MOVE | gdk::DragAction::LINK);
+        let prepared = Rc::new(Cell::new(None));
+        let preview = prepared.clone();
         let me = self.weak();
         let v = view.clone();
-        drag.connect_prepare(move |d, x, y| {
+        drag.connect_prepare(move |_, x, y| {
             let p = me.upgrade()?;
             let pos = Pane::item_at(&v, x, y)?;
             if !p.sel.is_selected(pos) {
@@ -497,14 +601,146 @@ impl Pane {
             if files.is_empty() {
                 return None;
             }
-            if let Some(info) = p.sorted.item(pos).and_downcast::<gio::FileInfo>() {
-                let theme = gtk::IconTheme::for_display(&v.display());
-                let icon = theme.lookup_by_gicon(&icon_for(&info), 48, v.scale_factor().max(1), gtk::TextDirection::None, gtk::IconLookupFlags::empty());
-                d.set_icon(Some(&icon), 24, 24);
-            }
+            // Freeze artwork and text at desktop size before dimming the source.
+            preview.set(Some(p.drag_preview(&v, pos, (x, y))?));
             Some(gdk::ContentProvider::for_value(&gdk::FileList::from_array(&files).to_value()))
         });
+        let me = self.weak();
+        drag.connect_drag_begin(move |_, system| {
+            let Some(p) = me.upgrade() else { return };
+            if let Some((preview, hot)) = prepared.take() {
+                let _ = kit::drag::set_icon(system, &preview, hot);
+            }
+            let selected = p.selected();
+            *p.dragging.borrow_mut() = selected;
+            p.sync_drag_opacity();
+        });
+        let me = self.weak();
+        drag.connect_drag_end(move |_, _, _| {
+            let Some(p) = me.upgrade() else { return };
+            p.dragging.borrow_mut().clear();
+            p.sync_drag_opacity();
+        });
         view.add_controller(drag);
+    }
+
+    fn item_opacity(&self, info: &gio::FileInfo) -> f64 {
+        let uri = file_of(info).map(|f| f.uri().to_string());
+        let cut = uri.is_some_and(|uri| self.cut.borrow().contains(&uri));
+        let lifted = self.dragging.borrow().contains(info);
+        let base = if info.is_hidden() || cut { 0.55 } else { 1.0 };
+        base * if lifted { 0.4 } else { 1.0 }
+    }
+
+    fn sync_drag_opacity(&self) {
+        for view in [self.grid.upcast_ref(), self.list.upcast_ref()] {
+            for (pos, widget) in item_widgets(view) {
+                if let Some(info) = self.sorted.item(pos).and_downcast::<gio::FileInfo>() {
+                    let opacity = self.item_opacity(&info);
+                    widget.set_opacity(opacity);
+                }
+            }
+        }
+    }
+
+    fn drag_preview(&self, view: &gtk::Widget, anchor: u32, pointer: (f64, f64)) -> Option<(gdk::Paintable, (i32, i32))> {
+        let widgets = item_widgets(view);
+        let (_, front) = widgets.iter().find(|(pos, _)| *pos == anchor)?;
+        let image = item_image(front)?;
+        let bounds = image.compute_bounds(view)?;
+        let px = image.pixel_size().max(1) as f64;
+        let name = front.last_child()?.compute_bounds(view)?;
+        let mut entries = vec![(anchor, front.clone())];
+        entries.extend(widgets.iter().filter(|(pos, w)| *pos != anchor && self.sel.is_selected(*pos) && w.is_mapped()).take(2).cloned());
+        let theme = gtk::IconTheme::for_display(&view.display());
+        let mut cards = Vec::new();
+        for (pos, widget) in entries {
+            let info = self.sorted.item(pos).and_downcast::<gio::FileInfo>()?;
+            let image = item_image(&widget)?;
+            // Reuse loaded thumbnails. Request folders and themed icons at 64 px
+            // as list artwork may only have been loaded at 22 px.
+            let folder = is_dir(&info).then(|| target_of(&info)).flatten();
+            let icon = folder.as_ref()
+                .and_then(|f| crate::art::folder(kit::folder::glyph(f), DRAG_ICON as i32 * view.scale_factor()))
+                .map(|t| t.upcast::<gdk::Paintable>())
+                .or_else(|| folder.is_none().then(|| image.paintable()).flatten())
+                .unwrap_or_else(|| theme.lookup_by_gicon(&icon_for(&info), DRAG_ICON as i32,
+                    view.scale_factor(), view.direction(), gtk::IconLookupFlags::empty()).upcast());
+            let label = view.create_pango_layout(Some(&info.display_name()));
+            let mut font = view.pango_context().font_description().unwrap_or_default();
+            font.set_absolute_size(13.0 * pango::SCALE as f64);
+            font.set_weight(pango::Weight::Medium);
+            font.set_variations(Some("wght=520"));
+            label.set_font_description(Some(&font));
+            label.set_width((DRAG_CELL.0 as i32 - 12) * pango::SCALE);
+            label.set_height(-2);
+            label.set_wrap(pango::WrapMode::WordChar);
+            label.set_ellipsize(pango::EllipsizeMode::End);
+            label.set_alignment(pango::Alignment::Center);
+            cards.push((icon.current_image(), label));
+        }
+        let aspect = cards[0].0.intrinsic_aspect_ratio();
+        let (w, h) = artwork_size(aspect, px);
+        let artwork = (bounds.x() as f64 + (bounds.width() as f64 - w) / 2.0,
+                       bounds.y() as f64 + (bounds.height() as f64 - h) / 2.0, w, h);
+        let target = preview_regions(artwork_size(aspect, DRAG_ICON), cards[0].1.pixel_size().1 as f64);
+        let grab = preview_grab(pointer, [artwork, (name.x() as f64, name.y() as f64,
+            name.width() as f64, name.height() as f64)], target);
+        let count = self.sel.selection().size();
+        let sizes = vec![DRAG_CELL; cards.len()];
+        let badge = (count > 1).then(|| {
+            let layout = view.create_pango_layout(Some(&count.to_string()));
+            layout.set_font_description(Some(&pango::FontDescription::from_string("Readex Pro Medium 10")));
+            layout
+        });
+        let badge_size = badge.as_ref().map(|l| {
+            let (w, h) = l.pixel_size();
+            ((w + 12) as f64, (h + 6) as f64)
+        });
+        let geometry = drag_geometry(&sizes, grab, badge_size, view.scale_factor());
+        let snapshot = gtk::Snapshot::new();
+        // Resolve the same installed selection colors as the source cells.
+        #[allow(deprecated)]
+        let color = |name| view.style_context().lookup_color(name).unwrap_or_else(|| view.color());
+        let bg = color("accent_bg_color");
+        let fg = color("accent_fg_color");
+        let round = kit::style::look().round;
+        // GDK hotspots use logical, integer coordinates, even on scaled outputs.
+        // Compensate the fractional grab in the contents, rather than rounding it
+        // away. GTK/GDK scales the vector snapshot and its loaded textures.
+        snapshot.translate(&gtk::graphene::Point::new(geometry.shift.0 as f32, geometry.shift.1 as f32));
+        for (i, (icon, label)) in cards.iter().enumerate().rev() {
+            let offset = stack_offset(i);
+            snapshot.save();
+            snapshot.translate(&gtk::graphene::Point::new(offset as f32, offset as f32));
+            // The artwork and name keep their own sizes; never scale a whole
+            // grid cell or a wide list row into the drag surface.
+            snapshot.save();
+            let (w, h) = artwork_size(icon.intrinsic_aspect_ratio(), DRAG_ICON);
+            let art = preview_regions((w, h), 0.0)[0];
+            snapshot.translate(&gtk::graphene::Point::new(art.0 as f32, art.1 as f32));
+            icon.snapshot(&snapshot, w, h);
+            snapshot.restore();
+            let (_, text) = label.pixel_extents();
+            let rect = gtk::graphene::Rect::new(text.x() as f32, DRAG_NAME_Y as f32 - 1.0,
+                text.width() as f32 + 12.0, text.height() as f32 + 2.0);
+            snapshot.push_rounded_clip(&gtk::gsk::RoundedRect::from_rect(rect, (6.0 * round) as f32));
+            snapshot.append_color(&bg, &rect);
+            snapshot.pop();
+            snapshot.translate(&gtk::graphene::Point::new(6.0, DRAG_NAME_Y as f32));
+            snapshot.append_layout(label, &fg);
+            snapshot.restore();
+        }
+        if let (Some(layout), Some((w, h))) = (badge, badge_size) {
+            let rect = gtk::graphene::Rect::new((sizes[0].0 - w) as f32, 0.0, w as f32, h as f32);
+            snapshot.push_rounded_clip(&gtk::gsk::RoundedRect::from_rect(rect, h as f32 / 2.0));
+            snapshot.append_color(&bg, &rect);
+            snapshot.pop();
+            snapshot.translate(&gtk::graphene::Point::new(rect.x() + 6.0, 3.0));
+            snapshot.append_layout(&layout, &fg);
+        }
+        snapshot.to_paintable(Some(&gtk::graphene::Size::new(geometry.size.0 as f32, geometry.size.1 as f32)))
+            .map(|image| (image, geometry.hotspot))
     }
 
     fn attach(self: &Rc<Self>, w: &gtk::Box, item: glib::WeakRef<glib::Object>) {
@@ -1156,5 +1392,106 @@ impl Pane {
 impl Drop for Pane {
     fn drop(&mut self) {
         self.stop_hunt();
+    }
+}
+
+#[cfg(test)]
+mod drag_tests {
+    use super::*;
+
+    fn assert_grab(g: &DragGeometry, grab: (f64, f64)) {
+        assert!((grab.0 + g.shift.0 - g.hotspot.0 as f64).abs() < 1e-9);
+        assert!((grab.1 + g.shift.1 - g.hotspot.1 as f64).abs() < 1e-9);
+        assert!(g.hotspot.0 >= 0 && (g.hotspot.0 as f64) < g.size.0);
+        assert!(g.hotspot.1 >= 0 && (g.hotspot.1 as f64) < g.size.1);
+    }
+
+    fn assert_contains(g: &DragGeometry, rect: (f64, f64, f64, f64)) {
+        assert!(rect.0 + g.shift.0 >= 0.0);
+        assert!(rect.1 + g.shift.1 >= 0.0);
+        assert!(rect.0 + rect.2 + g.shift.0 <= g.size.0);
+        assert!(rect.1 + rect.3 + g.shift.1 <= g.size.1);
+    }
+
+    #[test]
+    fn fractional_grabs_stay_under_pointer_at_every_scale() {
+        for scale in [0, 1, 2, 3] {
+            for grab in [(0.0, 0.0), (13.25, 42.75), (97.99, 130.01)] {
+                let g = drag_geometry(&[(120.5, 144.25)], grab, None, scale);
+                assert_grab(&g, grab);
+                assert_contains(&g, (0.0, 0.0, 120.5, 144.25));
+                // Moving the pointer preserves the same world-space grab, without
+                // multiplying the logical hotspot by the output scale.
+                let pointer = (901.5, 210.25);
+                let world = (pointer.0 - g.hotspot.0 as f64 + g.shift.0 + grab.0,
+                             pointer.1 - g.hotspot.1 as f64 + g.shift.1 + grab.1);
+                assert_eq!(world, pointer);
+            }
+        }
+    }
+
+    #[test]
+    fn grid_zoom_and_list_artwork_keep_the_relative_press_at_desktop_size() {
+        let target = preview_regions((64.0, 64.0), 32.0);
+        for px in SIZES.into_iter().chain([22]) {
+            let px = px as f64;
+            let source = [(20.0, 12.0, px, px), (6.0, px + 30.0, 200.0, 32.0)];
+            for (rx, ry) in [(0.0, 0.0), (0.25, 0.75), (0.5, 0.5), (1.0, 1.0)] {
+                let grab = preview_grab((20.0 + px * rx, 12.0 + px * ry), source, target);
+                assert_eq!(grab, (24.0 + 64.0 * rx, 64.0 * ry));
+                let g = drag_geometry(&[DRAG_CELL], grab, None, 2);
+                assert_grab(&g, grab);
+                assert_eq!(g.size, (114.0, 118.0));
+            }
+        }
+    }
+
+    #[test]
+    fn names_and_list_metadata_map_into_the_compact_name_instead_of_a_wide_surface() {
+        let target = preview_regions((64.0, 64.0), 32.0);
+        let source = [(0.0, 0.0, 22.0, 22.0), (32.0, 0.0, 300.0, 22.0)];
+        for (pointer, expected) in [((107.0, 16.5), (31.0, 94.0)), ((840.75, 11.0), (106.0, 86.0))] {
+            let grab = preview_grab(pointer, source, target);
+            assert_eq!(grab, expected);
+            let g = drag_geometry(&[DRAG_CELL], grab, None, 2);
+            assert_grab(&g, grab);
+            assert_eq!(g.size, (114.0, 118.0));
+        }
+    }
+
+    #[test]
+    fn nonsquare_thumbnails_fit_64_pixels_and_keep_the_same_press() {
+        for (aspect, expected) in [(2.0, (64.0, 32.0)), (0.5, (32.0, 64.0)), (0.0, (64.0, 64.0))] {
+            let size = artwork_size(aspect, DRAG_ICON);
+            assert_eq!(size, expected);
+            let source = preview_regions(artwork_size(aspect, 176.0), 32.0);
+            let target = preview_regions(size, 32.0);
+            let art = source[0];
+            let grab = preview_grab((art.0 + art.2 * 0.25, art.1 + art.3 * 0.75), source, target);
+            assert_eq!(grab, (target[0].0 + size.0 * 0.25, target[0].1 + size.1 * 0.75));
+        }
+    }
+
+    #[test]
+    fn stack_bounds_include_different_card_sizes_and_count_badge() {
+        let sizes = [(80.0, 100.0), (160.25, 40.5), (110.75, 120.25)];
+        let g = drag_geometry(&sizes, (12.75, 24.25), Some((96.0, 28.0)), 2);
+        assert_grab(&g, (12.75, 24.25));
+        for (i, (w, h)) in sizes.into_iter().enumerate() {
+            assert_contains(&g, (stack_offset(i), stack_offset(i), w, h));
+        }
+        assert_contains(&g, (-16.0, 0.0, 96.0, 28.0));
+    }
+
+    #[test]
+    fn stack_is_capped_at_three_and_single_item_keeps_its_size() {
+        let sizes = [DRAG_CELL; 4];
+        let single = drag_geometry(&sizes[..1], (15.0, 20.0), None, 1);
+        assert_eq!(single.size, (114.0, 118.0));
+        let three = drag_geometry(&sizes[..3], (15.0, 20.0), None, 1);
+        let four = drag_geometry(&sizes, (15.0, 20.0), None, 1);
+        assert_eq!(three.size, (130.0, 134.0));
+        assert_eq!(four.size, three.size);
+        assert_eq!(four.hotspot, three.hotspot);
     }
 }

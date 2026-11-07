@@ -6,6 +6,7 @@ pub mod calc;
 pub mod color;
 pub mod corners;
 pub mod distro;
+pub mod drag;
 pub mod effects;
 pub mod folder;
 pub mod fuzzy;

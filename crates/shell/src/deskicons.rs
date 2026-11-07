@@ -315,6 +315,17 @@ struct Drag {
     origins: BTreeMap<String, (f64, f64)>,
 }
 impl Drag {
+    /// Always translate from the press, including motions before GTK starts DND.
+    fn at(&self, x: f64, y: f64) -> BTreeMap<String, (f64, f64)> {
+        let (dx, dy) = (x - self.start.0, y - self.start.1);
+        self.origins
+            .iter()
+            .map(|(name, &(ox, oy))| (name.clone(), (ox + dx, oy + dy)))
+            .collect()
+    }
+    fn restored(&self) -> BTreeMap<String, (f64, f64)> {
+        self.at(self.start.0, self.start.1)
+    }
     fn dropped(&self, grid: Grid, x: f64, y: f64, page: u32) -> Positions {
         let mut dx = x - self.start.0;
         let mut dy = y - self.start.1;
@@ -354,6 +365,118 @@ impl Drag {
             .collect()
     }
 }
+// Prepared on press; only DragSource may turn this into a system drag. Keeping
+// the original geometry here avoids re-hit-testing icons already following us.
+struct DesktopDrag {
+    movement: Drag,
+    anchor: String,
+    content: gdk::ContentProvider,
+    preview: gdk::Paintable,
+    visual: Option<gtk::Picture>,
+    local_preview: bool,
+    over_desktop: bool,
+    hotspot: (i32, i32),
+    pointer: (f64, f64),
+    end: DragEnd,
+    system: Option<gdk::Drag>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum DragEnd {
+    #[default]
+    Active,
+    Performed,
+    Local,
+    Ended,
+}
+#[derive(Clone, Copy)]
+enum DragEvent {
+    Performed,
+    LocalDrop,
+    Finished { moved: bool },
+    Cancel,
+    SourceEnd,
+}
+#[derive(Debug, PartialEq)]
+enum DragResult {
+    Restore,
+    KeepLocal,
+    AwaitRemoval,
+}
+fn drag_items_visible(system: bool, local_preview: bool, over_desktop: bool, end: DragEnd) -> bool {
+    !system || end == DragEnd::Local || (local_preview && over_desktop)
+}
+impl DragEnd {
+    fn event(&mut self, event: DragEvent) -> Option<DragResult> {
+        if *self == Self::Ended {
+            return None;
+        }
+        let result = match event {
+            DragEvent::Performed => {
+                if *self != Self::Local {
+                    *self = Self::Performed;
+                }
+                return None;
+            }
+            DragEvent::LocalDrop => {
+                *self = Self::Local;
+                return None;
+            }
+            // GtkDragSource emits this inside GDK's terminal signal. It is not
+            // evidence of success: handling drag-cancel also sets delete_data.
+            DragEvent::SourceEnd => return None,
+            _ if *self == Self::Local => DragResult::KeepLocal,
+            DragEvent::Finished { moved: true } => DragResult::AwaitRemoval,
+            _ => DragResult::Restore,
+        };
+        *self = Self::Ended;
+        Some(result)
+    }
+}
+
+/// Include the tile and text shadow, and keep fractional grabs despite GDK's
+/// integer hotspot. Contents are translated by hot - pointer when composed.
+fn preview_bounds(
+    origins: &BTreeMap<String, (f64, f64)>,
+    pointer: (f64, f64),
+) -> (Rect, (i32, i32)) {
+    let min_x = origins
+        .values()
+        .map(|p| p.0)
+        .fold(pointer.0, f64::min)
+        .floor()
+        - 8.0;
+    let min_y = origins
+        .values()
+        .map(|p| p.1)
+        .fold(pointer.1, f64::min)
+        .floor()
+        - 8.0;
+    let max_x = origins
+        .values()
+        .map(|p| p.0 + CELL_W as f64)
+        .fold(pointer.0, f64::max)
+        .ceil()
+        + 8.0;
+    let max_y = origins
+        .values()
+        .map(|p| p.1 + CELL_H as f64)
+        .fold(pointer.1, f64::max)
+        .ceil()
+        + 8.0;
+    (
+        Rect {
+            x: min_x,
+            y: min_y,
+            w: max_x - min_x,
+            h: max_y - min_y,
+        },
+        (
+            (pointer.0 - min_x).round() as i32,
+            (pointer.1 - min_y).round() as i32,
+        ),
+    )
+}
 struct Desktop {
     // The item being renamed: its label is the editor while that lasts.
     renaming: Option<String>,
@@ -370,7 +493,11 @@ struct Desktop {
     selected: BTreeSet<String>,
     page: u32,
     rubber: Option<Rubber>,
-    drag: Option<Drag>,
+    drag: Option<DesktopDrag>,
+    // Successful outgoing MOVE items stay invisible until a scan sees them gone.
+    moved_out: BTreeSet<String>,
+    importing: bool,
+    pending_imports: Positions,
     ticking: bool,
     loading: bool,
     dirty: bool,
@@ -398,7 +525,11 @@ pub fn style(display: &gdk::Display) {
          entry.desk-rename.error { box-shadow: inset 0 0 0 1px rgb(255,69,58); } \
          label.desk-rename-error { color: white; font-size: 12px; text-shadow: 0 1px 3px rgba(0,0,0,0.6); }",
     );
-    gtk::style_context_add_provider_for_display(display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+    gtk::style_context_add_provider_for_display(
+        display,
+        &css,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
 }
 
 pub fn apply(app: &Rc<App>) {
@@ -446,7 +577,7 @@ pub fn apply(app: &Rc<App>) {
                 let Ok(mut state) = d.try_borrow_mut() else {
                     return;
                 };
-                if state.drag.is_none() && state.rubber.is_none() {
+                if state.drag.is_none() && state.rubber.is_none() && !state.importing {
                     state.layout(true);
                 } else {
                     state.dirty = true;
@@ -516,6 +647,9 @@ pub fn apply(app: &Rc<App>) {
         page: 0,
         rubber: None,
         drag: None,
+        moved_out: BTreeSet::new(),
+        importing: false,
+        pending_imports: Positions::new(),
         ticking: false,
         loading: false,
         dirty: false,
@@ -570,9 +704,15 @@ pub fn apply(app: &Rc<App>) {
 
 impl Desktop {
     fn visible(&self, item: &Item) -> bool {
-        self.positions
-            .get(&item.data.name)
-            .is_some_and(|p| p.page == self.page)
+        !self.moved_out.contains(&item.data.name)
+            && !self.drag.as_ref().is_some_and(|drag| {
+                !drag_items_visible(drag.system.is_some(), drag.local_preview, drag.over_desktop, drag.end)
+                    && drag.movement.origins.contains_key(&item.data.name)
+            })
+            && self
+                .positions
+                .get(&item.data.name)
+                .is_some_and(|p| p.page == self.page)
     }
     fn hit(&self, x: f64, y: f64) -> Option<usize> {
         let now = glib::monotonic_time();
@@ -590,13 +730,6 @@ impl Desktop {
         self.saved.clear();
         self.page = 0;
         self.layout(true);
-    }
-    fn paths(&self) -> Vec<PathBuf> {
-        self.items
-            .iter()
-            .filter(|i| self.selected.contains(&i.data.name))
-            .map(|i| i.data.path.clone())
-            .collect()
     }
     fn select(&mut self, selected: BTreeSet<String>) {
         self.selected = selected;
@@ -636,6 +769,9 @@ impl Desktop {
         self.positions = place(&names, &self.saved, self.grid);
         // Save automatic placements too: new files must never reshuffle existing icons.
         self.saved = self.positions.clone();
+        for (name, &pos) in &self.pending_imports {
+            self.saved.entry(name.clone()).or_insert(pos);
+        }
         self.page = self
             .page
             .min(self.positions.values().map(|p| p.page).max().unwrap_or(0));
@@ -651,6 +787,77 @@ impl Desktop {
             }
         }
     }
+}
+
+struct ItemFrame {
+    icon: gdk::Paintable,
+    label: pango::Layout,
+    rect: Rect,
+    selected: f64,
+    editing: bool,
+}
+
+fn draw_item(s: &gtk::Snapshot, app: &App, pal: &kit::palette::Palette, item: &ItemFrame) {
+    let ItemFrame {
+        icon,
+        label,
+        rect: r,
+        selected,
+        editing,
+    } = item;
+    let selected = *selected;
+    let x = r.x.round();
+    let y = r.y.round();
+    // Finder's look: a soft tile behind the icon and a pill around the words when selected,
+    // white text with a small shadow otherwise, so any wallpaper stays readable.
+    let (w, h) = label.pixel_size();
+    let (w, h) = (w as f64, h as f64);
+    let label_y = y + ICON as f64 + 6.0;
+    if *editing {
+        draw::paintable(s, icon, x + (CELL_W - ICON) as f64 / 2.0, y, ICON as f64);
+        return;
+    }
+    let plate = 6.0;
+    s.push_opacity(selected);
+    draw::fill(
+        s,
+        &draw::round(
+            x + (CELL_W - ICON) as f64 / 2.0 - plate,
+            y - plate,
+            ICON as f64 + 2.0 * plate,
+            ICON as f64 + 2.0 * plate,
+            12.0 * app.round(),
+        ),
+        Rgb::new(0.0, 0.0, 0.0).alpha(0.24),
+    );
+    draw::fill(
+        s,
+        &draw::round(
+            x + (CELL_W as f64 - w) / 2.0 - 6.0,
+            label_y - 1.0,
+            w + 12.0,
+            h + 2.0,
+            6.0 * app.round(),
+        ),
+        pal.accent,
+    );
+    s.pop();
+    draw::paintable(s, icon, x + (CELL_W - ICON) as f64 / 2.0, y, ICON as f64);
+    s.save();
+    s.translate(&graphene::Point::new(
+        (x + LABEL_INSET as f64) as f32,
+        label_y as f32,
+    ));
+    s.push_shadow(&[gtk::gsk::Shadow::new(
+        gdk::RGBA::new(0.0, 0.0, 0.0, 0.55 * (1.0 - selected as f32)),
+        0.0,
+        1.0,
+        3.0,
+    )]);
+    let ink = pal.on_accent.mix(Rgb::new(1.0, 1.0, 1.0), selected);
+    s.append_layout(label, &ink.rgba());
+    s.pop();
+    s.restore();
 }
 
 fn draw_desktop(d: &Rc<RefCell<Desktop>>, s: &gtk::Snapshot) {
@@ -673,14 +880,12 @@ fn draw_desktop(d: &Rc<RefCell<Desktop>>, s: &gtk::Snapshot) {
             .items
             .iter()
             .filter(|i| state.visible(i))
-            .map(|i| {
-                (
-                    i.icon.clone(),
-                    i.label.clone(),
-                    i.rect(now),
-                    i.selected.value(now),
-                    state.renaming.as_ref() == Some(&i.data.name),
-                )
+            .map(|i| ItemFrame {
+                icon: i.icon.clone(),
+                label: i.label.clone(),
+                rect: i.rect(now),
+                selected: i.selected.value(now),
+                editing: state.renaming.as_ref() == Some(&i.data.name),
             })
             .collect();
         (
@@ -706,56 +911,8 @@ fn draw_desktop(d: &Rc<RefCell<Desktop>>, s: &gtk::Snapshot) {
             paint.height().max(1) as f32,
         ),
     );
-    for (icon, label, r, selected, editing) in items {
-        let x = r.x.round();
-        let y = r.y.round();
-        // Finder's look: a soft tile behind the icon and a pill around the words when selected,
-        // white text with a small shadow otherwise, so any wallpaper stays readable.
-        let (w, h) = label.pixel_size();
-        let (w, h) = (w as f64, h as f64);
-        let label_y = y + ICON as f64 + 6.0;
-        if editing {
-            draw::paintable(s, &icon, x + (CELL_W - ICON) as f64 / 2.0, y, ICON as f64);
-            continue;
-        }
-        let plate = 6.0;
-        s.push_opacity(selected);
-        draw::fill(
-            s,
-            &draw::round(
-                x + (CELL_W - ICON) as f64 / 2.0 - plate,
-                y - plate,
-                ICON as f64 + 2.0 * plate,
-                ICON as f64 + 2.0 * plate,
-                12.0 * app.round(),
-            ),
-            Rgb::new(0.0, 0.0, 0.0).alpha(0.24),
-        );
-        draw::fill(
-            s,
-            &draw::round(
-                x + (CELL_W as f64 - w) / 2.0 - 6.0,
-                label_y - 1.0,
-                w + 12.0,
-                h + 2.0,
-                6.0 * app.round(),
-            ),
-            pal.accent,
-        );
-        s.pop();
-        draw::paintable(s, &icon, x + (CELL_W - ICON) as f64 / 2.0, y, ICON as f64);
-        s.save();
-        s.translate(&graphene::Point::new((x + LABEL_INSET as f64) as f32, label_y as f32));
-        s.push_shadow(&[gtk::gsk::Shadow::new(
-            gdk::RGBA::new(0.0, 0.0, 0.0, 0.55 * (1.0 - selected as f32)),
-            0.0,
-            1.0,
-            3.0,
-        )]);
-        let ink = pal.on_accent.mix(Rgb::new(1.0, 1.0, 1.0), selected);
-        s.append_layout(&label, &ink.rgba());
-        s.pop();
-        s.restore();
+    for item in &items {
+        draw_item(s, &app, &pal, item);
     }
     if let Some(r) = rubber {
         draw::fill(
@@ -802,12 +959,12 @@ fn animate(d: &Rc<RefCell<Desktop>>) {
         let Some(d) = weak.upgrade() else {
             return glib::ControlFlow::Break;
         };
+        let now = clock.frame_time();
         let busy = {
             // A nested frame may run while a callback is updating the model.
             let Ok(mut d) = d.try_borrow_mut() else {
                 return glib::ControlFlow::Continue;
             };
-            let now = clock.frame_time();
             let busy = !d.closed
                 && d.items
                     .iter()
@@ -933,7 +1090,7 @@ fn refresh(d: &Rc<RefCell<Desktop>>) {
     if state.closed {
         return;
     }
-    if state.loading || state.drag.is_some() || state.rubber.is_some() {
+    if state.loading || state.drag.is_some() || state.rubber.is_some() || state.importing {
         state.dirty = true;
         return;
     }
@@ -976,12 +1133,18 @@ fn refresh(d: &Rc<RefCell<Desktop>>) {
                             .upcast()
                         });
                     // Folders are drawn like the ones in Files, in the accent color.
-                    let drawn = data.directory.then(|| kit::folder::glyph(&gio::File::for_path(&data.path))).and_then(|glyph| {
-                        if !folders.contains_key(glyph) {
-                            folders.insert(glyph, kit::folder::texture(&accent, glyph, ICON * scale)?);
-                        }
-                        folders.get(glyph).cloned()
-                    });
+                    let drawn = data
+                        .directory
+                        .then(|| kit::folder::glyph(&gio::File::for_path(&data.path)))
+                        .and_then(|glyph| {
+                            if !folders.contains_key(glyph) {
+                                folders.insert(
+                                    glyph,
+                                    kit::folder::texture(&accent, glyph, ICON * scale)?,
+                                );
+                            }
+                            folders.get(glyph).cloned()
+                        });
                     let icon: gdk::Paintable = match drawn {
                         Some(texture) => texture.upcast(),
                         None => theme
@@ -1015,23 +1178,51 @@ fn refresh(d: &Rc<RefCell<Desktop>>) {
                         return;
                     }
                 }
-                {
+                let previous = {
                     let mut state = d.borrow_mut();
                     // An interaction begun while metadata was loading must not be overwritten.
-                    if state.drag.is_none() && state.rubber.is_none() {
-                        let order: BTreeMap<_, _> = state.items.iter().enumerate()
-                            .map(|(n, i)| (i.data.name.clone(), n)).collect();
-                        items.sort_by_key(|i| order.get(&i.data.name).copied().unwrap_or(usize::MAX));
-                        state.items = items;
+                    if state.drag.is_none() && state.rubber.is_none() && !state.importing {
+                        let order: BTreeMap<_, _> = state
+                            .items
+                            .iter()
+                            .enumerate()
+                            .map(|(n, i)| (i.data.name.clone(), n))
+                            .collect();
+                        items.sort_by_key(|i| {
+                            order.get(&i.data.name).copied().unwrap_or(usize::MAX)
+                        });
+                        // Metadata refresh must not restart selection from zero
+                        // just after replacing the drag preview with real items.
+                        let selection: BTreeMap<_, _> = state
+                            .items
+                            .iter()
+                            .map(|i| (i.data.name.clone(), i.selected))
+                            .collect();
+                        for item in &mut items {
+                            if let Some(selected) = selection.get(&item.data.name) {
+                                item.selected = *selected;
+                            }
+                        }
+                        // Only confirmed absence releases outgoing MOVE suppression.
+                        let present: BTreeSet<_> =
+                            items.iter().map(|i| i.data.name.clone()).collect();
+                        state.moved_out.retain(|name| present.contains(name));
+                        state
+                            .pending_imports
+                            .retain(|name, _| !present.contains(name));
+                        let previous = std::mem::replace(&mut state.items, items);
                         let names: BTreeSet<_> =
                             state.items.iter().map(|i| i.data.name.clone()).collect();
                         let selected = state.selected.intersection(&names).cloned().collect();
                         state.select(selected);
                         state.layout(false);
+                        previous
                     } else {
                         state.dirty = true;
+                        items
                     }
-                }
+                };
+                drop(previous);
                 save(&d);
                 animate(&d);
                 let rename_ready = {
@@ -1262,7 +1453,9 @@ fn rename(d: &Rc<RefCell<Desktop>>) {
     let place = {
         let (fixed, editor) = (fixed.downgrade(), editor.downgrade());
         move |entry: &gtk::Entry| {
-            let (Some(fixed), Some(editor)) = (fixed.upgrade(), editor.upgrade()) else { return };
+            let (Some(fixed), Some(editor)) = (fixed.upgrade(), editor.upgrade()) else {
+                return;
+            };
             let text = entry.text();
             let width = (entry.create_pango_layout(Some(&text)).pixel_size().0 + 20).clamp(44, 260).min(screen.max(1));
             entry.set_size_request(width, -1);
@@ -1687,6 +1880,8 @@ fn new_folder(folder: &Path) -> std::io::Result<PathBuf> {
 fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
     let click = gtk::GestureClick::new();
     click.set_button(0);
+    // Capture selection and the grab point before DragSource sees the press.
+    click.set_propagation_phase(gtk::PropagationPhase::Capture);
     let weak = Rc::downgrade(d);
     click.connect_pressed(move |g, n, x, y| {
         let Some(d) = weak.upgrade() else { return };
@@ -1694,6 +1889,7 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
         if button != 1 && button != 3 {
             return;
         }
+        cancel_pending_drag(&d);
         let ctrl = g
             .current_event_state()
             .contains(gdk::ModifierType::CONTROL_MASK);
@@ -1733,9 +1929,52 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
             menu(&d, on_icon, x, y);
         } else if let Some(file) = open_file {
             open(&file);
+        } else if button == 1 && n == 1 && on_icon {
+            arm_drag(&d, x, y);
         }
     });
     paint.add_controller(click);
+
+    // Motion has no threshold and does not claim a gesture. Once Wayland takes
+    // the pointer grab, use drop-target motion for the local Hyprland visual.
+    let motion = gtk::EventControllerMotion::new();
+    motion.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let weak = Rc::downgrade(d);
+    motion.connect_motion(move |controller, x, y| {
+        let Some(d) = weak.upgrade() else { return };
+        if !controller
+            .current_event_state()
+            .contains(gdk::ModifierType::BUTTON1_MASK)
+        {
+            cancel_pending_drag(&d);
+            return;
+        }
+        let pending = d
+            .borrow()
+            .drag
+            .as_ref()
+            .is_some_and(|drag| drag.system.is_none());
+        if pending {
+            move_drag(&d, x, y);
+        }
+    });
+    paint.add_controller(motion);
+
+    // GestureClick stops recognizing a click at the threshold, even if the
+    // button is released before DragSource actually starts. Observe that release
+    // independently so a quick small movement cannot leave icons displaced.
+    let release = gtk::EventControllerLegacy::new();
+    release.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let weak = Rc::downgrade(d);
+    release.connect_event(move |_, event| {
+        if event.event_type() == gdk::EventType::ButtonRelease
+            && let Some(d) = weak.upgrade()
+        {
+            cancel_pending_drag(&d);
+        }
+        glib::Propagation::Proceed
+    });
+    paint.add_controller(release);
 
     let band = gtk::GestureDrag::new();
     let weak = Rc::downgrade(d);
@@ -1804,53 +2043,93 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
     paint.add_controller(band);
 
     let source = gtk::DragSource::new();
+    // MOVE must remain offered: Hyprland may select it even for a local drag.
     source.set_actions(gdk::DragAction::COPY | gdk::DragAction::MOVE);
     let weak = Rc::downgrade(d);
-    source.connect_prepare(move |source, x, y| {
+    source.connect_prepare(move |_, _, _| {
         let d = weak.upgrade()?;
-        let (icon, paths) = {
+        let content = {
             let mut state = d.try_borrow_mut().ok()?;
-            let at = state.hit(x, y)?;
-            let name = state.items[at].data.name.clone();
-            let icon = state.items[at].icon.clone();
-            // Ctrl-click toggles selection; dragging an unselected icon still exports it.
+            let drag = state.drag.as_ref()?;
+            let name = drag.anchor.clone();
+            let content = drag.content.clone();
             if !state.selected.contains(&name) {
                 state.select([name.clone()].into_iter().collect());
             }
-            let now = glib::monotonic_time();
-            state.drag = Some(Drag {
-                start: (x, y),
-                origins: state
-                    .items
-                    .iter()
-                    .filter(|i| state.selected.contains(&i.data.name))
-                    .map(|i| (i.data.name.clone(), (i.x.value(now), i.y.value(now))))
-                    .collect(),
-            });
             let selected = state.selected.clone();
             state.items.sort_by_key(|i| selected.contains(&i.data.name));
             let at = state.items.iter().position(|i| i.data.name == name)?;
             state.raise(at);
-            (icon, state.paths())
+            content
         };
-        source.set_icon(Some(&icon), 32, 32);
-        let files: Vec<_> = paths.iter().map(gio::File::for_path).collect();
-        Some(gdk::ContentProvider::for_value(
-            &gdk::FileList::from_array(&files).to_value(),
-        ))
+        // Capture the current selection tween and pixel phase. Icon textures and
+        // Pango layouts were warmed on press; no file IO or texture render here.
+        let (preview, hotspot) = make_preview(&d, true)?;
+        let previous = {
+            let mut state = d.borrow_mut();
+            let drag = state.drag.as_mut()?;
+            drag.hotspot = hotspot;
+            std::mem::replace(&mut drag.preview, preview.clone())
+        };
+        drop(previous);
+        Some(content)
     });
     let weak = Rc::downgrade(d);
-    source.connect_drag_end(move |_, _, _| {
+    source.connect_drag_begin(move |_, system| {
+        let Some(d) = weak.upgrade() else { return };
+        let (preview, hotspot) = {
+            let mut state = d.borrow_mut();
+            let Some(drag) = state.drag.as_mut() else {
+                return;
+            };
+            drag.system = Some(system.clone());
+            (drag.preview.clone(), drag.hotspot)
+        };
+        // The shared helper also repairs Hyprland's offset after GPU attaches;
+        // merely setting GDK's hotspot before the frame cannot survive those.
+        let mut picture = Some(kit::drag::set_icon(system, &preview, hotspot));
+        let previous = {
+            let mut state = d.borrow_mut();
+            state.drag.as_mut().and_then(|drag| std::mem::replace(&mut drag.visual, picture.take()))
+        };
+        drop(previous);
+        drop(picture);
+        let weak = Rc::downgrade(&d);
+        system.connect_drop_performed(move |system| {
+            if let Some(d) = weak.upgrade() {
+                drag_event(&d, system, DragEvent::Performed);
+            }
+        });
+        let weak = Rc::downgrade(&d);
+        system.connect_dnd_finished(move |system| {
+            let moved = system.selected_action() == gdk::DragAction::MOVE;
+            if let Some(d) = weak.upgrade() {
+                drag_event(&d, system, DragEvent::Finished { moved });
+            }
+        });
+        let weak = Rc::downgrade(&d);
+        system.connect_cancel(move |system, _| {
+            if let Some(d) = weak.upgrade() {
+                drag_event(&d, system, DragEvent::Cancel);
+            }
+        });
+        animate(&d);
+    });
+    let weak = Rc::downgrade(d);
+    source.connect_drag_end(move |_, system, _| {
+        // URI targets own transfers. Never delete on delete_data (also true for
+        // local repositioning and for a handled cancellation). GDK decides end.
         if let Some(d) = weak.upgrade() {
-            cancel_drag(&d);
+            drag_event(&d, system, DragEvent::SourceEnd);
         }
     });
     let weak = Rc::downgrade(d);
-    source.connect_drag_cancel(move |_, _, _| {
+    source.connect_drag_cancel(move |_, system, _| {
         if let Some(d) = weak.upgrade() {
-            cancel_drag(&d);
+            // Also covers GtkDragSource::drag_cancel(), which bypasses GDK cancel.
+            drag_event(&d, system, DragEvent::Cancel);
         }
-        false
+        true // Direct restoration; suppress GTK's separate failure animation.
     });
     paint.add_controller(source);
 
@@ -1859,37 +2138,24 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
         gdk::DragAction::COPY | gdk::DragAction::MOVE,
     );
     let weak = Rc::downgrade(d);
-    target.connect_enter(move |_, _, _| {
-        if weak
-            .upgrade()
-            .is_some_and(|d| d.try_borrow().is_ok_and(|d| d.drag.is_some()))
+    target.connect_enter(move |target, x, y| {
+        if let Some(d) = weak.upgrade()
+            && own_drop(&d, target)
         {
-            gdk::DragAction::MOVE
-        } else {
-            gdk::DragAction::COPY
+            desktop_drag_target(&d, true);
+            move_drag(&d, x, y);
+            return gdk::DragAction::MOVE;
         }
+        gdk::DragAction::COPY
     });
     let weak = Rc::downgrade(d);
-    target.connect_motion(move |_, x, y| {
+    target.connect_motion(move |target, x, y| {
         let Some(d) = weak.upgrade() else {
             return gdk::DragAction::empty();
         };
-        let Ok(mut state) = d.try_borrow_mut() else {
-            return gdk::DragAction::empty();
-        };
-        if let Some(drag) = &state.drag {
-            let dx = x - drag.start.0;
-            let dy = y - drag.start.1;
-            let origins = drag.origins.clone();
-            for i in &mut state.items {
-                if let Some(&(ox, oy)) = origins.get(&i.data.name) {
-                    i.x.set(ox + dx);
-                    i.y.set(oy + dy);
-                }
-            }
-            let paint = state.paint.clone();
-            drop(state);
-            paint.queue_draw();
+        if own_drop(&d, target) {
+            desktop_drag_target(&d, true);
+            move_drag(&d, x, y);
             gdk::DragAction::MOVE
         } else {
             // We own the transfer; reporting COPY prevents source-side deletion on failure
@@ -1898,20 +2164,20 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
         }
     });
     let weak = Rc::downgrade(d);
-    target.connect_drop(move |_, value, x, y| {
+    target.connect_leave(move |_| {
+        if let Some(d) = weak.upgrade() {
+            desktop_drag_target(&d, false);
+        }
+    });
+    let weak = Rc::downgrade(d);
+    target.connect_drop(move |target, value, x, y| {
         let Some(d) = weak.upgrade() else {
             return false;
         };
         let Ok(list) = value.get::<gdk::FileList>() else {
             return false;
         };
-        let (internal, folder) = {
-            let Ok(state) = d.try_borrow() else {
-                return false;
-            };
-            (state.drag.is_some(), state.folder.clone())
-        };
-        if internal {
+        if own_drop(&d, target) {
             finish_drag(&d, x, y);
             return true;
         }
@@ -1919,16 +2185,7 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
         if uris.is_empty() {
             return false;
         }
-        glib::spawn_future_local(async move {
-            let _ = gio::spawn_blocking(move || {
-                for uri in uris {
-                    if let Err(e) = import(&gio::File::for_uri(&uri), &folder) {
-                        eprintln!("digit: desktop drop: {e}");
-                    }
-                }
-            })
-            .await;
-        });
+        import_drop(&d, uris, (x, y));
         true
     });
     paint.add_controller(target);
@@ -1963,6 +2220,210 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
         glib::Propagation::Stop
     });
     paint.add_controller(scroll);
+}
+fn make_preview(
+    d: &Rc<RefCell<Desktop>>,
+    freeze_selection: bool,
+) -> Option<(gdk::Paintable, (i32, i32))> {
+    let paint = { d.borrow().paint.clone() };
+    let now = paint
+        .frame_clock()
+        .map(|c| c.frame_time())
+        .unwrap_or_else(glib::monotonic_time);
+    let (app, frames, pointer, origins) = {
+        let mut state = d.borrow_mut();
+        if freeze_selection {
+            let names = state.drag.as_ref()?.movement.origins.clone();
+            for item in &mut state.items {
+                if names.contains_key(&item.data.name) {
+                    // The cached preview and the restored real item must have
+                    // identical selection ink, even if the press tween is mid-flight.
+                    item.selected.set(item.selected.value(now));
+                }
+            }
+        }
+        let drag = state.drag.as_ref()?;
+        let frames: Vec<_> = state
+            .items
+            .iter()
+            .filter(|i| drag.movement.origins.contains_key(&i.data.name))
+            .map(|i| ItemFrame {
+                icon: i.icon.clone(),
+                label: i.label.clone(),
+                rect: i.rect(now),
+                selected: i.selected.value(now),
+                editing: false,
+            })
+            .collect();
+        let origins = drag.movement.at(drag.pointer.0, drag.pointer.1);
+        (state.app.upgrade()?, frames, drag.pointer, origins)
+    };
+    let (bounds, hot) = preview_bounds(&origins, pointer);
+    let s = gtk::Snapshot::new();
+    // Compensate the fractional part GDK's integer hotspot cannot represent.
+    // Drawing in desktop coordinates first also preserves its text pixel phase.
+    s.translate(&graphene::Point::new(
+        hot.0 as f32 - pointer.0 as f32,
+        hot.1 as f32 - pointer.1 as f32,
+    ));
+    let pal = app.palette_at(now);
+    for item in &frames {
+        draw_item(&s, &app, &pal, item);
+    }
+    s.to_paintable(Some(&graphene::Size::new(bounds.w as f32, bounds.h as f32)))
+        .map(|preview| (preview, hot))
+}
+
+fn arm_drag(d: &Rc<RefCell<Desktop>>, x: f64, y: f64) {
+    let (movement, anchor, paths, fallback) = {
+        let state = d.borrow();
+        if state.drag.is_some() || state.closed {
+            return;
+        }
+        let Some(at) = state.hit(x, y) else { return };
+        let item = &state.items[at];
+        let anchor = item.data.name.clone();
+        let selected = drag_selection(&state.selected, &anchor);
+        let now = glib::monotonic_time();
+        let movement = Drag {
+            start: (x, y),
+            origins: state
+                .items
+                .iter()
+                .filter(|i| state.visible(i) && selected.contains(&i.data.name))
+                .map(|i| (i.data.name.clone(), (i.x.value(now), i.y.value(now))))
+                .collect(),
+        };
+        let paths: Vec<_> = state
+            .items
+            .iter()
+            .filter(|i| movement.origins.contains_key(&i.data.name))
+            .map(|i| i.data.path.clone())
+            .collect();
+        (movement, anchor, paths, item.icon.clone())
+    };
+    let files: Vec<_> = paths.iter().map(gio::File::for_path).collect();
+    let content = gdk::ContentProvider::for_value(&gdk::FileList::from_array(&files).to_value());
+    let drag = DesktopDrag {
+        movement,
+        anchor,
+        content,
+        preview: fallback,
+        visual: None,
+        local_preview: kit::wm::which() == kit::wm::Wm::Hyprland,
+        over_desktop: false,
+        hotspot: (0, 0),
+        pointer: (x, y),
+        end: DragEnd::Active,
+        system: None,
+    };
+    {
+        let mut state = d.borrow_mut();
+        if state.closed || state.drag.is_some() {
+            return;
+        }
+        state.drag = Some(drag);
+    }
+    move_drag(d, x, y);
+    // Warm the exact drawing (including theme paintables) before the threshold.
+    if let Some((preview, hotspot)) = make_preview(d, false) {
+        let previous = {
+            let mut state = d.borrow_mut();
+            let Some(drag) = state.drag.as_mut() else {
+                return;
+            };
+            drag.hotspot = hotspot;
+            std::mem::replace(&mut drag.preview, preview)
+        };
+        drop(previous);
+    }
+}
+
+fn own_drop(d: &Rc<RefCell<Desktop>>, target: &gtk::DropTarget) -> bool {
+    let system = target.current_drop().and_then(|drop| drop.drag());
+    let state = d.borrow();
+    system.is_some() && system == state.drag.as_ref().and_then(|drag| drag.system.clone())
+}
+
+fn drag_selection(selected: &BTreeSet<String>, anchor: &str) -> BTreeSet<String> {
+    if selected.contains(anchor) {
+        selected.clone()
+    } else {
+        [anchor.to_owned()].into_iter().collect()
+    }
+}
+
+fn desktop_drag_target(d: &Rc<RefCell<Desktop>>, over: bool) {
+    let (paint, visual, preview) = {
+        let mut state = d.borrow_mut();
+        let Some(drag) = state.drag.as_mut() else { return };
+        if !drag.local_preview || drag.system.is_none() || drag.end == DragEnd::Local
+            || drag.over_desktop == over {
+            return;
+        }
+        drag.over_desktop = over;
+        let visual = drag.visual.clone();
+        let preview = drag.preview.clone();
+        (state.paint.clone(), visual, preview)
+    };
+    if let Some(visual) = visual {
+        if over {
+            // A real texture node submits a transparent buffer, clearing the
+            // previous native visual. Keep its allocation/hotspot unchanged.
+            let empty = gdk::MemoryTexture::new(1, 1, gdk::MemoryFormat::R8g8b8a8,
+                &glib::Bytes::from_static(&[0, 0, 0, 0]), 4);
+            visual.set_paintable(Some(&empty));
+        } else {
+            visual.set_paintable(Some(&preview));
+        }
+    }
+    // Leaving only hides these items; restoration is a terminal drag event.
+    paint.queue_draw();
+}
+
+fn move_drag(d: &Rc<RefCell<Desktop>>, x: f64, y: f64) {
+    let paint = {
+        let mut state = d.borrow_mut();
+        let Some(drag) = state.drag.as_mut() else {
+            return;
+        };
+        if drag.end == DragEnd::Local {
+            return;
+        }
+        if drag.system.is_some() && !(drag.local_preview && drag.over_desktop) {
+            return;
+        }
+        drag.pointer = (x, y);
+        let positions = drag.movement.at(x, y);
+        for i in &mut state.items {
+            if let Some(&(x, y)) = positions.get(&i.data.name) {
+                i.x.set(x);
+                i.y.set(y);
+            }
+        }
+        state.paint.clone()
+    };
+    paint.queue_draw();
+}
+
+fn restore_drag_items(items: &mut [Item], restored: &BTreeMap<String, (f64, f64)>) {
+    for i in items {
+        if let Some(&(x, y)) = restored.get(&i.data.name) {
+            i.x.set(x);
+            i.y.set(y);
+        }
+    }
+}
+
+fn cancel_pending_drag(d: &Rc<RefCell<Desktop>>) {
+    let pending = d
+        .borrow()
+        .drag
+        .as_ref()
+        .is_some_and(|drag| drag.system.is_none());
+    if pending {
+        cancel_drag(d);
+    }
 }
 // Gesture arbitration may deny an empty-point drag too (for example a secondary
 // click). Both denied and duplicate end/cancel signals leave no rubber band behind.
@@ -2003,24 +2464,67 @@ fn cancel_drag(d: &Rc<RefCell<Desktop>>) {
     let Ok(mut state) = d.try_borrow_mut() else {
         return;
     };
-    if state.drag.take().is_some() {
-        state.layout(true);
+    let drag = state.drag.take();
+    if let Some(drag) = &drag {
+        restore_drag_items(&mut state.items, &drag.movement.restored());
     }
+    let selected = state.selected.clone();
+    state.select(selected);
     let refresh_needed = state.dirty;
     drop(state);
+    // Widgets/paintables may finalize with synchronous callbacks too.
+    drop(drag);
     animate(d);
     if refresh_needed {
         refresh(d);
     }
 }
+
+fn drag_event(d: &Rc<RefCell<Desktop>>, system: &gdk::Drag, event: DragEvent) {
+    let drag = {
+        let mut state = d.borrow_mut();
+        let Some(drag) = state.drag.as_mut() else {
+            return;
+        };
+        if drag.system.as_ref() != Some(system) {
+            return;
+        }
+        let Some(result) = drag.end.event(event) else {
+            return;
+        };
+        let drag = state.drag.take().unwrap();
+        match result {
+            DragResult::Restore => restore_drag_items(&mut state.items, &drag.movement.restored()),
+            DragResult::AwaitRemoval => {
+                state
+                    .moved_out
+                    .extend(drag.movement.origins.keys().cloned());
+            }
+            DragResult::KeepLocal => {}
+        }
+        let selected = state.selected.clone();
+        state.select(selected);
+        drag
+    };
+    // GDK callbacks may be followed synchronously by GtkDragSource::drag-end.
+    // The model has already transitioned once, and GTK objects finalize unborrowed.
+    drop(drag);
+    animate(d);
+    refresh(d);
+}
+
 fn finish_drag(d: &Rc<RefCell<Desktop>>, x: f64, y: f64) {
     let Ok(mut state) = d.try_borrow_mut() else {
         return;
     };
-    let Some(drag) = state.drag.take() else {
+    let Some(drag) = state.drag.as_ref() else {
         return;
     };
-    let dropped = drag.dropped(state.grid, x, y, state.page);
+    if drag.end == DragEnd::Local {
+        return;
+    }
+    let dropped = drag.movement.dropped(state.grid, x, y, state.page);
+    state.drag.as_mut().unwrap().end.event(DragEvent::LocalDrop);
     for i in &mut state.items {
         if let Some(p) = dropped.get(&i.data.name) {
             i.x.set(p.x);
@@ -2037,11 +2541,201 @@ fn finish_drag(d: &Rc<RefCell<Desktop>>, x: f64, y: f64) {
         refresh(d);
     }
 }
-fn import(file: &gio::File, folder: &Path) -> Result<(), String> {
+/// A compact cascade, centered on the drop rather than the automatic right column.
+fn drop_cascade(grid: Grid, pointer: (f64, f64), page: u32, count: usize) -> Vec<FreePos> {
+    (0..count)
+        .map(|n| {
+            grid.clamp(FreePos {
+                x: pointer.0 - CELL_W as f64 / 2.0 + n as f64 * 24.0,
+                y: pointer.1 - CELL_H as f64 / 2.0 + n as f64 * 24.0,
+                page,
+            })
+        })
+        .collect()
+}
+
+fn collision_name(
+    name: &std::ffi::OsStr,
+    directory: bool,
+    mut exists: impl FnMut(&std::ffi::OsStr) -> bool,
+) -> std::ffi::OsString {
+    if !exists(name) {
+        return name.to_owned();
+    }
+    let path = Path::new(name);
+    let (stem, extension) = if directory {
+        (name, None)
+    } else {
+        (path.file_stem().unwrap_or(name), path.extension())
+    };
+    for n in 2_u64.. {
+        let mut candidate = stem.to_owned();
+        candidate.push(format!(" ({n})"));
+        if let Some(extension) = extension {
+            candidate.push(".");
+            candidate.push(extension);
+        }
+        if !exists(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("all filename suffixes exhausted")
+}
+
+struct ImportPlan {
+    uri: String,
+    dest: PathBuf,
+}
+
+fn rollback_import(
+    saved: &mut Positions,
+    positions: &mut Positions,
+    pending: &mut Positions,
+    key: String,
+    seeded: FreePos,
+    previous: Option<FreePos>,
+) {
+    pending.remove(&key);
+    // A later manual reposition takes precedence over the failed reservation.
+    if saved.get(&key) == Some(&seeded) {
+        saved.remove(&key);
+        positions.remove(&key);
+        if let Some(previous) = previous {
+            saved.insert(key.clone(), previous);
+            positions.insert(key, previous);
+        }
+    }
+}
+
+fn plan_imports(
+    uris: Vec<String>,
+    folder: &Path,
+    mut reserved: BTreeSet<String>,
+) -> Vec<ImportPlan> {
+    uris.into_iter()
+        .filter_map(|uri| {
+            let file = gio::File::for_uri(&uri);
+            let name = file.basename()?;
+            let original = folder.join(&name);
+            let dest = if file.equal(&gio::File::for_path(&original)) {
+                original // Already on the desktop: reposition the existing item.
+            } else {
+                let directory = file
+                    .query_file_type(gio::FileQueryInfoFlags::NONE, gio::Cancellable::NONE)
+                    == gio::FileType::Directory;
+                let name = collision_name(name.as_os_str(), directory, |candidate| {
+                    reserved.contains(&name_key(candidate))
+                        || folder.join(candidate).symlink_metadata().is_ok()
+                });
+                folder.join(name)
+            };
+            reserved.insert(name_key(dest.file_name()?));
+            Some(ImportPlan { uri, dest })
+        })
+        .collect()
+}
+
+fn import_drop(d: &Rc<RefCell<Desktop>>, uris: Vec<String>, pointer: (f64, f64)) {
+    let (grid, page) = {
+        let state = d.borrow();
+        (state.grid, state.page)
+    };
+    let weak = Rc::downgrade(d);
+    glib::spawn_future_local(async move {
+        let Some(d) = weak.upgrade() else { return };
+        // Serialize planning too, so two concurrent drops cannot reserve the same name.
+        loop {
+            let ready = {
+                let mut state = d.borrow_mut();
+                if state.closed {
+                    return;
+                }
+                if state.importing {
+                    false
+                } else {
+                    state.importing = true;
+                    true
+                }
+            };
+            if ready {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(16)).await;
+        }
+        let (folder, reserved) = {
+            let state = d.borrow();
+            (state.folder.clone(), state.saved.keys().cloned().collect())
+        };
+        let plans = gio::spawn_blocking(move || plan_imports(uris, &folder, reserved)).await;
+        let Ok(plans) = plans else {
+            d.borrow_mut().importing = false;
+            refresh(&d);
+            return;
+        };
+        let positions = drop_cascade(grid, pointer, page, plans.len());
+        let previous: Vec<_> = {
+            let mut state = d.borrow_mut();
+            plans
+                .iter()
+                .zip(positions)
+                .map(|(plan, pos)| {
+                    let key = name_key(plan.dest.file_name().unwrap());
+                    let previous = state.saved.insert(key.clone(), pos);
+                    state.pending_imports.insert(key.clone(), pos);
+                    state.positions.insert(key.clone(), pos);
+                    for item in &mut state.items {
+                        if item.data.name == key {
+                            item.x.set(pos.x);
+                            item.y.set(pos.y);
+                        }
+                    }
+                    (key, pos, previous)
+                })
+                .collect()
+        };
+        // Seed both the monitor's in-memory layout and persistence before transfer.
+        // Pending reservations survive layout; refresh is deferred while importing.
+        save(&d);
+        animate(&d);
+        while WRITING.get() {
+            glib::timeout_future(Duration::from_millis(1)).await;
+        }
+        let results = gio::spawn_blocking(move || {
+            plans
+                .into_iter()
+                .map(|plan| import(&gio::File::for_uri(&plan.uri), &plan.dest))
+                .collect::<Vec<_>>()
+        })
+        .await;
+        {
+            let mut state = d.borrow_mut();
+            for (n, (key, pos, old)) in previous.into_iter().enumerate() {
+                let error = match &results {
+                    Ok(results) => results[n].as_ref().err().cloned(),
+                    Err(_) => Some("Import worker failed".into()),
+                };
+                if let Some(error) = error {
+                    eprintln!("digit: desktop drop: {error}");
+                    let Desktop {
+                        saved,
+                        positions,
+                        pending_imports,
+                        ..
+                    } = &mut *state;
+                    rollback_import(saved, positions, pending_imports, key, pos, old);
+                }
+            }
+            state.importing = false;
+        }
+        save(&d);
+        refresh(&d);
+    });
+}
+
+fn import(file: &gio::File, dest: &Path) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
-    let name = file.basename().ok_or("Missing file name")?;
-    let dest = folder.join(name);
-    let target = gio::File::for_path(&dest);
+    let folder = dest.parent().ok_or("Missing destination folder")?;
+    let target = gio::File::for_path(dest);
     if file.equal(&target) {
         return Ok(());
     }
@@ -2053,7 +2747,7 @@ fn import(file: &gio::File, folder: &Path) -> Result<(), String> {
             .dev();
         let dest_dev = std::fs::metadata(folder).map_err(|e| e.to_string())?.dev();
         if src_dev != dest_dev {
-            return copy_tree(&path, &dest).map_err(|e| e.to_string());
+            return copy_tree(&path, dest).map_err(|e| e.to_string());
         }
     }
     match file.move_(
@@ -2064,7 +2758,7 @@ fn import(file: &gio::File, folder: &Path) -> Result<(), String> {
     ) {
         Ok(()) => Ok(()),
         Err(e) if e.matches(gio::IOErrorEnum::NotSupported) => match file.path() {
-            Some(path) => copy_tree(&path, &dest).map_err(|e| e.to_string()),
+            Some(path) => copy_tree(&path, dest).map_err(|e| e.to_string()),
             None => file
                 .copy(
                     &target,
@@ -2105,6 +2799,309 @@ fn copy_tree(src: &Path, dest: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_visual_follows_desktop_reentry_but_never_restores_the_source_on_leave() {
+        assert!(drag_items_visible(false, true, false, DragEnd::Active));
+        for over in [true, false, true, false] {
+            assert_eq!(drag_items_visible(true, true, over, DragEnd::Active), over);
+        }
+        assert!(!drag_items_visible(true, true, false, DragEnd::Performed));
+        assert!(drag_items_visible(true, true, false, DragEnd::Local));
+        // On niri the compositor owns the visual even over the desktop.
+        assert!(!drag_items_visible(true, false, true, DragEnd::Active));
+        // A terminal restoration removes the system drag before showing items.
+        assert!(drag_items_visible(false, true, false, DragEnd::Ended));
+    }
+
+    #[test]
+    fn frozen_preview_keeps_the_press_across_windows_and_desktop_reentry() {
+        let press = (337.75, 229.25);
+        let drag = Drag {
+            start: press,
+            origins: [("a".into(), (300.25, 200.5)), ("b".into(), (20.5, 60.25))]
+                .into_iter().collect(),
+        };
+        let (_, hot) = preview_bounds(&drag.origins, press);
+        for pointer in [(351.0, 237.5), (951.0, 537.5), (401.0, 317.5)] {
+            // The same frozen surface follows the pointer on either target;
+            // neither leaving nor re-entering may rebase it to the old cell.
+            let moved = drag.at(pointer.0, pointer.1);
+            for (name, &(x, y)) in &drag.origins {
+                let in_preview = (x + hot.0 as f64 - press.0, y + hot.1 as f64 - press.1);
+                assert_eq!(moved[name], (pointer.0 - hot.0 as f64 + in_preview.0,
+                                        pointer.1 - hot.1 as f64 + in_preview.1));
+            }
+        }
+    }
+
+    #[test]
+    fn preview_hotspot_is_the_press_minus_bounds_origin_for_one_item_and_groups() {
+        let cell = (300.0, 200.0);
+        for grab in [(0.0, 0.0), (37.0, 29.0), (CELL_W as f64 - 1.0, 80.0)] {
+            let press = (cell.0 + grab.0, cell.1 + grab.1);
+            for grouped in [false, true] {
+                let mut origins = BTreeMap::from([("grabbed".into(), cell)]);
+                if grouped {
+                    origins.insert("above-left".into(), (20.0, 60.0));
+                    origins.insert("below-right".into(), (480.0, 350.0));
+                }
+                let (bounds, hot) = preview_bounds(&origins, press);
+                assert_eq!(hot.0 as f64, press.0 - bounds.x);
+                assert_eq!(hot.1 as f64, press.1 - bounds.y);
+                assert_eq!(hot.0 as f64 - (cell.0 - bounds.x), grab.0);
+                assert_eq!(hot.1 as f64 - (cell.1 - bounds.y), grab.1);
+
+                let drag = Drag {
+                    start: press,
+                    origins,
+                };
+                // Crossing the threshold moves both the cells and their bounds;
+                // it must not rebase the grab to the threshold event's position.
+                let pointer = (press.0 + 19.0, press.1 - 13.0);
+                let moved = drag.at(pointer.0, pointer.1);
+                let (moved_bounds, moved_hot) = preview_bounds(&moved, pointer);
+                assert_eq!(moved_hot, hot);
+                assert_eq!(moved_hot.0 as f64, pointer.0 - moved_bounds.x);
+                assert_eq!(moved_hot.1 as f64, pointer.1 - moved_bounds.y);
+            }
+        }
+    }
+    #[test]
+    fn preview_fits_one_icon_and_its_shadow_with_the_exact_fractional_grab() {
+        let origins = [("a".into(), (200.25, 100.5))].into_iter().collect();
+        let pointer = (237.75, 129.25);
+        let (bounds, hot) = preview_bounds(&origins, pointer);
+        assert_eq!(
+            (bounds.x, bounds.y, bounds.w, bounds.h),
+            (192.0, 92.0, 129.0, 133.0)
+        );
+        assert_eq!(hot, (46, 37));
+        assert!(bounds.contains(pointer.0, pointer.1));
+        // The surface is positioned at pointer - integer hotspot. Its contents
+        // compensate the fractional remainder, so no grab distance is rounded.
+        let in_preview = (
+            origins["a"].0 + hot.0 as f64 - pointer.0,
+            origins["a"].1 + hot.1 as f64 - pointer.1,
+        );
+        assert_eq!(pointer.0 - hot.0 as f64 + in_preview.0, origins["a"].0);
+        assert_eq!(pointer.1 - hot.1 as f64 + in_preview.1, origins["a"].1);
+    }
+    #[test]
+    fn preview_group_includes_icons_left_and_above_the_grab_and_keeps_its_first_frame() {
+        let drag = Drag {
+            start: (337.75, 229.25),
+            origins: [("a".into(), (300.25, 200.5)), ("b".into(), (20.5, 60.25))]
+                .into_iter()
+                .collect(),
+        };
+        let pointer = (351.0, 237.5); // Already moved before the DND threshold.
+        let moved = drag.at(pointer.0, pointer.1);
+        let (bounds, hot) = preview_bounds(&moved, pointer);
+        for &(x, y) in moved.values() {
+            assert!(bounds.contains(x - 6.0, y - 6.0));
+            assert!(bounds.contains(x + CELL_W as f64 + 5.0, y + CELL_H as f64 + 5.0));
+            let in_preview = (
+                x.round() + hot.0 as f64 - pointer.0,
+                y.round() + hot.1 as f64 - pointer.1,
+            );
+            assert_eq!(pointer.0 - hot.0 as f64 + in_preview.0, x.round());
+            assert_eq!(pointer.1 - hot.1 as f64 + in_preview.1, y.round());
+        }
+        let dropped = drag.dropped(grid(), pointer.0, pointer.1, 0);
+        for (name, &(x, y)) in &moved {
+            assert_eq!((dropped[name].x, dropped[name].y), (x, y));
+        }
+    }
+    #[test]
+    fn external_drop_cascade_is_centered_clamped_and_wins_over_automatic_placement() {
+        let positions = drop_cascade(grid(), (250.5, 200.25), 1, 3);
+        assert_eq!(
+            positions[0],
+            FreePos {
+                x: 194.5,
+                y: 142.25,
+                page: 1
+            }
+        );
+        assert_eq!(
+            positions[2],
+            FreePos {
+                x: 242.5,
+                y: 190.25,
+                page: 1
+            }
+        );
+        for pointer in [(0.0, 0.0), (800.0, 600.0)] {
+            assert!(
+                drop_cascade(grid(), pointer, 0, 5)
+                    .iter()
+                    .all(|p| grid().clamp(*p) == *p)
+            );
+        }
+        assert!(drop_cascade(grid(), (0.0, 0.0), 0, 0).is_empty());
+        let saved = [("incoming".into(), positions[0])].into_iter().collect();
+        let placed = place(&["incoming".into(), "other".into()], &saved, grid());
+        assert_eq!(placed["incoming"], positions[0]);
+    }
+    #[test]
+    fn failed_import_removes_its_reservation_but_preserves_existing_or_newer_placements() {
+        let seeded = drop_cascade(grid(), (250.0, 200.0), 0, 1)[0];
+        let old = grid().nth(0);
+        for previous in [None, Some(old)] {
+            let mut saved: Positions = [("incoming".into(), seeded)].into_iter().collect();
+            let mut positions = saved.clone();
+            let mut pending = saved.clone();
+            rollback_import(
+                &mut saved,
+                &mut positions,
+                &mut pending,
+                "incoming".into(),
+                seeded,
+                previous,
+            );
+            assert!(pending.is_empty());
+            assert_eq!(saved.get("incoming").copied(), previous);
+            assert_eq!(positions, saved);
+        }
+        let mut saved: Positions = [("incoming".into(), old)].into_iter().collect();
+        let mut positions = saved.clone();
+        let mut pending = [("incoming".into(), seeded)].into_iter().collect();
+        rollback_import(
+            &mut saved,
+            &mut positions,
+            &mut pending,
+            "incoming".into(),
+            seeded,
+            None,
+        );
+        assert!(pending.is_empty());
+        assert_eq!(saved["incoming"], old);
+        assert_eq!(positions["incoming"], old);
+    }
+    #[test]
+    fn collision_names_preserve_suffixes_directories_and_non_utf8_names() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        assert_eq!(
+            collision_name(OsStr::new("a.txt"), false, |_| false),
+            "a.txt"
+        );
+        assert_eq!(
+            collision_name(OsStr::new("a.txt"), false, |n| n == "a.txt"
+                || n == "a (2).txt"),
+            "a (3).txt"
+        );
+        assert_eq!(
+            collision_name(OsStr::new("folder.ext"), true, |n| n == "folder.ext"),
+            "folder.ext (2)"
+        );
+        assert_eq!(
+            collision_name(OsStr::new(".hidden"), false, |n| n == ".hidden"),
+            ".hidden (2)"
+        );
+        let name = OsStr::from_bytes(b"a\xff.txt");
+        assert_eq!(
+            collision_name(name, false, |n| n == name),
+            OsStr::from_bytes(b"a\xff (2).txt")
+        );
+    }
+    #[test]
+    fn import_plans_reserve_final_names_before_any_transfer_and_keep_existing_desktop_files() {
+        let dir = temp();
+        let desktop = dir.join("Desktop");
+        std::fs::create_dir_all(&desktop).unwrap();
+        std::fs::create_dir(dir.join("first")).unwrap();
+        std::fs::create_dir(dir.join("second")).unwrap();
+        std::fs::write(desktop.join("a.txt"), b"desktop").unwrap();
+        std::fs::write(dir.join("first/a.txt"), b"first").unwrap();
+        std::fs::write(dir.join("second/a.txt"), b"second").unwrap();
+        // Dangling symlinks also occupy names.
+        std::os::unix::fs::symlink("missing", desktop.join("a (2).txt")).unwrap();
+        let paths = [
+            dir.join("first/a.txt"),
+            dir.join("second/a.txt"),
+            desktop.join("a.txt"),
+        ];
+        let uris = paths
+            .iter()
+            .map(|p| gio::File::for_path(p).uri().to_string())
+            .collect();
+        let plans = plan_imports(uris, &desktop, BTreeSet::new());
+        assert_eq!(
+            plans.iter().map(|p| p.dest.clone()).collect::<Vec<_>>(),
+            [
+                desktop.join("a (3).txt"),
+                desktop.join("a (4).txt"),
+                desktop.join("a.txt"),
+            ]
+        );
+        assert!(!desktop.join("a (3).txt").exists());
+        assert!(!desktop.join("a (4).txt").exists());
+        for plan in plans {
+            import(&gio::File::for_uri(&plan.uri), &plan.dest).unwrap();
+        }
+        assert_eq!(std::fs::read(desktop.join("a.txt")).unwrap(), b"desktop");
+        assert_eq!(std::fs::read(desktop.join("a (3).txt")).unwrap(), b"first");
+        assert_eq!(std::fs::read(desktop.join("a (4).txt")).unwrap(), b"second");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn drag_end_waits_for_transfer_and_finishes_once_in_either_signal_order() {
+        for moved in [false, true] {
+            for source_first in [false, true] {
+                let mut state = DragEnd::default();
+                assert_eq!(state.event(DragEvent::Performed), None);
+                if source_first {
+                    assert_eq!(state.event(DragEvent::SourceEnd), None);
+                }
+                assert_eq!(
+                    state.event(DragEvent::Finished { moved }),
+                    Some(if moved {
+                        DragResult::AwaitRemoval
+                    } else {
+                        DragResult::Restore
+                    })
+                );
+                assert_eq!(state.event(DragEvent::SourceEnd), None);
+                assert_eq!(state.event(DragEvent::Cancel), None);
+                assert_eq!(state.event(DragEvent::Finished { moved }), None);
+            }
+        }
+        for performed in [false, true] {
+            let mut state = DragEnd::default();
+            if performed {
+                state.event(DragEvent::Performed);
+            }
+            assert_eq!(state.event(DragEvent::Cancel), Some(DragResult::Restore));
+            assert_eq!(state.event(DragEvent::SourceEnd), None);
+            assert_eq!(state.event(DragEvent::Cancel), None);
+        }
+    }
+    #[test]
+    fn local_drop_can_precede_or_follow_performed_and_is_never_an_external_move() {
+        for performed_first in [false, true] {
+            for cancelled in [false, true] {
+                let mut state = DragEnd::default();
+                if performed_first {
+                    state.event(DragEvent::Performed);
+                }
+                assert_eq!(state.event(DragEvent::LocalDrop), None);
+                if !performed_first {
+                    state.event(DragEvent::Performed);
+                }
+                assert_eq!(state, DragEnd::Local);
+                assert_eq!(
+                    state.event(if cancelled {
+                        DragEvent::Cancel
+                    } else {
+                        DragEvent::Finished { moved: true }
+                    }),
+                    Some(DragResult::KeepLocal)
+                );
+                assert_eq!(state.event(DragEvent::SourceEnd), None);
+            }
+        }
+    }
     fn grid() -> Grid {
         Grid::new(800, 600, 50)
     }
@@ -2254,6 +3251,56 @@ mod tests {
         assert!(p.values().all(|p| g.clamp(*p) == *p));
         assert!(p.values().any(|p| p.page > 0));
         assert_eq!(place(&names, &p, g), p);
+    }
+    #[test]
+    fn drag_follows_first_motion_and_dnd_handoff_without_rebasing_the_grab() {
+        let drag = Drag {
+            start: (237.25, 129.5),
+            origins: [("a".into(), (200.0, 100.0)), ("b".into(), (323.5, 211.25))]
+                .into_iter()
+                .collect(),
+        };
+        // Sub-threshold motion is visible immediately. The first DND motion
+        // continues the same translation rather than recapturing moved origins.
+        for (dx, dy) in [(0.0, 0.0), (0.75, 1.25), (12.0, 3.0), (54.5, 68.25)] {
+            let pointer = (drag.start.0 + dx, drag.start.1 + dy);
+            let p = drag.at(pointer.0, pointer.1);
+            assert_eq!(p["a"], (200.0 + dx, 100.0 + dy));
+            assert_eq!(pointer.0 - p["a"].0, 37.25);
+            assert_eq!(pointer.1 - p["a"].1, 29.5);
+            assert_eq!(p["b"].0 - p["a"].0, 123.5);
+            assert_eq!(p["b"].1 - p["a"].1, 111.25);
+            let dropped = drag.dropped(grid(), pointer.0, pointer.1, 0);
+            assert_eq!((dropped["a"].x, dropped["a"].y), p["a"]);
+        }
+    }
+    #[test]
+    fn drag_leave_reentry_and_cancel_keep_the_original_group_immutable() {
+        let drag = Drag {
+            start: (237.25, 129.5),
+            origins: [("a".into(), (200.0, 100.0)), ("b".into(), (323.5, 211.25))]
+                .into_iter()
+                .collect(),
+        };
+        let origins = drag.origins.clone();
+        let before_leave = drag.at(412.5, 310.25);
+        assert_ne!(before_leave, origins);
+        assert_eq!(drag.restored(), origins);
+        assert_eq!(drag.at(412.5, 310.25), before_leave);
+        let _ = drag.dropped(grid(), -9999.0, 9999.0, 0);
+        // Cancellation, including a release before DND, never uses the last
+        // pointer position or a clamped drop as its return destination.
+        assert_eq!(drag.restored(), origins);
+    }
+    #[test]
+    fn dragging_preserves_a_selected_group_and_exports_a_toggled_off_anchor_alone() {
+        let selected: BTreeSet<_> = ["a".into(), "b".into()].into_iter().collect();
+        assert_eq!(drag_selection(&selected, "b"), selected);
+        assert_eq!(
+            drag_selection(&selected, "c"),
+            ["c".into()].into_iter().collect()
+        );
+        assert_eq!(selected.len(), 2);
     }
     #[test]
     fn drop_keeps_exact_fractional_coordinates_and_selection_offsets() {
@@ -2475,13 +3522,13 @@ mod tests {
         let source = dir.join("a");
         let dest = dir.join("Desktop/a");
         std::fs::write(&source, b"original").unwrap();
-        import(&gio::File::for_path(&source), &dir.join("Desktop")).unwrap();
+        import(&gio::File::for_path(&source), &dest).unwrap();
         assert!(!source.exists());
         std::fs::write(&source, b"replacement").unwrap();
-        assert!(import(&gio::File::for_path(&source), &dir.join("Desktop")).is_err());
+        assert!(import(&gio::File::for_path(&source), &dest).is_err());
         assert_eq!(std::fs::read(&dest).unwrap(), b"original");
         assert_eq!(std::fs::read(&source).unwrap(), b"replacement");
-        import(&gio::File::for_path(&dest), &dir.join("Desktop")).unwrap();
+        import(&gio::File::for_path(&dest), &dest).unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
