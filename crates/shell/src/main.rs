@@ -260,6 +260,7 @@ fn run() {
         n.release_name();
     }
     polkit::stop();
+    kit::wm::release_pointer_focus();
     theming::give_back();
     hooks::run("stop", &[]);
     for n in app.notches.borrow().iter() {
