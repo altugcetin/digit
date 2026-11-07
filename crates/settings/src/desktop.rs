@@ -910,6 +910,9 @@ fn desktop(body: &gtk::Box, t: &toml::Table) {
     end.append(&pickb);
     desk.append(&row);
     choice(&desk, "schedule", "Desktop clock", "A large clock with the date and weather on the wallpaper, behind your windows", "desktop_widget", &[("off", "Off"), ("left", "Top left"), ("center", "Center")], &prefs::get_str(&t, "desktop_widget", "off"));
+    if gtk::gdk::Display::default().is_some_and(|d| d.monitors().n_items() > 1) {
+        choice(&desk, "wallpaper", "Wallpaper on several screens", "Change it from the wallpaper picker", "wallpaper_layout", &[("same", "Same on each"), ("span", "Span across"), ("separate", "One per screen")], &prefs::get_str(&t, "wallpaper_layout", "same"));
+    }
     choice(&desk, "battery_full", "Batteries widget", "This computer, headphones and other devices, as rings on the wallpaper", "desktop_battery", &[("off", "Off"), ("top_left", "Top left"), ("top_right", "Top right"), ("bottom_left", "Bottom left"), ("bottom_right", "Bottom right")], &prefs::get_str(&t, "desktop_battery", "off"));
     toggle(&desk, "folder", "Desktop icons", "Show what's in your Desktop folder on the wallpaper", "desktop_icons", prefs::get_bool(&t, "desktop_icons", true));
     slider(&desk, "rounded_corner", "Rounded screen corners", "Softens the corners of every display. 0 turns it off", "screen_corners", (0.0, 24.0, 1.0), prefs::get_f64(&t, "screen_corners", 0.0), 0.0, 0);

@@ -29,6 +29,7 @@ const KEEP: usize = 40;
 const WORKERS: usize = 2;
 const BORN: i64 = 240_000;
 
+#[derive(Clone)]
 struct Job {
     path: String,
     kinds: Vec<&'static str>,
@@ -48,6 +49,9 @@ const HUES: [(&str, &str); 8] = [("Red", "#ff3b30"), ("Orange", "#ff9500"), ("Ye
 #[derive(Clone, Copy, PartialEq)]
 enum Hit {
     Card(usize),
+    Layout(wallpaper::Layout),
+    Monitor(usize),
+    Apply,
     Source,
     Grid,
     Timer,
@@ -57,6 +61,7 @@ enum Hit {
     Bar,
 }
 
+#[derive(Clone)]
 struct State {
     app: Rc<App>,
     window: gtk::Window,
@@ -65,11 +70,15 @@ struct State {
     scrim: Option<gtk::Window>,
     size: (f64, f64),
     source: Source,
-    all: Vec<String>,
-    items: Vec<String>,
+    all: Rc<Vec<String>>,
+    items: Rc<Vec<String>>,
     pointed: usize,
     original: String,
     thumbs: HashMap<String, gdk::Texture>,
+    previews: HashMap<String, gdk::Texture>,
+    monitors: Vec<wallpaper::Monitor>,
+    frames: Vec<(String, gdk::Texture, wallpaper::Rect)>,
+    layout: wallpaper::Layout,
     pending: Vec<String>,
     queue: Vec<Job>,
     busy: usize,
@@ -81,7 +90,7 @@ struct State {
     order: Vec<String>,
     output: String,
     timer: bool,
-    colors: HashMap<String, u8>,
+    colors: Rc<HashMap<String, u8>>,
     hue: Option<usize>,
     query: String,
     grid: bool,
@@ -109,6 +118,7 @@ pub fn toggle(app: &Rc<App>) {
 }
 
 thread_local! {
+    static SLIDE_EVERY: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static SLIDES: RefCell<Option<glib::SourceId>> = const { RefCell::new(None) };
     static WALL_DIR: RefCell<String> = RefCell::new(kit::prefs::text(&kit::prefs::read(), "wall_dir", ""));
     static PREFS_MONITOR: RefCell<Option<gio::FileMonitor>> = const { RefCell::new(None) };
@@ -116,6 +126,9 @@ thread_local! {
 
 /// Reload the selected source in place, keeping the current preview and search.
 fn prefs_changed(app: &Rc<App>) {
+    if app.wallpapers.prefs_changed() { crate::retheme(app); }
+    let picker = app.picker.borrow().clone();
+    if let Some(picker) = picker { picker.refresh_layout(); }
     let dir = kit::prefs::text(&kit::prefs::read(), "wall_dir", "");
     let changed = WALL_DIR.with(|old| old.replace(dir.clone()) != dir);
     if changed {
@@ -131,6 +144,8 @@ fn prefs_changed(app: &Rc<App>) {
             }
         }
     }
+    let every = kit::prefs::number(&kit::prefs::read(), "wallpaper_every", 0.0).to_bits();
+    if SLIDE_EVERY.with(|old| old.get() != every) { slideshow(app); }
     crate::menubar::prefs_changed(app);
 }
 
@@ -168,21 +183,20 @@ pub fn slideshow(app: &Rc<App>) {
         id.remove();
     }
     let every = kit::prefs::number(&kit::prefs::read(), "wallpaper_every", 0.0);
-    if every < 1.0 {
+    SLIDE_EVERY.with(|old| old.set(every.to_bits()));
+    if !every.is_finite() || every < 1.0 {
         return;
     }
     let weak = Rc::downgrade(app);
     let id = glib::timeout_add_local(Duration::from_secs((every * 60.0) as u64), move || {
         let Some(app) = weak.upgrade() else { return glib::ControlFlow::Break };
-        let list = list(Source::Yours);
-        if list.len() > 1 {
-            let now = app.wallpapers.shown();
-            let at = list.iter().position(|p| *p == now).map(|i| i + 1).unwrap_or(0) % list.len();
-            if wallpaper::remember(&list[at]) {
-                app.wallpapers.set(list[at].clone());
-                crate::retheme(&app);
+        let mut images = Vec::new();
+        for dir in wallpaper::directories() {
+            for image in wallpaper::listed(&dir) {
+                if !images.contains(&image) { images.push(image); }
             }
         }
+        if !images.is_empty() && (images.len() > 1 || app.wallpapers.layout() == wallpaper::Layout::Separate) && app.wallpapers.rotate(&images) { crate::retheme(&app); }
         glib::ControlFlow::Continue
     });
     SLIDES.with(|s| *s.borrow_mut() = Some(id));
@@ -386,16 +400,21 @@ fn cards(path: &str, want: &[&'static str], sf: f64, screen: Option<(i32, i32)>)
         }
         make.push(kind);
     }
+    if want.contains(&"preview") { make.push("preview"); }
     if !make.iter().any(|k| want.contains(k)) {
         return out;
     }
-    let screen = screen.map(|s| (s, format!("screen-{}x{}", s.0, s.1))).filter(|(_, t)| !crate::stash::has(path, t));
-    let mut need: Vec<(i32, i32)> = make.iter().map(|k| card_box(k, sf)).map(|(w, h, _)| (w, h)).collect();
+    let screen = screen.filter(|_| !want.contains(&"preview")).map(|s| (s, format!("screen-{}x{}", s.0, s.1))).filter(|(_, t)| !crate::stash::has(path, t));
+    let mut need: Vec<(i32, i32)> = make.iter().map(|k| if *k == "preview" { ((BIG_W * sf) as i32, (BIG_H * sf) as i32) } else { let (w, h, _) = card_box(k, sf); (w, h) }).collect();
     if let Some((size, _)) = &screen {
         need.push(*size);
     }
     let Some(master) = crate::stash::master(path, &need) else { return out };
     for kind in make {
+        if kind == "preview" {
+            out.push(("preview", crate::stash::texture(&master)));
+            continue;
+        }
         if let Some(t) = build(&master, kind, sf) {
             crate::stash::put(path, &card_tag(kind, sf), t.clone());
             if want.contains(&kind) {
@@ -492,11 +511,15 @@ impl Picker {
             scrim: None,
             size: (1920.0, 1080.0),
             source: Source::Yours,
-            all: Vec::new(),
-            items: Vec::new(),
+            all: Rc::default(),
+            items: Rc::default(),
             pointed: 0,
             original: String::new(),
             thumbs: HashMap::new(),
+            previews: HashMap::new(),
+            monitors: Vec::new(),
+            frames: Vec::new(),
+            layout: wallpaper::Layout::Same,
             pending: Vec::new(),
             queue: Vec::new(),
             busy: 0,
@@ -508,7 +531,7 @@ impl Picker {
             order: Vec::new(),
             output: String::new(),
             timer: false,
-            colors: HashMap::new(),
+            colors: Rc::default(),
             hue: None,
             query: String::new(),
             grid: false,
@@ -587,6 +610,16 @@ impl Picker {
             let Some(s) = weak.upgrade() else { return };
             let me = Picker(s);
             match me.hit(x, y) {
+                Some(Hit::Layout(layout)) => {
+                    if let Err(e) = kit::prefs::set("wallpaper_layout", toml::Value::String(layout.key().to_string())) {
+                        eprintln!("digit: {e}");
+                    } else {
+                        let app = me.0.borrow().app.clone();
+                        prefs_changed(&app);
+                    }
+                }
+                Some(Hit::Monitor(i)) => me.select_monitor(i),
+                Some(Hit::Apply) => me.close(true),
                 Some(Hit::Card(i)) => {
                     let pointed = me.0.borrow().pointed;
                     if n >= 2 || pointed == i {
@@ -665,52 +698,96 @@ impl Picker {
 
     fn open(&self) {
         let output = compositor::focused_output();
+        let display = gdk::Display::default();
+        let monitors: Vec<gdk::Monitor> = display.map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect()).unwrap_or_default();
+        let monitor = monitors.iter().find(|m| output.as_deref().is_some_and(|o| m.connector().as_deref() == Some(o))).or(monitors.first()).cloned();
+        let (window, canvas, app) = { let s = self.0.borrow(); (s.window.clone(), s.canvas.clone(), s.app.clone()) };
+        let size = monitor.as_ref().map(|m| (m.geometry().width() as f64, BAND)).unwrap_or((1920.0, BAND));
+        let output = monitor.as_ref().and_then(|m| m.connector()).map(|c| c.to_string()).unwrap_or_default();
+        let original = app.wallpapers.chosen(&output);
+        canvas.set_size_request(size.0 as i32, BAND as i32);
+        if window.monitor() != monitor { window.set_visible(false); }
+        window.set_monitor(monitor.as_ref());
         {
             let mut s = self.0.borrow_mut();
-            let display = gdk::Display::default();
-            let monitors: Vec<gdk::Monitor> = display.map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect()).unwrap_or_default();
-            let monitor = monitors.iter().find(|m| output.as_deref().is_some_and(|o| m.connector().as_deref() == Some(o))).or(monitors.first()).cloned();
-            if let Some(m) = &monitor {
-                s.size = (m.geometry().width() as f64, BAND);
-                s.output = m.connector().map(|c| c.to_string()).unwrap_or_default();
-            }
-            s.canvas.set_size_request(s.size.0 as i32, BAND as i32);
-            s.timer = kit::prefs::number(&kit::prefs::read(), "wallpaper_every", 0.0) >= 1.0;
-            if !s.window.is_visible() {
-                s.window.set_monitor(monitor.as_ref());
-            }
-            s.original = s.app.wallpapers.shown();
+            s.size = size;
+            s.output = output;
+            s.original = original;
             s.open = true;
+            s.region = false;
+            s.items = Rc::default();
             s.query.clear();
             s.hue = None;
-            if s.colors.is_empty() {
-                s.colors = load_colors();
-            }
+            s.timer = kit::prefs::number(&kit::prefs::read(), "wallpaper_every", 0.0) >= 1.0;
+            if s.colors.is_empty() { s.colors = Rc::new(load_colors()); }
             let now = glib::monotonic_time();
             s.fade.go(1.0, now, 220, motion::STANDARD);
             s.rise.set(0.0);
             s.rise.go(1.0, now, 520, motion::EMPHASIZED_DECEL);
-            s.window.set_keyboard_mode(KeyboardMode::Exclusive);
-            if s.scrim.is_none() {
-                let weak = Rc::downgrade(&self.0);
-                s.scrim = Some(crate::paint::scrim(monitor.as_ref(), move || {
-                    if let Some(s) = weak.upgrade() {
-                        Picker(s).close(false);
-                    }
-                }));
-            }
         }
-        let window = self.0.borrow().window.clone();
+        window.set_keyboard_mode(KeyboardMode::Exclusive);
+        if self.0.borrow().scrim.is_none() {
+            let weak = Rc::downgrade(&self.0);
+            let scrim = crate::paint::scrim(monitor.as_ref(), move || {
+                if let Some(s) = weak.upgrade() { Picker(s).close(false); }
+            });
+            self.0.borrow_mut().scrim = Some(scrim);
+        }
         window.present();
+        self.refresh_layout();
         self.load(Source::Yours);
         self.kick();
-        glib::spawn_future_local(async {
-            let _ = gio::spawn_blocking(crate::stash::prune).await;
-        });
+        glib::spawn_future_local(async { let _ = gio::spawn_blocking(crate::stash::prune).await; });
+    }
+
+    pub(crate) fn refresh_layout(&self) {
+        if !self.0.borrow().open { return; }
+        let (app, output, old_layout) = { let s = self.0.borrow(); (s.app.clone(), s.output.clone(), s.layout) };
+        let monitors = app.wallpapers.monitors();
+        let layout = app.wallpapers.layout();
+        let output = if monitors.iter().any(|m| m.output == output) { output } else { monitors.first().map(|m| m.output.clone()).unwrap_or_default() };
+        let original = app.wallpapers.chosen(&output);
+        {
+            let mut s = self.0.borrow_mut();
+            s.monitors = monitors;
+            s.layout = layout;
+            s.output = output;
+            s.original = original;
+            if old_layout != layout {
+                s.pointed = s.items.iter().position(|p| *p == s.original).unwrap_or(0);
+                let pointed = s.pointed as f64;
+                s.focus.set(pointed);
+                s.preview_wait += 1;
+                let now = glib::monotonic_time();
+                s.rise.set(0.0);
+                s.rise.go(1.0, now, 240, motion::STANDARD);
+            }
+        }
+        self.request_thumbs();
+        self.kick();
+    }
+
+    fn select_monitor(&self, i: usize) {
+        let (app, old, output) = {
+            let s = self.0.borrow();
+            let Some(monitor) = s.monitors.get(i) else { return };
+            (s.app.clone(), s.output.clone(), monitor.output.clone())
+        };
+        if old == output { return; }
+        app.wallpapers.unpreview(&old);
+        let original = app.wallpapers.chosen(&output);
+        {
+            let mut s = self.0.borrow_mut();
+            s.output = output;
+            s.original = original.clone();
+            s.preview_wait += 1;
+            s.pointed = s.items.iter().position(|p| *p == original).unwrap_or(0);
+        }
+        self.refocus();
     }
 
     fn close(&self, keep: bool) {
-        let (app, original, chosen) = {
+        let (app, chosen, window, scrim) = {
             let mut s = self.0.borrow_mut();
             if !s.open {
                 return;
@@ -720,18 +797,15 @@ impl Picker {
             let now = glib::monotonic_time();
             s.fade.go(0.0, now, 180, motion::FAST_EFFECTS);
             s.rise.go(0.0, now, 220, motion::Curve::new(0.3, 0.0, 0.8, 0.15));
-            s.window.set_keyboard_mode(KeyboardMode::None);
-            if let Some(scrim) = s.scrim.take() {
-                scrim.destroy();
-            }
             s.queue.clear();
-            (s.app.clone(), s.original.clone(), s.items.get(s.pointed).cloned())
+            (s.app.clone(), s.items.get(s.pointed).cloned(), s.window.clone(), s.scrim.take())
         };
+        window.set_keyboard_mode(KeyboardMode::None);
+        if let Some(scrim) = scrim { scrim.destroy(); }
         let output = self.0.borrow().output.clone();
         match (keep, chosen) {
-            (true, Some(path)) if path != original => {
-                if wallpaper::remember(&path) {
-                    app.wallpapers.commit(path, &output);
+            (true, Some(path)) => {
+                if app.wallpapers.commit(path, &output) {
                     crate::retheme(&app);
                 } else {
                     app.wallpapers.unpreview(&output);
@@ -746,7 +820,11 @@ impl Picker {
         {
             let mut s = self.0.borrow_mut();
             s.source = source;
-            s.all = list(source);
+            s.all = Rc::new(list(source));
+            if source == Source::Yours && !s.original.is_empty() && !s.all.contains(&s.original) {
+                let original = s.original.clone();
+                Rc::make_mut(&mut s.all).insert(0, original);
+            }
         }
         self.refilter();
         let weak = Rc::downgrade(&self.0);
@@ -763,17 +841,17 @@ impl Picker {
     fn refilter(&self) {
         {
             let mut s = self.0.borrow_mut();
-            let current = s.items.get(s.pointed).cloned().unwrap_or_else(|| s.app.wallpapers.shown());
+            let current = s.items.get(s.pointed).cloned().unwrap_or_else(|| s.original.clone());
             let q = s.query.clone();
             let hue = s.hue;
             let colors = s.colors.clone();
-            s.items = s
+            s.items = Rc::new(s
                 .all
                 .iter()
                 .filter(|p| q.is_empty() || std::path::Path::new(p).file_stem().is_some_and(|n| n.to_string_lossy().to_lowercase().contains(&q)))
                 .filter(|p| hue.is_none_or(|h| colors.get(*p).copied() == Some(h as u8)))
                 .cloned()
-                .collect();
+                .collect());
             s.pointed = s.items.iter().position(|p| *p == current).unwrap_or(0);
             let p = s.pointed as f64;
             s.focus.set(p);
@@ -810,7 +888,7 @@ impl Picker {
             let Some(state) = weak.upgrade() else { return };
             let colors = {
                 let mut s = state.borrow_mut();
-                s.colors.extend(found);
+                Rc::make_mut(&mut s.colors).extend(found);
                 s.colors.clone()
             };
             save_colors(&colors);
@@ -877,12 +955,19 @@ impl Picker {
     }
 
     fn request_thumbs(&self) {
+        let canvas = self.0.borrow().canvas.clone();
+        let sf = canvas.scale_factor().max(1) as f64;
+        let (need_ring, need_ghosts) = { let s = self.0.borrow(); (s.ring.is_none(), s.ghosts.is_none()) };
+        let ring = need_ring.then(|| outline(BIG_W, BIG_H, sf, false)).flatten();
+        let ghosts = need_ghosts.then(|| outline(SMALL_W, SMALL_H, sf, true).zip(outline(BIG_W, BIG_H, sf, true))).flatten();
         {
             let mut s = self.0.borrow_mut();
-            let sf = s.canvas.scale_factor().max(1) as f64;
             let n = s.items.len();
             let p = s.pointed;
             let mut wanted: Vec<(usize, &'static str)> = Vec::new();
+            if s.monitors.len() > 1 && s.layout != wallpaper::Layout::Same && p < n {
+                wanted.push((p, "preview"));
+            }
             if s.grid {
                 let cols = (((s.size.0 - 160.0) + GRID_GAP) / (GRID_W + GRID_GAP)).floor().clamp(2.0, 7.0) as usize;
                 let first = (p / cols).saturating_sub(2) * cols;
@@ -914,12 +999,14 @@ impl Picker {
             while s.order.len() > KEEP {
                 let old = s.order.remove(0);
                 s.thumbs.remove(&old);
+                s.previews.remove(&old);
                 s.big.remove(&old);
                 s.side.remove(&old);
             }
             let mut jobs: Vec<Job> = Vec::new();
             for ((_, kind), path) in wanted.into_iter().zip(paths) {
                 let have = match kind {
+                    "preview" => s.previews.contains_key(&path),
                     "big" => s.big.contains_key(&path),
                     "side" => s.side.contains_key(&path),
                     _ => s.thumbs.contains_key(&path),
@@ -934,10 +1021,10 @@ impl Picker {
             }
             s.queue = jobs;
             if s.ring.is_none() {
-                s.ring = outline(BIG_W, BIG_H, sf, false);
+                s.ring = ring;
             }
             if s.ghosts.is_none() {
-                s.ghosts = outline(SMALL_W, SMALL_H, sf, true).zip(outline(BIG_W, BIG_H, sf, true));
+                s.ghosts = ghosts;
             }
         }
         self.pump();
@@ -945,7 +1032,9 @@ impl Picker {
 
     fn pump(&self) {
         loop {
-            let (job, sf) = {
+            let canvas = self.0.borrow().canvas.clone();
+            let sf = canvas.scale_factor().max(1) as f64;
+            let job = {
                 let mut s = self.0.borrow_mut();
                 if !s.open || s.busy >= WORKERS || s.queue.is_empty() {
                     return;
@@ -955,7 +1044,7 @@ impl Picker {
                 for kind in &job.kinds {
                     s.pending.push(format!("{kind}:{}", job.path));
                 }
-                (job, s.canvas.scale_factor().max(1) as f64)
+                job
             };
             self.fetch(job, sf);
         }
@@ -965,7 +1054,7 @@ impl Picker {
         let weak = Rc::downgrade(&self.0);
         let screen = {
             let st = self.0.borrow();
-            st.app.wallpapers.size_of(&st.output)
+            if st.app.wallpapers.layout() == wallpaper::Layout::Span { None } else { st.app.wallpapers.size_of(&st.output) }
         };
         glib::spawn_future_local(async move {
             let Job { path, kinds } = job;
@@ -985,6 +1074,7 @@ impl Picker {
                     let warm = s.fade.value(now) < 0.05;
                     for (kind, t) in made {
                         match kind {
+                            "preview" => s.previews.insert(path.clone(), t),
                             "big" => s.big.insert(path.clone(), t),
                             "side" => s.side.insert(path.clone(), t),
                             _ => s.thumbs.insert(path.clone(), t),
@@ -1020,15 +1110,34 @@ impl Picker {
         let weak: Weak<RefCell<State>> = Rc::downgrade(&self.0);
         canvas.add_tick_callback(move |w, clock| {
             let Some(state) = weak.upgrade() else { return glib::ControlFlow::Break };
-            let Ok(mut s) = state.try_borrow_mut() else { return glib::ControlFlow::Continue };
-            let busy = s.step(clock.frame_time());
-            w.queue_draw();
-            if busy {
-                glib::ControlFlow::Continue
-            } else {
-                s.ticking = false;
-                glib::ControlFlow::Break
+            let now = clock.frame_time();
+            let (window, open, region, size, app) = {
+                let s = state.borrow();
+                (s.window.clone(), s.open, s.region, s.size, s.app.clone())
+            };
+            if open != region && let Some(surface) = window.surface() {
+                let r = if open { cairo::RectangleInt::new(0, 0, size.0 as i32, size.1 as i32) } else { cairo::RectangleInt::new(0, 0, 1, 1) };
+                surface.set_input_region(Some(&cairo::Region::create_rectangle(&r)));
+                state.borrow_mut().region = open;
             }
+            let palette_moving = app.palette_moving(now);
+            let busy = {
+                let mut s = state.borrow_mut();
+                let busy = s.step(now) || palette_moving;
+                if !busy { s.ticking = false; }
+                busy
+            };
+            if !busy && !open {
+                let (window, later) = (window.clone(), weak.clone());
+                glib::idle_add_local_once(move || {
+                    let still_closed = later.upgrade().is_some_and(|state| !state.borrow().open);
+                    if still_closed { window.set_visible(false); }
+                });
+                draw::forget(w);
+                App::trim();
+            }
+            w.queue_draw();
+            if busy { glib::ControlFlow::Continue } else { glib::ControlFlow::Break }
         });
     }
 }
@@ -1040,29 +1149,20 @@ impl State {
     }
 
     fn step(&mut self, now: i64) -> bool {
-        if self.open != self.region {
-            if let Some(surface) = self.window.surface() {
-                let r = if self.open { cairo::RectangleInt::new(0, 0, self.size.0 as i32, self.size.1 as i32) } else { cairo::RectangleInt::new(0, 0, 1, 1) };
-                surface.set_input_region(Some(&cairo::Region::create_rectangle(&r)));
-                self.region = self.open;
-            }
-        }
         self.born.retain(|_, t| !motion::reduced() && now - *t < BORN);
-        let moving = [&self.fade, &self.focus, &self.rise, &self.scroll].iter().any(|t| !t.settled(now)) || self.app.palette_moving(now) || !self.born.is_empty();
-        if !moving && !self.open && self.window.is_visible() {
-            let window = self.window.clone();
-            glib::idle_add_local_once(move || window.set_visible(false));
+        let moving = [&self.fade, &self.focus, &self.rise, &self.scroll].iter().any(|t| !t.settled(now)) || !self.born.is_empty();
+        if !moving && !self.open {
             self.thumbs.clear();
+            self.previews.clear();
+            self.frames.clear();
             self.thumbs.shrink_to_fit();
             self.big.clear();
             self.side.clear();
             self.born.clear();
             self.queue.clear();
             self.order.clear();
-            self.items.clear();
-            self.all.clear();
-            draw::forget(&self.canvas);
-            App::trim();
+            self.items = Rc::default();
+            self.all = Rc::default();
         }
         moving
     }
@@ -1103,7 +1203,7 @@ impl State {
         let rise = self.rise.value(now).clamp(0.0, 1.2);
         s.push_opacity(fade);
         let bar_y = (10.0 + (1.0 - rise) * -14.0).round();
-        let cy = (10.0 + BAR_H + 28.0 + BIG_H / 2.0).round();
+        let mut cy = (10.0 + BAR_H + 28.0 + BIG_H / 2.0).round();
         let ink = pal.ink_main;
         let label = match (&self.hue, self.query.is_empty()) {
             (_, false) => format!("“{}”", self.query),
@@ -1113,7 +1213,12 @@ impl State {
         let label_w = draw::width(&canvas, &cfg, &label, 13.0, Face::Text(560)) + 28.0;
         let buttons = 3.0 * (CHIP + 6.0);
         let hues_w = HUES.len() as f64 * (CHIP + 6.0);
-        let bar_w = 10.0 + label_w + 8.0 + buttons + 8.0 + hues_w + 6.0 + CHIP + 10.0;
+        let multi = self.monitors.len() > 1;
+        let layout_w = if multi { 232.0 } else { 0.0 };
+        let base_w = 10.0 + label_w + 8.0 + buttons + 8.0 + hues_w + 6.0 + CHIP + 10.0;
+        let wrapped = multi && base_w + layout_w > sw - 24.0;
+        let bar_w = base_w + if wrapped { 0.0 } else { layout_w };
+        if wrapped { cy += 50.0; }
         let bx = ((sw - bar_w) / 2.0).round();
         let bar = rounded(bx, bar_y, bar_w, BAR_H, 16.0);
         s.push_rounded_clip(&bar);
@@ -1122,20 +1227,20 @@ impl State {
         self.hits.push((Hit::Bar, *bar.bounds()));
         let mid = bar_y + BAR_H / 2.0;
         let mut x = bx + 8.0;
-        let chip = |s: &gtk::Snapshot, x: f64, w: f64, on: bool| {
+        let chip = |s: &gtk::Snapshot, x: f64, mid: f64, w: f64, on: bool| {
             let r = rounded(x, mid - CHIP / 2.0 - 1.0, w, CHIP + 2.0, 9.0);
             s.push_rounded_clip(&r);
             s.append_color(&(if on { pal.accent } else { pal.raised }).rgba(), r.bounds());
             s.pop();
             *r.bounds()
         };
-        let r = chip(s, x, label_w, false);
+        let r = chip(s, x, mid, label_w, false);
         draw::text(s, &canvas, &cfg, &label, 13.0, Face::Text(560), ink, x, mid, label_w, pango::Alignment::Center);
         self.hits.push((Hit::Source, r));
         x += label_w + 8.0;
         let timer = self.timer;
         for (hit, icon, on) in [(Hit::Grid, if self.grid { "view_carousel" } else { "grid_view" }, self.grid), (Hit::Timer, "timer", timer), (Hit::Shuffle, "shuffle", false)] {
-            let r = chip(s, x, CHIP, on);
+            let r = chip(s, x, mid, CHIP, on);
             draw::icon(s, &canvas, &cfg, icon, 18.0, on, if on { pal.on_accent } else { ink }, x + CHIP / 2.0, mid);
             self.hits.push((hit, r));
             x += CHIP + 6.0;
@@ -1158,14 +1263,38 @@ impl State {
             self.hits.push((Hit::Hue(i), *r.bounds()));
             x += CHIP + 6.0;
         }
-        let r = chip(s, x, CHIP, !self.query.is_empty());
+        let r = chip(s, x, mid, CHIP, !self.query.is_empty());
         draw::icon(s, &canvas, &cfg, "search", 18.0, false, if self.query.is_empty() { ink } else { pal.on_accent }, x + CHIP / 2.0, mid);
         self.hits.push((Hit::Search, r));
+        if multi {
+            let layout_mid = if wrapped { mid + 50.0 } else { mid };
+            if wrapped {
+                x = ((sw - layout_w) / 2.0).round();
+                let bar = rounded(x, bar_y + 50.0, layout_w, BAR_H, 16.0 * self.app.round());
+                s.push_rounded_clip(&bar);
+                s.append_color(&pal.body.alpha(0.92).rgba(), bar.bounds());
+                s.pop();
+                self.hits.push((Hit::Bar, *bar.bounds()));
+                x += 8.0;
+            } else { x += CHIP + 10.0; }
+            for (layout, label, width) in [(wallpaper::Layout::Same, "Same", 60.0), (wallpaper::Layout::Span, "Span", 60.0), (wallpaper::Layout::Separate, "Separate", 84.0)] {
+                let on = self.layout == layout;
+                let r = chip(s, x, layout_mid, width, on);
+                draw::text(s, &canvas, &cfg, label, 12.0, Face::Text(520), if on { pal.on_accent } else { ink }, x, layout_mid, width, pango::Alignment::Center);
+                self.hits.push((Hit::Layout(layout), r));
+                x += width + 6.0;
+            }
+        }
         if self.items.is_empty() {
             let msg = if self.all.is_empty() { "No pictures here" } else { "Nothing matches" };
             draw::text(s, &canvas, &cfg, msg, 16.0, Face::Text(480), ink, 0.0, cy, sw, pango::Alignment::Center);
         } else if self.grid {
-            self.draw_grid(s, now, bar_y + BAR_H + 24.0, rise);
+            let mut top = bar_y + BAR_H + 24.0 + if wrapped { 50.0 } else { 0.0 };
+            if multi && self.layout != wallpaper::Layout::Same {
+                self.draw_monitors(s, now, graphene::Rect::new((sw / 2.0 - 210.0) as f32, top as f32, 420.0, 130.0), self.pointed);
+                top += 150.0;
+            }
+            self.draw_grid(s, now, top, rise);
         } else {
             self.draw_carousel(s, now, cy, rise);
         }
@@ -1200,6 +1329,10 @@ impl State {
             }
             let lift = (1.0 - enter) * 26.0;
             let rect = graphene::Rect::new((x - reach / 2.0) as f32, (cy + lift - h / 2.0) as f32, reach as f32, h as f32);
+            if t < 0.5 && self.monitors.len() > 1 && self.layout != wallpaper::Layout::Same {
+                self.draw_monitors(s, now, rect, i);
+                continue;
+            }
             let path = &self.items[i];
             let bigness = (1.0 - t).clamp(0.0, 1.0);
             let big = self.big.get(path).filter(|_| bigness > 0.0);
@@ -1244,6 +1377,64 @@ impl State {
             let hit_w = (w * 0.9).max(40.0);
             self.hits.push((Hit::Card(i), graphene::Rect::new((x - hit_w / 2.0) as f32, (cy - h / 2.0) as f32, hit_w as f32, h as f32)));
         }
+    }
+
+    fn draw_monitors(&mut self, s: &gtk::Snapshot, now: i64, slot: graphene::Rect, image: usize) {
+        let pal = self.app.palette_at(now);
+        let cfg = self.app.cfg.clone();
+        let round = self.app.round();
+        let b = wallpaper::bounds(&self.monitors);
+        let k = ((slot.width() as f64 - 32.0) / b.w).min((slot.height() as f64 - 58.0) / b.h);
+        let left = slot.x() as f64 + (slot.width() as f64 - b.w * k) / 2.0;
+        let top = slot.y() as f64 + 8.0 + (slot.height() as f64 - 58.0 - b.h * k) / 2.0;
+        let selected = self.items.get(image).and_then(|p| self.previews.get(p));
+        let regions = wallpaper::span_regions(&self.monitors);
+        self.hits.push((Hit::Bar, slot));
+        for (i, (monitor, view)) in self.monitors.iter().zip(regions).enumerate() {
+            let x = left + (monitor.rect.x - b.x) * k;
+            let y = top + (monitor.rect.y - b.y) * k;
+            let w = monitor.rect.w * k;
+            let h = monitor.rect.h * k;
+            let on = self.layout == wallpaper::Layout::Separate && monitor.output == self.output;
+            let frame = rounded(x, y, w, h, 8.0 * round);
+            s.push_rounded_clip(&frame);
+            s.append_color(&(if on { pal.accent } else { pal.raised }).rgba(), frame.bounds());
+            let inner = rounded(x + 3.0, y + 3.0, (w - 6.0).max(1.0), (h - 6.0).max(1.0), 5.0 * round);
+            s.push_rounded_clip(&inner);
+            let live = self.frames.iter().find(|(o, _, _)| *o == monitor.output);
+            let shown = if self.layout == wallpaper::Layout::Span {
+                selected.map(|t| {
+                    let crop = wallpaper::cover_crop((t.width() as f64, t.height() as f64), (b.w, b.h));
+                    (t, wallpaper::Rect { x: crop.x + view.x * crop.w, y: crop.y + view.y * crop.h, w: view.w * crop.w, h: view.h * crop.h })
+                })
+            } else if on {
+                selected.map(|t| (t, wallpaper::cover_crop((t.width() as f64, t.height() as f64), (monitor.rect.w, monitor.rect.h))))
+            } else { live.map(|(_, t, r)| (t, *r)) };
+            if let Some((texture, region)) = shown.or_else(|| live.map(|(_, t, r)| (t, *r))) {
+                let dw = inner.bounds().width() as f64 / region.w;
+                let dh = inner.bounds().height() as f64 / region.h;
+                s.append_scaled_texture(texture, gsk::ScalingFilter::Linear, &graphene::Rect::new((x + 3.0 - region.x * dw) as f32, (y + 3.0 - region.y * dh) as f32, dw as f32, dh as f32));
+            }
+            s.pop();
+            s.pop();
+            // Connector captions identify the selection target even for identical monitors.
+            let label = rounded(x + 5.0, y + h - 27.0, (w - 10.0).max(1.0), 22.0, 7.0 * round);
+            s.push_rounded_clip(&label);
+            s.append_color(&(if on { pal.accent } else { pal.body }).rgba(), label.bounds());
+            s.pop();
+            draw::text(s, &self.canvas, &cfg, &monitor.output, 11.0, Face::Text(520), if on { pal.on_accent } else { pal.ink_main }, x + 5.0, y + h - 16.0, w - 10.0, pango::Alignment::Center);
+            if self.layout == wallpaper::Layout::Separate { self.hits.push((Hit::Monitor(i), *frame.bounds())); }
+        }
+        let label = if self.layout == wallpaper::Layout::Separate { format!("Apply to {}", self.output) } else { "Apply".to_string() };
+        let width = (draw::width(&self.canvas, &cfg, &label, 12.0, Face::Text(520)) + 28.0).min(slot.width() as f64 - 16.0);
+        let x = slot.x() as f64 + (slot.width() as f64 - width) / 2.0;
+        let y = slot.y() as f64 + slot.height() as f64 - CHIP;
+        let chip = rounded(x, y, width, CHIP, 9.0 * round);
+        s.push_rounded_clip(&chip);
+        s.append_color(&pal.accent.rgba(), chip.bounds());
+        s.pop();
+        draw::text(s, &self.canvas, &cfg, &label, 12.0, Face::Text(520), pal.on_accent, x, y + CHIP / 2.0, width, pango::Alignment::Center);
+        self.hits.push((Hit::Apply, *chip.bounds()));
     }
 
     fn draw_grid(&mut self, s: &gtk::Snapshot, now: i64, top: f64, rise: f64) {
@@ -1303,12 +1494,13 @@ mod imp {
     impl WidgetImpl for Canvas {
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
             let Some(state) = self.state.borrow().upgrade() else { return };
-            let Ok(mut s) = state.try_borrow_mut() else {
-                self.obj().queue_draw();
-                return;
-            };
+            let mut s = state.borrow().clone();
             let now = self.obj().frame_clock().map(|c| c.frame_time()).unwrap_or_else(glib::monotonic_time);
+            s.monitors = s.app.wallpapers.monitors();
+            s.frames = s.app.wallpapers.preview_frames();
+            s.layout = s.app.wallpapers.layout();
             s.draw(snapshot, now);
+            state.borrow_mut().hits = s.hits;
         }
     }
 }

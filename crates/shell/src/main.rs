@@ -157,15 +157,15 @@ fn run() {
         icons::theme(app.cfg.icon_theme.as_deref());
     }
     if app.cfg.wallpaper {
-        if let Some(path) = wallpaper::current().or_else(wallpaper::found) {
+        if let Some(path) = wallpaper::current().or_else(wallpaper::found).or_else(|| app.cfg.wallpapers.values().find(|p| std::path::Path::new(p).is_file()).cloned()) {
             wallpaper::remember(&path);
             app.wallpapers.set(path);
         }
     }
-    theming::refresh(None, &app.cfg.scheme, None, false);
+    place(&app, &display);
+    theming::refresh(None, &app.cfg.scheme, app.wallpapers.theme_image(), false);
     load_palette(&app);
     watch_palette(&app);
-    place(&app, &display);
     intro::play(&app);
     let monitors = display.monitors();
     let weak = Rc::downgrade(&app);
@@ -214,6 +214,7 @@ fn run() {
         clip::start(&app);
     }
     picker::slideshow(&app);
+    if app.cfg.wallpaper { wallpaper::watch_layout(&app); }
     if !kit::theme::state_dir().join("onboarded").exists() {
         glib::timeout_add_local_once(std::time::Duration::from_millis(2500), || {
             let argv: [&std::ffi::OsStr; 2] = ["digit-settings".as_ref(), "welcome".as_ref()];
@@ -303,7 +304,6 @@ fn reshape(app: &Rc<App>, display: &gdk::Display, output: &str) {
     for n in stale {
         n.destroy();
     }
-    app.wallpapers.forget(output);
     place(app, display);
     dock::apply(app);
     night::apply(app);
@@ -319,7 +319,12 @@ fn place(app: &Rc<App>, display: &gdk::Display) {
         watch_monitor(app, m);
     }
     if app.cfg.wallpaper {
+        let had_monitors = !app.wallpapers.monitors().is_empty();
+        let before = app.wallpapers.theme_image();
         app.wallpapers.place(&monitors);
+        if had_monitors && before != app.wallpapers.theme_image() { retheme(app); }
+        let picker = app.picker.borrow().clone();
+        if let Some(picker) = picker { picker.refresh_layout(); }
     }
     if !app.notches.borrow().is_empty() {
         dock::apply(app);
@@ -446,10 +451,11 @@ fn load_palette(app: &Rc<App>) {
 
 pub(crate) fn retheme(app: &Rc<App>) {
     let scheme = app.cfg.scheme.clone();
+    let image = app.wallpapers.theme_image();
     app.retheming.set(true);
     let weak = Rc::downgrade(app);
     glib::spawn_future_local(async move {
-        let fresh = gio::spawn_blocking(move || theming::refresh(None, &scheme, None, false)).await.ok().flatten();
+        let fresh = gio::spawn_blocking(move || theming::refresh(None, &scheme, image, false)).await.ok().flatten();
         let Some(app) = weak.upgrade() else { return };
         if fresh.is_none() {
             app.retheming.set(false);
