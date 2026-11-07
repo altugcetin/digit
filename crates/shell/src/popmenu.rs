@@ -12,13 +12,21 @@ const SEP: f64 = 11.0;
 const PAD: f64 = 6.0;
 
 pub enum Row {
-    Item { label: String, hint: String, danger: bool, enabled: bool, act: Rc<dyn Fn()> },
+    Item { glyph: &'static str, label: String, hint: String, danger: bool, enabled: bool, act: Rc<dyn Fn()> },
     Sep,
 }
 
 impl Row {
     pub fn item(label: impl Into<String>, act: impl Fn() + 'static) -> Row {
-        Row::Item { label: label.into(), hint: String::new(), danger: false, enabled: true, act: Rc::new(act) }
+        Row::Item { glyph: "", label: label.into(), hint: String::new(), danger: false, enabled: true, act: Rc::new(act) }
+    }
+
+    /// A glyph before the label, as in Files' menus.
+    pub fn glyph(mut self, name: &'static str) -> Row {
+        if let Row::Item { glyph, .. } = &mut self {
+            *glyph = name;
+        }
+        self
     }
 
     pub fn hint(mut self, h: &str) -> Row {
@@ -161,7 +169,7 @@ impl Menu {
                 Row::Sep => {
                     draw::fill(s, &draw::round(12.0, y + SEP / 2.0, w - 24.0, 1.0, 0.0), pal.ink_main.alpha(0.08));
                 }
-                Row::Item { label, hint, danger, enabled, .. } => {
+                Row::Item { glyph, label, hint, danger, enabled, .. } => {
                     let on = self.hover == Some(i);
                     if on {
                         draw::fill(s, &draw::round(5.0, y + 1.0, w - 10.0, ROW - 2.0, 9.0), if *danger { pal.risk.alpha(0.85) } else { pal.accent });
@@ -175,7 +183,12 @@ impl Menu {
                     } else {
                         pal.ink_main
                     };
-                    draw::text(s, &self.paint, cfg, label, 14.5, Face::Text(if on { 520 } else { 450 }), ink, 14.0, y + ROW / 2.0, w - 28.0, pango::Alignment::Left);
+                    let text_x = if glyph.is_empty() { 14.0 } else {
+                        let tint = if on || *danger || !enabled { ink } else { pal.ink_sec };
+                        draw::icon(s, &self.paint, cfg, glyph, 18.0, false, tint, 23.0, y + ROW / 2.0);
+                        42.0
+                    };
+                    draw::text(s, &self.paint, cfg, label, 14.5, Face::Text(if on { 520 } else { 450 }), ink, text_x, y + ROW / 2.0, w - text_x - 14.0, pango::Alignment::Left);
                     if !hint.is_empty() {
                         let hink = if on { pal.on_accent.alpha(0.75) } else { pal.ink_meta };
                         draw::text(s, &self.paint, cfg, hint, 13.0, Face::Text(450), hink, 14.0, y + ROW / 2.0, w - 28.0, pango::Alignment::Right);
@@ -230,8 +243,8 @@ fn show_inner(app: &Rc<App>, monitor: Option<gdk::Monitor>, x: f64, y: f64, titl
     let paint = Paint::new(1, 1);
     let mut width: f64 = 200.0;
     for r in &rows {
-        if let Row::Item { label, hint, .. } = r {
-            let lw = draw::width(&paint, &app.cfg, label, 14.5, Face::Text(520));
+        if let Row::Item { glyph, label, hint, .. } = r {
+            let lw = draw::width(&paint, &app.cfg, label, 14.5, Face::Text(520)) + if glyph.is_empty() { 0.0 } else { 28.0 };
             let hw = if hint.is_empty() { 0.0 } else { 28.0 + draw::width(&paint, &app.cfg, hint, 13.0, Face::Text(450)) };
             width = width.max(lw + hw + 40.0);
         }
