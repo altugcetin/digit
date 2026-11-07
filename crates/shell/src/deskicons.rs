@@ -1986,7 +1986,8 @@ fn clip(paint: &Paint, files: &[FileData], cut: bool) {
 
 /// Files from the clipboard land at `pointer`: cut ones move here, copied ones are copied.
 fn paste(d: &Rc<RefCell<Desktop>>, pointer: (f64, f64)) {
-    let clipboard = d.borrow().paint.clipboard();
+    let paint = d.borrow().paint.clone();
+    let clipboard = paint.clipboard();
     let weak = Rc::downgrade(d);
     glib::spawn_future_local(async move {
         let formats = clipboard.formats();
@@ -2014,10 +2015,11 @@ fn paste(d: &Rc<RefCell<Desktop>>, pointer: (f64, f64)) {
         if let (Some((uris, cut)), Some(d)) = (found, weak.upgrade())
             && !uris.is_empty()
         {
-            if cut {
-                let _ = clipboard.set_content(None::<&gdk::ContentProvider>);
-            }
-            import_drop(&d, uris, pointer, !cut);
+            import_drop(&d, uris, pointer, !cut, cut, move |success| {
+                if cut && success {
+                    let _ = clipboard.set_content(None::<&gdk::ContentProvider>);
+                }
+            });
         }
     });
 }
@@ -2561,7 +2563,7 @@ fn menu(d: &Rc<RefCell<Desktop>>, on_icon: bool, x: f64, y: f64) {
                 MenuAction::Duplicate => {
                     if let Some(d) = weak.upgrade() {
                         let uris = files.iter().map(|f| gio::File::for_path(&f.path).uri().to_string()).collect();
-                        import_drop(&d, uris, (x + 24.0, y + 24.0), true);
+                        import_drop(&d, uris, (x + 24.0, y + 24.0), true, false, |_| {});
                     }
                 }
                 MenuAction::SelectAll => {
@@ -3052,7 +3054,7 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
         if uris.is_empty() {
             return false;
         }
-        import_drop(&d, uris, (x, y), false);
+        import_drop(&d, uris, (x, y), false, false, |_| {});
         true
     });
     paint.add_controller(target);
@@ -3758,6 +3760,7 @@ fn collision_name(
 struct ImportPlan {
     uri: String,
     dest: PathBuf,
+    cut: bool,
 }
 
 fn rollback_import(
@@ -3785,6 +3788,7 @@ fn plan_imports(
     folder: &Path,
     mut reserved: BTreeSet<String>,
     copy: bool,
+    cut: bool,
 ) -> Vec<ImportPlan> {
     uris.into_iter()
         .filter_map(|uri| {
@@ -3804,12 +3808,12 @@ fn plan_imports(
                 folder.join(name)
             };
             reserved.insert(name_key(dest.file_name()?));
-            Some(ImportPlan { uri, dest })
+            Some(ImportPlan { uri, dest, cut })
         })
         .collect()
 }
 
-fn import_drop(d: &Rc<RefCell<Desktop>>, uris: Vec<String>, pointer: (f64, f64), copy: bool) {
+fn import_drop(d: &Rc<RefCell<Desktop>>, uris: Vec<String>, pointer: (f64, f64), copy: bool, cut: bool, done: impl FnOnce(bool) + 'static) {
     let (grid, page) = {
         let state = d.borrow();
         (state.grid, state.page)
@@ -3844,7 +3848,8 @@ fn import_drop(d: &Rc<RefCell<Desktop>>, uris: Vec<String>, pointer: (f64, f64),
                 state.shared.borrow().saved.keys().cloned().collect(),
             )
         };
-        let plans = gio::spawn_blocking(move || plan_imports(uris, &folder, reserved, copy)).await;
+        let count = uris.len();
+        let plans = gio::spawn_blocking(move || plan_imports(uris, &folder, reserved, copy, cut)).await;
         let Ok(plans) = plans else {
             {
                 let mut state = d.borrow_mut();
@@ -3852,8 +3857,10 @@ fn import_drop(d: &Rc<RefCell<Desktop>>, uris: Vec<String>, pointer: (f64, f64),
                 state.shared.borrow_mut().importing = false;
             }
             refresh(&d);
+            done(false);
             return;
         };
+        let complete = plans.len() == count;
         let positions = drop_cascade(grid, pointer, page, plans.len());
         let previous: Vec<_> = {
             let mut state = d.borrow_mut();
@@ -3890,7 +3897,7 @@ fn import_drop(d: &Rc<RefCell<Desktop>>, uris: Vec<String>, pointer: (f64, f64),
         let results = gio::spawn_blocking(move || {
             plans
                 .into_iter()
-                .map(|plan| import(&gio::File::for_uri(&plan.uri), &plan.dest, copy))
+                .map(|plan| import(&gio::File::for_uri(&plan.uri), &plan.dest, copy, plan.cut))
                 .collect::<Vec<_>>()
         })
         .await;
@@ -3917,54 +3924,72 @@ fn import_drop(d: &Rc<RefCell<Desktop>>, uris: Vec<String>, pointer: (f64, f64),
         }
         save(&d);
         refresh(&d);
+        done(complete && imports_succeeded(&results));
     });
 }
 
-fn import(file: &gio::File, dest: &Path, copy: bool) -> Result<(), String> {
+fn imports_succeeded<E>(results: &Result<Vec<Result<(), String>>, E>) -> bool {
+    matches!(results, Ok(items) if items.iter().all(Result::is_ok))
+}
+
+fn import(file: &gio::File, dest: &Path, copy: bool, cut: bool) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
+    import_with_devices(file, dest, copy, cut, |src, folder| {
+        Ok(std::fs::symlink_metadata(src)?.dev() == std::fs::metadata(folder)?.dev())
+    })
+}
+
+fn import_with_devices(file: &gio::File, dest: &Path, copy: bool, cut: bool, same_device: impl FnOnce(&Path, &Path) -> std::io::Result<bool>) -> Result<(), String> {
     let folder = dest.parent().ok_or("Missing destination folder")?;
     let target = gio::File::for_path(dest);
     if file.equal(&target) {
         return Ok(());
     }
     if copy {
-        return match file.path() {
-            Some(path) => copy_tree(&path, dest).map_err(|e| e.to_string()),
-            None => file.copy(&target, gio::FileCopyFlags::NONE, gio::Cancellable::NONE, None).map_err(|e| e.to_string()),
-        };
+        return copy_import(file, dest, false);
     }
     if let Some(path) = file.path() {
         // Compare devices without following the source symlink; a cross-device drop is a
-        // copy, including folders. Neither path ever overwrites an existing destination.
-        let src_dev = std::fs::symlink_metadata(&path)
-            .map_err(|e| e.to_string())?
-            .dev();
-        let dest_dev = std::fs::metadata(folder).map_err(|e| e.to_string())?.dev();
-        if src_dev != dest_dev {
-            return copy_tree(&path, dest).map_err(|e| e.to_string());
+        // copy, including folders. A clipboard cut explicitly removes the source afterward.
+        if !same_device(&path, folder).map_err(|e| e.to_string())? {
+            return copy_import(file, dest, cut);
         }
     }
-    match file.move_(
-        &target,
-        gio::FileCopyFlags::NO_FALLBACK_FOR_MOVE,
-        gio::Cancellable::NONE,
-        None,
-    ) {
+    match file.move_(&target, gio::FileCopyFlags::NO_FALLBACK_FOR_MOVE, gio::Cancellable::NONE, None) {
         Ok(()) => Ok(()),
-        Err(e) if e.matches(gio::IOErrorEnum::NotSupported) => match file.path() {
-            Some(path) => copy_tree(&path, dest).map_err(|e| e.to_string()),
-            None => file
-                .copy(
-                    &target,
-                    gio::FileCopyFlags::NONE,
-                    gio::Cancellable::NONE,
-                    None,
-                )
-                .map_err(|e| e.to_string()),
-        },
+        Err(e) if e.matches(gio::IOErrorEnum::NotSupported) => copy_import(file, dest, cut),
         Err(e) => Err(e.to_string()),
     }
 }
+
+fn copy_import(file: &gio::File, dest: &Path, cut: bool) -> Result<(), String> {
+    let target = gio::File::for_path(dest);
+    match file.path() {
+        Some(path) => {
+            copy_tree(&path, dest).map_err(|e| e.to_string())?;
+            if cut {
+                remove_import_source(&path).map_err(|e| e.to_string())?;
+            }
+        }
+        None => {
+            let flags = if cut { gio::FileCopyFlags::NOFOLLOW_SYMLINKS } else { gio::FileCopyFlags::NONE };
+            file.copy(&target, flags, gio::Cancellable::NONE, None).map_err(|e| e.to_string())?;
+            if cut {
+                file.delete(gio::Cancellable::NONE).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remove_import_source(path: &Path) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(path)?.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
 fn copy_tree(src: &Path, dest: &Path) -> std::io::Result<()> {
     use std::io;
     let meta = std::fs::symlink_metadata(src)?;
@@ -3972,19 +3997,24 @@ fn copy_tree(src: &Path, dest: &Path) -> std::io::Result<()> {
         std::os::unix::fs::symlink(std::fs::read_link(src)?, dest)
     } else if meta.is_dir() {
         std::fs::create_dir(dest)?;
-        for entry in std::fs::read_dir(src)? {
-            let entry = entry?;
-            copy_tree(&entry.path(), &dest.join(entry.file_name()))?;
-        }
-        std::fs::set_permissions(dest, meta.permissions())
+        let result = (|| {
+            for entry in std::fs::read_dir(src)? {
+                let entry = entry?;
+                copy_tree(&entry.path(), &dest.join(entry.file_name()))?;
+            }
+            std::fs::set_permissions(dest, meta.permissions())
+        })();
+        if result.is_err() { let _ = std::fs::remove_dir_all(dest); }
+        result
     } else if meta.is_file() {
         let mut input = std::fs::File::open(src)?;
         let mut output = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(dest)?;
-        io::copy(&mut input, &mut output)?;
-        output.set_permissions(meta.permissions())
+        let result = io::copy(&mut input, &mut output).and_then(|_| output.set_permissions(meta.permissions()));
+        if result.is_err() { let _ = std::fs::remove_file(dest); }
+        result
     } else {
         Err(io::Error::other("Unsupported file type"))
     }
@@ -4415,7 +4445,7 @@ mod tests {
             .iter()
             .map(|p| gio::File::for_path(p).uri().to_string())
             .collect();
-        let plans = plan_imports(uris, &desktop, BTreeSet::new(), false);
+        let plans = plan_imports(uris, &desktop, BTreeSet::new(), false, false);
         assert_eq!(
             plans.iter().map(|p| p.dest.clone()).collect::<Vec<_>>(),
             [
@@ -4427,7 +4457,7 @@ mod tests {
         assert!(!desktop.join("a (3).txt").exists());
         assert!(!desktop.join("a (4).txt").exists());
         for plan in plans {
-            import(&gio::File::for_uri(&plan.uri), &plan.dest, false).unwrap();
+            import(&gio::File::for_uri(&plan.uri), &plan.dest, false, false).unwrap();
         }
         assert_eq!(std::fs::read(desktop.join("a.txt")).unwrap(), b"desktop");
         assert_eq!(std::fs::read(desktop.join("a (3).txt")).unwrap(), b"first");
@@ -4905,19 +4935,61 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
+    fn cross_device_cut_removes_only_fully_copied_sources() {
+        let dir = temp();
+        let desktop = dir.join("Desktop");
+        std::fs::create_dir_all(&desktop).unwrap();
+        let source = dir.join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("file"), "contents").unwrap();
+        // A FIFO is unsupported: a partially copied folder must leave its source intact.
+        use std::os::unix::ffi::OsStrExt;
+        let fifo = std::ffi::CString::new(source.join("fifo").as_os_str().as_bytes()).unwrap();
+        // SAFETY: fifo is a valid, NUL-terminated path for the duration of the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let file = gio::File::for_path(&source);
+        let dest = desktop.join("source");
+        assert!(import_with_devices(&file, &dest, false, true, |_, _| Ok(false)).is_err());
+        assert!(source.join("file").exists());
+        assert!(source.join("fifo").exists());
+        assert!(!dest.exists());
+        std::fs::remove_file(source.join("fifo")).unwrap();
+        import_with_devices(&file, &dest, false, false, |_, _| Ok(false)).unwrap();
+        assert!(source.join("file").exists(), "a normal cross-device drop stays a copy");
+        assert!(import_with_devices(&file, &dest, false, true, |_, _| Ok(false)).is_err());
+        assert!(source.join("file").exists(), "a collision must preserve the source");
+        std::fs::remove_dir_all(&dest).unwrap();
+        let plans = plan_imports(vec![file.uri().to_string()], &desktop, BTreeSet::new(), false, true);
+        assert!(plans[0].cut);
+        import_with_devices(&file, &plans[0].dest, false, plans[0].cut, |_, _| Ok(false)).unwrap();
+        assert!(!source.exists());
+        assert_eq!(std::fs::read_to_string(dest.join("file")).unwrap(), "contents");
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(dest.join("file"), &link).unwrap();
+        import_with_devices(&gio::File::for_path(&link), &desktop.join("link"), false, true, |_, _| Ok(false)).unwrap();
+        assert!(link.symlink_metadata().is_err());
+        assert!(desktop.join("link").symlink_metadata().unwrap().is_symlink());
+        assert!(dest.join("file").exists(), "moving a symlink must preserve its target");
+        assert!(imports_succeeded(&Ok::<_, ()>(vec![Ok(()), Ok(())])));
+        assert!(!imports_succeeded(&Ok::<_, ()>(vec![Ok(()), Err("Failed".into())])));
+        assert!(!imports_succeeded(&Err::<Vec<Result<(), String>>, _>(())));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn import_moves_on_same_filesystem_and_refuses_collisions() {
         let dir = temp();
         std::fs::create_dir_all(dir.join("Desktop")).unwrap();
         let source = dir.join("a");
         let dest = dir.join("Desktop/a");
         std::fs::write(&source, b"original").unwrap();
-        import(&gio::File::for_path(&source), &dest, false).unwrap();
+        import(&gio::File::for_path(&source), &dest, false, false).unwrap();
         assert!(!source.exists());
         std::fs::write(&source, b"replacement").unwrap();
-        assert!(import(&gio::File::for_path(&source), &dest, false).is_err());
+        assert!(import(&gio::File::for_path(&source), &dest, false, false).is_err());
         assert_eq!(std::fs::read(&dest).unwrap(), b"original");
         assert_eq!(std::fs::read(&source).unwrap(), b"replacement");
-        import(&gio::File::for_path(&dest), &dest, false).unwrap();
+        import(&gio::File::for_path(&dest), &dest, false, false).unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
@@ -4948,9 +5020,9 @@ mod tests {
         assert_eq!(free, "test (3)");
         std::fs::write(root.join("a.txt"), "x").unwrap();
         let uri = gio::File::for_path(root.join("a.txt")).uri().to_string();
-        let plans = plan_imports(vec![uri], &root, BTreeSet::new(), true);
+        let plans = plan_imports(vec![uri], &root, BTreeSet::new(), true, false);
         assert_eq!(plans[0].dest, root.join("a (2).txt"), "a copy onto itself is a duplicate");
-        import(&gio::File::for_uri(&plans[0].uri), &plans[0].dest, true).unwrap();
+        import(&gio::File::for_uri(&plans[0].uri), &plans[0].dest, true, false).unwrap();
         assert!(root.join("a.txt").exists() && root.join("a (2).txt").exists());
         std::fs::remove_dir_all(root).unwrap();
     }

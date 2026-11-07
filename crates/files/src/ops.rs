@@ -269,9 +269,22 @@ fn set_aside(dst: &gio::File, cancel: &gio::Cancellable) -> Result<Option<gio::F
     let aside = dst.parent().map(|p| p.child(format!(".digit-replacing-{}", glib::random_int())));
     let Some(aside) = aside else { return Err(format!("{}: can't be replaced", name(dst))) };
     let flags = gio::FileCopyFlags::NOFOLLOW_SYMLINKS | gio::FileCopyFlags::NO_FALLBACK_FOR_MOVE;
-    match dst.move_(&aside, flags, Some(cancel), None) {
-        Ok(()) => Ok(Some(aside)),
-        Err(e) if e.matches(gio::IOErrorEnum::NotSupported) => remove_tree(dst, cancel).map(|()| None).map_err(|e| format!("{}: {e}", name(dst))),
+    backup_after_move(dst.move_(&aside, flags, Some(cancel), None), dst, &aside, cancel)
+}
+
+// None means neither backend operation can keep a backup; the caller must ask first.
+fn backup_after_move(result: Result<(), glib::Error>, dst: &gio::File, aside: &gio::File, cancel: &gio::Cancellable) -> Result<Option<gio::File>, String> {
+    match result {
+        Ok(()) => Ok(Some(aside.clone())),
+        Err(e) if e.matches(gio::IOErrorEnum::NotSupported) => {
+            let hidden = aside.basename().ok_or("Missing backup name")?;
+            let hidden = hidden.to_str().ok_or("Backup name is not valid UTF-8")?;
+            match dst.set_display_name(hidden, Some(cancel)) {
+                Ok(renamed) => Ok(Some(renamed)),
+                Err(e) if e.matches(gio::IOErrorEnum::NotSupported) => Ok(None),
+                Err(e) => Err(format!("{}: {}", name(dst), e.message())),
+            }
+        }
         Err(e) => Err(format!("{}: {}", name(dst), e.message())),
     }
 }
@@ -313,6 +326,18 @@ impl Ctx<'_> {
         a
     }
 
+    fn replace_without_backup(&mut self, dst: &gio::File) -> Result<bool, String> {
+        // A remembered conflict policy must never authorize losing the backup.
+        match ask(self.st, format!("“{}” can't be kept as a backup here. If this fails, it's lost. Replace it anyway?", name(dst))).0 {
+            Answer::Replace => remove_tree(dst, self.cancel).map(|()| true),
+            Answer::Stop => {
+                self.policy = Some(Answer::Stop);
+                Err("Cancelled".into())
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn copy_tree(&mut self, src: &gio::File, dst: &gio::File) -> Result<(), String> {
         if self.cancel.is_cancelled() {
             return Err("Cancelled".into());
@@ -352,7 +377,12 @@ impl Ctx<'_> {
                 Answer::Replace if merge && moving => return self.merge(src, &dst),
                 Answer::Replace if merge => return self.copy_tree(src, &dst),
                 Answer::Replace if inside(src, &dst) || same_item(src, &dst, self.cancel) => return Err(format!("“{}” can't replace itself or a folder it's in", name(src))),
-                Answer::Replace => aside = set_aside(&dst, self.cancel)?,
+                Answer::Replace => {
+                    aside = set_aside(&dst, self.cancel)?;
+                    if aside.is_none() && !self.replace_without_backup(&dst)? {
+                        return Ok(());
+                    }
+                }
             }
         }
         let before = self.made.len();
@@ -365,8 +395,10 @@ impl Ctx<'_> {
         self.made.truncate(before);
         let _ = remove_tree(&dst, &cleanup);
         let flags = gio::FileCopyFlags::NOFOLLOW_SYMLINKS | gio::FileCopyFlags::NO_FALLBACK_FOR_MOVE;
-        if let Err(e) = aside.move_(&dst, flags, Some(&cleanup), None) {
-            return Err(format!("{}: the old item is kept as {}: {}", name(&dst), name(&aside), e.message()));
+        if let Err(e) = backup_after_move(aside.move_(&dst, flags, Some(&cleanup), None), &aside, &dst, &cleanup)
+            .and_then(|restored| restored.ok_or_else(|| "Backup restore is unsupported".into()))
+        {
+            return Err(format!("{}: the old item is kept as {}: {e}", name(&dst), name(&aside)));
         }
         result
     }
@@ -856,12 +888,15 @@ pub fn dialog(title: &str, detail: &str) -> (Sheet, gtk::Box, gtk::Box) {
 }
 
 fn conflict(question: &str, done: impl Fn(Answer, bool) + 'static) {
-    let (w, body, buttons) = dialog(question, "Replacing it overwrites its contents. Folders are merged.");
+    let backup = question.ends_with("Replace it anyway?");
+    let detail = if backup { "Only Replace continues. Skip keeps both items where they are." } else { "Replacing it overwrites its contents. Folders are merged." };
+    let (w, body, buttons) = dialog(question, detail);
     let all = gtk::CheckButton::with_label("Do this for every conflict");
-    body.append(&all);
+    if !backup { body.append(&all); }
     let done = Rc::new(done);
     let answered = Rc::new(std::cell::Cell::new(false));
     for (label, answer, kind) in [("Stop", Answer::Stop, ""), ("Skip", Answer::Skip, ""), ("Keep Both", Answer::Both, ""), ("Replace", Answer::Replace, "accent")] {
+        if backup && answer == Answer::Both { continue; }
         let b = kit::ui::button(label, kind);
         let (w2, all2, done2, answered2) = (w.clone(), all.clone(), done.clone(), answered.clone());
         b.connect_clicked(move |_| {
@@ -1511,6 +1546,56 @@ mod tests {
         let (st, cancel) = (state(), gio::Cancellable::new());
         let mut ctx = Ctx { st: &st, cancel: &cancel, policy: Some(policy), made: Vec::new(), moved: Vec::new(), base: 0 };
         ctx.place(&file(src), file(dst), moving)
+    }
+
+    #[test]
+    fn unsupported_move_tries_rename_without_deleting_the_backup() {
+        let t = Scratch::new("rename-backup");
+        let dst = file(&t.write("file", "old"));
+        let aside = file(&t.0.join(".hidden"));
+        let unsupported = Err(glib::Error::new(gio::IOErrorEnum::NotSupported, "Unsupported"));
+        let backup = backup_after_move(unsupported, &dst, &aside, &gio::Cancellable::new()).unwrap().unwrap();
+        assert!(backup.equal(&aside));
+        assert_eq!(fs::read_to_string(aside.path().unwrap()).unwrap(), "old");
+        assert!(!dst.query_exists(gio::Cancellable::NONE));
+        let unsupported = Err(glib::Error::new(gio::IOErrorEnum::NotSupported, "Unsupported"));
+        backup_after_move(unsupported, &aside, &dst, &gio::Cancellable::new()).unwrap().unwrap();
+        assert_eq!(fs::read_to_string(dst.path().unwrap()).unwrap(), "old");
+        assert!(!aside.query_exists(gio::Cancellable::NONE));
+    }
+
+    #[test]
+    fn refusing_unbacked_replace_ignores_policy_and_keeps_both_items() {
+        for answer in [Answer::Skip, Answer::Both, Answer::Stop] {
+            let t = Scratch::new("refuse-backup");
+            let src = t.write("src", "new");
+            let dst = t.write("dst", "old");
+            let st = state();
+            let worker = st.clone();
+            let dest = dst.clone();
+            let job = std::thread::spawn(move || {
+                let cancel = gio::Cancellable::new();
+                let mut ctx = Ctx { st: &worker, cancel: &cancel, policy: Some(Answer::Replace), made: Vec::new(), moved: Vec::new(), base: 0 };
+                let result = ctx.replace_without_backup(&file(&dest));
+                assert_eq!(ctx.policy == Some(Answer::Stop), answer == Answer::Stop);
+                result
+            });
+            let (m, cv) = &*st;
+            let mut shared = m.lock().unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while shared.ask.is_none() {
+                assert!(std::time::Instant::now() < deadline, "Backup question was never asked");
+                shared = cv.wait_timeout(shared, Duration::from_millis(10)).unwrap().0;
+            }
+            assert_eq!(shared.ask.as_deref(), Some("“dst” can't be kept as a backup here. If this fails, it's lost. Replace it anyway?"));
+            shared.answer = Some((answer, true));
+            cv.notify_all();
+            drop(shared);
+            let result = job.join().unwrap();
+            if answer == Answer::Stop { assert!(result.is_err()); } else { assert_eq!(result, Ok(false)); }
+            assert_eq!(fs::read_to_string(src).unwrap(), "new");
+            assert_eq!(fs::read_to_string(dst).unwrap(), "old");
+        }
     }
 
     #[test]
