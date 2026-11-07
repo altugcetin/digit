@@ -356,17 +356,7 @@ pub fn edit(cfg: &Config) {
 }
 
 pub fn set(key: &str, value: toml::Value) -> Result<(), String> {
-    let path = dir().join("config.toml");
-    let mut table: toml::Table = std::fs::read_to_string(&path).ok().and_then(|t| t.parse().ok()).unwrap_or_default();
-    if table.get(key) == Some(&value) {
-        return Ok(());
-    }
-    table.insert(key.to_string(), value);
-    let text = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(dir()).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("toml.new");
-    std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+    kit::prefs::set(key, value)
 }
 
 pub fn load() -> Config {
@@ -377,5 +367,31 @@ pub fn load() -> Config {
             Config::default()
         }),
         Err(_) => Config::default(),
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    #[test]
+    fn set_preserves_broken_config() {
+        if std::env::var_os("DIGIT_CONFIG_TEST").is_some() {
+            assert_eq!(dir().join("config.toml"), kit::prefs::path());
+            std::fs::create_dir_all(dir()).unwrap();
+            for body in [b"dock_mode = [".as_slice(), b"dock_mode = \xff".as_slice()] {
+                std::fs::write(kit::prefs::path(), body).unwrap();
+                assert!(set("dock_mode", "bar".into()).is_err());
+                assert_eq!(std::fs::read(kit::prefs::path()).unwrap(), body);
+            }
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("digit-config-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "config::persistence_tests::set_preserves_broken_config", "--nocapture"])
+            .env("DIGIT_CONFIG_TEST", "1").env("XDG_CONFIG_HOME", &root).output().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     }
 }

@@ -29,8 +29,22 @@ pub fn list(t: &toml::Table, key: &str) -> Vec<String> {
 fn for_writing() -> Result<toml::Table, String> {
     match std::fs::read_to_string(path()) {
         Ok(text) => text.parse::<toml::Table>().map_err(|e| format!("{} has an error, so nothing was saved: {e}", path().display())),
-        Err(_) => Ok(toml::Table::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml::Table::new()),
+        Err(e) => Err(format!("{} could not be read, so nothing was saved: {e}", path().display())),
     }
+}
+
+/// Reports a broken or unreadable settings file without changing it.
+pub fn problem() -> Option<String> {
+    let text = match std::fs::read_to_string(path()) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => return Some(format!("Can't read config.toml: {e}")),
+    };
+    text.parse::<toml::Table>().err().map(|e| {
+        let line = e.span().map(|span| format!(" on line {}", text.as_bytes()[..span.start.min(text.len())].iter().filter(|&&b| b == b'\n').count() + 1)).unwrap_or_default();
+        format!("Invalid config.toml{line}: {}", e.message())
+    })
 }
 
 fn write(table: &toml::Table) -> Result<(), String> {
@@ -58,5 +72,42 @@ pub fn home(path: &str) -> PathBuf {
         Some(rest) => gtk::glib::home_dir().join(rest),
         None if path == "~" => gtk::glib::home_dir(),
         None => PathBuf::from(path),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writes_preserve_unreadable_and_broken_settings() {
+        const CASE: &str = "prefs::tests::writes_preserve_unreadable_and_broken_settings";
+        if std::env::var_os("DIGIT_PREFS_TEST").is_some() {
+            assert!(problem().is_none());
+            set("answer", 42.into()).unwrap();
+            assert_eq!(read().get("answer").and_then(toml::Value::as_integer), Some(42));
+            assert!(problem().is_none());
+            for body in [b"answer = 42\n\xff".as_slice(), b"answer = 42\nbroken = [".as_slice()] {
+                std::fs::write(path(), body).unwrap();
+                assert!(set("answer", 43.into()).is_err());
+                assert!(problem().is_some());
+                if body.is_ascii() {
+                    assert!(problem().unwrap().contains("line 2"));
+                }
+                assert_eq!(std::fs::read(path()).unwrap(), body);
+                assert!(!path().with_extension("toml.new").exists());
+            }
+            std::fs::remove_file(path()).unwrap();
+            std::fs::create_dir(path()).unwrap();
+            assert!(problem().is_some());
+            assert!(set("answer", 43.into()).is_err());
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("digit-prefs-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", CASE, "--nocapture"]).env("DIGIT_PREFS_TEST", "1").env("XDG_CONFIG_HOME", &root).output().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     }
 }
