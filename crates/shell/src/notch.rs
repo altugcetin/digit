@@ -686,10 +686,12 @@ impl Notch {
         if let Some(st) = self.0.borrow().strip.as_ref() {
             draw::forget(st);
         }
-        for trigger in std::mem::take(&mut self.0.borrow_mut().panel_triggers) {
+        let triggers = std::mem::take(&mut self.0.borrow_mut().panel_triggers);
+        for trigger in triggers {
             trigger.destroy();
         }
-        if let Some(c) = self.0.borrow_mut().scrim.take() {
+        let scrim = self.0.borrow_mut().scrim.take();
+        if let Some(c) = scrim {
             c.destroy();
         }
         let effect = self.0.borrow_mut().effect.take();

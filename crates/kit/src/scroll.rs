@@ -278,7 +278,8 @@ pub fn smooth(window: &impl IsA<gtk::Window>) {
         glib::Propagation::Stop
     });
     wheel.connect_scroll_end(move |_| {
-        if let Some(sw) = pulling.borrow_mut().take() {
+        let released = pulling.borrow_mut().take();
+        if let Some(sw) = released {
             elastic(&sw).borrow_mut().held = false;
             spring(&sw);
         }
