@@ -2014,6 +2014,9 @@ fn paste(d: &Rc<RefCell<Desktop>>, pointer: (f64, f64)) {
         if let (Some((uris, cut)), Some(d)) = (found, weak.upgrade())
             && !uris.is_empty()
         {
+            if cut {
+                let _ = clipboard.set_content(None::<&gdk::ContentProvider>);
+            }
             import_drop(&d, uris, pointer, !cut);
         }
     });

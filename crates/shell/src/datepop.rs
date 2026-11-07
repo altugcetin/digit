@@ -58,12 +58,13 @@ pub fn is_open() -> bool {
 /// Slides the panel back out to the right; the window goes once the motion settles.
 pub fn close() {
     let Some(p) = OPEN.with(|o| o.borrow_mut().take()) else { return };
+    let scrim = p.borrow_mut().scrim.take();
+    if let Some(scrim) = scrim {
+        scrim.destroy();
+    }
     {
         let mut pp = p.borrow_mut();
         pp.open = false;
-        if let Some(scrim) = pp.scrim.take() {
-            scrim.destroy();
-        }
         let now = glib::monotonic_time();
         pp.slide.go(0.0, now, 240, motion::Curve::new(0.4, 0.0, 0.9, 0.6));
         pp.fade.go(0.0, now, 180, motion::STANDARD);

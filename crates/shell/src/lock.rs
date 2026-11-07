@@ -91,9 +91,14 @@ async fn locked_hint(on: bool) {
 }
 
 fn fallback() {
-    if crate::hooks::run("key", &["lock"]) {
-        return;
-    }
+    glib::spawn_future_local(async {
+        if !gio::spawn_blocking(|| crate::hooks::run("key", &["lock"])).await.unwrap_or(false) {
+            swaylock();
+        }
+    });
+}
+
+fn swaylock() {
     if glib::find_program_in_path("swaylock").is_some() {
         let _ = gio::Subprocess::newv(&[std::ffi::OsStr::new("swaylock"), std::ffi::OsStr::new("-f")], gio::SubprocessFlags::NONE);
     }
