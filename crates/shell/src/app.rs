@@ -869,6 +869,7 @@ impl App {
     }
 
     pub fn set_open(&self, open: bool) {
+        if open { crate::deskicons::release_keyboard(); }
         let count = self.open_count.get();
         self.open_count.set(if open { count + 1 } else { count.saturating_sub(1) });
         if let Some(p) = self.players.borrow().as_ref() {

@@ -39,6 +39,8 @@ enum Feed {
     Changed(Value),
     Layouts(Value),
     Keyboard(String),
+    // Direct event, independent of whether a window-list snapshot changed.
+    DesktopFocus { opened: Option<u64> },
 }
 
 fn short_layout(name: &str) -> String {
@@ -257,6 +259,9 @@ fn events(tx: async_channel::Sender<Feed>) {
                         }
                     } else if line.starts_with("{\"Window") {
                         if let Ok(event) = serde_json::from_str::<Value>(&line) {
+                            if niri_desktop_focus(&event, &windows) && tx.send_blocking(Feed::DesktopFocus { opened: None }).is_err() {
+                                return;
+                            }
                             if let Some(w) = event.get("WindowOpenedOrChanged").and_then(|e| e.get("window")) {
                                 let id = w.get("id").and_then(Value::as_u64);
                                 let fresh = !windows.is_empty() && id.is_some_and(|id| !windows.iter().any(|r| r.id == id));
@@ -330,6 +335,24 @@ fn capture_tool_running() -> bool {
     procs.flatten().any(|p| std::fs::read_to_string(p.path().join("comm")).is_ok_and(|c| CAPTURE_TOOLS.contains(&c.trim())))
 }
 
+fn hypr_desktop_focus(event: &str, data: &str) -> Option<Option<u64>> {
+    match event {
+        "openwindow" => Some(u64::from_str_radix(data.split(',').next()?.trim_start_matches("0x"), 16).ok()),
+        // Empty activewindow means focus was cleared (including focusing a layer).
+        "activewindow" | "activewindowv2" if !data.trim_matches(',').is_empty() => Some(None),
+        _ => None,
+    }
+}
+fn niri_desktop_focus(event: &Value, windows: &[Running]) -> bool {
+    if event.get("WindowFocusChanged").and_then(|e| e.get("id")).and_then(Value::as_u64).is_some() {
+        return true;
+    }
+    event.get("WindowOpenedOrChanged").and_then(|e| e.get("window")).is_some_and(|w| {
+        let previous = w.get("id").and_then(Value::as_u64).and_then(|id| windows.iter().find(|r| r.id == id));
+        previous.is_none() || (w.get("is_focused").and_then(Value::as_bool) == Some(true) && previous.is_some_and(|w| !w.focused))
+    })
+}
+
 fn hypr_events(tx: async_channel::Sender<Feed>) {
     let mut wait = 1;
     loop {
@@ -343,6 +366,10 @@ fn hypr_events(tx: async_channel::Sender<Feed>) {
             for line in BufReader::new(stream).lines() {
                 let Ok(line) = line else { break };
                 let (event, data) = line.split_once(">>").unwrap_or((line.as_str(), ""));
+                if let Some(opened) = hypr_desktop_focus(event, data)
+                    && tx.send_blocking(Feed::DesktopFocus { opened }).is_err() {
+                    return;
+                }
                 match event {
                     "activelayout" => {
                         let name = data.split_once(',').map(|(_, n)| n).unwrap_or(data);
@@ -439,7 +466,34 @@ pub fn watch(app: &std::rc::Rc<crate::app::App>) {
                 Feed::Changed(w) => crate::free::changed(&app, w),
                 Feed::Layouts(c) => crate::free::layouts(&app, c),
                 Feed::Keyboard(name) => app.request(crate::app::Peek::Osd { icon: "keyboard", text: name, level: None }),
+                Feed::DesktopFocus { opened } => crate::deskicons::window_focus(opened),
             }
         }
     });
+}
+
+#[cfg(test)]
+mod desktop_focus_tests {
+    use super::*;
+
+    #[test]
+    fn hypr_open_keeps_exact_address_and_focus_events_release_without_nudges() {
+        assert_eq!(hypr_desktop_focus("openwindow", "abc123,1,app,title,with,commas"), Some(Some(0xabc123)));
+        assert_eq!(hypr_desktop_focus("activewindow", "app,title"), Some(None));
+        assert_eq!(hypr_desktop_focus("activewindowv2", "abc123"), Some(None));
+        assert_eq!(hypr_desktop_focus("activewindow", ","), None);
+        assert_eq!(hypr_desktop_focus("activewindowv2", ""), None);
+        assert_eq!(hypr_desktop_focus("closewindow", "abc123"), None);
+    }
+
+    #[test]
+    fn niri_first_window_open_and_repeated_focus_release_but_title_changes_do_not() {
+        let opened = json!({"WindowOpenedOrChanged": {"window": {"id": 9, "is_focused": false}}});
+        assert!(niri_desktop_focus(&opened, &[]));
+        let running = vec![Running { id: 9, app_id: "app".into(), focused: false, stamp: 0 }];
+        assert!(!niri_desktop_focus(&opened, &running));
+        assert!(niri_desktop_focus(&json!({"WindowFocusChanged": {"id": 9}}), &running));
+        assert!(!niri_desktop_focus(&json!({"WindowFocusChanged": {"id": null}}), &running));
+        assert!(niri_desktop_focus(&json!({"WindowOpenedOrChanged": {"window": {"id": 9, "is_focused": true}}}), &running));
+    }
 }
