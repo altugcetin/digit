@@ -538,6 +538,8 @@ fn present(app: &gtk::Application, page: Option<&str>) {
     window.present();
 }
 
+kit::layer_shell_first!();
+
 fn main() -> glib::ExitCode {
     if std::env::args().nth(1).as_deref() == Some("--register") {
         install();

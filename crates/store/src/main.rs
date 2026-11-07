@@ -780,6 +780,8 @@ fn collections(store: &Rc<Store>) {
     }
 }
 
+kit::layer_shell_first!();
+
 fn main() -> glib::ExitCode {
     if std::env::args().nth(1).as_deref() == Some("--register") {
         install_files();

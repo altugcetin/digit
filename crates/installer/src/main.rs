@@ -109,6 +109,8 @@ fn askpass(app: &gtk::Application, prompt: &str, status: Rc<Cell<i32>>) {
     password.grab_focus();
 }
 
+kit::layer_shell_first!();
+
 fn main() -> glib::ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let password_mode = args.get(1).is_some_and(|s| s == "--askpass");
