@@ -233,11 +233,13 @@ fn apply_gtk_settings() {
         let old = std::fs::read_to_string(&file).unwrap_or_default();
         write_if_changed(&file, &settings_ini(&old, theme));
     }
-    for (key, value) in [("color-scheme", "prefer-dark"), ("gtk-theme", theme)] {
-        if std::process::Command::new("gsettings").args(["writable", "org.gnome.desktop.interface", key]).output().is_ok_and(|out| out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true") {
-            let _ = std::process::Command::new("gsettings").args(["set", "org.gnome.desktop.interface", key, value]).output();
+    std::thread::spawn(move || {
+        for (key, value) in [("color-scheme", "prefer-dark"), ("gtk-theme", theme)] {
+            if std::process::Command::new("gsettings").args(["writable", "org.gnome.desktop.interface", key]).output().is_ok_and(|out| out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true") {
+                let _ = std::process::Command::new("gsettings").args(["set", "org.gnome.desktop.interface", key, value]).output();
+            }
         }
-    }
+    });
 }
 
 fn ini_value<'a>(text: &'a str, section: &str, key: &str) -> Option<&'a str> {

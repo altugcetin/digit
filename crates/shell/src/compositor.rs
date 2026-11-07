@@ -98,6 +98,7 @@ fn niri(request: Value) -> Option<Value> {
     let path = std::env::var_os("NIRI_SOCKET")?;
     let mut stream = UnixStream::connect(path).ok()?;
     stream.set_read_timeout(Some(Duration::from_millis(500))).ok()?;
+    stream.set_write_timeout(Some(Duration::from_millis(500))).ok()?;
     writeln!(stream, "{request}").ok()?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line).ok()?;
@@ -123,7 +124,7 @@ pub fn focus(id: u64) {
 pub fn overview() {
     match kit::wm::which() {
         kit::wm::Wm::Niri => {
-            niri(json!({ "Action": { "ToggleOverview": {} } }));
+            std::thread::spawn(|| niri(json!({ "Action": { "ToggleOverview": {} } })));
         }
         _ => {}
     }
@@ -132,7 +133,7 @@ pub fn overview() {
 pub fn screenshot() {
     let argv: [&std::ffi::OsStr; 1] = ["digit-snap".as_ref()];
     if gtk::gio::Subprocess::newv(&argv, gtk::gio::SubprocessFlags::STDOUT_SILENCE | gtk::gio::SubprocessFlags::STDERR_SILENCE).is_err() {
-        niri(json!({ "Action": { "Screenshot": { "show_pointer": false } } }));
+        std::thread::spawn(|| niri(json!({ "Action": { "Screenshot": { "show_pointer": false } } })));
     }
 }
 

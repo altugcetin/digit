@@ -709,17 +709,17 @@ fn drag_to(st: &Shared, x: f64, y: f64, moved: f64) {
             let max_h = sh * 0.9;
             let (mut nx, mut ny, mut nw, mut nh) = (rx, ry, rw, rh);
             if edges & 2 != 0 {
-                nw = (rw + dx).clamp(min_w, max_w.min(sw - rx));
+                nw = (rw + dx).clamp(min_w, max_w.min(sw - rx).max(min_w));
             }
             if edges & 1 != 0 {
-                nw = (rw - dx).clamp(min_w, max_w.min(rx + rw));
+                nw = (rw - dx).clamp(min_w, max_w.min(rx + rw).max(min_w));
                 nx = rx + rw - nw;
             }
             if edges & 8 != 0 {
-                nh = (rh + dy).clamp(min_h, max_h.min(sh - ry));
+                nh = (rh + dy).clamp(min_h, max_h.min(sh - ry).max(min_h));
             }
             if edges & 4 != 0 {
-                nh = (rh - dy).clamp(min_h, max_h.min(ry + rh));
+                nh = (rh - dy).clamp(min_h, max_h.min(ry + rh).max(min_h));
                 ny = ry + rh - nh;
             }
             let Some(c) = s.cards.iter_mut().find(|c| c.kind == kind) else { return };

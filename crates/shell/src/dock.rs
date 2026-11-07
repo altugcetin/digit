@@ -1308,7 +1308,7 @@ impl State {
         let lift = 4.0 * (1.0 - tip);
         let rect = match self.geo.side {
             Side::Bottom => {
-                let a = (center - bw / 2.0).clamp(4.0, self.along_len() - bw - 4.0);
+                let a = (center - bw / 2.0).clamp(4.0, (self.along_len() - bw - 4.0).max(4.0));
                 self.map(a, far + 10.0 + lift, bw, bh)
             }
             _ => self.map((center - bh / 2.0).round(), far + 10.0 + lift, bh, bw),
@@ -1387,9 +1387,9 @@ fn open_menu(st: &Shared, i: usize) {
         let g = s.geo;
         let gap = LIFT + g.pad() + g.base * g.mag.max(1.0) + 12.0;
         let (anchor, main) = match g.side {
-            Side::Bottom => (Edge::Bottom, (center - MENU_W / 2.0).clamp(8.0, s.along_len() - MENU_W - 8.0)),
-            Side::Left => (Edge::Left, (center - h / 2.0).clamp(8.0, s.along_len() - h - 8.0)),
-            Side::Right => (Edge::Right, (center - h / 2.0).clamp(8.0, s.along_len() - h - 8.0)),
+            Side::Bottom => (Edge::Bottom, (center - MENU_W / 2.0).clamp(8.0, (s.along_len() - MENU_W - 8.0).max(8.0))),
+            Side::Left => (Edge::Left, (center - h / 2.0).clamp(8.0, (s.along_len() - h - 8.0).max(8.0))),
+            Side::Right => (Edge::Right, (center - h / 2.0).clamp(8.0, (s.along_len() - h - 8.0).max(8.0))),
         };
         (rows, item.name.clone(), item.key.clone(), s.window.monitor(), anchor, gap, main, h)
     };

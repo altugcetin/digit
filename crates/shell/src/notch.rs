@@ -810,6 +810,7 @@ impl Notch {
     }
 
     pub fn set_open(&self, open: bool) {
+        let mut closed_scrim = None;
         let app = {
             let mut v = self.0.borrow_mut();
             if v.open == open {
@@ -836,12 +837,13 @@ impl Notch {
                 }));
                 v.region = (0, 0, 0, 0);
             } else if !open {
-                if let Some(scrim) = v.scrim.take() {
-                    scrim.destroy();
-                }
+                closed_scrim = v.scrim.take();
             }
             v.app.clone()
         };
+        if let Some(scrim) = closed_scrim {
+            scrim.destroy();
+        }
         if open {
             crate::calendar::refresh(&app);
             if self.0.borrow().tab == Tab::Tray {
