@@ -33,7 +33,8 @@ impl Awake {
 
     pub fn set(&self, surface: Option<&gdk::Surface>, on: bool) {
         if !on {
-            if let Some(i) = self.held.borrow_mut().take() {
+            let held = self.held.borrow_mut().take();
+        if let Some(i) = held {
                 i.destroy();
             }
         } else if self.held.borrow().is_none() {

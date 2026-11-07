@@ -58,7 +58,8 @@ fn cache_key(app: &str, source: &str, name: &str, style: Style, size: i32, accen
 thread_local! {
     static LOOKS: RefCell<HashMap<(String, String), Look>> = RefCell::new(HashMap::new());
     static CACHE: RefCell<HashMap<CacheKey, gdk::Texture>> = RefCell::new(HashMap::new());
-    static CPU: RefCell<Option<gsk::Renderer>> = const { RefCell::new(None) };
+    // GSK aborts when a realized renderer is dropped, and thread locals drop at exit.
+    static CPU: RefCell<Option<std::mem::ManuallyDrop<gsk::Renderer>>> = const { RefCell::new(None) };
 }
 
 fn cpu() -> Option<gsk::Renderer> {
@@ -67,9 +68,9 @@ fn cpu() -> Option<gsk::Renderer> {
             let display = gdk::Display::default()?;
             let r = gsk::CairoRenderer::new();
             r.realize_for_display(&display).ok()?;
-            *c.borrow_mut() = Some(r.upcast());
+            *c.borrow_mut() = Some(std::mem::ManuallyDrop::new(r.upcast()));
         }
-        c.borrow().clone()
+        c.borrow().as_ref().map(|r| gsk::Renderer::clone(r))
     })
 }
 

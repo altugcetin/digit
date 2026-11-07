@@ -1029,7 +1029,8 @@ pub fn run_then(label: &str, plan: Plan, after: impl FnOnce() + 'static) {
         if crate::jobs_busy() {
             return glib::ControlFlow::Continue;
         }
-        if let Some(a) = after.borrow_mut().take() {
+        let then = after.borrow_mut().take();
+        if let Some(a) = then {
             a();
         }
         glib::ControlFlow::Break

@@ -181,7 +181,8 @@ pub fn ask(parent: Option<&gtk::Window>, title: &str, detail: &str, cancel: &str
         let ok = std::cell::RefCell::new(Some(ok));
         go.connect_clicked(move |_| {
             c();
-            if let Some(f) = ok.borrow_mut().take() {
+            let confirmed = ok.borrow_mut().take();
+            if let Some(f) = confirmed {
                 f();
             }
         });
@@ -209,7 +210,8 @@ pub fn ask(parent: Option<&gtk::Window>, title: &str, detail: &str, cancel: &str
     let ok = std::cell::RefCell::new(Some(ok));
     go.connect_clicked(move |_| {
         w.close();
-        if let Some(f) = ok.borrow_mut().take() {
+        let confirmed = ok.borrow_mut().take();
+        if let Some(f) = confirmed {
             f();
         }
     });
