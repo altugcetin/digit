@@ -1181,7 +1181,7 @@ impl Ed {
             }
             4 => {
                 self.flash("Reading text…");
-                out::ocr(&tex);
+                out::ocr(&tex, &self.app);
             }
             _ => {
                 out::copy(&tex, &self.app);
