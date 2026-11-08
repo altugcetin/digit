@@ -535,7 +535,7 @@ impl Overlay {
         };
         self.close();
         let hex = format!("#{:02x}{:02x}{:02x}", rgb.0, rgb.1, rgb.2);
-        out::copy_text(&hex);
+        out::copy_text(&hex, &self.app);
         let c = kit::color::Color { r: rgb.0 as f64 / 255.0, g: rgb.1 as f64 / 255.0, b: rgb.2 as f64 / 255.0, a: 1.0 };
         let body: Vec<String> = c.formats().into_iter().skip(1).take(3).map(|(_, v)| v).collect();
         let swatch = out::swatch(rgb);
@@ -601,7 +601,7 @@ impl Overlay {
                             Err(e) => out::notify("Couldn't save the screenshot", &e, None),
                         },
                         Act::Pin => out::pin(&app, tex, &name, origin.0 as i32, origin.1 as i32, surface.width(), surface.height()),
-                        Act::Text => out::ocr(&tex),
+                        Act::Text => out::ocr(&tex, &app),
                         Act::Edit => {}
                     }
                 }

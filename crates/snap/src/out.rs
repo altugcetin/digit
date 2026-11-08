@@ -142,6 +142,11 @@ pub fn copy(tex: &gdk::Texture, app: &gtk::Application) {
     let Some(display) = gdk::Display::default() else { return };
     let clip = display.clipboard();
     clip.set_texture(tex);
+    keep_clipboard(&clip, app);
+}
+
+/// Wayland clipboards live in the process that set them, so stay until something replaces it.
+fn keep_clipboard(clip: &gdk::Clipboard, app: &gtk::Application) {
     let guard = std::rc::Rc::new(std::cell::RefCell::new(Some(app.hold())));
     let g = guard.clone();
     clip.connect_changed(move |c| {
@@ -154,7 +159,7 @@ pub fn copy(tex: &gdk::Texture, app: &gtk::Application) {
     });
 }
 
-pub fn copy_text(text: &str) {
+pub fn copy_text(text: &str, app: &gtk::Application) {
     if glib::find_program_in_path("wl-copy").is_some() {
         if let Ok(mut child) = std::process::Command::new("wl-copy").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
             if let Some(mut stdin) = child.stdin.take() {
@@ -165,7 +170,9 @@ pub fn copy_text(text: &str) {
         }
     }
     if let Some(d) = gdk::Display::default() {
-        d.clipboard().set_text(text);
+        let clip = d.clipboard();
+        clip.set_text(text);
+        keep_clipboard(&clip, app);
     }
 }
 
@@ -205,8 +212,11 @@ pub fn ocr_available() -> bool {
     glib::find_program_in_path("tesseract").is_some()
 }
 
-pub fn ocr(tex: &gdk::Texture) {
+pub fn ocr(tex: &gdk::Texture, app: &gtk::Application) {
     let tex = tex.clone();
+    let app = app.clone();
+    // The selection closes straight away; without this the program exits before reading.
+    let hold = app.hold();
     glib::spawn_future_local(async move {
         // Let the editor paint “Reading text…” before encoding and starting OCR.
         glib::timeout_future(std::time::Duration::from_millis(40)).await;
@@ -218,11 +228,14 @@ pub fn ocr(tex: &gdk::Texture) {
         match result {
             Ok(Ok(text)) if text.is_empty() => notify("No text found", "The selection has no readable text", None),
             Ok(Ok(text)) => {
-                copy_text(&text);
+                copy_text(&text, &app);
                 notify("Text copied", &text.chars().take(120).collect::<String>(), None);
             }
             _ => notify("Couldn't read text", "tesseract failed or timed out; check the installed languages", None),
         }
+        // The notification is sent asynchronously too.
+        glib::timeout_future(std::time::Duration::from_millis(500)).await;
+        drop(hold);
     });
 }
 
