@@ -66,7 +66,7 @@ fn action(b: &Bind, snap: bool) -> String {
         Act::Terminal => exec(terminal()),
         Act::Window(w) => match w {
             Win::Close => "hl.dsp.window.close()".into(),
-            Win::Float => "require(\"digit.digit-floating\").outside(hl.dsp.window.float({ action = \"toggle\" }))".into(),
+            Win::Float => "require(\"digit.digit-floating\").float_key(hl.dsp.window.float({ action = \"toggle\" }))".into(),
             Win::Pseudo => "hl.dsp.window.pseudo()".into(),
             Win::Maximize => "per_layout({ default = hl.dsp.window.fullscreen({ mode = 1 }), scrolling = column_maximize })".into(),
             Win::Fullscreen => "hl.dsp.window.fullscreen({ mode = 0 })".into(),
