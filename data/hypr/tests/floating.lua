@@ -61,6 +61,8 @@ local moved = G.relative({ x = 0, y = 40, w = 1000, h = 800 }, { x = 0, y = 0, w
 assert(moved.x == 1000 and moved.y == 500 and moved.w == 1000 and moved.h == 500, 'the share of the screen survives a monitor change')
 local inside = G.relative({ x = 0, y = 0, w = 1000, h = 800 }, { x = 0, y = 0, w = 500, h = 400 }, { x = 900, y = 700, w = 1000, h = 800 })
 assert(inside.x == 0 and inside.y == 0 and inside.w == 500 and inside.h == 400, 'a moved window stays on the monitor')
+assert(G.fills({ x = 10, y = 40, w = 900, h = 700 }, 11, 39, 901, 699), 'a maximized window is recognised despite rounding')
+assert(not G.fills({ x = 10, y = 40, w = 900, h = 700 }, 10, 40, 450, 700), 'a half window is not maximized')
 local first = G.cascade(area, 0)
 local after_reload = G.cascade(area, 0, { first })
 assert(first.x ~= after_reload.x or first.y ~= after_reload.y)

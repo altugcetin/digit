@@ -108,6 +108,10 @@ function G.relative(from, to, r)
     return { x = clamp(to.x + round((r.x - from.x) / from.w * to.w), to.x, to.x + to.w - w),
         y = clamp(to.y + round((r.y - from.y) / from.h * to.h), to.y, to.y + to.h - h), w = w, h = h }
 end
+-- Whether a window already fills this rectangle, allowing for rounding.
+function G.fills(r, x, y, w, h)
+    return math.abs(r.x - x) <= 2 and math.abs(r.y - y) <= 2 and math.abs(r.w - w) <= 2 and math.abs(r.h - h) <= 2
+end
 function G.restore(saved, cursor, grab, monitor)
     return { x = round(cursor.x - monitor.x - saved.w * grab.x),
         y = round(cursor.y - monitor.y - saved.h * grab.y), w = saved.w, h = saved.h }
@@ -267,9 +271,9 @@ function M.drag()
         return result
     end
 end
-function M.snap(zone)
+function M.snap(zone, always)
     return function()
-        if not snap_enabled then return end
+        if not snap_enabled and not always then return end
         local w = hl.get_active_window()
         if not eligible(w) or not w.monitor then return end
         cancel()
@@ -303,12 +307,18 @@ function M.arrow(zone, otherwise)
         return hl.dispatch(otherwise)
     end
 end
--- Everything on a floating workspace floats, so toggling would tile a window there.
-function M.outside(action)
+-- Everything on a floating workspace floats, so there the float key maximizes and restores.
+function M.float_key(action)
+    local maximize, restore = M.snap('max', true), M.snap('restore', true)
     return function()
         local w = hl.get_active_window()
-        if w and floating(w.workspace) then return end
-        return hl.dispatch(action)
+        if not (w and floating(w.workspace)) then return hl.dispatch(action) end
+        if not eligible(w) or not w.monitor then return end
+        local m = w.monitor
+        local work, inner, border = area(m)
+        local full = G.rect(work, 'max', inner, border)
+        if G.fills(full, w.at.x - m.x, w.at.y - m.y, w.size.x, w.size.y) then return restore() end
+        return maximize()
     end
 end
 function M.to_monitor(step)

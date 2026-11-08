@@ -13,7 +13,7 @@ if not pcall(require, "digit.digit-floating") then
         snap = function() return function() end end,
         to_monitor = function() return function() end end,
         arrow = function(_, otherwise) return otherwise end,
-        outside = function(action) return action end,
+        float_key = function(action) return action end,
     }
 end
 require("digit.digit-keybinds")
