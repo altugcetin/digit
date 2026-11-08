@@ -105,18 +105,34 @@ fn stamp() -> String {
     gtk::glib::DateTime::now_local().ok().and_then(|d| d.format("%Y-%m-%d %H.%M.%S").ok()).map(|s| s.to_string()).unwrap_or_else(|| "now".into())
 }
 
-fn fresh(name: &str) -> Option<PathBuf> {
-    let dir = stash();
-    std::fs::create_dir_all(&dir).ok()?;
-    let clean: String = name.chars().map(|c| if c == '/' || c.is_control() { '-' } else { c }).take(80).collect();
-    Some(dir.join(clean))
+fn keep_bytes(dir: &std::path::Path, name: &str, bytes: &[u8]) -> Option<PathBuf> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir).ok()?;
+    let clean: String = name.chars().map(|c| if c == '/' || c.is_control() { '-' } else { c }).take(120).collect();
+    let name = std::path::Path::new(&clean);
+    let stem = name.file_stem()?.to_string_lossy();
+    let ext = name.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    for n in 1.. {
+        let path = dir.join(if n == 1 { clean.clone() } else { format!("{stem} ({n}){ext}") });
+        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path);
+        let mut file = match file {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        };
+        if file.write_all(bytes).and_then(|_| file.sync_all()).is_err() {
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
+        return Some(path);
+    }
+    None
 }
 
 pub fn keep_texture(texture: &gdk::Texture) -> Option<PathBuf> {
-    let path = fresh(&format!("Image {}.png", stamp()))?;
-    texture.save_to_png(&path).ok()?;
-    Some(path)
+    keep_bytes(&stash(), &format!("Image {}.png", stamp()), &texture.save_to_png_bytes())
 }
+
 
 pub fn keep_text(text: &str) -> Vec<PathBuf> {
     let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
@@ -131,5 +147,39 @@ pub fn keep_text(text: &str) -> Vec<PathBuf> {
     } else {
         format!("Text {}.txt", stamp())
     };
-    fresh(&name).filter(|p| std::fs::write(p, text).is_ok()).into_iter().collect()
+    keep_bytes(&stash(), &name, text.as_bytes()).into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_drops_create_exclusive_files() {
+        let dir = std::env::temp_dir().join(format!("digit-tray-race-{}", gtk::glib::uuid_string_random()));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let workers: Vec<_> = (0u8..8).map(|n| {
+            let dir = dir.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                (keep_bytes(&dir, "Image today.png", &[n]).unwrap(), n)
+            })
+        }).collect();
+        let files: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        for (path, n) in files { assert_eq!(std::fs::read(path).unwrap(), [n]); }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 8);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn repeated_drop_names_keep_both_files() {
+        let dir = std::env::temp_dir().join(format!("digit-tray-test-{}", gtk::glib::uuid_string_random()));
+        let a = keep_bytes(&dir, "Text today.txt", b"first").unwrap();
+        let b = keep_bytes(&dir, "Text today.txt", b"second").unwrap();
+        assert_eq!(b.file_name().unwrap(), "Text today (2).txt");
+        assert_eq!(std::fs::read(a).unwrap(), b"first");
+        assert_eq!(std::fs::read(b).unwrap(), b"second");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

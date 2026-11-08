@@ -1,7 +1,7 @@
 use crate::app::App;
 use gtk::{gdk, glib, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -205,8 +205,7 @@ fn converse(reader: &mut dyn BufRead, writer: &mut dyn Write, secret: &mut Vec<u
                 writer.write_all(b"\n").is_ok()
             } else {
                 answered = true;
-                secret.push(b'\n');
-                let ok = writer.write_all(secret).is_ok();
+                let ok = writer.write_all(secret).and_then(|_| writer.write_all(b"\n")).is_ok();
                 wipe(secret);
                 secret.clear();
                 ok
@@ -229,24 +228,30 @@ fn converse(reader: &mut dyn BufRead, writer: &mut dyn Write, secret: &mut Vec<u
     (false, notes)
 }
 
-fn authenticate(user: &str, cookie: &str, mut secret: Vec<u8>) -> (bool, Vec<String>) {
+struct Secret(Vec<u8>);
+
+impl Drop for Secret {
+    fn drop(&mut self) { wipe(&mut self.0); }
+}
+
+fn authenticate(user: &str, cookie: &str, mut secret: Secret) -> (bool, Vec<String>) {
     if std::path::Path::new(SOCKET).exists() {
         if let Ok(stream) = UnixStream::connect(SOCKET) {
             let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
             let Ok(mut writer) = stream.try_clone() else {
-                wipe(&mut secret);
+                wipe(&mut secret.0);
                 return (false, Vec::new());
             };
             if writer.write_all(format!("{user}\n{cookie}\n").as_bytes()).is_err() {
-                wipe(&mut secret);
+                wipe(&mut secret.0);
                 return (false, Vec::new());
             }
             let mut reader = BufReader::new(stream);
-            return converse(&mut reader, &mut writer, &mut secret);
+            return converse(&mut reader, &mut writer, &mut secret.0);
         }
     }
     let Some(helper) = HELPERS.iter().find(|h| std::path::Path::new(h).exists()) else {
-        wipe(&mut secret);
+        wipe(&mut secret.0);
         return (false, vec!["polkit's authentication helper is missing".into()]);
     };
     let child = std::process::Command::new(helper)
@@ -256,19 +261,19 @@ fn authenticate(user: &str, cookie: &str, mut secret: Vec<u8>) -> (bool, Vec<Str
         .stderr(std::process::Stdio::null())
         .spawn();
     let Ok(mut child) = child else {
-        wipe(&mut secret);
+        wipe(&mut secret.0);
         return (false, Vec::new());
     };
     let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-        wipe(&mut secret);
+        wipe(&mut secret.0);
         let _ = child.kill();
         return (false, Vec::new());
     };
     let result = if stdin.write_all(format!("{cookie}\n").as_bytes()).is_ok() {
         let mut reader = BufReader::new(stdout);
-        converse(&mut reader, &mut stdin, &mut secret)
+        converse(&mut reader, &mut stdin, &mut secret.0)
     } else {
-        wipe(&mut secret);
+        wipe(&mut secret.0);
         (false, Vec::new())
     };
     drop(stdin);
@@ -287,12 +292,14 @@ struct Dialog {
 }
 
 struct Live {
+    id: u64,
     request: Request,
     dialog: Dialog,
 }
 
 thread_local! {
     static QUEUE: RefCell<VecDeque<Request>> = const { RefCell::new(VecDeque::new()) };
+    static NEXT: Cell<u64> = const { Cell::new(0) };
     static LIVE: RefCell<Option<Live>> = const { RefCell::new(None) };
     static APP: RefCell<std::rc::Weak<App>> = const { RefCell::new(std::rc::Weak::new()) };
     static REGISTERED: RefCell<Option<(String, zbus::Connection)>> = const { RefCell::new(None) };
@@ -345,7 +352,7 @@ fn label(text: &str, class: &str) -> gtk::Label {
     l
 }
 
-fn show(request: &Request) -> Option<Dialog> {
+fn show(request: &Request, id: u64) -> Option<Dialog> {
     let app = APP.with(|a| a.borrow().upgrade())?;
     let display = gdk::Display::default()?;
     let provider = gtk::CssProvider::new();
@@ -427,13 +434,13 @@ fn show(request: &Request) -> Option<Dialog> {
             }
         });
     }
-    cancel.connect_clicked(|_| finish(Outcome::Cancelled));
-    go.connect_clicked(|_| submit());
-    entry.connect_activate(|_| submit());
+    cancel.connect_clicked(move |_| finish_if(id, Outcome::Cancelled));
+    go.connect_clicked(move |_| submit(id));
+    entry.connect_activate(move |_| submit(id));
     let keys = gtk::EventControllerKey::new();
-    keys.connect_key_pressed(|_, key, _, _| {
+    keys.connect_key_pressed(move |_, key, _, _| {
         if key == gdk::Key::Escape {
-            finish(Outcome::Cancelled);
+            finish_if(id, Outcome::Cancelled);
             return glib::Propagation::Stop;
         }
         glib::Propagation::Proceed
@@ -457,8 +464,9 @@ fn next() {
         return;
     }
     let Some(request) = QUEUE.with(|q| q.borrow_mut().pop_front()) else { return };
-    match show(&request) {
-        Some(dialog) => LIVE.with(|l| *l.borrow_mut() = Some(Live { request, dialog })),
+    let id = NEXT.with(|n| { n.set(n.get() + 1); n.get() });
+    match show(&request, id) {
+        Some(dialog) => LIVE.with(|l| *l.borrow_mut() = Some(Live { id, request, dialog })),
         None => {
             let _ = request.reply.try_send(Outcome::Failed("The authentication dialog could not be shown".into()));
             next();
@@ -475,69 +483,78 @@ fn finish(outcome: Outcome) {
     glib::idle_add_local_once(next);
 }
 
-fn submit() {
+fn current(id: u64, live: Option<u64>) -> bool { live == Some(id) }
+
+#[derive(Debug, PartialEq)]
+enum AuthReply { Stale, Done, Retry(u32), Failed }
+
+fn auth_reply(id: u64, live: Option<(u64, u32)>, ok: bool) -> AuthReply {
+    let Some((_, tries)) = live.filter(|(live, _)| current(id, Some(*live))) else { return AuthReply::Stale };
+    if ok { AuthReply::Done } else if tries + 1 >= TRIES { AuthReply::Failed } else { AuthReply::Retry(tries + 1) }
+}
+
+fn finish_if(id: u64, outcome: Outcome) {
+    if LIVE.with(|l| current(id, l.borrow().as_ref().map(|l| l.id))) { finish(outcome); }
+}
+
+fn submit(id: u64) {
     let job = LIVE.with(|l| {
         let mut l = l.borrow_mut();
-        let live = l.as_mut()?;
-        if live.dialog.busy {
-            return None;
-        }
-        let text = live.dialog.entry.text();
-        if text.is_empty() {
-            return None;
-        }
-        if text.contains('\n') {
-            live.dialog.entry.set_text("");
-            live.dialog.error.set_text("The password can't contain a line break");
-            live.dialog.error.set_visible(true);
-            return None;
-        }
-        let secret = text.as_bytes().to_vec();
-        live.dialog.entry.set_text("");
+        let live = l.as_mut().filter(|l| l.id == id)?;
+        if live.dialog.busy { return None; }
         live.dialog.busy = true;
-        live.dialog.entry.set_sensitive(false);
-        live.dialog.go.set_sensitive(false);
-        live.dialog.go.set_label("Checking…");
-        live.dialog.error.set_visible(false);
-        let at = live.dialog.pick.as_ref().map_or(0, |p| p.selected() as usize);
-        let user = live.request.users.get(at).or(live.request.users.first()).map(|u| u.1.clone())?;
-        Some((user, live.request.cookie.clone(), secret))
+        Some((live.id, live.request.cookie.clone(), live.request.users.clone(), live.dialog.entry.clone(), live.dialog.go.clone(), live.dialog.error.clone(), live.dialog.pick.clone()))
     });
-    let Some((user, cookie, secret)) = job else { return };
+    let Some((id, cookie, users, entry, go, error, pick)) = job else { return };
+    let text = entry.text();
+    if text.is_empty() || text.contains('\n') {
+        LIVE.with(|l| { if let Some(live) = l.borrow_mut().as_mut().filter(|l| l.id == id) { live.dialog.busy = false; } });
+        if text.contains('\n') {
+            entry.set_text("");
+            error.set_text("The password can't contain a line break");
+            error.set_visible(true);
+        }
+        return;
+    }
+    let secret = Secret(text.as_bytes().to_vec());
+    drop(text);
+    entry.set_text("");
+    entry.set_sensitive(false);
+    go.set_sensitive(false);
+    go.set_label("Checking…");
+    error.set_visible(false);
+    let at = pick.as_ref().map_or(0, |p| p.selected() as usize);
+    let Some(user) = users.get(at).or(users.first()).map(|u| u.1.clone()) else { return };
     let (tx, rx) = async_channel::bounded(1);
     let spawned = std::thread::Builder::new().name("digit-auth".into()).spawn(move || {
         let _ = tx.send_blocking(authenticate(&user, &cookie, secret));
     });
     if spawned.is_err() {
-        finish(Outcome::Failed("Could not start authentication".into()));
+        finish_if(id, Outcome::Failed("Could not start authentication".into()));
         return;
     }
     glib::spawn_future_local(async move {
         let (ok, notes) = rx.recv().await.unwrap_or((false, Vec::new()));
-        if ok {
-            finish(Outcome::Done);
-            return;
-        }
-        let give_up = LIVE.with(|l| {
-            let mut l = l.borrow_mut();
-            let Some(live) = l.as_mut() else { return false };
-            live.dialog.tries += 1;
-            live.dialog.busy = false;
-            if live.dialog.tries >= TRIES {
-                return true;
+        let reply = LIVE.with(|l| auth_reply(id, l.borrow().as_ref().map(|l| (l.id, l.dialog.tries)), ok));
+        let tries = match reply {
+            AuthReply::Stale => return,
+            AuthReply::Done => { finish_if(id, Outcome::Done); return; }
+            AuthReply::Failed => { finish_if(id, Outcome::Failed("Too many failed attempts".into())); return; }
+            AuthReply::Retry(tries) => tries,
+        };
+        LIVE.with(|l| {
+            if let Some(live) = l.borrow_mut().as_mut().filter(|l| l.id == id) {
+                live.dialog.tries = tries;
+                live.dialog.busy = false;
             }
-            let note = notes.into_iter().find(|n| !n.trim().is_empty()).unwrap_or_else(|| "That password didn't work. Try again.".into());
-            live.dialog.error.set_text(&note);
-            live.dialog.error.set_visible(true);
-            live.dialog.entry.set_sensitive(true);
-            live.dialog.go.set_sensitive(true);
-            live.dialog.go.set_label("Authenticate");
-            live.dialog.entry.grab_focus();
-            false
         });
-        if give_up {
-            finish(Outcome::Failed("Too many failed attempts".into()));
-        }
+        let note = notes.into_iter().find(|n| !n.trim().is_empty()).unwrap_or_else(|| "That password didn't work. Try again.".into());
+        error.set_text(&note);
+        error.set_visible(true);
+        entry.set_sensitive(true);
+        go.set_sensitive(true);
+        go.set_label("Authenticate");
+        entry.grab_focus();
     });
 }
 
@@ -634,7 +651,19 @@ pub fn stop() {
 
 #[cfg(test)]
 mod tests {
-    use super::{converse, unescape};
+    use super::{AuthReply, auth_reply, converse, unescape};
+
+    #[test]
+    fn cancelled_results_cannot_finish_the_next_request() {
+        for ok in [true, false] {
+            assert_eq!(auth_reply(1, None, ok), AuthReply::Stale);
+            assert_eq!(auth_reply(1, Some((2, 0)), ok), AuthReply::Stale);
+            assert_eq!(auth_reply(1, Some((2, 2)), ok), AuthReply::Stale);
+        }
+        assert_eq!(auth_reply(2, Some((2, 0)), false), AuthReply::Retry(1));
+        assert_eq!(auth_reply(2, Some((2, 2)), false), AuthReply::Failed);
+        assert_eq!(auth_reply(2, Some((2, 2)), true), AuthReply::Done);
+    }
 
     #[test]
     fn unescapes_like_glib() {

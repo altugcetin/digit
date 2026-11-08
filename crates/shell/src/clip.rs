@@ -26,17 +26,31 @@ pub struct Clip {
     pub id: u64,
     pub data: Data,
     pub at: i64,
-    texture: RefCell<Option<gdk::Texture>>,
+    texture: RefCell<Option<(i32, gdk::Texture)>>,
 }
 
 impl Clip {
-    pub fn texture(&self) -> Option<gdk::Texture> {
+    pub fn preview(&self, scale: i32) -> Option<gdk::Texture> {
         let Data::Image(png) = &self.data else { return None };
-        if self.texture.borrow().is_none() {
-            *self.texture.borrow_mut() = gdk::Texture::from_bytes(&glib::Bytes::from(png)).ok();
-        }
-        self.texture.borrow().clone()
+        let px = 60 * scale;
+        let cached = self.texture.borrow().clone();
+        if let Some((_, t)) = cached.filter(|(n, _)| *n == px) { return Some(t); }
+        let t = crate::images::decode(png, px);
+        *self.texture.borrow_mut() = t.clone().map(|t| (px, t));
+        t
     }
+
+    pub fn dimensions(&self) -> Option<(usize, usize)> {
+        let Data::Image(png) = &self.data else { return None };
+        let size = imagesize::blob_size(png).ok()?;
+        Some((size.width, size.height))
+    }
+
+    pub fn original(&self) -> Option<gdk::Texture> {
+        let Data::Image(png) = &self.data else { return None };
+        gdk::Texture::from_bytes(&glib::Bytes::from(png)).ok()
+    }
+
 }
 
 thread_local! {
@@ -267,5 +281,27 @@ fn slurp(fd: OwnedFd, limit: usize) -> Option<Vec<u8>> {
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => return None,
         }
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use gtk::prelude::*;
+
+    #[test]
+    fn previews_are_scale_aware_and_copy_keeps_original_pixels() {
+        let pb = gtk::gdk_pixbuf::Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, true, 8, 800, 400).unwrap();
+        pb.fill(0x123456ff);
+        let bytes = pb.save_to_bufferv("png", &[]).unwrap();
+        let clip = Clip { id: 1, data: Data::Image(bytes.clone()), at: 0, texture: RefCell::new(None) };
+        let preview = clip.preview(1).unwrap();
+        assert_eq!((preview.width(), preview.height()), (60, 30));
+        let preview = clip.preview(2).unwrap();
+        assert_eq!((preview.width(), preview.height()), (120, 60));
+        let original = clip.original().unwrap();
+        assert_eq!((original.width(), original.height()), (800, 400));
+        assert_eq!(clip.dimensions(), Some((800, 400)));
+        assert!(matches!(clip.data, Data::Image(ref png) if *png == bytes));
     }
 }

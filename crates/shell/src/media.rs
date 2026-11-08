@@ -87,7 +87,9 @@ struct Inner {
     app: std::rc::Weak<App>,
     entries: HashMap<String, Entry>,
     active: Option<String>,
-    art_cache: Vec<(String, gdk::Texture, Option<Rgb>)>,
+    pending: HashMap<String, u64>,
+    generation: u64,
+    art_cache: Vec<(String, i32, gdk::Texture, Option<Rgb>)>,
     polling: Option<glib::SourceId>,
     recheck: Option<glib::SourceId>,
     refresh: Option<(String, glib::SourceId)>,
@@ -104,6 +106,8 @@ impl Players {
             app: Rc::downgrade(app),
             entries: HashMap::new(),
             active: None,
+            pending: HashMap::new(),
+            generation: 0,
             art_cache: Vec::new(),
             polling: None,
             recheck: None,
@@ -136,7 +140,8 @@ impl Players {
             }
             if args.new_owner().is_none() {
                 self.remove(&name);
-            } else if args.old_owner().is_none() {
+            } else {
+                self.remove(&name);
                 self.add(&conn, name);
             }
         }
@@ -144,24 +149,35 @@ impl Players {
     }
 
     fn add(&self, conn: &zbus::Connection, name: String) {
+        let generation = {
+            let mut inner = self.0.borrow_mut();
+            inner.generation += 1;
+            let generation = inner.generation;
+            inner.pending.insert(name.clone(), generation);
+            generation
+        };
         let this = self.clone();
         let conn = conn.clone();
         glib::spawn_future_local(async move {
-            if let Err(e) = this.watch(conn, name.clone()).await {
+            if let Err(e) = this.watch(conn, name.clone(), generation).await {
                 eprintln!("digit: {name}: {e}");
             }
         });
     }
 
     fn remove(&self, name: &str) {
-        let gone = self.0.borrow_mut().entries.remove(name);
+        let gone = {
+            let mut inner = self.0.borrow_mut();
+            inner.pending.remove(name);
+            inner.entries.remove(name)
+        };
         if let Some(entry) = gone {
             entry.task.abort();
         }
         self.pick();
     }
 
-    async fn watch(&self, conn: zbus::Connection, name: String) -> zbus::Result<()> {
+    async fn watch(&self, conn: zbus::Connection, name: String, generation: u64) -> zbus::Result<()> {
         let proxy = PlayerProxy::builder(&conn)
             .destination(name.clone())?
             .uncached_properties(&["Position"])
@@ -179,6 +195,8 @@ impl Players {
         let browser = is_browser(&name, &desktop);
         let mut track = read(&fresh).await;
         track.browser = browser;
+        if self.0.borrow().pending.get(&name) != Some(&generation) { return Ok(()); }
+        self.0.borrow_mut().pending.remove(&name);
         let this = self.clone();
         let listener = proxy.clone();
         let reader = fresh.clone();
@@ -397,7 +415,9 @@ impl Players {
         if url.is_empty() {
             return;
         }
-        let cached = self.0.borrow().art_cache.iter().find(|(u, _, _)| *u == url).map(|(_, t, c)| (t.clone(), *c));
+        // All art consumers are in notch.rs: 104 logical px at most, plus 20 px miniatures.
+        let px = 208 * crate::images::scale();
+        let cached = self.0.borrow().art_cache.iter().find(|(u, n, _, _)| *u == url && *n >= px).map(|(_, _, t, c)| (t.clone(), *c));
         if let Some((texture, tint)) = cached {
             let mut m = app.media.borrow_mut();
             m.art = Some(texture);
@@ -411,12 +431,12 @@ impl Players {
         glib::spawn_future_local(async move {
             let file = gio::File::for_uri(&url);
             let Ok((bytes, _)) = file.load_bytes_future().await else { return };
-            let Ok(texture) = gdk::Texture::from_bytes(&bytes) else { return };
+            let Ok(Some(texture)) = gio::spawn_blocking(move || crate::images::decode(&bytes, px)).await else { return };
             let Some(app) = weak.upgrade() else { return };
             let tint = tint_of(&texture);
             {
                 let mut inner = this.0.borrow_mut();
-                inner.art_cache.push((url.clone(), texture.clone(), tint));
+                inner.art_cache.push((url.clone(), px, texture.clone(), tint));
                 if inner.art_cache.len() > 12 {
                     inner.art_cache.remove(0);
                 }
@@ -546,9 +566,8 @@ impl Players {
                 if let (Some(name), true) = (active, sample) {
                     this.sample_position_of(&name);
                 }
-                if let Some(app) = this.0.borrow().app.upgrade() {
-                    app.redraw();
-                }
+                let app = this.0.borrow().app.upgrade();
+                if let Some(app) = app { app.redraw(); }
                 glib::ControlFlow::Continue
             }));
         } else if !on {

@@ -32,6 +32,7 @@ mod gpu;
 mod gsr;
 mod hooks;
 mod icons;
+mod images;
 mod idle;
 mod intro;
 mod ipc;

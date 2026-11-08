@@ -312,7 +312,11 @@ pub fn texture(widget: &impl IsA<gtk::Widget>, key: &str, icon: Option<&gdk::Pai
     let look = match icon {
         Some(p) => LOOKS.with(|l| l.borrow().get(&look_id).copied()).unwrap_or_else(|| {
             let look = analyze(&renderer, p);
-            LOOKS.with(|l| l.borrow_mut().insert(look_id, look));
+            LOOKS.with(|l| {
+                let mut l = l.borrow_mut();
+                if l.len() >= 256 { l.clear(); }
+                l.insert(look_id, look);
+            });
             look
         }),
         None => Look { shape: Shape::Free, color: None, bbox: (0.0, 0.0, 1.0, 1.0) },
