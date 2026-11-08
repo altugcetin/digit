@@ -831,7 +831,8 @@ impl App {
         self.shown_gen.set(self.shown_gen.get() + 1);
         let ended = self.peek.borrow_mut().take();
         if let Some(Peek::Notification { id, .. }) = ended {
-            if let Some(n) = self.notify.borrow().as_ref() {
+            let notify = self.notify.borrow().clone();
+            if let Some(n) = notify {
                 match how {
                     Ending::Expired => {}
                     Ending::Clicked => {

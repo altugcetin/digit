@@ -155,14 +155,26 @@ fn save() {
     }
 }
 
-fn update(f: impl FnOnce(&mut Run)) {
-    ENGINE.with(|e| {
-        if let Some(r) = e.borrow_mut().run.as_mut() {
-            f(r);
-        }
+type RunId = (i32, i64);
+
+fn identity() -> Option<RunId> {
+    ENGINE.with(|e| e.borrow().run.as_ref().map(|r| (r.pid, r.since)))
+}
+
+fn same_run(id: RunId, current: Option<RunId>) -> bool { current == Some(id) }
+
+fn update(id: RunId, f: impl FnOnce(&mut Run)) {
+    let updated = ENGINE.with(|e| {
+        let mut e = e.borrow_mut();
+        update_run(&mut e.run, id, f)
     });
-    save();
-    changed();
+    if updated { save(); changed(); }
+}
+
+fn update_run(run: &mut Option<Run>, id: RunId, f: impl FnOnce(&mut Run)) -> bool {
+    let Some(r) = run.as_mut().filter(|r| same_run(id, Some((r.pid, r.since)))) else { return false };
+    f(r);
+    true
 }
 
 fn alive(pid: i32) -> bool {
@@ -178,14 +190,15 @@ pub fn restore(app: &Rc<App>) {
     let run: Option<Run> = std::fs::read_to_string(state_file()).ok().and_then(|t| serde_json::from_str(&t).ok());
     match run {
         Some(r) if alive(r.pid) => {
-            let pid = r.pid;
+            let id = (r.pid, r.since);
             ENGINE.with(|e| e.borrow_mut().run = Some(r));
             changed();
             glib::timeout_add_local(Duration::from_secs(2), move || {
-                if alive(pid) {
+                if !same_run(id, identity()) { return glib::ControlFlow::Break; }
+                if alive(id.0) {
                     return glib::ControlFlow::Continue;
                 }
-                ended(pid);
+                ended(id);
                 glib::ControlFlow::Break
             });
         }
@@ -195,10 +208,10 @@ pub fn restore(app: &Rc<App>) {
     }
 }
 
-fn ended(pid: i32) {
+fn ended(id: RunId) {
     let (run, asked) = ENGINE.with(|e| {
         let mut e = e.borrow_mut();
-        if e.run.as_ref().is_none_or(|r| r.pid != pid) {
+        if e.run.as_ref().is_none_or(|r| (r.pid, r.since) != id) {
             return (None, false);
         }
         (e.run.take(), std::mem::take(&mut e.stopping))
@@ -232,11 +245,14 @@ async fn ask(name: &'static str, data: serde_json::Value) -> Result<Option<Strin
     .unwrap_or_else(|_| Err("the recorder did not answer".into()))
 }
 
-fn signal(sig: i32) -> bool {
-    match ENGINE.with(|e| e.borrow().run.as_ref().map(|r| r.pid)) {
-        Some(pid) => unsafe { libc::kill(pid, sig) == 0 },
-        None => false,
-    }
+async fn ask_run(id: RunId, name: &'static str, data: serde_json::Value) -> Option<Result<Option<String>, String>> {
+    if !same_run(id, identity()) { return None; }
+    let reply = ask(name, data).await;
+    same_run(id, identity()).then_some(reply)
+}
+
+fn signal(id: RunId, sig: i32) -> bool {
+    same_run(id, identity()) && alive(id.0) && unsafe { libc::kill(id.0, sig) == 0 }
 }
 
 async fn region() -> Option<String> {
@@ -371,7 +387,7 @@ pub fn start(app: &Rc<App>, mode: Mode) {
         save();
         changed();
         let _ = p.wait_future().await;
-        ended(pid);
+        ended((pid, now));
     });
 }
 
@@ -382,18 +398,21 @@ fn saved(what: &str, path: &str) {
 /// Stops everything the recorder runs, saving a recording in progress.
 pub fn stop() -> bool {
     let Some(st) = status() else { return false };
+    let Some(id) = identity() else { return false };
     ENGINE.with(|e| e.borrow_mut().stopping = true);
     glib::spawn_future_local(async move {
         if st.mode != Mode::Record && st.taping {
-            if let Ok(Some(path)) = ask("stop-replay-recording", serde_json::Value::Null).await {
+            let Some(reply) = ask_run(id, "stop-replay-recording", serde_json::Value::Null).await else { return };
+            if let Ok(Some(path)) = reply {
                 saved("Recording", &path);
             }
         }
-        match ask("stop", serde_json::Value::Null).await {
+        let Some(reply) = ask_run(id, "stop", serde_json::Value::Null).await else { return };
+        match reply {
             Ok(Some(path)) => saved("Recording", &path),
             Ok(None) => {}
             Err(_) => {
-                signal(libc::SIGINT);
+                signal(id, libc::SIGINT);
             }
         }
     });
@@ -409,12 +428,14 @@ pub fn toggle_record(app: &Rc<App>) {
             stop();
         }
         Some(st) => {
+            let Some(id) = identity() else { return };
             let taping = st.taping;
             glib::spawn_future_local(async move {
                 if taping {
-                    match ask("stop-replay-recording", serde_json::Value::Null).await {
+                    let Some(reply) = ask_run(id, "stop-replay-recording", serde_json::Value::Null).await else { return };
+                    match reply {
                         Ok(path) => {
-                            update(|r| r.taping = None);
+                            update(id, |r| r.taping = None);
                             if let Some(path) = path {
                                 saved("Recording", &path);
                             }
@@ -422,8 +443,9 @@ pub fn toggle_record(app: &Rc<App>) {
                         Err(e) => notify("Can't stop the recording", &e),
                     }
                 } else {
-                    match ask("start-replay-recording", serde_json::Value::Null).await {
-                        Ok(_) => update(|r| r.taping = Some(glib::real_time())),
+                    let Some(reply) = ask_run(id, "start-replay-recording", serde_json::Value::Null).await else { return };
+                    match reply {
+                        Ok(_) => update(id, |r| r.taping = Some(glib::real_time())),
                         Err(e) => notify("Can't start recording", &e),
                     }
                 }
@@ -443,10 +465,12 @@ pub fn pause() -> bool {
     if status().is_none_or(|s| s.mode != Mode::Record) {
         return false;
     }
+    let Some(id) = identity() else { return false };
     glib::spawn_future_local(async move {
-        let ok = ask("toggle-pause", serde_json::Value::Null).await.is_ok() || signal(libc::SIGUSR2);
+        let Some(reply) = ask_run(id, "toggle-pause", serde_json::Value::Null).await else { return };
+        let ok = reply.is_ok() || signal(id, libc::SIGUSR2);
         if ok {
-            update(|r| {
+            update(id, |r| {
                 let now = glib::real_time();
                 match r.paused.take() {
                     Some(at) => r.held += now - at,
@@ -465,11 +489,13 @@ pub fn save_replay(secs: Option<u32>) -> bool {
         Some(s) if s > 0 && s < st.replay => serde_json::json!({ "seconds": s }),
         _ => serde_json::Value::Null,
     };
+    let Some(id) = identity() else { return false };
     let length = secs.filter(|s| *s > 0 && *s < st.replay).unwrap_or(st.replay);
     glib::spawn_future_local(async move {
-        match ask("save-replay", data).await {
+        let Some(reply) = ask_run(id, "save-replay", data).await else { return };
+        match reply {
             Ok(path) => notify(&format!("Replay saved · last {}", span(length)), &path.as_deref().map(file_name).unwrap_or_default()),
-            Err(_) if signal(libc::SIGUSR1) => notify("Replay saved", &folder().display().to_string()),
+            Err(_) if signal(id, libc::SIGUSR1) => notify("Replay saved", &folder().display().to_string()),
             Err(e) => notify("Can't save the replay", &e),
         }
     });
@@ -521,5 +547,30 @@ pub fn describe() -> serde_json::Value {
             "seconds": s.secs,
             "replay_seconds": s.replay,
         }),
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn stale_pause_and_stop_replies_leave_the_new_recording_untouched() {
+        let mut run = Some(Run { pid: 42, since: 200, mode: Mode::Record, taping: Some(200), paused: None, held: 0, replay: 60 });
+        assert!(!update_run(&mut run, (42, 100), |r| r.paused = Some(300)));
+        assert!(!update_run(&mut run, (42, 100), |r| r.taping = None));
+        assert_eq!(run.as_ref().unwrap().paused, None);
+        assert_eq!(run.as_ref().unwrap().taping, Some(200));
+        assert!(update_run(&mut run, (42, 200), |r| r.paused = Some(300)));
+        assert_eq!(run.as_ref().unwrap().paused, Some(300));
+    }
+
+    #[test]
+    fn replies_and_exit_watchers_reject_new_runs_even_with_reused_pid() {
+        let old = (42, 100);
+        assert!(same_run(old, Some(old)));
+        assert!(!same_run(old, Some((43, 200))));
+        assert!(!same_run(old, Some((42, 200))));
+        assert!(!same_run(old, None));
     }
 }

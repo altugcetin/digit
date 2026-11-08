@@ -1,6 +1,6 @@
 use super::drop_data::{self as data, MAX_IMAGE, MAX_TEXT};
 use gtk::{gdk, gio, glib, prelude::*};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -65,22 +65,7 @@ fn keep_image(bytes: &[u8]) -> Option<PathBuf> {
         return None;
     }
     let ext = data::extension(data::magic(bytes)?)?;
-    // Exclusive names avoid replacing another drop made within the same second.
-    let path = super::fresh(&format!(
-        "Image {} {}.{ext}",
-        super::stamp(),
-        glib::uuid_string_random()
-    ))?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .ok()?;
-    if file.write_all(bytes).and_then(|_| file.sync_all()).is_err() {
-        let _ = std::fs::remove_file(&path);
-        return None;
-    }
-    Some(path)
+    super::keep_bytes(&super::stash(), &format!("Image {}.{ext}", super::stamp()), bytes)
 }
 
 fn fetch_image(url: &str, cap: usize) -> Option<Vec<u8>> {
@@ -326,6 +311,7 @@ pub async fn receive_drop(drop: &gdk::Drop) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     fn server(responses: Vec<Vec<u8>>) -> (String, std::thread::JoinHandle<()>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

@@ -2,8 +2,9 @@ use crate::app::{App, Peek};
 use futures_util::StreamExt;
 use gtk::{gdk, gio, glib, prelude::*};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use zbus::fdo::{RequestNameFlags, RequestNameReply};
@@ -15,10 +16,20 @@ const PATH: &str = "/org/freedesktop/Notifications";
 
 /// Icon size requested from the theme; drawn at 18 logical px, so this stays sharp at 2x.
 const ICON_PX: i32 = 36;
+const INGRESS: usize = 64;
+const FILE_MAX: u64 = 8 * 1024 * 1024;
 
-/// Raw icon data as it arrives on the bus. Resolved to a paintable on the GTK thread.
+fn newest<T>(queue: &mut VecDeque<T>, value: T, cap: usize) -> Option<T> {
+    // Overload keeps the newest arrivals; callers explicitly close evicted notifications.
+    let dropped = if queue.len() >= cap { queue.pop_front() } else { None };
+    queue.push_back(value);
+    dropped
+}
+
+/// File sources are checked and decoded on workers before GTK resolves paintables.
 enum IconSource {
     Named(String),
+    Loaded(gdk::Texture),
     File(String),
     Pixels { width: i32, height: i32, stride: i32, alpha: bool, data: Vec<u8> },
 }
@@ -36,7 +47,9 @@ enum Event {
 }
 
 struct Server {
-    tx: async_channel::Sender<Event>,
+    tx: async_channel::Sender<()>,
+    queue: Arc<Mutex<VecDeque<Event>>>,
+    image_px: i32,
     next: AtomicU32,
 }
 
@@ -47,7 +60,7 @@ impl Server {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn notify(
+    async fn notify(
         &self,
         app_name: String,
         replaces_id: u32,
@@ -57,7 +70,8 @@ impl Server {
         actions: Vec<String>,
         hints: HashMap<String, OwnedValue>,
         _expire_timeout: i32,
-    ) -> u32 {
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<u32> {
         let id = if replaces_id > 0 { replaces_id } else { self.next.fetch_add(1, Ordering::Relaxed) };
         let urgency = hints.get("urgency").and_then(|v| u8::try_from(v.try_clone().ok()?).ok()).unwrap_or(1);
         let default = actions.chunks(2).any(|pair| pair[0] == "default");
@@ -65,33 +79,34 @@ impl Server {
             .chunks(2)
             .filter(|p| p.len() == 2 && p[0] != "default" && !p[1].trim().is_empty())
             .take(3)
-            .map(|p| (p[0].chars().take(64).collect(), plain(&p[1]).chars().take(24).collect()))
+            .map(|p| (p[0].chars().take(64).collect(), plain(&p[1].chars().take(256).collect::<String>()).chars().take(24).collect()))
             .collect();
         let look = Look {
             app_icon: icon_from_str(&app_icon),
             desktop_entry: hint_str(&hints, &["desktop-entry"]),
             image: ["image-data", "image_data", "icon_data"]
                 .iter()
-                .find_map(|k| hints.get(*k).and_then(|v| pixels(v)))
+                .find_map(|k| hints.get(*k).and_then(|v| pixels(v, self.image_px)))
                 .or_else(|| hint_str(&hints, &["image-path", "image_path"]).and_then(|p| icon_from_str(&p))),
         };
         let transient = hints.get("transient").and_then(|v| bool::try_from(v.try_clone().ok()?).ok().or_else(|| u8::try_from(v.try_clone().ok()?).ok().map(|x| x != 0))).unwrap_or(false);
-        let _ = self.tx.try_send(Event::Notify {
+        let event = Event::Notify {
             transient,
             id,
-            app: app_name,
-            summary: plain(&summary),
-            body: plain(&body),
+            app: app_name.chars().take(256).collect(),
+            summary: plain(&summary.chars().take(4096).collect::<String>()),
+            body: plain(&body.chars().take(16384).collect::<String>()),
             default,
             urgent: urgency >= 2,
             look,
             actions: buttons,
-        });
-        id
+        };
+        self.enqueue(event, &emitter).await?;
+        Ok(id)
     }
 
-    fn close_notification(&self, id: u32) {
-        let _ = self.tx.try_send(Event::Close(id));
+    async fn close_notification(&self, id: u32, #[zbus(signal_emitter)] emitter: SignalEmitter<'_>) -> zbus::fdo::Result<()> {
+        self.enqueue(Event::Close(id), &emitter).await
     }
 
     fn get_server_information(&self) -> (String, String, String, String) {
@@ -105,8 +120,30 @@ impl Server {
     async fn action_invoked(emitter: &SignalEmitter<'_>, id: u32, action_key: &str) -> zbus::Result<()>;
 }
 
+impl Server {
+    async fn enqueue(&self, event: Event, emitter: &SignalEmitter<'_>) -> zbus::fdo::Result<()> {
+        let dropped = {
+            let mut queue = self.queue.lock().map_err(|_| zbus::fdo::Error::Failed("Notification queue failed".into()))?;
+            if let Event::Notify { id, .. } = &event {
+                queue.retain(|e| !matches!(e, Event::Notify { id: old, .. } if old == id));
+            }
+            newest(&mut queue, event, INGRESS)
+        };
+        match self.tx.try_send(()) {
+            Ok(()) | Err(async_channel::TrySendError::Full(())) => {}
+            Err(_) => return Err(zbus::fdo::Error::Failed("Notifications are unavailable".into())),
+        }
+        if let Some(event) = dropped {
+            let (id, reason) = match event { Event::Notify { id, .. } => (id, 4), Event::Close(id) => (id, 3) };
+            Server::notification_closed(emitter, id, reason).await?;
+        }
+        Ok(())
+    }
+}
+
 fn icon_from_str(value: &str) -> Option<IconSource> {
     let value = value.trim();
+    if value.len() > 4096 { return None; }
     if value.is_empty() {
         None
     } else if value.starts_with("file://") || value.starts_with('/') {
@@ -118,13 +155,13 @@ fn icon_from_str(value: &str) -> Option<IconSource> {
 
 fn hint_str(hints: &HashMap<String, OwnedValue>, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|k| match hints.get(*k).map(|v| &**v) {
-        Some(Value::Str(s)) if !s.is_empty() => Some(s.to_string()),
+        Some(Value::Str(s)) if !s.is_empty() => Some(s.chars().take(4096).collect()),
         _ => None,
     })
 }
 
 /// Decodes the `(iiibiiay)` image hint: width, height, rowstride, alpha, bits, channels, data.
-fn pixels(value: &OwnedValue) -> Option<IconSource> {
+fn pixels(value: &OwnedValue, px: i32) -> Option<IconSource> {
     let Value::Structure(st) = &**value else { return None };
     let f = st.fields();
     let int = |i: usize| match f.get(i) {
@@ -138,9 +175,75 @@ fn pixels(value: &OwnedValue) -> Option<IconSource> {
         return None;
     }
     let Some(Value::Array(array)) = f.get(6) else { return None };
-    let data: Vec<u8> = array.iter().filter_map(|v| if let Value::U8(b) = v { Some(*b) } else { None }).collect();
-    let needed = stride as usize * (height as usize - 1) + width as usize * channels as usize;
-    (data.len() >= needed).then_some(IconSource::Pixels { width, height, stride, alpha, data })
+    let channels = channels as usize;
+    pixel_layout(width, height, stride, channels, array.len())?;
+    let (w, h) = crate::images::fit(width, height, px)?;
+    let mut data = Vec::with_capacity(w as usize * h as usize * channels);
+    for y in 0..h as usize {
+        let row = y * height as usize / h as usize * stride as usize;
+        for x in 0..w as usize {
+            let at = row + x * width as usize / w as usize * channels;
+            for c in 0..channels {
+                data.push(array.get::<u8>(at + c).ok()??);
+            }
+        }
+    }
+    Some(IconSource::Pixels { width: w, height: h, stride: w * channels as i32, alpha, data })
+}
+
+fn pixel_layout(w: i32, h: i32, stride: i32, channels: usize, len: usize) -> Option<usize> {
+    if w <= 0 || h <= 0 || stride <= 0 || !(3..=4).contains(&channels) { return None; }
+    let row = (w as usize).checked_mul(channels)?;
+    if (stride as usize) < row { return None; }
+    let needed = (stride as usize).checked_mul(h as usize - 1)?.checked_add(row)?;
+    (needed <= len && needed <= 32 * 1024 * 1024).then_some(needed)
+}
+
+fn read_image(location: &str, px: i32) -> Option<gdk::Texture> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = if location.starts_with("file://") { gio::File::for_uri(location).path()? } else { std::path::PathBuf::from(location) };
+    // O_NONBLOCK prevents a raced FIFO from blocking open; inspect the opened descriptor.
+    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW).open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > FILE_MAX { return None; }
+    let mut bytes = Vec::new();
+    file.take(FILE_MAX + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > FILE_MAX { return None; }
+    crate::images::decode(&bytes, px)
+}
+
+async fn load_files(mut look: Look, px: i32) -> Look {
+    use futures_util::future::{Either, select};
+    static ACTIVE: AtomicU32 = AtomicU32::new(0);
+    struct Permit;
+    impl Drop for Permit { fn drop(&mut self) { ACTIVE.fetch_sub(1, Ordering::Relaxed); } }
+    let has_file = [&look.app_icon, &look.image].iter().any(|s| matches!(s, Some(IconSource::File(_))));
+    if !has_file { return look; }
+    let strip = |s: Option<IconSource>| s.filter(|s| !matches!(s, IconSource::File(_)));
+    if ACTIVE.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < 2).then_some(n + 1)).is_err() {
+        look.app_icon = strip(look.app_icon);
+        look.image = strip(look.image);
+        return look;
+    }
+    let fallback = Look { app_icon: None, desktop_entry: look.desktop_entry.clone(), image: None };
+    let permit = Permit;
+    let job = gio::spawn_blocking(move || {
+        let _permit = permit;
+        let load = |s| match s {
+            Some(IconSource::File(path)) => read_image(&path, px).map(IconSource::Loaded),
+            other => other,
+        };
+        look.app_icon = load(look.app_icon);
+        look.image = load(look.image);
+        look
+    });
+    let timeout = glib::timeout_future(Duration::from_millis(500));
+    futures_util::pin_mut!(job, timeout);
+    match select(job, timeout).await {
+        Either::Left((Ok(look), _)) => look,
+        _ => fallback,
+    }
 }
 
 fn paint(theme: &gtk::IconTheme, source: &IconSource, require_known_name: bool) -> Option<gdk::Paintable> {
@@ -158,10 +261,8 @@ fn paint_at(theme: &gtk::IconTheme, source: &IconSource, require_known_name: boo
             }
             Some(lookup(gio::ThemedIcon::new(name).upcast_ref()))
         }
-        IconSource::File(location) => {
-            let file = if location.starts_with("file://") { gio::File::for_uri(location) } else { gio::File::for_path(location) };
-            file.query_exists(gio::Cancellable::NONE).then(|| lookup(gio::FileIcon::new(&file).upcast_ref()))
-        }
+        IconSource::Loaded(t) => Some(t.clone().upcast()),
+        IconSource::File(_) => None,
         IconSource::Pixels { width, height, stride, alpha, data } => {
             let format = if *alpha { gdk::MemoryFormat::R8g8b8a8 } else { gdk::MemoryFormat::R8g8b8 };
             let bytes = glib::Bytes::from(data.as_slice());
@@ -176,14 +277,8 @@ fn icon_like(source: &IconSource) -> bool {
     let (w, h) = match source {
         IconSource::Named(_) => return true,
         IconSource::Pixels { width, height, .. } => (*width, *height),
-        IconSource::File(location) => {
-            let path = location.strip_prefix("file://").map(|p| gio::File::for_uri(&format!("file://{p}"))).unwrap_or_else(|| gio::File::for_path(location));
-            let Some(path) = path.path() else { return false };
-            match gtk::gdk_pixbuf::Pixbuf::file_info(&path) {
-                Some((_, w, h)) => (w, h),
-                None => return false,
-            }
-        }
+        IconSource::Loaded(t) => (t.width(), t.height()),
+        IconSource::File(_) => return false,
     };
     h > 0 && (0.8..=1.25).contains(&(f64::from(w) / f64::from(h)))
 }
@@ -268,12 +363,28 @@ fn plain(text: &str) -> String {
         .join(" ")
 }
 
+#[derive(Clone)]
 pub struct Handle {
     conn: zbus::Connection,
-    defaults: RefCell<HashSet<u32>>,
+    defaults: Rc<RefCell<VecDeque<u32>>>,
 }
 
 impl Handle {
+    fn take_default(&self, id: u32) -> bool {
+        let mut defaults = self.defaults.borrow_mut();
+        let found = defaults.contains(&id);
+        defaults.retain(|i| *i != id);
+        found
+    }
+
+    fn set_default(&self, id: u32, enabled: bool) {
+        self.take_default(id);
+        if enabled {
+            let mut defaults = self.defaults.borrow_mut();
+            newest(&mut defaults, id, 256);
+        }
+    }
+
     fn emit(&self, id: u32, reason: u32, action: Option<String>) {
         let conn = self.conn.clone();
         glib::spawn_future_local(async move {
@@ -290,17 +401,17 @@ impl Handle {
     }
 
     pub fn closed(&self, id: u32, reason: u32) {
-        self.defaults.borrow_mut().remove(&id);
+        self.take_default(id);
         self.emit(id, reason, None);
     }
 
     pub fn clicked(&self, id: u32) {
-        let default = self.defaults.borrow_mut().remove(&id);
+        let default = self.take_default(id);
         self.emit(id, 2, default.then(|| "default".to_string()));
     }
 
     pub fn invoke(&self, id: u32, key: &str) {
-        self.defaults.borrow_mut().remove(&id);
+        self.take_default(id);
         self.emit(id, 2, Some(key.to_string()));
     }
 
@@ -310,10 +421,12 @@ impl Handle {
 }
 
 pub fn start(app: &Rc<App>) {
-    let (tx, rx) = async_channel::unbounded();
+    let (tx, rx) = async_channel::bounded(1);
+    let queue = Arc::new(Mutex::new(VecDeque::new()));
+    let image_px = 96 * crate::images::scale();
     let weak = Rc::downgrade(app);
     glib::spawn_future_local(async move {
-        let server = Server { tx, next: AtomicU32::new(1) };
+        let server = Server { tx, queue: queue.clone(), image_px, next: AtomicU32::new(1) };
         let conn = match async {
             let conn = crate::bus::session().await?;
             conn.object_server().at(PATH, server).await?;
@@ -328,18 +441,22 @@ pub fn start(app: &Rc<App>) {
             }
         };
         let Some(app) = weak.upgrade() else { return };
-        *app.notify.borrow_mut() = Some(Handle { conn: conn.clone(), defaults: RefCell::new(HashSet::new()) });
+        *app.notify.borrow_mut() = Some(Handle { conn: conn.clone(), defaults: Rc::new(RefCell::new(VecDeque::new())) });
         drop(app);
         glib::spawn_future_local(acquire(conn));
-        while let Ok(event) = rx.recv().await {
+        loop {
+            let event = queue.lock().ok().and_then(|mut q| q.pop_front());
+            let Some(event) = event else {
+                if rx.recv().await.is_err() { break; }
+                continue;
+            };
             let Some(app) = weak.upgrade() else { break };
             match event {
                 Event::Notify { id, app: source, summary, body, default, urgent, look, transient, actions } => {
-                    if let Some(h) = app.notify.borrow().as_ref() {
-                        if default {
-                            h.defaults.borrow_mut().insert(id);
-                        }
-                    }
+                    // Resolve in one serial consumer so slow file loads cannot reorder arrivals.
+                    let look = load_files(look, image_px).await;
+                    let handle = app.notify.borrow().clone();
+                    if let Some(h) = handle { h.set_default(id, default); }
                     let full = body.clone();
                     let summary = if summary.is_empty() { body } else { summary };
                     let line = if full == summary { String::new() } else { full.split_whitespace().collect::<Vec<_>>().join(" ") };
@@ -370,9 +487,8 @@ pub fn start(app: &Rc<App>) {
                     app.history.borrow_mut().retain(|n| n.id != id);
                     app.history_changed();
                     app.cancel_notification(id);
-                    if let Some(h) = app.notify.borrow().as_ref() {
-                        h.closed(id, 3);
-                    }
+                    let handle = app.notify.borrow().clone();
+                    if let Some(h) = handle { h.closed(id, 3); }
                 }
             }
         }
@@ -399,5 +515,49 @@ async fn acquire(conn: zbus::Connection) {
         let timeout = glib::timeout_future(Duration::from_secs(5));
         futures_util::pin_mut!(released, timeout);
         futures_util::future::select(released, timeout).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ingress_keeps_newest_in_arrival_order_and_reports_evictions() {
+        let mut q = VecDeque::new();
+        assert_eq!(newest(&mut q, 1, 2), None);
+        assert_eq!(newest(&mut q, 2, 2), None);
+        assert_eq!(newest(&mut q, 3, 2), Some(1));
+        assert_eq!(q.into_iter().collect::<Vec<_>>(), vec![2, 3]);
+    }
+
+    #[test]
+    fn pixel_hints_are_downsampled_before_entering_the_queue() {
+        let pixels = vec![127u8; 800 * 400 * 4];
+        let st = zbus::zvariant::Structure::from((800i32, 400i32, 3200i32, true, 8i32, 4i32, pixels));
+        let value = OwnedValue::try_from(Value::from(st)).unwrap();
+        let Some(IconSource::Pixels { width, height, stride, data, .. }) = super::pixels(&value, 96) else { panic!("pixel hint rejected") };
+        assert_eq!((width, height, stride, data.len()), (96, 48, 384, 96 * 48 * 4));
+        assert!(data.iter().all(|b| *b == 127));
+    }
+
+    #[test]
+    fn image_layout_rejects_invalid_strides_overflow_and_oversized_payloads() {
+        assert_eq!(pixel_layout(2, 2, 8, 4, 16), Some(16));
+        assert_eq!(pixel_layout(2, 2, 7, 4, 16), None);
+        assert_eq!(pixel_layout(2, 2, 8, 4, 15), None);
+        assert_eq!(pixel_layout(-1, 2, 8, 4, 16), None);
+        assert_eq!(pixel_layout(i32::MAX, i32::MAX, i32::MAX, 4, usize::MAX), None);
+        assert_eq!(pixel_layout(4096, 4096, 16384, 4, usize::MAX), None);
+    }
+
+    #[test]
+    fn notification_images_reject_fifos_without_opening_a_stream() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::env::temp_dir().join(format!("digit-notify-fifo-{}", glib::uuid_string_random()));
+        let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) }, 0);
+        assert!(read_image(path.to_str().unwrap(), 96).is_none());
+        std::fs::remove_file(path).unwrap();
     }
 }

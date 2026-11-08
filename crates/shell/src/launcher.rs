@@ -92,7 +92,7 @@ enum Act {
     Copy(String),
     Open(String),
     Run(String),
-    Image(gdk::Texture),
+    Image(Rc<crate::clip::Clip>),
     Clear,
     Found(usize, String),
     More(usize),
@@ -390,6 +390,7 @@ fn color_items(items: &mut Vec<Item>, c: kit::color::Color, original: &str, top:
 fn clip_items(items: &mut Vec<Item>, colors: &mut Vec<(usize, Copied)>, query: &str) {
     let q = fold(query);
     let all = crate::clip::history();
+    let scale = crate::images::scale();
     for (n, c) in all.iter().enumerate() {
         let score = 10_000 - n as i32 * 10;
         match &c.data {
@@ -412,9 +413,10 @@ fn clip_items(items: &mut Vec<Item>, colors: &mut Vec<(usize, Copied)>, query: &
                 if !q.is_empty() && !"image picture screenshot".contains(q.as_str()) {
                     continue;
                 }
-                if let Some(t) = c.texture() {
-                    let title = format!("Image {} × {}", t.width(), t.height());
-                    items.push(Item { kind: Kind::Clip, act: Act::Image(t.clone()), title, detail: ago(c.at), look: Look::Picture(t), score });
+                if let Some(t) = c.preview(scale) {
+                    let (w, h) = c.dimensions().unwrap_or((t.width() as usize, t.height() as usize));
+                    let title = format!("Image {w} × {h}");
+                    items.push(Item { kind: Kind::Clip, act: Act::Image(c.clone()), title, detail: ago(c.at), look: Look::Picture(t), score });
                 }
             }
         }
@@ -778,22 +780,19 @@ impl Launcher {
     }
 
     fn close(&self) {
-        {
+        let (window, caret, scrim) = {
             let mut s = self.0.borrow_mut();
-            if !s.open {
-                return;
-            }
+            if !s.open { return; }
             s.open = false;
             let now = glib::monotonic_time();
             s.fade.go(0.0, now, 200, motion::STANDARD);
             s.rise.go(0.0, now, 240, LEAVE);
-            s.window.set_keyboard_mode(KeyboardMode::None);
             s.caret_shown = false;
-            s.caret_paint.queue_draw();
-            if let Some(scrim) = s.scrim.take() {
-                scrim.destroy();
-            }
-        }
+            (s.window.clone(), s.caret_paint.clone(), s.scrim.take())
+        };
+        window.set_keyboard_mode(KeyboardMode::None);
+        caret.queue_draw();
+        if let Some(scrim) = scrim { scrim.destroy(); }
         self.kick();
     }
 
@@ -983,9 +982,8 @@ impl Launcher {
     }
 
     fn search(&self) {
-        let mut s = self.0.borrow_mut();
-        let raw = s.field.text().to_string();
-        let mut mode = s.mode;
+        let (field, mut mode) = { let s = self.0.borrow(); (s.field.clone(), s.mode) };
+        let raw = field.text().to_string();
         let mut query = raw.trim().to_string();
         if mode == Mode::All {
             if let Some(c) = raw.chars().next() {
@@ -1008,6 +1006,10 @@ impl Launcher {
             query = raw[1..].trim().to_string();
         }
         let q = fold(&query);
+        let mut clips = Vec::new();
+        let mut colors = Vec::new();
+        if mode == Mode::Clip { clip_items(&mut clips, &mut colors, &query); }
+        let mut s = self.0.borrow_mut();
         let apps = s.app.apps.list();
         let mut items: Vec<Item> = Vec::new();
         if run {
@@ -1110,9 +1112,8 @@ impl Launcher {
                 items.push(Item { kind: Kind::Web, act: Act::Open(url), title: query.clone(), detail: "Search the web".into(), look: Look::Symbol("travel_explore"), score: top });
             }
         }
-        let mut colors = Vec::new();
         if mode == Mode::Clip {
-            clip_items(&mut items, &mut colors, &query);
+            items = clips;
         } else if !query.is_empty() && matches!(mode, Mode::All | Mode::Calc) {
             if let Some(c) = kit::color::parse(&query) {
                 color_items(&mut items, c, &query, 2100);
@@ -1159,7 +1160,6 @@ impl Launcher {
             lines.extend((0..items.len().min(200)).map(Line::Item));
         }
         let placeholder = MODES.iter().find(|m| m.0 == mode).map(|m| m.2).unwrap_or("Search");
-        s.field.set_placeholder_text(Some(placeholder));
         let ask = (mode == Mode::All && !run && query.chars().count() >= 2 && !s.providers.is_empty() && s.found_q != query).then(|| query.clone());
         if s.found_q != query {
             s.found.clear();
@@ -1190,6 +1190,7 @@ impl Launcher {
         }
         s.scroll.set(0.0);
         drop(s);
+        field.set_placeholder_text(Some(placeholder));
         if let Some(q) = ask {
             self.ask(q);
         }
@@ -1378,8 +1379,8 @@ impl Launcher {
                     display.clipboard().set_text(&text);
                 }
             }
-            Act::Image(t) => {
-                if let Some(display) = gdk::Display::default() {
+            Act::Image(c) => {
+                if let Some(t) = c.original() && let Some(display) = gdk::Display::default() {
                     display.clipboard().set_texture(&t);
                 }
             }

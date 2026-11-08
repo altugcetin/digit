@@ -293,6 +293,7 @@ name = "digit-shell"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "async-lock",
  "futures-util",
  "gdk4-wayland",
  "gio-unix",
