@@ -6,8 +6,49 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-const KEEP: usize = 320;
+const BUDGET: usize = 40 * 1024 * 1024;
+const FAILED: usize = 512;
 const WORKERS: usize = 3;
+
+struct Cache<T> {
+    entries: HashMap<String, (T, usize)>,
+    order: VecDeque<String>,
+    bytes: usize,
+}
+
+impl<T: Clone> Cache<T> {
+    fn new() -> Self { Self { entries: HashMap::new(), order: VecDeque::new(), bytes: 0 } }
+
+    fn get(&mut self, key: &str) -> Option<T> {
+        let value = self.entries.get(key)?.0.clone();
+        self.order.retain(|k| k != key);
+        self.order.push_back(key.to_string());
+        Some(value)
+    }
+
+    fn insert(&mut self, key: String, value: T, bytes: usize) {
+        if let Some((_, old)) = self.entries.insert(key.clone(), (value, bytes)) { self.bytes -= old; }
+        self.bytes += bytes;
+        self.order.retain(|k| *k != key);
+        self.order.push_back(key);
+    }
+
+    fn trim(&mut self, budget: usize, visible: &HashSet<String>) {
+        // Visible widgets pin their thumbnails; trim any excess when they unbind.
+        let mut left = self.order.len();
+        while self.bytes > budget && left > 0 {
+            left -= 1;
+            let Some(key) = self.order.pop_front() else { break };
+            if visible.contains(&key) { self.order.push_back(key); continue; }
+            if let Some((_, bytes)) = self.entries.remove(&key) { self.bytes -= bytes; }
+        }
+    }
+}
+
+fn trim_cache() {
+    let visible = MARK.with(|m| m.borrow().values().cloned().collect());
+    CACHE.with(|c| c.borrow_mut().trim(BUDGET, &visible));
+}
 
 struct Job {
     key: String,
@@ -21,10 +62,10 @@ struct Job {
 }
 
 thread_local! {
-    static CACHE: RefCell<(HashMap<String, gdk::Texture>, VecDeque<String>)> = RefCell::new((HashMap::new(), VecDeque::new()));
+    static CACHE: RefCell<Cache<gdk::Texture>> = RefCell::new(Cache::new());
     static QUEUE: RefCell<VecDeque<Job>> = const { RefCell::new(VecDeque::new()) };
     static BUSY: Cell<usize> = const { Cell::new(0) };
-    static MISS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    static MISS: RefCell<VecDeque<String>> = const { RefCell::new(VecDeque::new()) };
     static MARK: RefCell<HashMap<usize, String>> = RefCell::new(HashMap::new());
 }
 
@@ -94,11 +135,14 @@ fn id(img: &gtk::Image) -> usize {
 }
 
 pub fn forget(img: &gtk::Image) {
-    MARK.with(|m| m.borrow_mut().remove(&id(img)));
+    let id = id(img);
+    MARK.with(|m| m.borrow_mut().remove(&id));
+    trim_cache();
 }
 
 pub fn load(img: &gtk::Image, info: &gio::FileInfo, px: i32) {
-    forget(img);
+    let image_id = id(img);
+    MARK.with(|m| m.borrow_mut().remove(&image_id));
     if is_dir(info) {
         return;
     }
@@ -117,14 +161,14 @@ pub fn load(img: &gtk::Image, info: &gio::FileInfo, px: i32) {
     let big = px * img.scale_factor() > 128;
     let uri = file.uri().to_string();
     let key = format!("{}{uri}", if big { "L" } else { "N" });
-    if let Some(tex) = CACHE.with(|c| c.borrow().0.get(&key).cloned()) {
+    MARK.with(|m| m.borrow_mut().insert(image_id, key.clone()));
+    if let Some(tex) = CACHE.with(|c| c.borrow_mut().get(&key)) {
         img.set_paintable(Some(&tex));
         return;
     }
     if MISS.with(|m| m.borrow().contains(&key)) {
         return;
     }
-    MARK.with(|m| m.borrow_mut().insert(id(img), key.clone()));
     let job = Job {
         key,
         uri,
@@ -149,16 +193,10 @@ fn live(job: &Job) -> bool {
 
 fn pump() {
     while BUSY.with(|b| b.get()) < WORKERS {
-        let Some(job) = QUEUE.with(|q| {
-            let mut q = q.borrow_mut();
-            while let Some(j) = q.pop_front() {
-                if live(&j) {
-                    return Some(j);
-                }
-            }
-            None
-        }) else {
-            return;
+        let job = loop {
+            let next = QUEUE.with(|q| q.borrow_mut().pop_front());
+            let Some(job) = next else { return };
+            if live(&job) { break job; }
         };
         BUSY.with(|b| b.set(b.get() + 1));
         let (uri, path, ct, mtime, size, big) = (job.uri.clone(), job.path.clone(), job.ct.clone(), job.mtime, job.size, job.big);
@@ -167,16 +205,9 @@ fn pump() {
             BUSY.with(|b| b.set(b.get() - 1));
             match tex {
                 Some(t) => {
-                    CACHE.with(|c| {
-                        let mut c = c.borrow_mut();
-                        c.0.insert(job.key.clone(), t.clone());
-                        c.1.push_back(job.key.clone());
-                        while c.1.len() > KEEP {
-                            if let Some(old) = c.1.pop_front() {
-                                c.0.remove(&old);
-                            }
-                        }
-                    });
+                    let bytes = t.width().max(0) as usize * t.height().max(0) as usize * 4;
+                    CACHE.with(|c| c.borrow_mut().insert(job.key.clone(), t.clone(), bytes));
+                    trim_cache();
                     if live(&job) {
                         if let Some(i) = job.img.upgrade() {
                             i.set_paintable(Some(&t));
@@ -184,7 +215,12 @@ fn pump() {
                     }
                 }
                 None => {
-                    MISS.with(|m| m.borrow_mut().insert(job.key.clone()));
+                    MISS.with(|m| {
+                        let mut m = m.borrow_mut();
+                        m.retain(|k| *k != job.key);
+                        m.push_back(job.key.clone());
+                        while m.len() > FAILED { m.pop_front(); }
+                    });
                 }
             }
             pump();
@@ -324,4 +360,36 @@ pub fn texture_for(file: &gio::File, info: &gio::FileInfo, done: impl FnOnce(Opt
         let t = gio::spawn_blocking(move || make(&uri, path.as_deref(), &ct, mtime, size, true)).await.ok().flatten();
         done(t);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn byte_budget_evicts_oldest_unpinned_and_accounts_replacements() {
+        let mut c = Cache::new();
+        c.insert("visible".into(), 1, 30);
+        c.insert("old".into(), 2, 20);
+        c.insert("recent".into(), 3, 10);
+        c.trim(40, &HashSet::from(["visible".into()]));
+        assert_eq!(c.bytes, 40);
+        assert!(!c.entries.contains_key("old"));
+        assert!(c.entries.contains_key("visible"));
+        c.insert("recent".into(), 4, 5);
+        assert_eq!(c.bytes, 35);
+        c.trim(10, &HashSet::new());
+        assert_eq!(c.get("recent"), Some(4));
+        assert_eq!(c.bytes, 5);
+    }
+
+    #[test]
+    fn visible_thumbnails_survive_until_unbound() {
+        let mut c = Cache::new();
+        c.insert("visible".into(), (), 50);
+        c.trim(40, &HashSet::from(["visible".into()]));
+        assert_eq!(c.bytes, 50);
+        c.trim(40, &HashSet::new());
+        assert_eq!(c.bytes, 0);
+    }
 }
