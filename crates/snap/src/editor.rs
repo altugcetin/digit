@@ -1180,8 +1180,8 @@ impl Ed {
                 self.window.close();
             }
             4 => {
-                out::ocr(&tex);
                 self.flash("Reading text…");
+                out::ocr(&tex);
             }
             _ => {
                 out::copy(&tex, &self.app);

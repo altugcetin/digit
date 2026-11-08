@@ -1,7 +1,7 @@
 use gtk::{cairo, gdk, gio, glib, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct Prefs {
     pub dir: PathBuf,
@@ -84,10 +84,32 @@ pub fn save(tex: &gdk::Texture, p: &Prefs) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&p.dir).map_err(|e| e.to_string())?;
     let (bytes, ext) = encode(tex, &p.format);
     let path = filename(p, ext);
-    let tmp = path.with_extension(format!("{ext}.part"));
-    std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    atomic_write(&path, &bytes).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    atomic_write_with(path, |file| file.write_all(bytes))
+}
+
+fn atomic_write_with(path: &Path, write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = dir.join(format!(".digit-save-{}.part", glib::uuid_string_random()));
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+    let result = (|| {
+        let permissions = match std::fs::metadata(path) {
+            Ok(m) => Some(m.permissions()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        write(&mut file)?;
+        if let Some(p) = permissions { file.set_permissions(p)?; }
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&tmp); }
+    result
 }
 
 pub fn save_as(tex: gdk::Texture, parent: Option<&gtk::Window>, done: impl FnOnce(Option<PathBuf>) + 'static) {
@@ -102,7 +124,7 @@ pub fn save_as(tex: gdk::Texture, parent: Option<&gtk::Window>, done: impl FnOnc
         let Some(path) = file.path() else { return done(None) };
         let fmt = if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg")) { "jpg" } else { "png" };
         let (bytes, _) = encode(&tex, fmt);
-        done(std::fs::write(&path, bytes).ok().map(|_| path));
+        done(atomic_write(&path, &bytes).ok().map(|_| path));
     });
 }
 
@@ -184,26 +206,57 @@ pub fn ocr_available() -> bool {
 }
 
 pub fn ocr(tex: &gdk::Texture) {
-    let png = tex.save_to_png_bytes();
-    let tmp = glib::user_runtime_dir().join(format!("digit-ocr-{}.png", std::process::id()));
-    if std::fs::write(&tmp, &png).is_err() {
-        return;
-    }
-    let langs = kit::prefs::text(&kit::prefs::read(), "snap_ocr_langs", "eng+tur");
-    let out = std::process::Command::new("tesseract").arg(&tmp).arg("-").args(["-l", &langs]).stderr(std::process::Stdio::null()).output();
-    let _ = std::fs::remove_file(&tmp);
-    match out {
-        Ok(o) if o.status.success() => {
-            let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if text.is_empty() {
-                notify("No text found", "The selection has no readable text", None);
-            } else {
+    let tex = tex.clone();
+    glib::spawn_future_local(async move {
+        // Let the editor paint “Reading text…” before encoding and starting OCR.
+        glib::timeout_future(std::time::Duration::from_millis(40)).await;
+        let result = gio::spawn_blocking(move || {
+            let png = tex.save_to_png_bytes();
+            let langs = kit::prefs::text(&kit::prefs::read(), "snap_ocr_langs", "eng+tur");
+            read_text(&png, &langs)
+        }).await;
+        match result {
+            Ok(Ok(text)) if text.is_empty() => notify("No text found", "The selection has no readable text", None),
+            Ok(Ok(text)) => {
                 copy_text(&text);
                 notify("Text copied", &text.chars().take(120).collect::<String>(), None);
             }
+            _ => notify("Couldn't read text", "tesseract failed or timed out; check the installed languages", None),
         }
-        _ => notify("Couldn't read text", "tesseract failed; check the installed languages", None),
+    });
+}
+
+fn wait_ocr(child: &mut std::process::Child, timeout: std::time::Duration) -> std::io::Result<()> {
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(s)) if s.success() => return Ok(()),
+            Ok(Some(_)) => return Err(std::io::Error::other("tesseract failed")),
+            Ok(None) if start.elapsed() < timeout => std::thread::sleep(std::time::Duration::from_millis(20)),
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(result.err().unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "tesseract timed out")));
+            }
+        }
     }
+}
+
+fn read_text(png: &[u8], langs: &str) -> std::io::Result<String> {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = glib::user_runtime_dir().join(format!("digit-ocr-{}", glib::uuid_string_random()));
+    std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+    let result = (|| {
+        let input = dir.join("input.png");
+        let output = dir.join("text");
+        std::fs::write(&input, png)?;
+        let mut child = std::process::Command::new("tesseract").arg(&input).arg(&output).args(["-l", langs])
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()?;
+        wait_ocr(&mut child, std::time::Duration::from_secs(30))?;
+        Ok(std::fs::read_to_string(output.with_extension("txt"))?.trim().to_string())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
 }
 
 pub fn pin(app: &gtk::Application, tex: gdk::Texture, output: &str, x: i32, y: i32, w: i32, h: i32) {
@@ -318,4 +371,37 @@ pub fn pin(app: &gtk::Application, tex: gdk::Texture, output: &str, x: i32, y: i
     win.add_controller(keys);
     win.set_tooltip_text(Some("Drag to move · scroll to resize · double-click to close"));
     win.present();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn timed_out_ocr_is_killed_and_reaped() {
+        let mut child = std::process::Command::new("sleep").arg("10").spawn().unwrap();
+        let error = wait_ocr(&mut child, std::time::Duration::from_millis(20)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn atomic_save_preserves_original_on_failure_and_permissions_on_success() {
+        let dir = std::env::temp_dir().join(format!("digit-save-test-{}", glib::uuid_string_random()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("existing.png");
+        std::fs::write(&path, b"original").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(atomic_write_with(&path, |f| {
+            f.write_all(b"partial")?;
+            Err(std::io::Error::other("injected write failure"))
+        }).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        atomic_write(&path, b"replacement").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o640);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
