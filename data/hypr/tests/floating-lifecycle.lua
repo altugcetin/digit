@@ -12,6 +12,8 @@ end
 local function event(name, ...) for _, cb in ipairs(callbacks[name] or {}) do cb(...) end end
 local function factory(name) return function(args) return { name = name, args = args } end end
 local moves, resizes = 0, 0
+local rules, rule_calls, refresh_pending = {}, 0, false
+local workspaces = { ws }
 hl = {
     config = function() end,
     dsp = { window = { tag = factory('tag'), float = factory('float'), move = factory('move'), resize = factory('resize'), drag = factory('drag') } },
@@ -22,11 +24,22 @@ hl = {
         return { top = 4, right = 4, bottom = 4, left = 4 }
     end,
     get_windows = function() return windows end,
+    get_workspaces = function() return workspaces end,
     get_monitors = function() return { m } end,
     get_active_window = function() return active end,
     get_cursor_pos = function() return cursor end,
     exec_cmd = function(cmd) commands[#commands + 1] = cmd end,
-    window_rule = function(rule) eq(rule.enabled, false) end,
+    window_rule = function(rule)
+        rule_calls, refresh_pending = rule_calls + 1, true
+        local old = rules[rule.name] or { effects = {} }
+        rules[rule.name] = old
+        old.enabled = rule.enabled
+        if rule.match then old.match = rule.match end
+        -- The real binding appends effects, rather than replacing them.
+        for _, key in ipairs({ 'float', 'size', 'move', 'tag' }) do
+            if rule[key] ~= nil then old.effects[#old.effects + 1] = { key, rule[key] }; old[key] = rule[key] end
+        end
+    end,
     workspace_rule = function(rule) assert(rule.layout ~= 'floating') end,
     timer = function(callback, opts)
         eq(opts.timeout, 33); eq(opts.type, 'repeat')
@@ -49,7 +62,51 @@ hl = {
         return { success = true }
     end,
 }
+local function settle()
+    for _ = 1, 8 do
+        if not refresh_pending then return end
+        refresh_pending = false
+        event('config.props_refreshed')
+    end
+    error('rule refresh loop')
+end
 local M = dofile(path)
+local initial = assert(rules['digit-mode-open-1'])
+eq(initial.match.workspace, '1'); eq(initial.match.modal, false); eq(initial.match.float, false)
+eq(initial.match.pin, false); eq(initial.float, true); eq(initial.tag, '+digit-mode-floated')
+eq(initial.size, '1280 658'); eq(initial.move, '320 191')
+settle()
+local stable = rule_calls
+settle(); event('config.props_refreshed'); eq(rule_calls, stable)
+local function mapped_by_rule(w)
+    local rule
+    for _, candidate in pairs(rules) do
+        if candidate.enabled and candidate.match and candidate.match.workspace == tostring(w.workspace.id) then rule = candidate end
+    end
+    assert(rule)
+    w.floating = true
+    local width, height = rule.size:match('^(%d+) (%d+)$')
+    local x, y = rule.move:match('^(%d+) (%d+)$')
+    w.size = { x = tonumber(width), y = tonumber(height) }
+    w.at = { x = w.monitor.x + tonumber(x), y = w.monitor.y + tonumber(y) }
+    w.tags = { 'digit-mode-floated*' }
+    event('window.open_early', w)
+    -- propertiesChanged(ALL) clears the rule tag after float=false stops matching.
+    w.tags = {}
+    local before_moves, before_resizes = moves, resizes
+    event('window.open', w)
+    eq(moves, before_moves); eq(resizes, before_resizes)
+    eq(w.tags[1], 'digit-mode-floated')
+    settle()
+end
+-- Empty workspace placement comes from the rule, before animate-in, with no dispatch.
+local first = window('first', false)
+windows = { first }; mapped_by_rule(first)
+eq(first.at.x, 320); eq(first.at.y, 191)
+-- Close is emitted before the client disappears from get_windows().
+event('window.close', first); eq(rules['digit-mode-open-1'].move, '320 191')
+windows = {}; settle()
+
 local tiled, own, fs, pinned, named, special = window('tiled', false), window('own', true), window('fs', false), window('pin', true), window('named', false, {}), window('special', false, { id = 2, special = true })
 fs.fullscreen, pinned.pinned = 2, true
 windows = { tiled, own, fs, pinned, named, special }
@@ -57,10 +114,10 @@ event('config.reloaded') -- generated default in this fixture is floating
 assert(tiled.floating); assert(own.floating); assert(pinned.floating)
 assert(not fs.floating); assert(not named.floating); assert(not special.floating)
 eq(#tiled.tags, 1); eq(#own.tags, 0); eq(#timers, 0)
--- A new client is arranged synchronously in the map callback without another timer.
+-- A rule-placed client keeps its first-map geometry and advances the next cascade.
 local fresh = window('fresh', false)
 windows[#windows + 1] = fresh
-event('window.open', fresh)
+mapped_by_rule(fresh)
 assert(fresh.floating); assert(fresh.at.x ~= tiled.at.x or fresh.at.y ~= tiled.at.y)
 eq(#timers, 0)
 -- Auto-grouping inherits mode ownership, but an app's own initial float rule does not.
@@ -134,3 +191,50 @@ m.name = 'DP-$(touch /tmp/never)'
 binding = M.drag(); cursor = { x = own.at.x + 10, y = own.at.y + 10 }; binding()
 cursor = { x = 1, y = 400 }; timers[#timers].callback(); binding()
 for _, cmd in ipairs(commands) do assert(not cmd:find('touch', 1, true)) end
+
+-- Rule synchronization never places existing windows or spins the deferred pass.
+before_moves = moves
+local before_resizes = resizes
+for _ = 1, 5 do event('workspace.active', ws); event('config.props_refreshed') end
+settle(); eq(moves, before_moves); eq(resizes, before_resizes)
+-- Slots are disabled outside the mode and reused across unbounded workspace IDs.
+workspaces = {}; event('workspace.removed', ws); settle()
+eq(rules['digit-mode-open-1'].enabled, false)
+for id = 10, 30 do
+    local other = { id = id, monitor = m }
+    event('workspace.created_early', other)
+    eq(rules['digit-mode-open-1'].enabled, true)
+    eq(rules['digit-mode-open-1'].match.workspace, tostring(id))
+    event('workspace.removed', other)
+    eq(rules['digit-mode-open-1'].enabled, false)
+end
+assert(not rules['digit-mode-open-2'])
+local outside = { id = 2, monitor = m }
+event('workspace.created_early', outside)
+eq(rules['digit-mode-open-1'].enabled, false)
+event('workspace.created_early', { name = 'named', monitor = m })
+event('workspace.removed', { name = 'named', monitor = m })
+event('workspace.created_early', { id = 1, special = true, monitor = m })
+eq(rules['digit-mode-open-1'].enabled, false)
+-- A monitor snapshot supplies rotated, scaled, reserved and gapped logical geometry.
+m.name, m.width, m.height, m.scale, m.transform = 'DP-1', 2160, 3840, 2, 1
+workspaces, windows = { ws }, {}
+event('monitor.layout_changed'); settle()
+eq(rules['digit-mode-open-1'].size, '1280 658')
+eq(rules['digit-mode-open-1'].move, '320 191')
+
+-- Preference mode changes replace the Lua VM and Hyprland's rule registry.
+local source_file = assert(io.open(path))
+local source = source_file:read('*a'); source_file:close()
+callbacks, rules, refresh_pending = {}, {}, false
+local owned = window('reload-owned', true)
+owned.tags = { 'digit-mode-floated' }
+windows, workspaces = { owned }, { ws }
+assert(load((source:gsub('local default_mode = "floating"', 'local default_mode = "dwindle"'))))()
+event('config.reloaded'); settle()
+assert(not owned.floating); eq(#owned.tags, 0)
+assert(not rules['digit-mode-open-1'])
+callbacks, rules, refresh_pending = {}, {}, false
+M = assert(load(source))(); event('config.reloaded'); settle()
+assert(owned.floating); eq(owned.tags[1], 'digit-mode-floated')
+assert(rules['digit-mode-open-1'].enabled)

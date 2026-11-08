@@ -128,7 +128,7 @@ local saved_prefix = 'digit-snap:'
 local cascades, saved = {}, {}
 local drag, timer, preview
 local changing = false
-local pending, opening = {}, {}
+local pending, opening, preplaced = {}, {}, {}
 local function tag(w, value)
     hl.dispatch(hl.dsp.window.tag({ window = w, tag = value }))
 end
@@ -144,6 +144,57 @@ end
 local function area(m)
     local outer, inner = gaps()
     return G.workarea(G.monitor(m), m.reserved, outer), inner, hl.get_config('general.border_size')
+end
+-- One reusable slot per concurrently existing numeric floating workspace. Named rules
+-- retain their effects in 0.57.1, so only append geometry when it actually changes.
+local open_rules = {}
+local function sync_open_rules(extra, closing, removed)
+    local workspaces = {}
+    for _, ws in ipairs(hl.get_workspaces()) do
+        if floating(ws) and ws.monitor then workspaces[ws.id] = ws end
+    end
+    if floating(extra) and extra.monitor then workspaces[extra.id] = extra end
+    if removed then workspaces[removed] = nil end
+    for _, slot in ipairs(open_rules) do
+        if slot.id and not workspaces[slot.id] then
+            hl.window_rule({ name = slot.name, enabled = false })
+            slot.id, slot.key = nil, nil
+        end
+    end
+    for id, ws in pairs(workspaces) do
+        local slot
+        for _, old in ipairs(open_rules) do if old.id == id then slot = old; break end end
+        if not slot then
+            for _, old in ipairs(open_rules) do if not old.id then slot = old; break end end
+            if not slot then
+                slot = { name = 'digit-mode-open-' .. (#open_rules + 1) }
+                open_rules[#open_rules + 1] = slot
+            end
+        end
+        local m, occupied = ws.monitor, {}
+        for _, w in ipairs(hl.get_windows()) do
+            if w.mapped and w.address ~= closing and w.workspace == ws and w.floating then
+                occupied[#occupied + 1] = { x = w.at.x - m.x, y = w.at.y - m.y }
+            end
+        end
+        local work, _, border = area(m)
+        local r = G.cascade(G.inset(work, border), cascades[id] or 0, occupied)
+        local size, move = string.format('%d %d', r.w, r.h), string.format('%d %d', r.x, r.y)
+        local key = id .. ':' .. size .. ':' .. move
+        if slot.key ~= key then
+            local rule = { name = slot.name, enabled = true,
+                match = { workspace = tostring(id), modal = false, float = false, pin = false },
+                size = size, move = move }
+            if not slot.initialized then
+                rule.float, rule.tag = true, '+' .. owned_tag
+                slot.initialized = true
+            end
+            -- digit-rules.lua currently contains only a layer rule, no app floats.
+            -- float=false excludes client hints, not pending float effects in user.lua.
+            hl.window_rule(rule)
+            slot.id, slot.key = id, key
+        end
+    end
 end
 local function place(w, m, r)
     hl.dispatch(hl.dsp.window.resize({ window = w, x = r.w, y = r.h, relative = false }))
@@ -402,21 +453,30 @@ end
 hl.on('window.open_early', function(w)
     -- App/dialog float rules have already run; grouping has not.
     opening[w.address] = w.floating
+    -- Rule tags have a '*' suffix and are cleared on property refresh. Capture
+    -- the first-map claim now; promote it to the existing persistent tag at open.
+    preplaced[w.address] = has_tag(w, owned_tag .. '*')
 end)
 hl.on('window.open', function(w)
-    -- This synchronous map callback is before control returns to the event loop/rendering,
-    -- after app/dialog rules and layout insertion. open_early cannot float: target.space is nil.
-    if opening[w.address] == false and w.floating and w.group and floating(w.workspace) then
+    local placed = preplaced[w.address]
+    if placed then
+        if not w.pinned then tag(w, '+' .. owned_tag) end
+        local ws = w.workspace
+        if numbered(ws) then cascades[ws.id] = (cascades[ws.id] or 0) + 1 end
+    elseif opening[w.address] == false and w.floating and w.group and floating(w.workspace) then
         for _, member in ipairs(w.group.members or {}) do
             if has_tag(member, owned_tag) then tag(w, '+' .. owned_tag); break end
         end
     end
-    opening[w.address] = nil
-    arrange({ w })
+    opening[w.address], preplaced[w.address] = nil, nil
+    -- A rule-placed window already floats: arrange only handles later transitions.
+    if not placed then arrange({ w }) end
+    sync_open_rules()
 end)
 hl.on('window.move_to_workspace', function(w)
     if drag and drag.window == w then cancel() end
     pending[w.address] = w
+    sync_open_rules() -- Read-only geometry preparation is safe during transfer.
     -- Request a deferred property pass rather than mutate a target midway through transfer.
     -- A disabled empty rule schedules that pass without changing any window or starting a timer.
     hl.window_rule({ name = 'digit-mode-deferred', enabled = false })
@@ -430,6 +490,7 @@ hl.on('config.props_refreshed', function()
     for _, w in pairs(pending) do windows[#windows + 1] = w end
     pending = {}
     arrange(windows)
+    sync_open_rules()
 end)
 hl.on('window.update_state', function(w, changes)
     if changes.pin and has_tag(w, owned_tag) then tag(w, '-' .. owned_tag) end
@@ -440,14 +501,24 @@ hl.on('window.pin', function(w)
 end)
 hl.on('window.close', function(w)
     if drag and drag.window == w then cancel() end
-    saved[w.address], pending[w.address], opening[w.address] = nil, nil, nil
+    saved[w.address], pending[w.address], opening[w.address], preplaced[w.address] = nil, nil, nil, nil
+    -- close is emitted while the closing client can still appear in get_windows().
+    sync_open_rules(nil, w.address)
 end)
 for _, event in ipairs({ 'workspace.active', 'workspace.special_active', 'monitor.layout_changed', 'config.unload' }) do hl.on(event, cancel) end
+for _, event in ipairs({ 'workspace.active', 'workspace.created_early', 'workspace.created', 'workspace.move_to_monitor' }) do
+    hl.on(event, function(ws) sync_open_rules(ws) end)
+end
+hl.on('workspace.removed', function(ws)
+    if numbered(ws) then cascades[ws.id] = nil; sync_open_rules(nil, nil, ws.id) end
+end)
+hl.on('monitor.layout_changed', function() sync_open_rules() end)
 hl.on('config.reloaded', function()
     cancel()
     -- Ownership and restore geometry live on windows, surviving a fresh Lua VM.
     for _, w in ipairs(hl.get_windows()) do rebuild_saved(w) end
     arrange(hl.get_windows())
+    sync_open_rules()
 end)
 -- Magnetic edges for free placement; the zones above take over at the screen edge.
 if snap_enabled then
@@ -456,4 +527,5 @@ end
 for id, mode in pairs(modes) do
     hl.workspace_rule({ workspace = tostring(id), layout = mode == 'floating' and underlying[id] or mode })
 end
+sync_open_rules()
 return M
