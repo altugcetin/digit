@@ -4,7 +4,7 @@
 use crate::{
     app::App,
     draw::{self, Face},
-    paint::Paint,
+    paint::{self, Paint},
     popmenu::{self, Row},
 };
 use gtk::{gdk, gio, glib, graphene, pango, prelude::*};
@@ -660,16 +660,18 @@ pub fn style(display: &gdk::Display) {
         for n in at..at + added {
             if let Some(window) = windows.item(n).and_downcast::<gtk::Window>() {
                 window.connect_is_active_notify(|window| {
-                    if window.is_active()
+                    if !window.has_css_class("digit-lock")
+                        && window.is_active()
                         && window.is_layer_window()
-                        && window.namespace().as_deref() != Some("digit-desktop-icons")
+                        && paint::layer_namespace(window).as_deref() != Some("digit-desktop-icons")
                     {
                         defer_release_keyboard();
                     }
                 });
                 window.connect_map(|window| {
-                    if window.is_layer_window()
-                        && window.namespace().as_deref() != Some("digit-desktop-icons")
+                    if !window.has_css_class("digit-lock")
+                        && window.is_layer_window()
+                        && paint::layer_namespace(window).as_deref() != Some("digit-desktop-icons")
                         && (matches!(window.layer(), Layer::Top | Layer::Overlay)
                             || window.keyboard_mode() != KeyboardMode::None)
                     {
@@ -844,9 +846,10 @@ fn acquire_after_release(d: &Rc<RefCell<Desktop>>) {
                 .into_iter()
                 .filter_map(|w| w.downcast::<gtk::Window>().ok())
                 .any(|w| {
-                    w.is_visible()
+                    !w.has_css_class("digit-lock")
+                        && w.is_visible()
                         && w.is_layer_window()
-                        && w.namespace().as_deref() != Some("digit-desktop-icons")
+                        && paint::layer_namespace(&w).as_deref() != Some("digit-desktop-icons")
                         && w.keyboard_mode() != KeyboardMode::None
                 });
             if overlay {
