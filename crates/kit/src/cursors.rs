@@ -69,6 +69,7 @@ pub fn current(prefs: &toml::Table) -> (String, u32) {
 }
 
 pub(crate) fn hypr(prefs: &toml::Table) -> String {
+    if !prefs.contains_key("cursor_theme") && !prefs.contains_key("cursor_size") { return String::new() }
     let (theme, size) = current(prefs);
     let mut out =
         format!("hl.env(\"XCURSOR_SIZE\", \"{size}\")\nhl.env(\"HYPRCURSOR_SIZE\", \"{size}\")\n");
@@ -95,6 +96,8 @@ pub(crate) fn niri(prefs: &toml::Table) -> Vec<String> {
 
 /// Apply the cursor immediately after regenerating Hyprland's environment.
 pub(crate) fn apply_live() {
+    let prefs = crate::prefs::read();
+    if !prefs.contains_key("cursor_theme") && !prefs.contains_key("cursor_size") { return; }
     if crate::setup::installed()
         && crate::setup::kind() == Some(crate::setup::Kind::Hyprland)
         && std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some()
@@ -118,6 +121,12 @@ pub(crate) fn apply_live() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cursor_environment_requires_an_explicit_choice() {
+        assert!(hypr(&toml::Table::new()).is_empty());
+        assert!(hypr(&"cursor_size = 32".parse().unwrap()).contains("XCURSOR_SIZE"));
+    }
+
     #[test]
     fn scans_cursor_folders_and_names_with_user_precedence() {
         let root = std::env::temp_dir().join(format!("digit-cursors-{}", std::process::id()));

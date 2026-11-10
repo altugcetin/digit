@@ -2,7 +2,7 @@
 -- change any of it in user.lua, which loads after this.
 
 {{cursor}}
-hl.env("QT_QPA_PLATFORMTHEME", "qt6ct")
+{{qt}}
 {{gpu}}
 hl.config({
     dwindle = { preserve_split = true },

@@ -32,7 +32,7 @@ pub(crate) fn save_many(values: &[(&str, toml::Value)]) -> bool {
     }
     // Compositor settings (and the accent, which colors niri's window border) go straight into
     // digit's part of the compositor config.
-    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "ui_accent" | "border_color" | "reduce_motion" | "reduced_effects" | "terminal" | "nvidia_env" | "cursor_theme" | "cursor_size")) {
+    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "ui_accent" | "border_color" | "reduce_motion" | "reduced_effects" | "terminal" | "theme_qt" | "nvidia_env" | "cursor_theme" | "cursor_size")) {
         apply_compositor();
     }
     if values.iter().any(|(key, _)| matches!(*key, "button_maximize" | "button_close")) {
@@ -40,6 +40,7 @@ pub(crate) fn save_many(values: &[(&str, toml::Value)]) -> bool {
             let _ = gio::spawn_blocking(kit::appearance::apply_buttons).await;
         });
     }
+    if values.iter().any(|(key, _)| *key == "theme_qt") { ui::done("Log in again to apply to all apps"); }
     true
 }
 
@@ -151,7 +152,7 @@ pub(crate) fn choice(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &
     let values: Rc<Vec<String>> = Rc::new(options.iter().map(|o| o.0.to_string()).collect());
     let selected = Rc::new(Cell::new(at));
     let mut controls = Vec::new();
-    let short = options.len() <= 3 && labels.iter().map(|l| l.chars().count()).sum::<usize>() <= 26;
+    let short = !matches!(key, "gtk_theme" | "qt_theme") && options.len() <= 3 && labels.iter().map(|l| l.chars().count()).sum::<usize>() <= 26;
     if short {
         let (values, selected) = (values.clone(), selected.clone());
         let bar = ui::segmented(&labels, at, move |i| {
@@ -541,7 +542,7 @@ pub type Section = fn(&gtk::Box, &toml::Table);
 
 pub fn sections(page: &str) -> &'static [Section] {
     match page {
-        "appearance" => &[shell_look, app_look, effects],
+        "appearance" => &[shell_look, app_look, app_themes, effects],
         "dock" => &[dock],
         "notch" => &[notch, menu_bar, panels, screen_edges],
         "desktop" => &[desktop, window_buttons, weather],
@@ -666,7 +667,6 @@ fn shell_look(body: &gtk::Box, t: &toml::Table) {
             restoring.set(false);
         } else {
             accepted.set(p.selected());
-            apply_compositor();
         }
     });
     end.append(&pick);
@@ -714,6 +714,44 @@ fn app_look(body: &gtk::Box, t: &toml::Table) {
     corners(&apps, "rounded_corner", "Corners", "Cards, menus, buttons and dialogs", "ui_round", prefs::get_f64(&t, "ui_round", 1.0));
     choice(&apps, "density_medium", "Density", "", "ui_density", &[("comfortable", "Comfortable"), ("compact", "Compact")], &prefs::get_str(&t, "ui_density", "comfortable"));
     toggle(&apps, "select_window", "Open Settings as a window", "Settings opens over everything by default; turn this on for an ordinary window. Takes effect the next time Settings opens", "settings_window", prefs::get_bool(&t, "settings_window", false));
+}
+
+fn app_themes(body: &gtk::Box, t: &toml::Table) {
+    let card = section(body, "App themes");
+    let gtk = toggle(&card, "palette", "Theme GTK apps", "Colors and theme for GTK apps", "theme_gtk", prefs::get_bool(t, "theme_gtk", false));
+    // Build searchable rows immediately; discover packages and themes without blocking GTK.
+    let gtk_choice = choice(&card, "palette", "GTK theme", "Digit follows your wallpaper and accent", "gtk_theme", &[("digit", "Digit")], "digit");
+    when_on(&gtk, &gtk_choice.row);
+    let qt = toggle(&card, "palette", "Theme Qt apps", "Needs qt6ct", "theme_qt", false);
+    qt.set_sensitive(false);
+    let qt_choice = choice(&card, "palette", "Qt theme", "Digit follows your wallpaper and accent", "qt_theme", &[("digit", "Digit")], "digit");
+    when_on(&qt, &qt_choice.row);
+    let t = t.clone();
+    glib::spawn_future_local(async move {
+        let Ok((themes, styles, platform)) = gio::spawn_blocking(|| (
+            kit::app_themes::gtk_themes(&kit::app_themes::gtk_roots()), kit::app_themes::qt_styles(), kit::distro::qt_platform()
+        )).await else { return };
+        let replace = |old: &gtk::Box, key, title, names: Vec<String>, source: &gtk::Box| {
+            let mut options = vec![("digit", "Digit")];
+            options.extend(names.iter().map(|n| (n.as_str(), n.as_str())));
+            let holder = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            let next = choice(&holder, "palette", title, "Digit follows your wallpaper and accent", key, &options, &prefs::get_str(&t, key, "digit"));
+            holder.remove(&next.row);
+            card.insert_child_after(&next.row, old.prev_sibling().as_ref());
+            card.remove(old);
+            when_on(source, &next.row);
+        };
+        replace(&gtk_choice.row, "gtk_theme", "GTK theme", themes, &gtk);
+        use kit::distro::QtPlatform;
+        let detail = match platform { QtPlatform::Kde => "Includes KDE apps", QtPlatform::Qt6ct => "Install qt6ct-kde to include KDE apps", QtPlatform::Missing => "Needs qt6ct" };
+        let holder = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let next = toggle(&holder, "palette", "Theme Qt apps", detail, "theme_qt", platform != QtPlatform::Missing && prefs::get_bool(&t, "theme_qt", false));
+        holder.remove(&next);
+        card.insert_child_after(&next, qt.prev_sibling().as_ref());
+        card.remove(&qt);
+        next.set_sensitive(platform != QtPlatform::Missing);
+        replace(&qt_choice.row, "qt_theme", "Qt theme", styles, &next);
+    });
 }
 
 fn effects(body: &gtk::Box, t: &toml::Table) {

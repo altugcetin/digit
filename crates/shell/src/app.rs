@@ -678,9 +678,6 @@ impl App {
         }
         if before.icon_theme != next.icon_theme {
             crate::icons::theme(next.icon_theme.as_deref());
-            glib::spawn_future_local(async {
-                if let Ok(Err(e)) = gtk::gio::spawn_blocking(kit::appearance::apply).await { eprintln!("digit: {e}"); }
-            });
         }
         if before.dock != next.dock || before.icon_theme != next.icon_theme || before.corners != next.corners {
             crate::dock::apply(self);

@@ -11,6 +11,7 @@
 7. **One operation at a time.** A global lock prevents overlapping package transactions from the app.
 8. **Rolling releases stay visible.** On Tumbleweed, Slowroll and MicroOS, system upgrades need `zypper dup`, which can ask about conflicts and vendor changes. The app opens it in a terminal so every question is seen and answered; the password goes to `sudo` there, never to the app.
 9. **Desktop settings are plain files.** digit's own options live in `~/.config/digit/config.toml`, written atomically (temporary file and rename).
+10. **App theming is opt-in.** `theme_gtk` and `theme_qt` default to false. Digit does not change GTK/Qt configuration, desktop gsettings or toolkit session environment unless requested in Settings. The shell is the only toolkit theme writer; it snapshots original files and explicit gsettings values under `$XDG_STATE_HOME/digit/app-themes` (default `~/.local/state/digit/app-themes`) before enabling a toolkit, and restores them when disabled. Icon and window-button choices apply only on explicit changes in Settings.
 
 ## digit's polkit agent
 

@@ -419,6 +419,11 @@ pub fn sync() -> Result<bool, String> {
     generate()
 }
 
+fn base_with(prefs: &toml::Table, gpu: &str) -> String {
+    let qt = if crate::prefs::flag(prefs, "theme_qt", false) { "    QT_QPA_PLATFORMTHEME \"qt6ct\"\n" } else { "" };
+    fill(BASE, &[("gpu", gpu), ("qt", qt)])
+}
+
 fn generate() -> Result<bool, String> {
     static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _one = WRITING.lock().unwrap_or_else(|e| e.into_inner());
@@ -429,7 +434,7 @@ fn generate() -> Result<bool, String> {
     changed |= write_if_changed(&d.join("init.kdl"), INIT).map_err(e)?;
     let enabled = crate::hyprconf::nvidia_env();
     let gpu = crate::hyprconf::NVIDIA_ENV.iter().filter(|_| enabled).map(|(k, v)| format!("    {k} \"{v}\"\n")).collect::<String>();
-    changed |= write_if_changed(&d.join("digit-base.kdl"), &fill(BASE, &[("gpu", &gpu)])).map_err(e)?;
+    changed |= write_if_changed(&d.join("digit-base.kdl"), &base_with(&crate::prefs::read(), &gpu)).map_err(e)?;
     // niri wants one layout or input block per file, so the settings get their own.
     let settings = format!("// Settings > Compositor. Written by digit; change them in digit Settings.\n// niri can't switch a setting like tap-to-click off from here; turn those off in user.kdl.\n\n{}", compositor());
     changed |= write_if_changed(&d.join("digit-compositor.kdl"), &settings).map_err(e)?;
@@ -455,6 +460,12 @@ pub fn prepare() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qt_environment_is_opt_in() {
+        assert!(!base_with(&toml::Table::new(), "").contains("QT_QPA_PLATFORMTHEME"));
+        assert!(base_with(&"theme_qt = true".parse().unwrap(), "").contains("QT_QPA_PLATFORMTHEME \"qt6ct\""));
+    }
 
     #[test]
     fn reduced_motion_disables_niri_animations_without_changing_stored_choices() {
