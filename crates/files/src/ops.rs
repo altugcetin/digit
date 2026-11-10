@@ -192,14 +192,29 @@ fn name(f: &gio::File) -> String {
     f.basename().map(|b| b.to_string_lossy().into_owned()).unwrap_or_else(|| f.uri().to_string())
 }
 
-pub fn unique(dir: &gio::File, wanted: &str) -> gio::File {
-    let first = dir.child(wanted);
+pub fn unique(dir: &gio::File, wanted: impl AsRef<std::ffi::OsStr>) -> gio::File {
+    let wanted = wanted.as_ref();
+    let first = dir.child(std::path::Path::new(wanted));
     if !exists(&first, None) {
         return first;
     }
-    let (stem, ext) = split_ext(wanted);
+    let (stem, ext) = if let Some(text) = wanted.to_str() {
+        let (stem, ext) = split_ext(text);
+        (std::ffi::OsString::from(stem), std::ffi::OsString::from(ext))
+    } else {
+        let path = std::path::Path::new(wanted);
+        let mut ext = std::ffi::OsString::new();
+        if let Some(e) = path.extension() {
+            ext.push(".");
+            ext.push(e);
+        }
+        (path.file_stem().unwrap_or(wanted).to_os_string(), ext)
+    };
     for n in 2..10_000 {
-        let candidate = dir.child(format!("{stem} ({n}){ext}"));
+        let mut candidate = stem.clone();
+        candidate.push(format!(" ({n})"));
+        candidate.push(&ext);
+        let candidate = dir.child(std::path::Path::new(&candidate));
         if !exists(&candidate, None) {
             return candidate;
         }
@@ -357,12 +372,14 @@ impl Ctx<'_> {
         let base = self.base;
         let st = self.st.clone();
         let mut progress = |cur: i64, _: i64| note(&st, |s| s.done = base + cur.max(0) as u64);
+        let out = dst.create(gio::FileCreateFlags::NONE, Some(self.cancel)).map_err(|e| format!("{}: {}", name(dst), e.message()))?;
+        self.made.push(dst.clone());
+        drop(out);
         let flags = gio::FileCopyFlags::NOFOLLOW_SYMLINKS | gio::FileCopyFlags::ALL_METADATA | gio::FileCopyFlags::OVERWRITE;
         src.copy(dst, flags, Some(self.cancel), Some(&mut progress)).map_err(|e| format!("{}: {}", name(src), e.message()))?;
         let size = src.query_info("standard::size", gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS, None::<&gio::Cancellable>).map(|i| i.size().max(0) as u64).unwrap_or(0);
         self.base += size;
         note(self.st, |s| s.done = self.base);
-        self.made.push(dst.clone());
         Ok(())
     }
 
@@ -373,7 +390,7 @@ impl Ctx<'_> {
             match self.decide(&dst) {
                 Answer::Skip => return Ok(()),
                 Answer::Stop => return Err("Cancelled".into()),
-                Answer::Both => dst = unique(&dst.parent().unwrap_or_else(|| dst.clone()), &name(&dst)),
+                Answer::Both => dst = unique(&dst.parent().unwrap_or_else(|| dst.clone()), dst.basename().unwrap_or_default()),
                 Answer::Replace if merge && moving => return self.merge(src, &dst),
                 Answer::Replace if merge => return self.copy_tree(src, &dst),
                 Answer::Replace if inside(src, &dst) || same_item(src, &dst, self.cancel) => return Err(format!("“{}” can't replace itself or a folder it's in", name(src))),
@@ -418,12 +435,25 @@ impl Ctx<'_> {
             Err(e) if e.matches(gio::IOErrorEnum::NotSupported) || e.matches(gio::IOErrorEnum::WouldRecurse) || e.matches(gio::IOErrorEnum::WouldMerge) => {}
             Err(e) => return Err(format!("{}: {}", name(src), e.message())),
         }
-        let before = self.made.len();
-        self.copy_tree(src, dst)?;
-        self.made.truncate(before);
+        self.copy_for_move(src, dst)?;
         remove_tree(src, self.cancel).map_err(|e| format!("{}: {e}", name(src)))?;
         self.moved.push((src.clone(), dst.clone()));
         Ok(())
+    }
+
+    fn copy_for_move(&mut self, src: &gio::File, dst: &gio::File) -> Result<(), String> {
+        let before = self.made.len();
+        let result = self.copy_tree(src, dst);
+        if result.is_err() {
+            let cleanup = gio::Cancellable::new();
+            for file in tops_of(&self.made[before..]) {
+                if let Err(e) = remove_tree(&file, &cleanup) {
+                    return Err(format!("{}; couldn't remove {}: {e}", result.unwrap_err(), name(&file)));
+                }
+            }
+        }
+        self.made.truncate(before);
+        result
     }
 
     /// Moves a folder's items one by one; whatever was skipped stays where it was.
@@ -468,7 +498,7 @@ fn work(plan: Plan, st: &State, cancel: &gio::Cancellable) {
                     errors.push(format!("Can't copy “{}” into itself", name(&f)));
                     continue;
                 }
-                let dst = if f.parent().is_some_and(|p| p.equal(&dest)) { unique(&dest, &name(&f)) } else { dest.child(name(&f)) };
+                let dst = if f.parent().is_some_and(|p| p.equal(&dest)) { unique(&dest, f.basename().unwrap_or_default()) } else { dest.child(f.basename().unwrap_or_default()) };
                 let before = ctx.made.len();
                 if let Err(e) = ctx.place(&f, dst, false) {
                     errors.push(e);
@@ -492,7 +522,7 @@ fn work(plan: Plan, st: &State, cancel: &gio::Cancellable) {
                 if f.parent().is_some_and(|p| p.equal(&dest)) {
                     continue;
                 }
-                if let Err(e) = ctx.place(&f, dest.child(name(&f)), true) {
+                if let Err(e) = ctx.place(&f, dest.child(f.basename().unwrap_or_default()), true) {
                     errors.push(e);
                     if cancel.is_cancelled() || ctx.policy == Some(Answer::Stop) {
                         break;
@@ -1503,6 +1533,56 @@ pub fn is_trash(f: &gio::File) -> bool {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn copy_and_move_preserve_non_utf8_names() {
+        use std::os::unix::ffi::OsStringExt;
+        for moving in [false, true] {
+            let t = Scratch::new(if moving { "raw-move" } else { "raw-copy" });
+            let raw = std::ffi::OsString::from_vec(b"file\xff.txt".to_vec());
+            let src = t.0.join(&raw);
+            fs::write(&src, "data").unwrap();
+            let dest = t.0.join("dest");
+            fs::create_dir(&dest).unwrap();
+            let plan = if moving { Plan::Move(vec![file(&src)], file(&dest)) } else { Plan::Copy(vec![file(&src)], file(&dest)) };
+            let st = state();
+            work(plan, &st, &gio::Cancellable::new());
+            assert!(st.0.lock().unwrap().errors.is_empty());
+            assert_eq!(fs::read_to_string(dest.join(&raw)).unwrap(), "data");
+            let expected = std::ffi::OsString::from_vec(b"file\xff (2).txt".to_vec());
+            assert_eq!(unique(&file(&dest), &raw).basename().unwrap(), PathBuf::from(expected));
+        }
+    }
+
+    #[test]
+    fn failed_move_copy_removes_only_created_items() {
+        let t = Scratch::new("failed-move-copy");
+        let fifo = |path: &std::path::Path| {
+            let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        };
+        let src = t.0.join("fifo");
+        fifo(&src);
+        let (st, cancel) = (state(), gio::Cancellable::new());
+        let mut ctx = Ctx { st: &st, cancel: &cancel, policy: None, made: Vec::new(), moved: Vec::new(), base: 0 };
+        let dst = t.0.join("partial");
+        assert!(ctx.copy_for_move(&file(&src), &file(&dst)).is_err());
+        assert!(!dst.exists());
+        assert!(ctx.made.is_empty());
+        fs::write(&dst, "keep").unwrap();
+        assert!(ctx.copy_for_move(&file(&src), &file(&dst)).is_err());
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "keep");
+        fs::create_dir(t.0.join("source")).unwrap();
+        fs::write(t.0.join("source/data"), "data").unwrap();
+        fifo(&t.0.join("source/fifo"));
+        let tree = t.0.join("tree");
+        assert!(ctx.copy_for_move(&file(&t.0.join("source")), &file(&tree)).is_err());
+        assert!(!tree.exists());
+        assert!(t.0.join("source/data").exists());
+        cancel.cancel();
+        assert!(ctx.copy_for_move(&file(&src), &file(&tree)).is_err());
+        assert!(!tree.exists());
+    }
 
     struct Scratch(PathBuf);
 
