@@ -108,6 +108,7 @@ fn failure(code: u32, details: &str) -> String {
 }
 
 enum Event {
+    OwnerLost,
     Signal(zbus::Message),
     Props(Option<u32>, Option<u32>),
 }
@@ -131,6 +132,11 @@ where
     B: serde::Serialize + DynamicType,
 {
     let conn = system().await?;
+    let dbus = zbus::fdo::DBusProxy::new(&conn).await.map_err(|e| e.to_string())?;
+    let owners = dbus.receive_name_owner_changed_with_args(&[(0, NAME)]).await.map_err(|e| e.to_string())?;
+    let lost = owners.filter_map(|signal| async move {
+        signal.args().ok().filter(|a| a.old_owner().is_some()).map(|_| Event::OwnerLost)
+    }).chain(futures_util::stream::once(async { Event::OwnerLost })).boxed_local();
     let pk = zbus::Proxy::new(&conn, NAME, "/org/freedesktop/PackageKit", "org.freedesktop.PackageKit").await.map_err(|e| e.to_string())?;
     let path: OwnedObjectPath = pk.call("CreateTransaction", &()).await.map_err(|e| e.to_string())?;
     let tx = zbus::Proxy::new(&conn, NAME, path.clone().into_inner(), "org.freedesktop.PackageKit.Transaction").await.map_err(|e| e.to_string())?;
@@ -149,7 +155,7 @@ where
             Err(_) => Event::Props(None, None),
         }
     });
-    let mut events = futures_util::stream::select(signals, changes);
+    let mut events = futures_util::stream::select(futures_util::stream::select(signals, changes), lost);
     tx.call_method(method, body).await.map_err(|e| {
         let text = e.to_string();
         if text.contains("NotAuthorized") || text.contains("not authorized") { "Authorization was not granted, nothing was changed".to_string() } else { text }
@@ -160,6 +166,7 @@ where
     let mut now = Progress::default();
     while let Some(ev) = events.next().await {
         match ev {
+            Event::OwnerLost => return Err("Package manager disconnected".into()),
             Event::Props(percent, status) => {
                 if let Some(p) = percent {
                     now.percent = (p <= 100).then_some(p);

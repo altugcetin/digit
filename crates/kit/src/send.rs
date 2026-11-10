@@ -1,6 +1,6 @@
 use gtk::{gio, glib, prelude::*};
 use serde_json::{Value, json};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{Ipv4Addr, UdpSocket};
 use std::os::fd::FromRawFd;
 use std::os::unix::process::CommandExt;
@@ -173,7 +173,7 @@ pub async fn kde_send(id: &str, files: &[PathBuf]) -> bool {
 
 fn curl() -> Command {
     let mut c = Command::new("curl");
-    c.args(["-sk", "--connect-timeout", "5"]).stderr(Stdio::null());
+    c.args(["-sk", "--connect-timeout", "5", "--speed-limit", "1", "--speed-time", "30"]).stderr(Stdio::null());
     unsafe {
         c.pre_exec(|| {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
@@ -206,8 +206,16 @@ pub fn localsend(ip: &str, port: u16, https: bool, files: &[PathBuf], progress: 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(body.as_bytes());
     }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let mut out = Vec::new();
+    let result = child.stdout.take().ok_or("Bad reply")?.take(1024 * 1024 + 1).read_to_end(&mut out);
+    if result.is_err() || out.len() > 1024 * 1024 {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("Bad reply".into());
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if !status.success() { return Err("Transfer failed".into()); }
+    let text = String::from_utf8_lossy(&out).to_string();
     let (payload, code) = text.rsplit_once('\n').unwrap_or(("", text.as_str()));
     match code.trim() {
         "200" => {}
@@ -219,6 +227,7 @@ pub fn localsend(ip: &str, port: u16, https: bool, files: &[PathBuf], progress: 
     }
     let reply: Value = serde_json::from_str(payload).map_err(|_| "Bad reply".to_string())?;
     let session = reply.get("sessionId").and_then(Value::as_str).ok_or("Bad reply")?.to_string();
+    let mut sent = 0;
     for (i, f) in files.iter().enumerate() {
         let id = format!("f{i}");
         let Some(token) = reply.get("files").and_then(|m| m.get(&id)).and_then(Value::as_str) else { continue };
@@ -230,11 +239,16 @@ pub fn localsend(ip: &str, port: u16, https: bool, files: &[PathBuf], progress: 
             .arg(&url)
             .output()
             .map_err(|e| e.to_string())?;
-        if String::from_utf8_lossy(&status.stdout).trim() != "200" {
+        if !status.status.success() || String::from_utf8_lossy(&status.stdout).trim() != "200" {
             return Err("Transfer failed".into());
         }
+        sent += 1;
     }
-    Ok(())
+    send_result(sent, files.len())
+}
+
+fn send_result(sent: usize, total: usize) -> Result<(), String> {
+    if sent == total { Ok(()) } else { Err(format!("Sent {sent} of {total}")) }
 }
 
 pub const APPS: &[(&str, &str)] = &[
@@ -275,5 +289,15 @@ pub fn launch_with(info: &gio::AppInfo, files: &[PathBuf], ctx: Option<&gio::App
         info.launch_uris(&refs, ctx).map_err(|e| e.to_string())
     } else {
         info.launch(&[], ctx).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn reports_partial_sends() {
+        assert_eq!(super::send_result(2, 2), Ok(()));
+        assert_eq!(super::send_result(1, 2), Err("Sent 1 of 2".into()));
+        assert_eq!(super::send_result(0, 2), Err("Sent 0 of 2".into()));
     }
 }
