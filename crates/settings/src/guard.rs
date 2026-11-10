@@ -1,16 +1,6 @@
-const EXACT: &[&str] = &[
-    "bash", "coreutils", "dbus-1", "dbus-broker", "dracut", "filesystem", "glib2", "glibc", "grub2", "gtk4", "libzypp", "login",
-    "NetworkManager", "niri", "openssh", "openSUSE-release", "PackageKit", "pam", "pipewire", "polkit", "rpm", "shadow", "shim",
-    "sudo", "systemd", "udev", "util-linux", "wireplumber", "xdg-desktop-portal", "zypper",
-];
-
-const PREFIX: &[&str] = &["kernel-", "glibc-", "systemd-", "libsystemd", "Mesa", "nvidia-", "grub2-", "libzypp", "pipewire-", "polkit-"];
+pub use kit::guard::protected;
 
 pub const MAX_REMOVALS: usize = 40;
-
-pub fn protected(name: &str) -> bool {
-    EXACT.contains(&name) || PREFIX.iter().any(|p| name.starts_with(p))
-}
 
 pub fn package_id(id: &str) -> bool {
     let parts: Vec<&str> = id.split(';').collect();
