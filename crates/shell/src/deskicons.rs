@@ -1316,15 +1316,16 @@ fn draw_item(s: &gtk::Snapshot, app: &App, pal: &kit::palette::Palette, item: &I
         (x + LABEL_INSET as f64) as f32,
         label_y as f32,
     ));
-    s.push_shadow(&[gtk::gsk::Shadow::new(
+    let shadow = !kit::effects::reduced();
+    if shadow { s.push_shadow(&[gtk::gsk::Shadow::new(
         gdk::RGBA::new(0.0, 0.0, 0.0, 0.55 * (1.0 - selected as f32)),
         0.0,
         1.0,
         3.0,
-    )]);
+    )]); }
     let ink = pal.on_accent.mix(Rgb::new(1.0, 1.0, 1.0), selected);
     s.append_layout(label, &ink.rgba());
-    s.pop();
+    if shadow { s.pop(); }
     s.restore();
 }
 

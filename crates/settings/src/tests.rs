@@ -49,6 +49,34 @@ fn settings_controls_and_dialogs() {
         eprintln!("Skipping GTK checks without a display: {e}");
         return;
     }
+    // A rebuilt page must wait for allocation rather than lose its saved offset.
+    let window = gtk::Window::new();
+    let (page, body) = ui::page("Motion", "");
+    let switch = gtk::Switch::new();
+    body.append(&switch);
+    window.set_child(Some(&page));
+    gtk::prelude::GtkWindowExt::set_focus(&window, Some(&switch));
+    let path = crate::focus_path(page.upcast_ref()).expect("focused switch belongs to the page");
+    let (next, body) = ui::page("Motion", "");
+    let switch = gtk::Switch::new();
+    switch.set_active(true);
+    body.append(&switch);
+    crate::restore_page(next.upcast_ref(), 420.0, Some(path));
+    window.set_child(Some(&next));
+    let adj = next.vadjustment();
+    adj.configure(0.0, 0.0, 100.0, 1.0, 10.0, 100.0);
+    assert_eq!(adj.value(), 0.0, "an unallocated range cannot restore the offset");
+    adj.configure(0.0, 0.0, 400.0, 1.0, 10.0, 100.0);
+    assert_eq!(adj.value(), 0.0, "a partial range must keep waiting");
+    adj.configure(0.0, 0.0, 1000.0, 1.0, 10.0, 100.0);
+    assert_eq!(adj.value(), 420.0);
+    assert_eq!(gtk::prelude::GtkWindowExt::focus(&window), Some(switch.clone().upcast()));
+    assert!(switch.is_active());
+    adj.set_value(250.0);
+    adj.set_upper(1100.0);
+    assert_eq!(adj.value(), 250.0, "later layouts must leave scrolling alone");
+    window.destroy();
+
     // Closing with reduced motion must complete even without a mapped frame clock.
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let card = gtk::Box::new(gtk::Orientation::Vertical, 0);

@@ -1536,7 +1536,7 @@ impl State {
     }
 
     fn smooth_caret(&self) -> bool {
-        !motion::reduced() && self.app.prefs.borrow().smooth_caret
+        motion::enabled(self.app.prefs.borrow().smooth_caret)
     }
 
     fn retarget_caret(&mut self, now: i64) {

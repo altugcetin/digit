@@ -62,7 +62,7 @@ fn visible() -> bool {
 }
 
 pub fn want(app: &Rc<App>, on: bool) {
-    if !on || kit::motion::reduced() || kit::effects::software() || !visible() {
+    if !on || kit::motion::reduced() || !visible() {
         if app.cava.borrow_mut().take().is_some() {
             app.spectrum.borrow_mut().clear();
         }
@@ -91,7 +91,7 @@ pub fn want(app: &Rc<App>, on: bool) {
             if app.cava.borrow().as_ref().is_none_or(|c| c.process != process) {
                 break;
             }
-            if kit::effects::software() || kit::motion::reduced() || !visible() {
+            if kit::motion::reduced() || !visible() {
                 want(&app, false);
                 app.redraw_wings();
                 break;

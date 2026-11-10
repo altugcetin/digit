@@ -175,12 +175,13 @@ fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, output: &str, left: bool, top: 
     pal.ink_main = ink;
     pal.ink_meta = ink;
     let x = card_x(left, SURFACE_W, card_width(list.len()));
-    s.push_shadow(&[gtk::gsk::Shadow::new(shade, 0.0, 1.0, 10.0)]);
+    let shadow = !kit::effects::reduced();
+    if shadow { s.push_shadow(&[gtk::gsk::Shadow::new(shade, 0.0, 1.0, 10.0)]); }
     for (i, g) in list.iter().enumerate() {
         let cx = x + INSET + CELL_W * (i as f64 + 0.5);
         crate::batteries::cell(s, p, &app.cfg, &pal, g, cx, AIR + 42.0, CELL_W, false);
     }
-    s.pop();
+    if shadow { s.pop(); }
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use crate::desktop::{choice, field, save, save_many, slider, tiles, toggle};
+use crate::desktop::{choice, controlled, field, save, save_many, slider, tiles, toggle};
 use crate::{prefs, ui};
 use gtk::prelude::*;
 
@@ -119,22 +119,26 @@ pub fn build() -> gtk::Widget {
     body.append(&ui::heading("Effects"));
     let fx = ui::card();
     {
-        let at = if b("hypr_shadow", true) { SHADOWS.iter().position(|v| v.0 == s("hypr_shadow_size", "medium")).unwrap_or(2) } else { 0 };
+        let detail = controlled("hypr_shadow");
+        let at = if detail.is_none() && b("hypr_shadow", true) { SHADOWS.iter().position(|v| v.0 == s("hypr_shadow_size", "medium")).unwrap_or(2) } else { 0 };
         let items = SHADOWS.iter().map(|(v, name, r)| (*name, shadow_picture(if *v == "off" { 0.0 } else { *r }))).collect();
-        tiles(&fx, "shadow", "Window shadows", "", items, at, |i| {
+        let row = tiles(&fx, "shadow", "Window shadows", detail.unwrap_or(""), items, at, |i| {
             let mut values = vec![("hypr_shadow", toml::Value::Boolean(i != 0))];
             if i != 0 { values.push(("hypr_shadow_size", toml::Value::String(SHADOWS[i].0.into()))); }
             save_many(&values)
         });
+        crate::desktop::controlled_row(&row, detail);
     }
     {
-        let at = if b("hypr_blur", false) { BLURS.iter().position(|v| v.0 == s("hypr_blur_strength", "medium")).unwrap_or(2) } else { 0 };
+        let detail = controlled("hypr_blur");
+        let at = if detail.is_none() && b("hypr_blur", false) { BLURS.iter().position(|v| v.0 == s("hypr_blur_strength", "medium")).unwrap_or(2) } else { 0 };
         let items = BLURS.iter().map(|(_, name, k)| (*name, blur_picture(*k))).collect();
-        tiles(&fx, "blur_on", "Blur behind windows", "Frosts what's behind see-through windows; costs some GPU time", items, at, |i| {
+        let row = tiles(&fx, "blur_on", "Blur behind windows", detail.unwrap_or("Frosts what's behind see-through windows; costs some GPU time"), items, at, |i| {
             let mut values = vec![("hypr_blur", toml::Value::Boolean(i != 0))];
             if i != 0 { values.push(("hypr_blur_strength", toml::Value::String(BLURS[i].0.into()))); }
             save_many(&values)
         });
+        crate::desktop::controlled_row(&row, detail);
     }
     body.append(&fx);
 

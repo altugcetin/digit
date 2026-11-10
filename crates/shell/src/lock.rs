@@ -339,6 +339,10 @@ fn each(f: impl Fn(&Sheet)) {
     faces.iter().for_each(f);
 }
 
+pub fn appearance_changed() {
+    each(|f| f.paint.queue_draw());
+}
+
 fn shake(column: &gtk::Box) {
     if kit::motion::reduced() {
         return;
@@ -470,7 +474,8 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64) 
             }
             let full = graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
             s.append_color(&gdk::RGBA::BLACK, &full);
-            if back.borrow().is_none() {
+            let effects = kit::effects::reduced();
+            if !effects && back.borrow().is_none() {
                 if let Some(t) = source.as_ref() {
                     *back.borrow_mut() = blurred(&p, t, w, h);
                 }
@@ -478,7 +483,8 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64) 
             let now = p.frame_clock().map(|c| c.frame_time()).unwrap_or_else(glib::monotonic_time);
             let fade = if kit::motion::reduced() { 1.0 } else { ((now - start) as f64 / 380_000.0).clamp(0.0, 1.0) };
             let fade = fade * fade * (3.0 - 2.0 * fade);
-            if let Some(t) = back.borrow().as_ref() {
+            let back = back.borrow();
+            if let Some(t) = if effects { source.as_ref() } else { back.as_ref() } {
                 s.push_opacity(fade);
                 s.append_texture(t, &full);
                 s.pop();
@@ -496,10 +502,10 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64) 
             let white = Rgb::new(1.0, 1.0, 1.0);
             let top = h * 0.14 + (1.0 - fade) * 10.0;
             s.push_opacity(fade);
-            s.push_shadow(&[gtk::gsk::Shadow::new(gdk::RGBA::new(0.0, 0.0, 0.0, 0.25), 0.0, 1.0, 12.0)]);
+            if !effects { s.push_shadow(&[gtk::gsk::Shadow::new(gdk::RGBA::new(0.0, 0.0, 0.0, 0.25), 0.0, 1.0, 12.0)]); }
             draw::text(s, &p, &cfg, &date, 22.0, Face::Text(560), white.alpha(0.9), 0.0, top, w, pango::Alignment::Center);
             draw::text(s, &p, &cfg, &time, (h * 0.105).clamp(72.0, 150.0), Face::Text(420), white.alpha(0.96), 0.0, top + 22.0 + (h * 0.06).clamp(42.0, 88.0), w, pango::Alignment::Center);
-            s.pop();
+            if !effects { s.pop(); }
             s.pop();
         });
     }

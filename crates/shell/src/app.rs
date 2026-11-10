@@ -222,6 +222,8 @@ pub struct App {
     pub palette: Cell<Palette>,
     palette_from: Cell<Palette>,
     palette_since: Cell<i64>,
+    motion_reduced: Cell<bool>,
+    effects_reduced: Cell<bool>,
     pub clock: RefCell<String>,
     pub date: RefCell<String>,
     pub media: RefCell<Media>,
@@ -271,6 +273,8 @@ impl App {
             palette: Cell::new(Palette::new(Roles::default(), body)),
             palette_from: Cell::new(Palette::new(Roles::default(), body)),
             palette_since: Cell::new(0),
+            motion_reduced: Cell::new(kit::motion::reduced()),
+            effects_reduced: Cell::new(kit::effects::reduced()),
             cfg,
             clock: RefCell::new(String::new()),
             date: RefCell::new(String::new()),
@@ -589,9 +593,14 @@ impl App {
     pub fn apply_prefs(self: &Rc<Self>, next: crate::config::Prefs) {
         let before = self.prefs.replace(next.clone());
         kit::appearance::apply_gtk();
-        if before.reduce_motion != next.reduce_motion {
-            kit::motion::apply(next.reduce_motion);
-            if next.reduce_motion {
+        kit::motion::refresh();
+        let motion = kit::motion::reduced();
+        let motion_changed = self.motion_reduced.replace(motion) != motion;
+        kit::effects::invalidate();
+        let effects = kit::effects::reduced();
+        let effects_changed = self.effects_reduced.replace(effects) != effects;
+        if motion_changed {
+            if kit::motion::reduced() {
                 self.palette_since.set(0);
             }
             let wants = self.media.borrow().wings(Self::now()) || self.call.borrow().is_some();
@@ -599,13 +608,13 @@ impl App {
             self.redraw_wings();
             self.redraw();
         }
-        if before.reduce_motion != next.reduce_motion || before.smooth_caret != next.smooth_caret {
+        if motion_changed || before.smooth_caret != next.smooth_caret {
             if let Some(launcher) = self.launcher.borrow().as_ref() {
                 launcher.refresh_caret();
             }
         }
         let restyle = before.style != next.style || before.menubar != next.menubar || (next.wide(&self.cfg) && before.wide_height != next.wide_height);
-        if before.surface != next.surface || restyle {
+        if before.surface != next.surface || restyle || effects_changed {
             self.set_roles(self.roles.get());
         }
         // Roundness changes reshape the notch at once (restyle retargets its corner radius) and
@@ -633,6 +642,11 @@ impl App {
                     eprintln!("digit: {e}");
                 }
             });
+        }
+        if effects_changed {
+            crate::desk::changed(self);
+            crate::batterywidget::changed();
+            crate::lock::appearance_changed();
         }
         if before.menubar_look != next.menubar_look {
             self.changed();

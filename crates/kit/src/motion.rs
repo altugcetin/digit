@@ -1,20 +1,45 @@
 use std::cell::Cell;
 
 thread_local! {
+    static LOADED: Cell<bool> = const { Cell::new(false) };
     static POLICY: Cell<(bool, u64)> = const { Cell::new((false, 0)) };
 }
 
+/// The process motion policy. Worker threads resolve the same preference without GTK access.
 pub fn reduced() -> bool {
+    if !LOADED.get() { refresh(); }
     POLICY.get().0
 }
 
+/// Read the effective master and apply it live. Returns whether the policy changed.
+pub fn refresh() -> bool {
+    let on = crate::effects::effective(&crate::prefs::read(), "reduce_motion", crate::effects::software());
+    let changed = POLICY.get().0 != on;
+    apply(on);
+    changed
+}
+
+pub fn automatic() -> bool {
+    crate::prefs::read().get("reduce_motion").and_then(toml::Value::as_bool).is_none() && crate::effects::software()
+}
+
+pub fn enabled(stored: bool) -> bool {
+    child_enabled(stored, reduced())
+}
+
+fn child_enabled(stored: bool, master: bool) -> bool {
+    stored && !master
+}
+
 pub fn apply(reduce: bool) {
+    LOADED.set(true);
     let (before, generation) = POLICY.get();
     if before == reduce {
         return;
     }
     // An in-flight tween stays settled if motion is turned back on.
     POLICY.set((reduce, generation + u64::from(reduce)));
+    if !gtk::is_initialized_main_thread() { return; }
     if let Some(settings) = gtk::Settings::default() {
         if reduce {
             settings.set_gtk_enable_animations(false);
@@ -144,5 +169,56 @@ impl Tween {
 
     pub fn set(&mut self, v: f64) {
         *self = Self::still(v);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn masters_honor_explicit_values_and_software_defaults_independently() {
+        for software in [false, true] {
+            for key in ["reduce_motion", "reduced_effects"] {
+                let mut t = toml::Table::new();
+                assert_eq!(crate::effects::effective(&t, key, software), software);
+                for stored in [false, true] {
+                    t.insert(key.into(), stored.into());
+                    assert_eq!(crate::effects::effective(&t, key, software), stored);
+                }
+            }
+            for motion in [false, true] {
+                let mut t = toml::Table::new();
+                t.insert("reduce_motion".into(), motion.into());
+                for effects in [false, true] {
+                    t.insert("reduced_effects".into(), effects.into());
+                    assert_eq!(crate::effects::effective(&t, "reduce_motion", software), motion);
+                    assert_eq!(crate::effects::effective(&t, "reduced_effects", software), effects);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn turning_motion_back_on_allows_new_tweens_without_resuming_old_ones() {
+        apply(false);
+        let mut tween = Tween::still(0.0);
+        tween.go(1.0, 1_000, 100, STANDARD);
+        assert!(!tween.settled(2_000));
+        apply(true);
+        assert_eq!(tween.value(2_000), 1.0);
+        apply(false);
+        assert_eq!(tween.value(2_000), 1.0);
+        tween.go(2.0, 2_000, 100, STANDARD);
+        assert!(!tween.settled(3_000));
+        assert!(tween.value(3_000) < 2.0);
+    }
+
+    #[test]
+    fn children_resume_their_stored_value_after_the_master_is_off() {
+        for stored in [false, true] {
+            assert!(!child_enabled(stored, true));
+            assert_eq!(child_enabled(stored, false), stored);
+        }
     }
 }

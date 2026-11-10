@@ -2060,7 +2060,7 @@ impl View {
     }
 
     fn glassy(&self) -> bool {
-        if !self.app.menubar() || self.app.wide() {
+        if kit::effects::reduced() || !self.app.menubar() || self.app.wide() {
             return false;
         }
         match self.app.prefs.borrow().menubar_look.as_str() {

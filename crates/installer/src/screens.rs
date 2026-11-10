@@ -490,7 +490,8 @@ pub fn open(app: &gtk::Application, root: Result<PathBuf, String>) {
     content.append(&top);
     let stack = gtk::Stack::new();
     stack.set_transition_type(gtk::StackTransitionType::Crossfade);
-    stack.set_transition_duration(if kit::motion::reduced() { 0 } else { 220 });
+    // GTK's animation policy follows Reduce motion live, including when it is turned off.
+    stack.set_transition_duration(220);
     stack.set_vexpand(true);
     content.append(&stack);
     let bottom = gtk::CenterBox::new();

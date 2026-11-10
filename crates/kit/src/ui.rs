@@ -537,7 +537,7 @@ pub const SETTLE_DROP: f64 = 18.0;
 /// closing runs it back, quicker. `margin` is the card's resting top and bottom margin.
 pub fn settle(root: &gtk::Box, card: &gtk::Box, margin: i32, opening: bool, done: impl FnOnce() + 'static) {
     use crate::motion::{Curve, Tween};
-    if crate::motion::reduced() || crate::effects::software() {
+    if crate::motion::reduced() {
         root.set_opacity(if opening { 1.0 } else { 0.0 });
         card.set_margin_top(margin);
         card.set_margin_bottom(margin);
@@ -555,7 +555,7 @@ pub fn settle(root: &gtk::Box, card: &gtk::Box, margin: i32, opening: bool, done
     let done = std::cell::Cell::new(Some(done));
     root.add_tick_callback(move |w, clock| {
         let Some(card) = card.upgrade() else { return gtk::glib::ControlFlow::Break };
-        if crate::motion::reduced() || crate::effects::software() {
+        if crate::motion::reduced() {
             w.set_opacity(if opening { 1.0 } else { 0.0 });
             card.set_margin_top(margin);
             card.set_margin_bottom(margin);

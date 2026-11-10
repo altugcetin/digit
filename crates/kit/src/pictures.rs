@@ -155,7 +155,7 @@ pub fn showcase(width: i32, height: i32) -> gtk::DrawingArea {
     area.set_draw_func(move |a, cr, w, h| {
         let (index, start) = st.get();
         let now = a.frame_clock().map_or(start, |c| c.frame_time());
-        let t = if start == 0 { 1.0 } else { curve.at(((now - start) as f64 / (MORPH_MS * 1000.0)).clamp(0.0, 1.0)) };
+        let t = if crate::motion::reduced() || start == 0 { 1.0 } else { curve.at(((now - start) as f64 / (MORPH_MS * 1000.0)).clamp(0.0, 1.0)) };
         let (from, to) = (SCENES[(index + SCENES.len() - 1) % SCENES.len()], SCENES[index]);
         let (sx, sy) = (w as f64 / 188.0, h as f64 / 112.0);
         let s = sx.min(sy);
@@ -177,13 +177,10 @@ pub fn showcase(width: i32, height: i32) -> gtk::DrawingArea {
             }
         }
     });
-    if crate::motion::reduced() {
-        return area;
-    }
     let weak = area.downgrade();
     gtk::glib::timeout_add_local(std::time::Duration::from_millis(SCENE_MS), move || {
         let Some(area) = weak.upgrade() else { return gtk::glib::ControlFlow::Break };
-        if !area.is_mapped() {
+        if crate::motion::reduced() || !area.is_mapped() {
             return gtk::glib::ControlFlow::Continue;
         }
         let Some(clock) = area.frame_clock() else { return gtk::glib::ControlFlow::Continue };
@@ -192,7 +189,7 @@ pub fn showcase(width: i32, height: i32) -> gtk::DrawingArea {
         // Tick only while the move lasts, then let the frame clock rest.
         area.add_tick_callback(move |a, clock| {
             a.queue_draw();
-            if (clock.frame_time() - start) as f64 > MORPH_MS * 1000.0 { gtk::glib::ControlFlow::Break } else { gtk::glib::ControlFlow::Continue }
+            if crate::motion::reduced() || (clock.frame_time() - start) as f64 > MORPH_MS * 1000.0 { gtk::glib::ControlFlow::Break } else { gtk::glib::ControlFlow::Continue }
         });
         gtk::glib::ControlFlow::Continue
     });
