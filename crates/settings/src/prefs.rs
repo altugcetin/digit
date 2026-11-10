@@ -34,49 +34,22 @@ pub fn get_f64(t: &toml::Table, key: &str, fallback: f64) -> f64 {
     t.get(key).and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))).unwrap_or(fallback)
 }
 
-/// The settings file for changing it; an error when it exists but doesn't parse, so a typo
-/// never gets every setting overwritten.
-fn for_writing() -> Result<toml::Table, String> {
-    match std::fs::read_to_string(path()) {
-        Ok(text) => text.parse::<toml::Table>().map_err(|e| format!("{} has an error, so nothing was saved: {e}", path().display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml::Table::new()),
-        Err(e) => Err(format!("Could not read {}: {e}", path().display())),
-    }
-}
-
 pub fn set(key: &str, value: toml::Value) -> Result<(), String> {
     set_many(&[(key, value)])
 }
 
 /// Save related controls together, so a preset never leaves half of its values behind.
 pub fn set_many(values: &[(&str, toml::Value)]) -> Result<(), String> {
-    let mut table = for_writing()?;
-    if values.iter().all(|(key, value)| table.get(*key) == Some(value)) {
-        return Ok(());
+    let table = read();
+    if values.iter().any(|(key, value)| table.get(*key) != Some(value)) {
+        mark();
     }
-    for (key, value) in values {
-        table.insert(key.to_string(), value.clone());
-    }
-    let text = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
-    let file = path();
-    if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let tmp = file.with_extension("toml.new");
-    mark();
-    std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &file).map_err(|e| e.to_string())
+    kit::prefs::set_many(values)
 }
 
 pub fn unset(key: &str) -> Result<(), String> {
-    let mut table = for_writing()?;
-    if table.remove(key).is_none() {
-        return Ok(());
+    if read().contains_key(key) {
+        mark();
     }
-    let text = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
-    let file = path();
-    let tmp = file.with_extension("toml.new");
-    mark();
-    std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &file).map_err(|e| e.to_string())
+    kit::prefs::unset(key)
 }
