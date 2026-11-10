@@ -82,7 +82,7 @@ pub fn controls(window: &impl IsA<gtk::Window>, app_id: &'static str) -> gtk::Bo
     close.set_tooltip_text(Some("Close"));
     min.connect_clicked(move |_| {
         glib::spawn_future_local(async move {
-            let _ = gio::spawn_blocking(move || crate::niri::minimize(app_id)).await;
+            let _ = gio::spawn_blocking(move || crate::wm::minimize(app_id)).await;
         });
     });
     let w = window.clone();

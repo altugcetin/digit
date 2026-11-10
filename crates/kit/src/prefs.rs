@@ -1,4 +1,6 @@
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub fn path() -> PathBuf {
     gtk::glib::user_config_dir().join("digit/config.toml")
@@ -53,9 +55,20 @@ fn write(table: &toml::Table) -> Result<(), String> {
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let tmp = file.with_extension("toml.new");
-    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &file).map_err(|e| e.to_string())
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let (tmp, mut out) = loop {
+        let tmp = file.with_extension(format!("toml.{}.{}.new", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(out) => break (tmp, out),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    let result = out.write_all(body.as_bytes()).and_then(|()| std::fs::rename(&tmp, &file));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.map_err(|e| e.to_string())
 }
 
 pub fn set(key: &str, value: toml::Value) -> Result<(), String> {
@@ -64,15 +77,33 @@ pub fn set(key: &str, value: toml::Value) -> Result<(), String> {
 
 /// Save related values together, preserving the old file if any part cannot be written.
 pub fn set_many(values: &[(&str, toml::Value)]) -> Result<(), String> {
-    let mut table = for_writing()?;
-    let mut changed = false;
-    for (key, value) in values {
-        if table.get(*key) != Some(value) {
-            table.insert((*key).into(), value.clone());
-            changed = true;
+    update(|table| {
+        let mut changed = false;
+        for (key, value) in values {
+            if table.get(*key) != Some(value) {
+                table.insert((*key).into(), value.clone());
+                changed = true;
+            }
         }
+        changed
+    })
+}
+
+pub fn unset(key: &str) -> Result<(), String> {
+    update(|table| table.remove(key).is_some())
+}
+
+fn update(change: impl FnOnce(&mut toml::Table) -> bool) -> Result<(), String> {
+    let file = path();
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    if changed { write(&table) } else { Ok(()) }
+    // Lock a stable sibling: the config inode is replaced by every successful write.
+    let lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
+        .open(file.with_extension("toml.lock")).map_err(|e| e.to_string())?;
+    lock.lock().map_err(|e| e.to_string())?;
+    let mut table = for_writing()?;
+    if change(&mut table) { write(&table) } else { Ok(()) }
 }
 
 pub fn home(path: &str) -> PathBuf {
@@ -86,6 +117,45 @@ pub fn home(path: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_writers_preserve_every_key() {
+        const CASE: &str = "prefs::tests::concurrent_writers_preserve_every_key";
+        if std::env::var_os("DIGIT_PREFS_CONCURRENT_TEST").is_some() {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+            let threads: Vec<_> = (0..16).map(|i| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for value in 0..8 {
+                        set(&format!("key_{i}"), value.into()).unwrap();
+                    }
+                })
+            }).collect();
+            for thread in threads {
+                thread.join().unwrap();
+            }
+            let table = read();
+            for i in 0..16 {
+                assert_eq!(table.get(&format!("key_{i}")).and_then(toml::Value::as_integer), Some(7));
+            }
+            unset("key_0").unwrap();
+            assert!(!read().contains_key("key_0"));
+            assert_eq!(read().len(), 15);
+            // A failed rename must not leave a temporary file behind.
+            std::fs::remove_file(path()).unwrap();
+            std::fs::create_dir(path()).unwrap();
+            assert!(write(&table).is_err());
+            assert!(std::fs::read_dir(path().parent().unwrap()).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".new")));
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("digit-prefs-concurrent-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", CASE, "--nocapture"]).env("DIGIT_PREFS_CONCURRENT_TEST", "1").env("XDG_CONFIG_HOME", &root).output().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    }
 
     #[test]
     fn writes_preserve_unreadable_and_broken_settings() {
@@ -102,6 +172,7 @@ mod tests {
             for body in [b"answer = 42\n\xff".as_slice(), b"answer = 42\nbroken = [".as_slice()] {
                 std::fs::write(path(), body).unwrap();
                 assert!(set("answer", 43.into()).is_err());
+                assert!(unset("answer").is_err());
                 assert!(set_many(&[("hypr_tiling", "dwindle".into()), ("hypr_tiled_layout", "scrolling".into())]).is_err());
                 assert!(problem().is_some());
                 if body.is_ascii() {
