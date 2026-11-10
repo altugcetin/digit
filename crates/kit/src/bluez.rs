@@ -1,3 +1,4 @@
+use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue};
@@ -310,6 +311,23 @@ pub async fn agent(conn: &zbus::Connection) -> Option<async_channel::Receiver<Re
     }
     let (tx, rx) = async_channel::unbounded();
     conn.object_server().at(AGENT, Agent { conn: conn.clone(), tx }).await.ok()?;
+    let dbus = zbus::fdo::DBusProxy::new(conn).await.ok()?;
+    let mut owners = dbus.receive_name_owner_changed_with_args(&[(0, "org.bluez")]).await.ok()?;
+    register_agent(conn).await?;
+    let conn = conn.clone();
+    gtk::glib::spawn_future_local(async move {
+        while let Some(signal) = owners.next().await {
+            let Ok(args) = signal.args() else { continue };
+            if args.new_owner().is_some() {
+                let _ = register_agent(&conn).await;
+            }
+        }
+    });
+    let _ = REQUESTS.set(rx.clone());
+    Some(rx)
+}
+
+async fn register_agent(conn: &zbus::Connection) -> Option<()> {
     let manager = proxy(conn, "/org/bluez", "org.bluez.AgentManager1").await.ok()?;
     let path = ObjectPath::try_from(AGENT).ok()?;
     if let Err(e) = manager.call_method("RegisterAgent", &(&path, "KeyboardDisplay")).await {
@@ -317,6 +335,5 @@ pub async fn agent(conn: &zbus::Connection) -> Option<async_channel::Receiver<Re
             return None;
         }
     }
-    let _ = REQUESTS.set(rx.clone());
-    Some(rx)
+    Some(())
 }
