@@ -949,7 +949,7 @@ impl Launcher {
         if !s.open || s.bubbles.target() < 0.5 || !(PAD..=PAD + BAR).contains(&y) {
             return None;
         }
-        (0..4)
+        (0..MODES.len())
             .find(|&i| {
                 let n = MODES.len();
                 let bx = PAD + WIDTH - (n - i) as f64 * BUBBLE - (n - 1 - i) as f64 * BUBBLE_GAP;

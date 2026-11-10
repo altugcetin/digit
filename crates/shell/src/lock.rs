@@ -38,6 +38,7 @@ struct Sheet {
 }
 
 struct State {
+    generation: u64,
     mode: Mode,
     faces: Vec<Sheet>,
     busy: bool,
@@ -47,11 +48,28 @@ struct State {
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+    static GENERATION: Cell<u64> = const { Cell::new(0) };
     static STYLED: Cell<bool> = const { Cell::new(false) };
 }
 
 pub fn active() -> bool {
+    STATE.with(|s| s.borrow().as_ref().is_some_and(|st| matches!(st.mode, Mode::Real(_))))
+}
+
+fn showing() -> bool {
     STATE.with(|s| s.borrow().is_some())
+}
+
+fn next_generation() -> u64 {
+    GENERATION.with(|g| {
+        let next = g.get().checked_add(1).expect("lock generation exhausted");
+        g.set(next);
+        next
+    })
+}
+
+fn current(generation: u64) -> bool {
+    STATE.with(|s| s.borrow().as_ref().is_some_and(|st| st.generation == generation))
 }
 
 pub fn supported() -> bool {
@@ -108,6 +126,10 @@ pub fn lock(app: &Rc<App>) -> bool {
     if active() {
         return true;
     }
+    let preview = STATE.with(|s| s.borrow().as_ref().map(|st| st.generation));
+    if let Some(generation) = preview {
+        finish(generation);
+    }
     if !supported() {
         fallback();
         return false;
@@ -119,12 +141,14 @@ pub fn lock(app: &Rc<App>) -> bool {
         return false;
     }
     let instance: glib::Object = unsafe { glib::Object::from_glib_full(ptr) };
-    STATE.with(|s| *s.borrow_mut() = Some(State { mode: Mode::Real(instance.clone()), faces: Vec::new(), busy: false, locked: false, clock: None }));
+    let generation = next_generation();
+    STATE.with(|s| *s.borrow_mut() = Some(State { generation, mode: Mode::Real(instance.clone()), faces: Vec::new(), busy: false, locked: false, clock: None }));
     let a = app.clone();
     instance.connect_local("monitor", false, move |args| {
+        if !current(generation) { return None; }
         let inst = args.first()?.get::<glib::Object>().ok()?;
         let monitor = args.get(1)?.get::<gdk::Monitor>().ok()?;
-        let face = build(&a, &monitor, false);
+        let face = build(&a, &monitor, false, generation);
         unsafe {
             ffi::gtk_session_lock_instance_assign_window_to_monitor(inst.as_ptr(), face.window.to_glib_none().0, monitor.to_glib_none().0);
         }
@@ -136,6 +160,7 @@ pub fn lock(app: &Rc<App>) -> bool {
         None
     });
     instance.connect_local("locked", false, move |_| {
+        if !current(generation) { return None; }
         STATE.with(|s| {
             if let Some(st) = s.borrow_mut().as_mut() {
                 st.locked = true;
@@ -145,6 +170,7 @@ pub fn lock(app: &Rc<App>) -> bool {
         None
     });
     instance.connect_local("failed", false, move |_| {
+        if !current(generation) { return None; }
         let was = STATE.with(|s| s.borrow_mut().take());
         if let Some(st) = was {
             if let Some(id) = st.clock {
@@ -155,7 +181,7 @@ pub fn lock(app: &Rc<App>) -> bool {
         None
     });
     instance.connect_local("unlocked", false, move |_| {
-        finish();
+        finish(generation);
         None
     });
     start_clock();
@@ -167,23 +193,28 @@ pub fn lock(app: &Rc<App>) -> bool {
 }
 
 pub fn preview(app: &Rc<App>, output: Option<&str>) {
-    if active() {
+    if showing() {
         return;
     }
     style(app);
-    STATE.with(|s| *s.borrow_mut() = Some(State { mode: Mode::Preview, faces: Vec::new(), busy: false, locked: true, clock: None }));
     let Some(display) = gdk::Display::default() else { return };
+    let generation = next_generation();
+    STATE.with(|s| *s.borrow_mut() = Some(State { generation, mode: Mode::Preview, faces: Vec::new(), busy: false, locked: true, clock: None }));
     for m in display.monitors().iter::<gdk::Monitor>().filter_map(Result::ok) {
         if output.is_some_and(|o| m.connector().as_deref() != Some(o)) {
             continue;
         }
-        let face = build(app, &m, true);
+        let face = build(app, &m, true, generation);
         face.window.present();
         STATE.with(|s| {
             if let Some(st) = s.borrow_mut().as_mut() {
                 st.faces.push(face);
             }
         });
+    }
+    if STATE.with(|s| s.borrow().as_ref().is_some_and(|st| st.faces.is_empty())) {
+        finish(generation);
+        return;
     }
     start_clock();
 }
@@ -209,7 +240,8 @@ fn start_clock() {
     });
 }
 
-fn finish() {
+fn finish(generation: u64) {
+    if !current(generation) { return; }
     let was = STATE.with(|s| s.borrow_mut().take());
     let Some(st) = was else { return };
     if let Some(id) = st.clock {
@@ -224,14 +256,15 @@ fn finish() {
     }
 }
 
-fn unlock() {
+fn unlock(generation: u64) {
+    if !current(generation) { return; }
     let real = STATE.with(|s| match s.borrow().as_ref().map(|st| &st.mode) {
         Some(Mode::Real(i)) => Some(i.clone()),
         _ => None,
     });
     match real {
         Some(instance) => unsafe { ffi::gtk_session_lock_instance_unlock(instance.as_ptr()) },
-        None => finish(),
+        None => finish(generation),
     }
 }
 
@@ -290,7 +323,8 @@ fn shake(column: &gtk::Box) {
     });
 }
 
-fn submit(entry: &gtk::PasswordEntry) {
+fn submit(entry: &gtk::PasswordEntry, generation: u64) {
+    if !current(generation) { return; }
     let busy = STATE.with(|s| s.borrow().as_ref().is_none_or(|st| st.busy));
     if busy {
         return;
@@ -315,9 +349,10 @@ fn submit(entry: &gtk::PasswordEntry) {
     });
     glib::spawn_future_local(async move {
         let ok = verify(bytes).await;
+        if !current(generation) { return; }
         if ok {
             each(|f| f.status.set_text(""));
-            unlock();
+            unlock(generation);
             return;
         }
         STATE.with(|s| {
@@ -366,7 +401,7 @@ fn blurred(paint: &Paint, texture: &gdk::Texture, w: f64, h: f64) -> Option<gdk:
     Some(renderer.render_texture(&node, Some(&graphene::Rect::new(0.0, 0.0, qw as f32, qh as f32))))
 }
 
-fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool) -> Sheet {
+fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64) -> Sheet {
     let window = gtk::Window::new();
     window.add_css_class("digit-lock");
     if preview {
@@ -520,15 +555,16 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool) -> Sheet {
     }
     overlay.add_overlay(&actions);
     window.set_child(Some(&overlay));
-    entry.connect_activate(submit);
+    entry.connect_activate(move |e| submit(e, generation));
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     let e = entry.clone();
     keys.connect_key_pressed(move |_, key, _, _| {
+        if !current(generation) { return glib::Propagation::Proceed; }
         if key == gdk::Key::Escape {
             let preview = STATE.with(|s| s.borrow().as_ref().is_some_and(|st| matches!(st.mode, Mode::Preview)));
             if e.text().is_empty() && preview {
-                glib::idle_add_local_once(finish);
+                glib::idle_add_local_once(move || finish(generation));
             } else {
                 e.set_text("");
             }
@@ -551,4 +587,36 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool) -> Sheet {
         }
     });
     Sheet { window, paint, column, entry, status }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(mode: Mode) -> u64 {
+        let generation = next_generation();
+        STATE.with(|s| *s.borrow_mut() = Some(State { generation, mode, faces: Vec::new(), busy: false, locked: false, clock: None }));
+        generation
+    }
+
+    #[test]
+    fn preview_is_not_a_real_lock_and_stale_generation_cannot_finish_replacement() {
+        let preview = state(Mode::Preview);
+        assert!(showing());
+        assert!(!active());
+        let real = state(Mode::Real(glib::Object::new()));
+        assert!(active());
+        assert!(!current(preview));
+        finish(preview);
+        assert!(current(real));
+        STATE.with(|s| s.borrow_mut().take());
+    }
+
+    #[test]
+    fn finishing_empty_preview_clears_state() {
+        let preview = state(Mode::Preview);
+        finish(preview);
+        assert!(!showing());
+        assert!(!current(preview));
+    }
 }

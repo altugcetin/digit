@@ -1,4 +1,4 @@
-//! Says so when config.toml can't be used: the shell runs on defaults and saves nothing to it.
+//! Says so when config.toml can't be used: the shell keeps its last valid settings.
 use crate::config;
 use gtk::{gio, glib, prelude::*};
 use std::cell::RefCell;
@@ -13,14 +13,17 @@ thread_local! {
 
 /// Notifies once per distinct problem, and again if it comes back after being fixed.
 pub fn check() {
-    let problem = kit::prefs::problem();
+    let problem = kit::prefs::problem().or_else(|| {
+        let text = std::fs::read_to_string(config::dir().join("config.toml")).ok()?;
+        toml::from_str::<config::Config>(&text).err().map(|e| format!("Invalid config.toml: {e}"))
+    });
     if SHOWN.with(|s| s.replace(problem.clone())) == problem {
         return;
     }
     let Some(problem) = problem else { return };
     glib::spawn_future_local(async move {
         let Ok(conn) = gio::bus_get_future(gio::BusType::Session).await else { return };
-        let body = format!("{problem}. Changes aren't saved until it's fixed.");
+        let body = format!("{problem}. Changes are ignored until it's fixed.");
         let actions = vec!["default".to_string(), "Open".to_string()];
         let hints = glib::VariantDict::new(None);
         let args = ("Digit", 0u32, "dev.digit.Settings", "Settings file has an error", body.as_str(), actions, hints.end(), 0i32).to_variant();
