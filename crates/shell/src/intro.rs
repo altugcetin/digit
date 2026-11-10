@@ -30,7 +30,7 @@ const MELT: Curve = Curve::new(0.45, 0.0, 0.55, 1.0);
 /// Covers every screen when the shell starts: a dot springs up, splits into the dots of the
 /// wordmark as its letters rise into place, then the curtain opens from the middle.
 pub fn play(app: &Rc<App>) {
-    if !app.cfg.intro || kit::motion::reduced() {
+    if !app.cfg.intro || kit::motion::reduced() || kit::effects::software() {
         return;
     }
     let Some(display) = gdk::Display::default() else { return };
@@ -55,8 +55,10 @@ fn cover(app: &Rc<App>, monitor: &gdk::Monitor, start: i64) {
     let paint = Paint::new(-1, -1);
     window.set_child(Some(&paint));
     let greeting = greeting(&app.clock.borrow());
-    let (a, p) = (app.clone(), paint.clone());
-    paint.on_draw(move |s| frame(&a, &p, s, start, &greeting));
+    let (a, p) = (Rc::downgrade(app), paint.downgrade());
+    paint.on_draw(move |s| {
+        if let (Some(a), Some(p)) = (a.upgrade(), p.upgrade()) { frame(&a, &p, s, start, &greeting); }
+    });
     window.present();
     if let Some(surface) = window.surface() {
         surface.set_input_region(Some(&cairo::Region::create()));
@@ -64,7 +66,7 @@ fn cover(app: &Rc<App>, monitor: &gdk::Monitor, start: i64) {
     let win = window.clone();
     paint.add_tick_callback(move |w, clock| {
         w.queue_draw();
-        if !kit::motion::reduced() && ((clock.frame_time() - start) as f64 / 1000.0) < END {
+        if !kit::motion::reduced() && !kit::effects::software() && ((clock.frame_time() - start) as f64 / 1000.0) < END {
             return glib::ControlFlow::Continue;
         }
         let win = win.clone();
