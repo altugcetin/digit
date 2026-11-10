@@ -25,6 +25,7 @@ pub struct Space {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Running {
+    pub minimized: bool,
     pub id: u64,
     pub app_id: String,
     pub focused: bool,
@@ -49,6 +50,7 @@ fn short_layout(name: &str) -> String {
 
 fn running_of(w: &Value) -> Option<Running> {
     Some(Running {
+        minimized: false,
         id: w.get("id")?.as_u64()?,
         app_id: w.get("app_id").and_then(Value::as_str).unwrap_or_default().to_string(),
         focused: w.get("is_focused").and_then(Value::as_bool).unwrap_or(false),
@@ -57,7 +59,7 @@ fn running_of(w: &Value) -> Option<Running> {
 }
 
 fn read_windows(event: &Value, list: &mut Vec<Running>, tick: &mut u64) -> bool {
-    let shape = |l: &Vec<Running>| l.iter().map(|r| (r.id, r.app_id.clone(), r.focused)).collect::<Vec<_>>();
+    let shape = |l: &Vec<Running>| l.iter().map(|r| (r.id, r.app_id.clone(), r.focused, r.minimized)).collect::<Vec<_>>();
     let before = shape(list);
     if let Some(all) = event.get("WindowsChanged").and_then(|e| e.get("windows")).and_then(Value::as_array) {
         *list = all.iter().filter_map(running_of).collect();
@@ -71,6 +73,7 @@ fn read_windows(event: &Value, list: &mut Vec<Running>, tick: &mut u64) -> bool 
             Some(r) => {
                 r.app_id = w.app_id;
                 r.focused = w.focused;
+                r.minimized = w.minimized;
             }
             None => list.push(w),
         }
@@ -319,7 +322,7 @@ fn events(tx: async_channel::Sender<Feed>) {
 }
 
 fn running_list() -> Vec<Running> {
-    let mut list: Vec<Running> = kit::wm::windows().into_iter().map(|w| Running { id: w.id, app_id: w.app_id, focused: w.focused, stamp: w.stamp }).collect();
+    let mut list: Vec<Running> = kit::wm::windows().into_iter().map(|w| Running { minimized: w.minimized, id: w.id, app_id: w.app_id, focused: w.focused, stamp: w.stamp }).collect();
     list.sort_by_key(|r| r.id);
     list
 }
@@ -511,7 +514,7 @@ mod desktop_focus_tests {
     fn niri_first_window_open_and_repeated_focus_release_but_title_changes_do_not() {
         let opened = json!({"WindowOpenedOrChanged": {"window": {"id": 9, "is_focused": false}}});
         assert!(niri_desktop_focus(&opened, &[]));
-        let running = vec![Running { id: 9, app_id: "app".into(), focused: false, stamp: 0 }];
+        let running = vec![Running { minimized: false, id: 9, app_id: "app".into(), focused: false, stamp: 0 }];
         assert!(!niri_desktop_focus(&opened, &running));
         assert!(niri_desktop_focus(&json!({"WindowFocusChanged": {"id": 9}}), &running));
         assert!(!niri_desktop_focus(&json!({"WindowFocusChanged": {"id": null}}), &running));

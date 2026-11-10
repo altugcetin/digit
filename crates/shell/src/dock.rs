@@ -86,18 +86,36 @@ impl Geo {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Window {
+    id: u64,
+    stamp: u64,
+    focused: bool,
+    minimized: bool,
+}
+
+fn target_window(windows: &[Window]) -> Option<Window> {
+    let mut ids = windows.to_vec();
+    ids.sort_by_key(|w| w.id);
+    if let Some(p) = ids.iter().position(|w| w.focused) {
+        return Some(ids[(p + 1) % ids.len()]);
+    }
+    ids.iter().filter(|w| !w.minimized).max_by_key(|w| w.stamp)
+        .or_else(|| ids.iter().max_by_key(|w| w.stamp)).copied()
+}
+
 struct Item {
     key: String,
     name: String,
     entry: Option<usize>,
     pinned: bool,
-    windows: Vec<(u64, u64, bool)>,
+    windows: Vec<Window>,
     badge: usize,
 }
 
 impl Item {
     fn focused(&self) -> bool {
-        self.windows.iter().any(|w| w.2)
+        self.windows.iter().any(|w| w.focused)
     }
 }
 
@@ -126,6 +144,7 @@ struct State {
     order: Vec<String>,
     icons: HashMap<String, Option<gdk::Paintable>>,
     icon_key: Option<crate::icons::DockKey>,
+    away: HashMap<String, Tween>,
     slide: HashMap<String, Tween>,
     appear: HashMap<String, Tween>,
     pointer: Option<(f64, f64)>,
@@ -533,6 +552,7 @@ fn build(app: &Rc<App>, geo: Geo, monitor: Option<&gdk::Monitor>, output: String
         pins: load_pins(app),
         icons: HashMap::new(),
         icon_key: None,
+        away: HashMap::new(),
         slide: HashMap::new(),
         appear: HashMap::new(),
         pointer: None,
@@ -673,13 +693,13 @@ fn rebuild(st: &Shared) {
         let idx = app.apps.find(&r.app_id);
         let key = idx.map(|i| list[i].id.clone()).unwrap_or_else(|| r.app_id.clone());
         match items.iter_mut().find(|it| it.key == key) {
-            Some(it) => it.windows.push((r.id, r.stamp, r.focused)),
+            Some(it) => it.windows.push(Window { id: r.id, stamp: r.stamp, focused: r.focused, minimized: r.minimized }),
             None if s.running => items.push(Item {
                 name: idx.map(|i| list[i].name.clone()).unwrap_or_else(|| crate::apps::pretty(&r.app_id)),
                 key,
                 entry: idx,
                 pinned: false,
-                windows: vec![(r.id, r.stamp, r.focused)],
+                windows: vec![Window { id: r.id, stamp: r.stamp, focused: r.focused, minimized: r.minimized }],
                 badge: 0,
             }),
             None => {}
@@ -731,6 +751,12 @@ fn rebuild(st: &Shared) {
     if s.hover.is_some_and(|h| h >= items.len()) {
         s.hover = None;
     }
+    s.away.retain(|k, _| items.iter().any(|i| i.key == *k));
+    for item in &items {
+        let away = if !item.windows.is_empty() && item.windows.iter().all(|w| w.minimized) { 1.0 } else { 0.0 };
+        let tween = s.away.entry(item.key.clone()).or_insert_with(|| Tween::still(0.0));
+        tween.go(away, now, 200, motion::STANDARD);
+    }
     s.items = items;
     let after = s.centers(now);
     let dragged = s.drag.as_ref().filter(|d| d.moving).map(|d| d.key.clone());
@@ -760,6 +786,7 @@ fn rebuild(st: &Shared) {
     region(st);
     let paint = st.borrow().paint.clone();
     paint.queue_draw();
+    kick(st);
 }
 
 fn paint_art(st: &Shared) {
@@ -993,14 +1020,14 @@ fn activate(st: &Shared, i: usize) {
         }
         return;
     }
-    let mut ids = windows;
-    ids.sort_by_key(|w| w.0);
-    let target = match ids.iter().position(|w| w.2) {
-        Some(p) => ids[(p + 1) % ids.len()].0,
-        None => ids.iter().max_by_key(|w| w.1).map_or(ids[0].0, |w| w.0),
-    };
+    if let Some(target) = target_window(&windows) { focus_window(target); }
+}
+
+fn focus_window(target: Window) {
     glib::spawn_future_local(async move {
-        let _ = gio::spawn_blocking(move || compositor::focus(target)).await;
+        let _ = gio::spawn_blocking(move || {
+            if target.minimized { let _ = kit::wm::restore(target.id); } else { compositor::focus(target.id); }
+        }).await;
     });
 }
 
@@ -1098,7 +1125,7 @@ fn kick(st: &Shared) {
         }
         let bouncing = s.bounce.iter().any(|(_, t)| now - t < 3 * BOUNCE);
         let busy = [&s.magnify, &s.shown, &s.tip].iter().any(|t| !t.settled(now))
-            || s.slide.values().chain(s.appear.values()).any(|t| !t.settled(now))
+            || s.slide.values().chain(s.appear.values()).chain(s.away.values()).any(|t| !t.settled(now))
             || bouncing;
         if busy {
             return glib::ControlFlow::Continue;
@@ -1251,7 +1278,9 @@ impl State {
                 let r = (g.base * 0.045).max(2.0);
                 let center = a + slide + size / 2.0;
                 let (x, y, w, h) = self.map(center - r, LIFT + off + 3.5, 2.0 * r, 2.0 * r);
-                draw::fill(s, &draw::round(x, y, w, h, r), if item.focused() { pal.ink_main } else { pal.ink_meta.alpha(0.7) });
+                let away = self.away.get(&item.key).map_or(0.0, |t| t.value(now));
+                let ink = if item.focused() { pal.ink_main } else { pal.ink_meta.alpha(0.7) };
+                draw::fill(s, &draw::round(x, y, w, h, r), ink.mix(pal.ink_faint, 1.0 - away));
             }
             if self.hover == Some(i) {
                 let tip = if self.badges && item.badge > 0 { format!("{} · {} new notification{}", item.name, item.badge, if item.badge == 1 { "" } else { "s" }) } else { item.name.clone() };
@@ -1280,11 +1309,14 @@ impl State {
         if alpha < 0.999 {
             s.push_opacity(alpha);
         }
+        let away = self.away.get(&item.key).map_or(0.0, |t| t.value(now));
+        s.push_opacity(1.0 - 0.5 * away);
         match (self.art.get(&item.key), self.icons.get(&item.key).and_then(|p| p.as_ref())) {
             (Some(t), _) => s.append_scaled_texture(t, gsk::ScalingFilter::Trilinear, &graphene::Rect::new(x.round() as f32, y.round() as f32, w as f32, w as f32)),
             (None, Some(p)) => draw::paintable(s, p, x.round(), y.round(), w),
             (None, None) => draw::monogram(s, &self.paint, &self.app.cfg, &item.name, x, y, w, pal.raised, pal.ink_main),
         }
+        s.pop();
         if self.badges && item.badge > 0 {
             let text = if item.badge > 99 { "99+".to_string() } else { item.badge.to_string() };
             let px = (shown * 0.24).clamp(10.0, 16.0);
@@ -1326,7 +1358,7 @@ impl State {
 
 #[derive(Clone)]
 enum Act {
-    Focus(u64),
+    Focus(Window),
     Launch,
     Pin,
     Quit(Vec<u64>),
@@ -1367,10 +1399,10 @@ fn open_menu(st: &Shared, i: usize) {
         let Some(item) = s.items.get(i) else { return };
         let mut rows: Vec<(String, Act, bool)> = Vec::new();
         let mut ids = item.windows.clone();
-        ids.sort_by_key(|w| w.0);
-        for (id, _, focused) in ids.iter().take(6) {
-            let t = titles.get(id).cloned().filter(|t| !t.is_empty()).unwrap_or_else(|| item.name.clone());
-            rows.push((if *focused { format!("● {t}") } else { t }, Act::Focus(*id), false));
+        ids.sort_by_key(|w| w.id);
+        for window in ids.iter().take(6) {
+            let t = titles.get(&window.id).cloned().filter(|t| !t.is_empty()).unwrap_or_else(|| item.name.clone());
+            rows.push((if window.focused { format!("● {t}") } else { t }, Act::Focus(*window), false));
         }
         if item.entry.is_some() {
             rows.push((if item.windows.is_empty() { "Open".into() } else { "New Window".into() }, Act::Launch, false));
@@ -1378,7 +1410,7 @@ fn open_menu(st: &Shared, i: usize) {
         }
         rows.push(("Hide Dock".into(), Act::Hide, false));
         if !item.windows.is_empty() {
-            rows.push(("Quit".into(), Act::Quit(item.windows.iter().map(|w| w.0).collect()), true));
+            rows.push(("Quit".into(), Act::Quit(item.windows.iter().map(|w| w.id).collect()), true));
         } else if item.entry.is_some() && crate::quit::running(&s.app, &item.key) {
             rows.push(("Quit".into(), Act::Quit(Vec::new()), true));
         }
@@ -1505,11 +1537,7 @@ fn run(m: &Rc<RefCell<Menu>>, r: usize) {
     close_menu();
     let Some(st) = dock else { return };
     match act {
-        Act::Focus(id) => {
-            glib::spawn_future_local(async move {
-                let _ = gio::spawn_blocking(move || compositor::focus(id)).await;
-            });
-        }
+        Act::Focus(window) => focus_window(window),
         Act::Launch => launch_key(&st, key),
         Act::Pin => toggle_pin(&st, &key),
         Act::Hide => {
@@ -1553,5 +1581,23 @@ impl Menu {
             draw::text(s, &self.paint, cfg, label, 14.0, Face::Text(450), ink, 16.0, y + ROW / 2.0, w - 32.0, pango::Alignment::Left);
         }
         s.pop();
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+
+    #[test]
+    fn activation_cycles_and_prefers_recent_normal_windows() {
+        let a = Window { id: 1, stamp: 10, focused: false, minimized: false };
+        let b = Window { id: 2, stamp: 30, minimized: true, ..a };
+        let c = Window { id: 3, stamp: 20, ..a };
+        assert_eq!(target_window(&[]), None);
+        assert_eq!(target_window(&[b, a, c]), Some(c));
+        assert_eq!(target_window(&[b, Window { minimized: true, ..a }]), Some(b));
+        assert_eq!(target_window(&[b, Window { focused: true, ..a }, c]), Some(b));
+        assert_eq!(target_window(&[b, a, Window { focused: true, ..c }]), Some(a));
+        assert_eq!(target_window(&[b]), Some(b));
     }
 }
