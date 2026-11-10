@@ -27,9 +27,9 @@ pub fn apply_gtk() {
     settings.set_gtk_cursor_theme_size(size as i32);
 }
 
-/// GTK headerbar order, shared by Digit controls and other GTK applications.
+/// GTK headerbar order; app minimize requests are not supported by Hyprland.
 pub fn button_layout(prefs: &toml::Table) -> String {
-    let names: Vec<_> = [("button_minimize", "minimize"), ("button_maximize", "maximize"), ("button_close", "close")]
+    let names: Vec<_> = [("button_maximize", "maximize"), ("button_close", "close")]
         .into_iter().filter(|(key, _)| crate::prefs::flag(prefs, key, true)).map(|(_, name)| name).collect();
     format!(":{}", names.join(","))
 }
@@ -150,8 +150,8 @@ mod tests {
     use super::*;
     #[test]
     fn button_layout_defaults_and_all_combinations() {
-        assert_eq!(button_layout(&toml::Table::new()), ":minimize,maximize,close");
-        for (mask, expected) in [":", ":minimize", ":maximize", ":minimize,maximize", ":close", ":minimize,close", ":maximize,close", ":minimize,maximize,close"].iter().enumerate() {
+        assert_eq!(button_layout(&toml::Table::new()), ":maximize,close");
+        for (mask, expected) in [":", ":", ":maximize", ":maximize", ":close", ":close", ":maximize,close", ":maximize,close"].iter().enumerate() {
             let mut prefs = toml::Table::new();
             for (i, name) in ["minimize", "maximize", "close"].iter().enumerate() {
                 prefs.insert(format!("button_{name}"), (mask & (1 << i) != 0).into());
