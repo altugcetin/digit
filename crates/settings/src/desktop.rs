@@ -724,24 +724,26 @@ fn app_themes(body: &gtk::Box, t: &toml::Table) {
     when_on(&gtk, &gtk_choice.row);
     let qt = toggle(&card, "palette", "Theme Qt apps", "Needs qt6ct", "theme_qt", false);
     qt.set_sensitive(false);
-    let qt_choice = choice(&card, "palette", "Qt theme", "Digit follows your wallpaper and accent", "qt_theme", &[("digit", "Digit")], "digit");
+    let qt_choice = choice(&card, "palette", "Qt theme", "Style for Qt apps", "qt_theme", &[], "Fusion");
     when_on(&qt, &qt_choice.row);
     let t = t.clone();
     glib::spawn_future_local(async move {
         let Ok((themes, styles, platform)) = gio::spawn_blocking(|| (
             kit::app_themes::gtk_themes(&kit::app_themes::gtk_roots()), kit::app_themes::qt_styles(), kit::distro::qt_platform()
         )).await else { return };
-        let replace = |old: &gtk::Box, key, title, names: Vec<String>, source: &gtk::Box| {
-            let mut options = vec![("digit", "Digit")];
+        let replace = |old: &gtk::Box, key, title, detail, names: Vec<String>, default: &str, digit: bool, source: &gtk::Box| {
+            let mut options = Vec::new();
+            if digit { options.push(("digit", "Digit")); }
             options.extend(names.iter().map(|n| (n.as_str(), n.as_str())));
             let holder = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            let next = choice(&holder, "palette", title, "Digit follows your wallpaper and accent", key, &options, &prefs::get_str(&t, key, "digit"));
+            let selected = if digit { prefs::get_str(&t, key, default) } else { kit::app_themes::effective_qt_style(t.get(key).and_then(toml::Value::as_str), &names) };
+            let next = choice(&holder, "palette", title, detail, key, &options, &selected);
             holder.remove(&next.row);
             card.insert_child_after(&next.row, old.prev_sibling().as_ref());
             card.remove(old);
             when_on(source, &next.row);
         };
-        replace(&gtk_choice.row, "gtk_theme", "GTK theme", themes, &gtk);
+        replace(&gtk_choice.row, "gtk_theme", "GTK theme", "Digit follows your wallpaper and accent", themes, "digit", true, &gtk);
         use kit::distro::QtPlatform;
         let detail = match platform { QtPlatform::Kde => "Includes KDE apps", QtPlatform::Qt6ct => "Install qt6ct-kde to include KDE apps", QtPlatform::Missing => "Needs qt6ct" };
         let holder = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -750,7 +752,7 @@ fn app_themes(body: &gtk::Box, t: &toml::Table) {
         card.insert_child_after(&next, qt.prev_sibling().as_ref());
         card.remove(&qt);
         next.set_sensitive(platform != QtPlatform::Missing);
-        replace(&qt_choice.row, "qt_theme", "Qt theme", styles, &next);
+        replace(&qt_choice.row, "qt_theme", "Qt theme", "Style for Qt apps", styles, "Fusion", false, &next);
     });
 }
 

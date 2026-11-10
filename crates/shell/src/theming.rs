@@ -24,10 +24,6 @@ impl ThemeJobs {
     }
 }
 
-fn accent_for(t: &Theme) -> String {
-    kit::style::look().accent.or_else(|| t.roles.get("primary").cloned()).filter(|c| kit::style::custom_accent(c).is_some()).unwrap_or_else(|| "#3daee9".into())
-}
-
 fn gtk_css_for(t: &Theme, gtk4: bool, look: &kit::style::Look) -> String {
     let accent = look.accent.clone().unwrap_or_else(|| t.hex("primary"));
     let on_accent = kit::style::custom_accent(&accent).map(|(_, on)| on.to_owned()).unwrap_or_else(|| t.hex("on_primary"));
@@ -119,70 +115,6 @@ fn niri_radius() -> u32 {
         .map_or(12, |r| r.round().clamp(0.0, 64.0) as u32)
 }
 
-fn color_line(source: &str, section: &str, key: &str) -> Option<String> {
-    let mut current = "";
-    for line in source.lines() {
-        let line = line.trim();
-        if line.starts_with('[') && line.ends_with(']') { current = line; }
-        else if current == section && line.starts_with(&format!("{key}=")) { return line.split_once('=') .map(|(_, value)| value.trim().to_owned()); }
-    }
-    None
-}
-
-fn theme_color(t: &Theme, key: &str, fallback: &str) -> String {
-    t.roles.get(key).and_then(|value| kit::palette::Rgb::hex(value)).map(|_| t.hex(key)).unwrap_or_else(|| fallback.to_owned())
-}
-
-fn qt_scheme(t: &Theme, breeze: Option<&str>) -> String {
-    let accent = accent_for(t);
-    let on_accent = kit::style::custom_accent(&accent).map(|(_, on)| on.to_owned()).unwrap_or_else(|| t.hex("on_primary"));
-    let color = |section: &str, key: &str, palette_key: &str, fallback: &str| {
-        breeze.and_then(|source| color_line(source, section, key)).unwrap_or_else(|| theme_color(t, palette_key, fallback))
-    };
-    let roles = [
-        color("[Colors:Window]", "ForegroundNormal", "on_surface", "#eeeeee"),
-        color("[Colors:Button]", "BackgroundNormal", "surface_container_high", "#292c30"),
-        theme_color(t, "surface_container_high", "#3d4044"),
-        theme_color(t, "surface_container", "#33363a"),
-        theme_color(t, "surface_container_lowest", "#0a0c0e"),
-        theme_color(t, "surface_container_low", "#1c1e20"),
-        color("[Colors:View]", "ForegroundNormal", "on_surface", "#eeeeee"),
-        theme_color(t, "on_error", "#ffffff"),
-        color("[Colors:Button]", "BackgroundNormal", "surface_container_high", "#292c30"),
-        color("[Colors:Button]", "ForegroundNormal", "on_surface", "#eeeeee"),
-        color("[Colors:View]", "BackgroundNormal", "surface", "#141618"),
-        color("[Colors:Window]", "BackgroundNormal", "surface_container_low", "#202326"),
-        "0,0,0".into(),
-        color("[Colors:Selection]", "BackgroundNormal", "primary", "#3daee9"),
-        color("[Colors:Selection]", "ForegroundNormal", "on_primary", "#ffffff"),
-        color("[Colors:View]", "ForegroundLink", "primary", "#3daee9"),
-        theme_color(t, "secondary", "#9b59b6"),
-        color("[Colors:View]", "BackgroundAlternate", "surface_container_low", "#1d1f22"),
-        color("[Colors:Tooltip]", "BackgroundNormal", "surface_container_high", "#292c30"),
-        color("[Colors:Tooltip]", "ForegroundNormal", "on_surface", "#eeeeee"),
-        color("[Colors:View]", "ForegroundInactive", "outline", "#a1a9b1"),
-        accent.clone(),
-    ];
-    let mut roles = roles;
-    roles[13] = accent;
-    roles[14] = on_accent;
-    for role in &mut roles {
-        let rgb: Option<Vec<u8>> = role.split(',').map(|v| v.trim().parse().ok()).collect();
-        if let Some(rgb) = rgb.filter(|v| v.len() == 3) { *role = format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]); }
-    }
-    let row = roles.join(", ");
-    format!("[ColorScheme]\nactive_colors={row}\ndisabled_colors={row}\ninactive_colors={row}\n")
-}
-
-fn breeze_scheme() -> Option<String> {
-    let data_dirs = std::env::var_os("XDG_DATA_DIRS")
-        .map(|v| std::env::split_paths(&v).collect::<Vec<_>>())
-        .unwrap_or_else(|| vec![PathBuf::from("/usr/local/share"), PathBuf::from("/usr/share")]);
-    std::iter::once(glib::user_data_dir().join("color-schemes/BreezeDark.colors"))
-        .chain(data_dirs.into_iter().map(|dir| dir.join("color-schemes/BreezeDark.colors")))
-        .find_map(|path| std::fs::read_to_string(path).ok())
-}
-
 fn theme_name_in(roots: Vec<PathBuf>) -> Option<&'static str> {
     let available = |name: &str| roots.iter().any(|root| root.join(name).join("gtk-3.0/gtk.css").is_file());
     if available("adw-gtk3-dark") { Some("adw-gtk3-dark") }
@@ -195,10 +127,10 @@ fn settings_ini(old: &str, theme: &str) -> String {
     kit::appearance::ini(old, "[Settings]", &[("gtk-theme-name", Some(theme)), ("gtk-application-prefer-dark-theme", Some(if dark { "1" } else { "0" }))])
 }
 
-fn qt_config_for(old: &str, style: &str, palette: Option<&str>) -> String {
+fn qt_config_for(old: &str, style: &str) -> String {
     kit::appearance::ini(old, "[Appearance]", &[
-        ("style", Some(style)), ("custom_palette", Some(if palette.is_some() { "true" } else { "false" })),
-        ("color_scheme_path", palette),
+        ("style", Some(style)), ("custom_palette", Some("false")),
+        ("color_scheme_path", None),
     ])
 }
 
@@ -241,21 +173,11 @@ fn apply_owned(t: &Theme, icons: bool, prefs: &toml::Table, store: &kit::app_the
     });
     let qt = kit::prefs::flag(prefs, "theme_qt", false);
     let qt_result = store.apply(Toolkit::Qt, qt && platform != kit::distro::QtPlatform::Missing, settings, || {
-        let choice = kit::prefs::text(prefs, "qt_theme", "digit");
-        let dynamic = choice == "digit";
-        let colors = store.config.join("qt6ct/colors/digit.conf");
-        let sample = if dynamic { breeze_scheme() } else { None };
-        if dynamic { atomic_write(&colors, qt_scheme(t, sample.as_deref()).as_bytes())?; }
-        else { store.original_file(Toolkit::Qt, 1)?; }
+        let choice = prefs.get("qt_theme").and_then(toml::Value::as_str);
         let styles = kit::app_themes::qt_styles();
-        let style = if dynamic { if styles.iter().any(|s| s == "Breeze") { "Breeze" } else { "Fusion" } } else { &choice };
-        // qt6ct-kde uses the same palette key, with a .colors file for KColorScheme.
-        let kde = theme::state_dir().join("app-themes/digit.colors");
-        let use_kde = dynamic && platform == kit::distro::QtPlatform::Kde && sample.is_some();
-        if use_kde { atomic_write(&kde, kde_scheme(t, sample.as_deref().unwrap()).as_bytes())?; }
+        let style = kit::app_themes::effective_qt_style(choice, &styles);
         let path = store.config.join("qt6ct/qt6ct.conf");
-        let palette = if use_kde { kde.to_string_lossy() } else { colors.to_string_lossy() };
-        atomic_write(&path, qt_config_for(&read_ini(&path)?, style, dynamic.then_some(palette.as_ref())).as_bytes())
+        atomic_write(&path, qt_config_for(&read_ini(&path)?, &style).as_bytes())
     });
     let icons_result = if icons { kit::appearance::apply_icons().map_err(std::io::Error::other) } else { Ok(()) };
     gtk_result.and(qt_result).and(icons_result)
@@ -263,17 +185,6 @@ fn apply_owned(t: &Theme, icons: bool, prefs: &toml::Table, store: &kit::app_the
 
 fn read_ini(path: &std::path::Path) -> std::io::Result<String> {
     match std::fs::read_to_string(path) { Ok(s) => Ok(s), Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()), Err(e) => Err(e) }
-}
-
-fn kde_scheme(t: &Theme, sample: &str) -> String {
-    let accent = accent_for(t);
-    let on_accent = kit::style::custom_accent(&accent).map(|(_, on)| on.to_owned()).unwrap_or_else(|| t.hex("on_primary"));
-    let mut text = kit::appearance::ini(sample, "[General]", &[("Name", Some("Digit"))]);
-    text = kit::appearance::ini(&text, "[Colors:Selection]", &[("BackgroundNormal", Some(&accent)), ("ForegroundNormal", Some(&on_accent))]);
-    for section in ["[Colors:View]", "[Colors:Window]", "[Colors:Button]", "[Colors:Tooltip]", "[Colors:Complementary]", "[Colors:Header]"] {
-        text = kit::appearance::ini(&text, section, &[("ForegroundLink", Some(&accent)), ("DecorationFocus", Some(&accent)), ("DecorationHover", Some(&accent))]);
-    }
-    text
 }
 
 fn write(t: &Theme, icons: bool) {
@@ -393,21 +304,15 @@ mod tests {
             apply_owned(&theme(), false, &prefs, &store, &settings, QtPlatform::Missing).unwrap();
             assert!(!config.exists());
             let conf = config.join("qt6ct/qt6ct.conf");
-            let colors = config.join("qt6ct/colors/digit.conf");
             let original = b"[Appearance]\nicon_theme=Keep\n[Fonts]\ngeneral=User Font\n";
             atomic_write(&conf, original).unwrap();
             apply_owned(&theme(), false, &prefs, &store, &settings, QtPlatform::Qt6ct).unwrap();
             let plain = std::fs::read_to_string(&conf).unwrap();
-            assert!(plain.contains("custom_palette=true"));
-            assert!(plain.contains(&format!("color_scheme_path={}", colors.display())));
-            assert!(!plain.contains(".colors"));
-            assert!(colors.is_file());
-            let sample = gtk::glib::user_data_dir().join("color-schemes/BreezeDark.colors");
-            atomic_write(&sample, b"[General]\nName=Breeze Dark\n[Colors:View]\nBackgroundNormal=1,2,3\n").unwrap();
             apply_owned(&theme(), false, &prefs, &store, &settings, QtPlatform::Kde).unwrap();
-            let kde = theme::state_dir().join("app-themes/digit.colors");
-            assert!(std::fs::read_to_string(&conf).unwrap().contains(&format!("color_scheme_path={}", kde.display())));
-            assert!(std::fs::read_to_string(kde).unwrap().contains("BackgroundNormal=#7c83ff"));
+            assert!(plain.contains("custom_palette=false"));
+            assert!(!plain.contains("color_scheme_path="));
+            assert!(!config.join("qt6ct/colors/digit.conf").exists());
+            assert!(!theme::state_dir().join("app-themes/digit.colors").exists());
             prefs.insert("qt_theme".into(), "Fusion".into());
             apply_owned(&theme(), false, &prefs, &store, &settings, QtPlatform::Kde).unwrap();
             let named = std::fs::read_to_string(&conf).unwrap();
@@ -416,7 +321,6 @@ mod tests {
             assert!(!named.contains("color_scheme_path="));
             assert!(named.contains("icon_theme=Keep"));
             assert!(named.contains("general=User Font"));
-            assert!(!colors.exists());
             atomic_write(&conf, b"hand edit").unwrap();
             prefs.insert("theme_qt".into(), false.into());
             apply_owned(&theme(), false, &prefs, &store, &settings, QtPlatform::Kde).unwrap();
@@ -435,17 +339,14 @@ mod tests {
     }
 
     #[test]
-    fn named_qt_styles_disable_custom_palette_and_preserve_icons_fonts_and_other_keys() {
+    fn qt_config_disables_custom_palette_preserves_unrelated_keys_and_removes_scheme() {
         let old = "[Appearance]\nicon_theme=User\nstyle=Breeze\ncustom_palette=true\ncolor_scheme_path=/old\n[Fonts]\ngeneral=User Font\n";
-        let text = qt_config_for(old, "kvantum", None);
+        let text = qt_config_for(old, "kvantum");
         assert!(text.contains("style=kvantum\n"));
         assert!(text.contains("custom_palette=false\n"));
         assert!(!text.contains("color_scheme_path="));
         assert!(text.contains("icon_theme=User\n"));
         assert!(text.contains("general=User Font\n"));
-        let kde = kde_scheme(&theme(), "[General]\nName=Breeze Dark\n[Colors:View]\nBackgroundNormal=1,2,3\n");
-        assert!(kde.contains("BackgroundNormal=1,2,3"));
-        assert!(kde.contains("BackgroundNormal=#7c83ff"));
     }
 
     #[test]
@@ -475,22 +376,45 @@ mod tests {
     }
 
     #[test]
-    fn qt6ct_configuration_uses_breeze_sample_and_digit_fallback() {
-        let config = qt_config_for("[Appearance]\nstyle=Fusion\nicon_theme=Adwaita\n", "Breeze", Some("/digit.conf"));
+    fn qt6ct_config_preserves_unrelated_appearance_keys() {
+        let config = qt_config_for("[Appearance]\nstyle=Fusion\nicon_theme=Adwaita\ncolor_scheme_path=/old\n", "Breeze");
         assert!(config.contains("style=Breeze"));
-        assert!(config.contains("icon_theme=Adwaita"));
-        assert!(qt_config_for("[Appearance]\nicon_theme=Papirus-Dark\n", "Fusion", None).contains("icon_theme=Papirus-Dark\n"));
-        assert!(config.contains("color_scheme_path="));
+        assert!(config.contains("custom_palette=false"));
+        assert!(config.contains("icon_theme=Adwaita\n"));
+        assert!(!config.contains("color_scheme_path="));
         assert_eq!(config.matches("[Appearance]").count(), 1);
-        let sample = "[Colors:Window]\nForegroundNormal=220,221,222\nBackgroundNormal=30,31,32\n[Colors:Button]\nBackgroundNormal=40,41,42\nForegroundNormal=230,231,232\n[Colors:View]\nForegroundNormal=240,241,242\nBackgroundNormal=50,51,52\nBackgroundAlternate=60,61,62\nForegroundLink=70,71,72\nForegroundVisited=80,81,82\nForegroundInactive=90,91,92\n[Colors:Selection]\nBackgroundNormal=100,101,102\nForegroundNormal=110,111,112\n[Colors:Tooltip]\nBackgroundNormal=120,121,122\nForegroundNormal=130,131,132\n";
-        let scheme = qt_scheme(&theme(), Some(sample));
-        assert!(scheme.contains("active_colors="));
-        assert!(scheme.contains("#dcddde"));
-        assert!(scheme.contains("#28292a"));
-        assert!(scheme.contains("#7c83ff"));
-        let fallback = qt_scheme(&theme(), None);
-        assert!(fallback.contains("#000000"));
-        assert!(fallback.contains("#7c83ff"));
+    }
+
+    #[test]
+    fn qt_style_falls_back_to_breeze_then_fusion() {
+        use kit::app_themes::effective_qt_style;
+        let styles = vec!["Fusion".into(), "Breeze".into(), "kvantum".into()];
+        assert_eq!(effective_qt_style(None, &styles), "Breeze");
+        assert_eq!(effective_qt_style(Some("digit"), &styles), "Breeze");
+        assert_eq!(effective_qt_style(Some("Removed"), &styles), "Breeze");
+        assert_eq!(effective_qt_style(Some("kvantum"), &styles), "kvantum");
+        assert_eq!(effective_qt_style(None, &["Fusion".into()]), "Fusion");
+    }
+
+    #[test]
+    fn wallpaper_retheme_does_not_write_qt_config_again() {
+        isolated("wallpaper_retheme_does_not_write_qt_config_again", |config| {
+            use kit::{app_themes::{GSettings, Store}, distro::QtPlatform};
+            let store = Store::default();
+            let settings = GSettings::default();
+            let prefs: toml::Table = "theme_qt = true\nqt_theme = \"Fusion\"".parse().unwrap();
+            apply_owned(&theme(), false, &prefs, &store, &settings, QtPlatform::Qt6ct).unwrap();
+            let qt_dir = config.join("qt6ct");
+            let conf = qt_dir.join("qt6ct.conf");
+            let before = std::fs::metadata(&conf).unwrap().modified().unwrap();
+            let contents = std::fs::read(&conf).unwrap();
+            let mut changed_theme = theme();
+            changed_theme.roles.insert("primary".into(), "#123456".into());
+            apply_owned(&changed_theme, false, &prefs, &store, &settings, QtPlatform::Qt6ct).unwrap();
+            assert_eq!(std::fs::read(&conf).unwrap(), contents);
+            assert_eq!(std::fs::metadata(&conf).unwrap().modified().unwrap(), before);
+            assert_eq!(std::fs::read_dir(qt_dir).unwrap().count(), 1);
+        });
     }
 
     #[test]
