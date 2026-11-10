@@ -94,6 +94,7 @@ enum Act {
     Open(String),
     Run(String),
     Image(Rc<crate::clip::Clip>),
+    Clip(Rc<crate::clip::Clip>),
     Clear,
     Found(usize, String),
     More(usize),
@@ -409,7 +410,7 @@ fn clip_items(items: &mut Vec<Item>, colors: &mut Vec<(usize, Copied)>, query: &
                     continue;
                 }
                 let detail = if lines > 1 { format!("{lines} lines · {}", ago(c.at)) } else { format!("{} chars · {}", text.chars().count(), ago(c.at)) };
-                items.push(Item { kind: Kind::Clip, act: Act::Copy(text.clone()), title: line, detail, look: Look::Symbol("content_paste"), score });
+                items.push(Item { kind: Kind::Clip, act: Act::Clip(c.clone()), title: line, detail, look: Look::Symbol("content_paste"), score });
             }
             crate::clip::Data::Image(_) => {
                 if !q.is_empty() && !"image picture screenshot".contains(q.as_str()) {
@@ -1058,12 +1059,21 @@ impl Launcher {
                 }
             }
             if matches!(mode, Mode::All | Mode::Apps) && (!q.is_empty() || mode == Mode::Apps) {
-                for (i, e) in apps.iter().enumerate() {
-                    let hit = e.keys.iter().filter_map(|(k, bias)| score(&q, k).map(|v| v + bias)).max();
-                    if let Some(hit) = hit {
-                        let bonus = if q.is_empty() { 0 } else { s.app.apps.boost(&e.id) };
-                        items.push(Item { kind: Kind::App, act: Act::App(i), title: e.name.clone(), detail: e.detail.clone(), look: look(e), score: hit + bonus });
-                    }
+                let mut hits: Vec<_> = apps.iter().enumerate().filter_map(|(i, e)| {
+                    let hit = e.keys.iter().filter_map(|(k, bias)| score(&q, k).map(|v| v + bias)).max()?;
+                    let bonus = if q.is_empty() { 0 } else { s.app.apps.boost(&e.id) };
+                    Some((i, hit + bonus))
+                }).collect();
+                let cap = if mode == Mode::All { 7 } else { 200 };
+                limit_hits(&mut hits, cap, |a, b| {
+                    let order = if q.is_empty() && mode == Mode::Apps {
+                        apps[a.0].name.to_lowercase().cmp(&apps[b.0].name.to_lowercase())
+                    } else { b.1.cmp(&a.1) };
+                    order.then(a.0.cmp(&b.0))
+                });
+                for (i, hit) in hits {
+                    let e = &apps[i];
+                    items.push(Item { kind: Kind::App, act: Act::App(i), title: e.name.clone(), detail: e.detail.clone(), look: look(e), score: hit });
                 }
             }
             if mode == Mode::Calc || (mode == Mode::All && calc::looks_like_math(&query)) {
@@ -1401,9 +1411,16 @@ impl Launcher {
                     display.clipboard().set_text(&text);
                 }
             }
+            Act::Clip(c) => {
+                if let crate::clip::Data::Text(text) = &c.data && let Some(display) = gdk::Display::default() {
+                    display.clipboard().set_text(text);
+                }
+            }
             Act::Image(c) => {
-                if let Some(t) = c.original() && let Some(display) = gdk::Display::default() {
-                    display.clipboard().set_texture(&t);
+                if let crate::clip::Data::Image(png) = &c.data && let Some(display) = gdk::Display::default() {
+                    let bytes = glib::Bytes::from_owned(png.clone());
+                    let provider = gdk::ContentProvider::for_bytes("image/png", &bytes);
+                    let _ = display.clipboard().set_content(Some(&provider));
                 }
             }
             Act::Clear => crate::clip::clear(),
@@ -1931,5 +1948,28 @@ mod tests {
         let hits = find_settings(&settings, "dock icon", 12);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].1.link, "dock/icon-size/dock");
+    }
+}
+
+// Keep source order for equal-ranked items in the final stable sort.
+fn limit_hits(hits: &mut Vec<(usize, i32)>, cap: usize, compare: impl FnMut(&(usize, i32), &(usize, i32)) -> std::cmp::Ordering) {
+    if hits.len() > cap {
+        hits.select_nth_unstable_by(cap, compare);
+        hits.truncate(cap);
+        hits.sort_unstable_by_key(|h| h.0);
+    }
+}
+
+#[cfg(test)]
+mod search_limit_tests {
+    use super::*;
+
+    #[test]
+    fn selects_best_before_building_items_and_preserves_ties() {
+        let mut hits = vec![(0, 4), (1, 9), (2, 9), (3, 1)];
+        limit_hits(&mut hits, 2, |a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        assert_eq!(hits, vec![(1, 9), (2, 9)]);
+        limit_hits(&mut hits, 0, |a, b| b.1.cmp(&a.1));
+        assert!(hits.is_empty());
     }
 }
