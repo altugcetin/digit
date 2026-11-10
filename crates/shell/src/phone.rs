@@ -66,7 +66,7 @@ struct State {
     loading: bool,
     again: bool,
     watching: bool,
-    icons: Vec<(String, gdk::Texture)>,
+    icons: Vec<(String, i32, gdk::Texture)>,
 }
 
 thread_local! {
@@ -146,22 +146,29 @@ fn get<T: glib::variant::FromVariant>(d: &glib::VariantDict, key: &str) -> Optio
     d.lookup_value(key, None).and_then(|v| v.get::<T>())
 }
 
-fn icon(path: &str) -> Option<gdk::Texture> {
+async fn icon(path: &str) -> Option<gdk::Texture> {
     if path.is_empty() {
         return None;
     }
-    if let Some(t) = STATE.with(|s| s.borrow().icons.iter().find(|(p, _)| p == path).map(|(_, t)| t.clone())) {
+    let px = 18 * crate::images::scale();
+    if let Some(t) = STATE.with(|s| s.borrow().icons.iter().find(|(p, n, _)| p == path && *n == px).map(|(_, _, t)| t.clone())) {
         return Some(t);
     }
-    let t = gdk::Texture::from_filename(path).ok()?;
+    let t = crate::sni::file_icon(path.to_string(), px).await?;
     STATE.with(|s| {
         let mut s = s.borrow_mut();
-        if s.icons.len() > 48 {
-            s.icons.remove(0);
+        s.icons.push((path.to_string(), px, t.clone()));
+        let mut bytes: usize = s.icons.iter().map(|(_, _, t)| texture_bytes(t)).sum();
+        while s.icons.len() > 48 || bytes > 2 * 1024 * 1024 {
+            let (_, _, old) = s.icons.remove(0);
+            bytes -= texture_bytes(&old);
         }
-        s.icons.push((path.to_string(), t.clone()));
     });
     Some(t)
+}
+
+fn texture_bytes(t: &gdk::Texture) -> usize {
+    t.width() as usize * t.height() as usize * 4
 }
 
 /// A paired device in the switcher.
@@ -225,7 +232,7 @@ async fn detail(conn: &gio::DBusConnection, id: String, d: &glib::VariantDict) -
                         app: get::<String>(&n, "appName").unwrap_or_default(),
                         title: get::<String>(&n, "title").unwrap_or_default(),
                         text: get::<String>(&n, "text").unwrap_or_default().replace('\n', " "),
-                        icon: icon(&icon_path),
+                        icon: icon(&icon_path).await,
                         dismissable: get::<bool>(&n, "dismissable").unwrap_or(false),
                     });
                 }
