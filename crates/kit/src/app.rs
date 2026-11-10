@@ -69,6 +69,20 @@ pub fn control(icon: &str, kind: &str) -> gtk::Button {
     b
 }
 
+thread_local! {
+    static CONTROLS: std::cell::RefCell<Vec<(glib::WeakRef<gtk::Button>, &'static str)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn refresh_controls(prefs: &toml::Table) {
+    let all = CONTROLS.with(|all| std::mem::take(&mut *all.borrow_mut()));
+    let buttons: Vec<_> = all.into_iter().filter_map(|(button, key)| button.upgrade().map(|b| (b, key))).collect();
+    let live: Vec<_> = buttons.iter().map(|(button, key)| (button.downgrade(), *key)).collect();
+    CONTROLS.with(|all| all.borrow_mut().extend(live));
+    for (button, key) in buttons {
+        button.set_visible(crate::prefs::flag(prefs, key, true));
+    }
+}
+
 pub fn controls(window: &impl IsA<gtk::Window>, app_id: &'static str) -> gtk::Box {
     let window = window.as_ref().clone();
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
@@ -94,6 +108,12 @@ pub fn controls(window: &impl IsA<gtk::Window>, app_id: &'static str) -> gtk::Bo
     bar.append(&min);
     bar.append(&max);
     bar.append(&close);
+    let prefs = crate::prefs::read();
+    for (button, key) in [(&min, "button_minimize"), (&max, "button_maximize"), (&close, "button_close")] {
+        button.set_visible(crate::prefs::flag(&prefs, key, true));
+        let weak = button.downgrade();
+        CONTROLS.with(|all| all.borrow_mut().push((weak, key)));
+    }
     bar
 }
 
