@@ -317,9 +317,6 @@ pub async fn join(conn: &zbus::Connection, device: &str, net: &Network, password
             (a, None)
         }
         _ => {
-            if let (Some(old), Some(_)) = (&net.saved, password) {
-                let _ = forget(conn, old).await;
-            }
             let mut base: HashMap<&str, Value> = HashMap::new();
             base.insert("id", Value::from(net.ssid.clone()));
             base.insert("type", Value::from("802-11-wireless"));
@@ -371,6 +368,11 @@ pub async fn join(conn: &zbus::Connection, device: &str, net: &Network, password
         }
     }
     if state == 2 {
+        if created.is_some() {
+            if let Some(old) = &net.saved {
+                let _ = forget(conn, old).await;
+            }
+        }
         return Ok(());
     }
     if let Some(path) = created {

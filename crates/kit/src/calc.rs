@@ -1,6 +1,7 @@
 struct Parser<'a> {
     s: &'a [u8],
     i: usize,
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -72,6 +73,16 @@ impl Parser<'_> {
     }
 
     fn unary(&mut self) -> Option<f64> {
+        if self.depth >= 64 {
+            return None;
+        }
+        self.depth += 1;
+        let result = self.unary_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn unary_inner(&mut self) -> Option<f64> {
         if self.eat(b'-') {
             return Some(-self.unary()?);
         }
@@ -145,11 +156,14 @@ impl Parser<'_> {
 }
 
 pub fn eval(text: &str) -> Option<f64> {
+    if text.len() > 4096 {
+        return None;
+    }
     let text = text.trim();
     if text.is_empty() {
         return None;
     }
-    let mut p = Parser { s: text.as_bytes(), i: 0 };
+    let mut p = Parser { s: text.as_bytes(), i: 0, depth: 0 };
     let v = p.expr()?;
     (p.peek().is_none() && v.is_finite()).then_some(v)
 }
@@ -162,6 +176,9 @@ pub fn looks_like_math(text: &str) -> bool {
 pub fn format(v: f64) -> String {
     if v == v.trunc() && v.abs() < 1e15 {
         return format!("{}", v as i64);
+    }
+    if v != 0.0 && (v.abs() < 1e-6 || v.abs() >= 1e15) {
+        return format!("{v:e}");
     }
     let s = format!("{:.10}", v);
     let s = s.trim_end_matches('0').trim_end_matches('.');
@@ -203,7 +220,18 @@ mod tests {
     }
 
     #[test]
+    fn rejects_excessive_recursion() {
+        assert_eq!(eval(&"(".repeat(100_000)), None);
+        for text in ["(".repeat(100), "-".repeat(100), "1^".repeat(100), "sqrt ".repeat(100)] {
+            assert_eq!(eval(&(text + "1")), None);
+        }
+        assert_eq!(eval(&format!("{}1{}", "(".repeat(20), ")".repeat(20))), Some(1.0));
+    }
+
+    #[test]
     fn formatting() {
+        assert_eq!(format(eval("1/1000000000000").unwrap()), "1e-12");
+        assert_eq!(format(-1e-12), "-1e-12");
         assert_eq!(format(4.0), "4");
         assert_eq!(format(2.5), "2.5");
         assert_eq!(format(1.0 / 3.0), "0.3333333333");
