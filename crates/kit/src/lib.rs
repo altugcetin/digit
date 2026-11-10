@@ -10,6 +10,7 @@ pub mod drag;
 pub mod effects;
 pub mod folder;
 pub mod fuzzy;
+pub mod guard;
 pub mod hyprconf;
 pub mod niriconf;
 pub mod setup;

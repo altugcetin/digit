@@ -923,6 +923,10 @@ pub(crate) fn package_row(s: &Rc<Store>, p: &crate::arch::Package, title: Option
     }
     col.append(&tags);
     row.append(&col);
+    if installed.is_some() && kit::guard::protected(&p.name) {
+        row.append(&ui::badge("Protected", ""));
+        return row.upcast();
+    }
     let key = format!("arch:{}", p.name);
     let working = s.busy.borrow().as_deref() == Some(key.as_str());
     let (label, kind) = match (working, installed.is_some()) {

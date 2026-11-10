@@ -259,8 +259,16 @@ impl Store {
             self.note("Another app is still being installed", true);
             return;
         }
-        let key = format!("arch:{name}");
+        if name.starts_with('-') || name.is_empty() {
+            self.note("Invalid package name", true);
+            return;
+        }
         let remove = self.arch_installed.borrow().contains_key(name);
+        if remove && kit::guard::protected(name) {
+            self.note("Protected system package", true);
+            return;
+        }
+        let key = format!("arch:{name}");
         *self.busy.borrow_mut() = Some(key);
         self.bar_label.set_text(&format!("{} {name}", if remove { "Removing" } else { "Installing" }));
         self.bar_label.remove_css_class("warn");
@@ -277,9 +285,9 @@ impl Store {
                 glib::ControlFlow::Continue
             });
             let args: Vec<&std::ffi::OsStr> = if remove {
-                vec!["pkexec".as_ref(), "pacman".as_ref(), "-R".as_ref(), "--noconfirm".as_ref(), name.as_ref()]
+                vec!["pkexec".as_ref(), "pacman".as_ref(), "-R".as_ref(), "--noconfirm".as_ref(), "--".as_ref(), name.as_ref()]
             } else {
-                vec!["pkexec".as_ref(), "pacman".as_ref(), "-S".as_ref(), "--needed".as_ref(), "--noconfirm".as_ref(), name.as_ref()]
+                vec!["pkexec".as_ref(), "pacman".as_ref(), "-S".as_ref(), "--needed".as_ref(), "--noconfirm".as_ref(), "--".as_ref(), name.as_ref()]
             };
             let result = match gio::Subprocess::newv(&args, gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_PIPE) {
                 Ok(p) => match p.communicate_utf8_future(None).await {
