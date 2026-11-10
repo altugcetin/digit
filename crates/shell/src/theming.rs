@@ -1,6 +1,28 @@
 use gtk::glib;
 use kit::theme::{self, Theme};
 use std::path::PathBuf;
+use std::sync::{Mutex, atomic::{AtomicU64, Ordering}};
+
+static JOBS: ThemeJobs = ThemeJobs { generation: AtomicU64::new(0), publish: Mutex::new(()) };
+static TEMP: AtomicU64 = AtomicU64::new(0);
+
+struct ThemeJobs {
+    generation: AtomicU64,
+    publish: Mutex<()>,
+}
+
+impl ThemeJobs {
+    fn begin(&self) -> Option<u64> {
+        let _publish = self.publish.lock().ok()?;
+        Some(self.generation.fetch_add(1, Ordering::Relaxed) + 1)
+    }
+
+    fn publish<T>(&self, generation: u64, write: impl FnOnce() -> Option<T>) -> Option<T> {
+        let _publish = self.publish.lock().ok()?;
+        if self.generation.load(Ordering::Relaxed) != generation { return None; }
+        write()
+    }
+}
 
 const IMPORT: &str = "@import url(\"digit.css\");";
 
@@ -254,9 +276,10 @@ fn ini_value<'a>(text: &'a str, section: &str, key: &str) -> Option<&'a str> {
 
 fn write_if_changed(path: &PathBuf, text: &str) {
     if std::fs::read_to_string(path).ok().as_deref() != Some(text) {
-        let tmp = path.with_extension("new");
+        let tmp = path.with_extension(format!("{}-{}.new", std::process::id(), TEMP.fetch_add(1, Ordering::Relaxed)));
         if std::fs::write(&tmp, text).is_ok() {
-            let _ = std::fs::rename(tmp, path);
+            let _ = std::fs::rename(&tmp, path);
+            let _ = std::fs::remove_file(&tmp);
         }
     }
 }
@@ -336,20 +359,20 @@ fn give_back_qt() {
 }
 
 pub fn refresh(chosen: Option<&str>, fallback: &str, image: Option<String>, force: bool) -> Option<Theme> {
+    let generation = JOBS.begin()?;
     let current = theme::load();
     let scheme = chosen.map(str::to_string).or_else(|| current.as_ref().map(|t| t.scheme.clone())).unwrap_or_else(|| fallback.to_string());
     let scheme = scheme.as_str();
     let image = image.or_else(crate::wallpaper::current).or_else(crate::wallpaper::found).or_else(|| current.as_ref().map(|t| t.wallpaper.clone()))?;
     let fresh = match &current {
         Some(t) if !force && t.wallpaper == image && t.scheme == scheme => t.clone(),
-        _ => {
-            let t = theme::generate(std::path::Path::new(&image), scheme)?;
-            theme::save(&t).ok()?;
-            t
-        }
+        _ => theme::generate(std::path::Path::new(&image), scheme)?,
     };
-    write(&fresh);
-    Some(fresh)
+    JOBS.publish(generation, || {
+        theme::save(&fresh).ok()?;
+        write(&fresh);
+        Some(fresh)
+    })
 }
 
 pub fn restyle() {
@@ -360,6 +383,15 @@ pub fn restyle() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_theme_jobs_cannot_publish_after_a_newer_request() {
+        let jobs = ThemeJobs { generation: AtomicU64::new(0), publish: Mutex::new(()) };
+        let old = jobs.begin().unwrap();
+        let new = jobs.begin().unwrap();
+        assert_eq!(jobs.publish(new, || Some("new")), Some("new"));
+        assert_eq!(jobs.publish(old, || panic!("obsolete theme published")), None::<()>);
+    }
 
     fn theme() -> Theme {
         Theme { roles: [
