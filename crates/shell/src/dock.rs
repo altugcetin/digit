@@ -980,14 +980,14 @@ fn drop_drag(st: &Shared) {
 }
 
 fn activate(st: &Shared, i: usize) {
-    let (app, windows, entry, key) = {
+    let (app, windows, key) = {
         let s = st.borrow();
         let Some(it) = s.items.get(i) else { return };
-        (s.app.clone(), it.windows.clone(), it.entry, it.key.clone())
+        (s.app.clone(), it.windows.clone(), it.key.clone())
     };
     if windows.is_empty() {
         let list = app.apps.list();
-        if let Some(e) = entry.and_then(|idx| list.get(idx)) {
+        if let Some(e) = list.iter().find(|e| e.id == key) {
             app.apps.launch(e);
             bounce(st, key);
         }
@@ -1005,13 +1005,16 @@ fn activate(st: &Shared, i: usize) {
 }
 
 fn launch(st: &Shared, i: usize) {
-    let (app, entry, key) = {
-        let s = st.borrow();
-        let Some(it) = s.items.get(i) else { return };
-        (s.app.clone(), it.entry, it.key.clone())
-    };
+    let key = st.borrow().items.get(i).map(|it| it.key.clone());
+    if let Some(key) = key {
+        launch_key(st, key);
+    }
+}
+
+fn launch_key(st: &Shared, key: String) {
+    let app = st.borrow().app.clone();
     let list = app.apps.list();
-    if let Some(e) = entry.and_then(|idx| list.get(idx)) {
+    if let Some(e) = list.iter().find(|e| e.id == key) {
         app.apps.launch(e);
         bounce(st, key);
     }
@@ -1337,7 +1340,6 @@ struct Menu {
     paint: Paint,
     title: String,
     key: String,
-    index: usize,
     rows: Vec<(String, Act, bool)>,
     hover: Option<usize>,
     fade: Tween,
@@ -1412,7 +1414,7 @@ fn open_menu(st: &Shared, i: usize) {
     let mut fade = Tween::still(0.0);
     fade.go(1.0, glib::monotonic_time(), 160, motion::STANDARD);
     let scrim = crate::paint::scrim(monitor.as_ref(), close_menu);
-    let menu = Rc::new(RefCell::new(Menu { dock: Rc::downgrade(st), window: window.clone(), scrim, paint: paint.clone(), title, key, index: i, rows, hover: None, fade }));
+    let menu = Rc::new(RefCell::new(Menu { dock: Rc::downgrade(st), window: window.clone(), scrim, paint: paint.clone(), title, key, rows, hover: None, fade }));
     let weak = Rc::downgrade(&menu);
     paint.on_draw(move |s| {
         if let Some(m) = weak.upgrade() {
@@ -1495,10 +1497,10 @@ fn open_menu(st: &Shared, i: usize) {
 }
 
 fn run(m: &Rc<RefCell<Menu>>, r: usize) {
-    let (dock, act, key, index) = {
+    let (dock, act, key) = {
         let m = m.borrow();
         let Some(row) = m.rows.get(r) else { return };
-        (m.dock.upgrade(), row.1.clone(), m.key.clone(), m.index)
+        (m.dock.upgrade(), row.1.clone(), m.key.clone())
     };
     close_menu();
     let Some(st) = dock else { return };
@@ -1508,7 +1510,7 @@ fn run(m: &Rc<RefCell<Menu>>, r: usize) {
                 let _ = gio::spawn_blocking(move || compositor::focus(id)).await;
             });
         }
-        Act::Launch => launch(&st, index),
+        Act::Launch => launch_key(&st, key),
         Act::Pin => toggle_pin(&st, &key),
         Act::Hide => {
             let app = st.borrow().app.clone();

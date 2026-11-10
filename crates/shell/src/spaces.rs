@@ -36,10 +36,14 @@ struct Card {
 
 /// A window icon being dragged onto another workspace card.
 struct Drag {
-    card: usize,
-    win: usize,
+    space: u64,
+    window: u64,
     at: (f64, f64),
     moving: bool,
+}
+
+fn drag_window<'a>(cards: &'a [Card], drag: &Drag) -> Option<&'a (u64, String, Option<gdk::Paintable>)> {
+    cards.iter().find(|c| c.id == drag.space)?.windows.iter().find(|w| w.0 == drag.window)
 }
 
 /// A special workspace, shown as a small chip under the cards.
@@ -246,7 +250,7 @@ fn build(app: &Rc<App>) -> Shared {
         let Some(st) = weak.upgrade() else { return };
         let mut s = st.borrow_mut();
         s.drag = match s.spot_at(x, y) {
-            Some(Spot::Window(card, win)) => Some(Drag { card, win, at: (x, y), moving: false }),
+            Some(Spot::Window(card, win)) => Some(Drag { space: s.cards[card].id, window: s.cards[card].windows[win].0, at: (x, y), moving: false }),
             _ => None,
         };
     });
@@ -284,9 +288,9 @@ fn build(app: &Rc<App>) -> Shared {
                 Spot::Card(i) | Spot::Window(i, _) => Some(i),
                 Spot::Special(_) => None,
             });
-            let win = s.cards.get(d.card).and_then(|c| c.windows.get(d.win)).map(|w| w.0);
+            let win = drag_window(&s.cards, &d).map(|w| w.0);
             match (to, win) {
-                (Some(to), Some(win)) if to != d.card => s.cards.get(to).map(|c| (win, c.id)),
+                (Some(to), Some(win)) if s.cards[to].id != d.space => s.cards.get(to).map(|c| (win, c.id)),
                 _ => None,
             }
         };
@@ -332,6 +336,10 @@ fn load(st: &Shared) {
             }
         })
         .collect();
+    if s.drag.as_ref().is_some_and(|d| drag_window(&s.cards, d).is_none()) {
+        s.drag = None;
+        s.dropped = true;
+    }
     let output = s.output.clone();
     s.chips = specials
         .into_iter()
@@ -647,12 +655,12 @@ impl State {
                 draw::icon(s, &self.paint, cfg, "add", 26.0, false, pal.ink_faint, x + CARD_W / 2.0, y + CARD_H / 2.0 + 10.0);
                 continue;
             }
-            for (j, (_, app_id, icon)) in card.windows.iter().take(4).enumerate() {
+            for (j, (id, app_id, icon)) in card.windows.iter().take(4).enumerate() {
                 let (ix, iy) = self.icon_rect(i, j);
                 if self.hot == Some(Spot::Window(i, j)) {
                     draw::fill(s, &draw::round(ix - 4.0, iy - 4.0, ICON + 8.0, ICON + 8.0, 10.0), pal.ink_main.alpha(0.12));
                 }
-                let lifted = self.drag.as_ref().is_some_and(|d| d.moving && d.card == i && d.win == j);
+                let lifted = self.drag.as_ref().is_some_and(|d| d.moving && d.space == card.id && d.window == *id);
                 if lifted {
                     s.push_opacity(0.3);
                 }
@@ -672,7 +680,7 @@ impl State {
         }
         // The dragged window rides under the pointer, a touch larger.
         if let Some(d) = self.drag.as_ref().filter(|d| d.moving)
-            && let Some((_, app_id, icon)) = self.cards.get(d.card).and_then(|c| c.windows.get(d.win)) {
+            && let Some((_, app_id, icon)) = drag_window(&self.cards, d) {
             let size = ICON + 8.0;
             let (ix, iy) = (d.at.0 - rect.x - size / 2.0, d.at.1 - rect.y - size / 2.0);
             draw::fill(s, &draw::round(ix - 6.0, iy - 6.0, size + 12.0, size + 12.0, 14.0), pal.body.mix(pal.ink_main, 0.12).alpha(0.92));
@@ -720,5 +728,14 @@ mod tests {
             assert_eq!(panel_corner::envelope(Corner::TopLeft, rect, (SURFACE_W, SURFACE_H), FILLET),
                 panel_corner::Rect { x: 0.0, y: 0.0, w: w + 14.0, h: h + 14.0 });
         }
+    }
+
+    #[test]
+    fn drag_follows_ids_and_cancels_missing_source() {
+        let card = |id, ids: &[u64]| Card { id, idx: id, active: false, title: String::new(), windows: ids.iter().map(|id| (*id, String::new(), None)).collect() };
+        let drag = Drag { space: 2, window: 9, at: (0.0, 0.0), moving: true };
+        assert_eq!(drag_window(&[card(1, &[9]), card(2, &[8, 9])], &drag).map(|w| w.0), Some(9));
+        assert!(drag_window(&[card(2, &[8])], &drag).is_none());
+        assert!(drag_window(&[card(1, &[9])], &drag).is_none());
     }
 }

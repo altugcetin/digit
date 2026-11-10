@@ -7,6 +7,7 @@ mod drop_data;
 
 pub use drop::{accepts_drop, receive_drop};
 
+#[derive(Clone)]
 pub struct Item {
     pub path: PathBuf,
     pub name: String,
@@ -40,18 +41,34 @@ fn item(path: PathBuf) -> Option<Item> {
 
 fn with<R>(f: impl FnOnce(&mut Vec<Item>) -> R) -> R {
     ITEMS.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        let items = slot.get_or_insert_with(|| {
-            std::fs::read_to_string(store()).unwrap_or_default().lines().map(PathBuf::from).filter(|p| p.exists()).filter_map(item).collect()
-        });
-        f(items)
+        if cell.borrow().is_none() {
+            let paths = std::fs::read_to_string(store()).unwrap_or_default().lines().map(PathBuf::from).filter(|p| p.exists()).take(MAX).collect::<Vec<_>>();
+            let items = paths.into_iter().filter_map(item).collect();
+            let mut slot = cell.borrow_mut();
+            if slot.is_none() { *slot = Some(items); }
+        }
+        f(cell.borrow_mut().as_mut().unwrap())
     })
+}
+
+fn write_state(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path.parent().ok_or_else(|| std::io::Error::other("Missing state directory"))?;
+    std::fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(".tray-{}.tmp", gtk::glib::uuid_string_random()));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&tmp); }
+    result
 }
 
 fn save(items: &[Item]) {
     let text: String = items.iter().map(|i| format!("{}\n", i.path.display())).collect();
-    let _ = std::fs::create_dir_all(kit::theme::state_dir());
-    let _ = std::fs::write(store(), text);
+    if let Err(e) = write_state(&store(), &text) { eprintln!("digit: tray save: {e}"); }
 }
 
 pub fn len() -> usize {
@@ -59,7 +76,8 @@ pub fn len() -> usize {
 }
 
 pub fn each(mut f: impl FnMut(usize, &Item)) {
-    with(|items| items.iter().enumerate().for_each(|(i, it)| f(i, it)));
+    let items = with(|items| items.clone());
+    items.iter().enumerate().for_each(|(i, it)| f(i, it));
 }
 
 pub fn path(i: usize) -> Option<PathBuf> {
@@ -70,31 +88,43 @@ pub fn icon(i: usize) -> Option<gdk::Paintable> {
     with(|items| items.get(i).and_then(|it| it.icon.clone()))
 }
 
-pub fn add(paths: Vec<PathBuf>) {
-    with(|items| {
-        for p in paths {
-            if items.iter().any(|it| it.path == p) {
-                continue;
-            }
-            if let Some(it) = item(p) {
-                items.insert(0, it);
-            }
+fn incoming_paths(paths: Vec<PathBuf>, existing: &[PathBuf]) -> Vec<PathBuf> {
+    let mut seen: std::collections::HashSet<_> = existing.iter().cloned().collect();
+    let mut incoming = std::collections::VecDeque::new();
+    for path in paths {
+        if seen.insert(path.clone()) {
+            incoming.push_back(path);
+            if incoming.len() > MAX { incoming.pop_front(); }
         }
-        items.truncate(MAX);
-        save(items);
+    }
+    incoming.into_iter().collect()
+}
+
+pub fn add(paths: Vec<PathBuf>) {
+    let existing = with(|items| items.iter().map(|it| it.path.clone()).collect::<Vec<_>>());
+    let incoming = incoming_paths(paths, &existing).into_iter().filter_map(item).collect::<Vec<_>>();
+    let (_discarded, saved) = with(|items| {
+        let mut discarded = Vec::new();
+        for it in incoming {
+            if items.iter().any(|old| old.path == it.path) { discarded.push(it); }
+            else { items.insert(0, it); }
+        }
+        discarded.extend(items.split_off(MAX.min(items.len())));
+        (discarded, items.clone())
     });
+    save(&saved);
 }
 
 pub fn remove(i: usize) {
-    with(|items| {
-        if i < items.len() {
-            let gone = items.remove(i);
-            if gone.path.starts_with(stash()) {
-                let _ = std::fs::remove_file(&gone.path);
-            }
-            save(items);
-        }
+    let removed = with(|items| {
+        (i < items.len()).then(|| (items.remove(i), items.clone()))
     });
+    if let Some((gone, saved)) = removed {
+        if gone.path.starts_with(stash()) {
+            let _ = std::fs::remove_file(&gone.path);
+        }
+        save(&saved);
+    }
 }
 
 fn stash() -> PathBuf {
@@ -153,6 +183,31 @@ pub fn keep_text(text: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incoming_paths_are_limited_before_loading_and_keep_first_duplicate_order() {
+        let paths: Vec<_> = (0..MAX + 10).map(|n| PathBuf::from(n.to_string())).collect();
+        let mut repeated = paths.clone();
+        repeated.push(paths[10].clone());
+        let selected = incoming_paths(repeated, &[paths[MAX + 9].clone()]);
+        assert_eq!(selected, paths[9..MAX + 9]);
+        assert_eq!(selected.len(), MAX);
+    }
+
+    #[test]
+    fn state_replaces_complete_file_and_cleans_up_failed_rename() {
+        let dir = std::env::temp_dir().join(format!("digit-tray-state-{}", gtk::glib::uuid_string_random()));
+        let path = dir.join("tray");
+        write_state(&path, "first\n").unwrap();
+        write_state(&path, "second\nthird\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second\nthird\n");
+        let blocked = dir.join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        assert!(write_state(&blocked, "replacement").is_err());
+        assert!(blocked.is_dir());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn concurrent_drops_create_exclusive_files() {

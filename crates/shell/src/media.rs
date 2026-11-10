@@ -254,7 +254,7 @@ impl Players {
             }
             let Some(entry) = inner.entries.get_mut(name) else { return };
             track.since = if track.status == entry.track.status && entry.track.since != 0 { entry.track.since } else { now };
-            let new_track = track.title != entry.track.title;
+            let new_track = track_key(&track) != track_key(&entry.track);
             let toggled = track.status != entry.track.status;
             if new_track {
                 let seen = !entry.track.title.is_empty() && track.status == "Playing";
@@ -648,6 +648,16 @@ fn source_label(url: &str, app_name: &str) -> String {
     }
 }
 
+fn track_key(track: &Track) -> (u8, &str) {
+    if let Some(id) = track.trackid.as_ref().filter(|id| !id.as_str().ends_with("/NoTrack")) {
+        (0, id.as_str())
+    } else if !track.url.is_empty() {
+        (1, &track.url)
+    } else {
+        (2, &track.title)
+    }
+}
+
 /// Live streams report no duration; their title, URL or lack of seeking gives them away.
 fn timing(track: &Track) -> Timing {
     if track.length > 0.0 {
@@ -707,6 +717,21 @@ mod tests {
 
     fn track(title: &str, url: &str, length: f64, can_seek: bool) -> Track {
         Track { title: title.into(), url: url.into(), length, can_seek, ..Default::default() }
+    }
+
+    #[test]
+    fn track_identity_prefers_id_then_url_then_title() {
+        let mut a = track("Same", "file:///one", 1.0, true);
+        let mut b = track("Same", "file:///two", 1.0, true);
+        assert_ne!(track_key(&a), track_key(&b));
+        a.trackid = Some(OwnedObjectPath::try_from("/one").unwrap());
+        b.trackid = Some(OwnedObjectPath::try_from("/two").unwrap());
+        assert_ne!(track_key(&a), track_key(&b));
+        b.trackid = a.trackid.clone();
+        assert_eq!(track_key(&a), track_key(&b));
+        a.trackid = None;
+        a.url.clear();
+        assert_eq!(track_key(&a), (2, "Same"));
     }
 
     #[test]

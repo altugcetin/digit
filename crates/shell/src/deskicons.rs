@@ -1984,12 +1984,34 @@ fn clip(paint: &Paint, files: &[FileData], cut: bool) {
     let _ = paint.clipboard().set_content(Some(&provider));
 }
 
+struct ClipboardWatch {
+    clipboard: gdk::Clipboard,
+    changed: Rc<Cell<bool>>,
+    handler: Option<glib::SignalHandlerId>,
+}
+
+impl ClipboardWatch {
+    fn new(clipboard: &gdk::Clipboard) -> Self {
+        let changed = Rc::new(Cell::new(false));
+        let signal = changed.clone();
+        let handler = clipboard.connect_changed(move |_| signal.set(true));
+        Self { clipboard: clipboard.clone(), changed, handler: Some(handler) }
+    }
+}
+
+impl Drop for ClipboardWatch {
+    fn drop(&mut self) {
+        if let Some(handler) = self.handler.take() { self.clipboard.disconnect(handler); }
+    }
+}
+
 /// Files from the clipboard land at `pointer`: cut ones move here, copied ones are copied.
 fn paste(d: &Rc<RefCell<Desktop>>, pointer: (f64, f64)) {
     let paint = d.borrow().paint.clone();
     let clipboard = paint.clipboard();
     let weak = Rc::downgrade(d);
     glib::spawn_future_local(async move {
+        let watch = ClipboardWatch::new(&clipboard);
         let formats = clipboard.formats();
         let mut found: Option<(Vec<String>, bool)> = None;
         if formats.contain_mime_type(COPIED_FILES)
@@ -2016,7 +2038,9 @@ fn paste(d: &Rc<RefCell<Desktop>>, pointer: (f64, f64)) {
             && !uris.is_empty()
         {
             import_drop(&d, uris, pointer, !cut, cut, move |success| {
-                if cut && success {
+                let unchanged = !watch.changed.get();
+                drop(watch);
+                if cut && success && unchanged {
                     let _ = clipboard.set_content(None::<&gdk::ContentProvider>);
                 }
             });
@@ -3966,9 +3990,9 @@ fn copy_import(file: &gio::File, dest: &Path, cut: bool) -> Result<(), String> {
     let target = gio::File::for_path(dest);
     match file.path() {
         Some(path) => {
-            copy_tree(&path, dest).map_err(|e| e.to_string())?;
+            let copied = copy_tree(&path, dest).map_err(|e| e.to_string())?;
             if cut {
-                remove_import_source(&path).map_err(|e| e.to_string())?;
+                remove_import_source(&copied).map_err(|e| e.to_string())?;
             }
         }
         None => {
@@ -3982,17 +4006,50 @@ fn copy_import(file: &gio::File, dest: &Path, cut: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn remove_import_source(path: &Path) -> std::io::Result<()> {
-    if std::fs::symlink_metadata(path)?.is_dir() {
-        std::fs::remove_dir_all(path)
-    } else {
-        std::fs::remove_file(path)
-    }
+struct CopiedSource {
+    path: PathBuf,
+    meta: std::fs::Metadata,
 }
 
-fn copy_tree(src: &Path, dest: &Path) -> std::io::Result<()> {
+fn remove_import_source(copied: &[CopiedSource]) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let mut error = None;
+    // Children precede their directories; newly created entries keep a directory nonempty.
+    for entry in copied.iter().rev() {
+        let result = (|| {
+            let meta = std::fs::symlink_metadata(&entry.path)?;
+            let old = &entry.meta;
+            if meta.dev() != old.dev() || meta.ino() != old.ino() || meta.file_type() != old.file_type()
+                || (!meta.is_dir() && (meta.len() != old.len() || meta.modified()? != old.modified()?
+                    || meta.ctime() != old.ctime() || meta.ctime_nsec() != old.ctime_nsec()))
+            {
+                return Err(std::io::Error::other("Source changed during copy"));
+            }
+            if meta.is_dir() { std::fs::remove_dir(&entry.path) } else { std::fs::remove_file(&entry.path) }
+        })();
+        if let Err(e) = result { error.get_or_insert(e); }
+    }
+    error.map_or(Ok(()), Err)
+}
+
+fn copy_tree(src: &Path, dest: &Path) -> std::io::Result<Vec<CopiedSource>> {
+    if std::fs::symlink_metadata(src)?.is_dir() {
+        let source = std::fs::canonicalize(src)?;
+        let parent = std::fs::canonicalize(dest.parent().ok_or_else(|| std::io::Error::other("Missing destination folder"))?)?;
+        let target = parent.join(dest.file_name().ok_or_else(|| std::io::Error::other("Missing destination name"))?);
+        if target.starts_with(&source) {
+            return Err(std::io::Error::other("Cannot copy a folder into itself"));
+        }
+    }
+    let mut copied = Vec::new();
+    copy_tree_entries(src, dest, &mut copied)?;
+    Ok(copied)
+}
+
+fn copy_tree_entries(src: &Path, dest: &Path, copied: &mut Vec<CopiedSource>) -> std::io::Result<()> {
     use std::io;
     let meta = std::fs::symlink_metadata(src)?;
+    copied.push(CopiedSource { path: src.to_path_buf(), meta: meta.clone() });
     if meta.is_symlink() {
         std::os::unix::fs::symlink(std::fs::read_link(src)?, dest)
     } else if meta.is_dir() {
@@ -4000,7 +4057,7 @@ fn copy_tree(src: &Path, dest: &Path) -> std::io::Result<()> {
         let result = (|| {
             for entry in std::fs::read_dir(src)? {
                 let entry = entry?;
-                copy_tree(&entry.path(), &dest.join(entry.file_name()))?;
+                copy_tree_entries(&entry.path(), &dest.join(entry.file_name()), copied)?;
             }
             std::fs::set_permissions(dest, meta.permissions())
         })();
@@ -4008,6 +4065,8 @@ fn copy_tree(src: &Path, dest: &Path) -> std::io::Result<()> {
         result
     } else if meta.is_file() {
         let mut input = std::fs::File::open(src)?;
+        // Track the opened file, so replacing the source path cannot delete the replacement.
+        copied.last_mut().unwrap().meta = input.metadata()?;
         let mut output = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -4898,6 +4957,42 @@ mod tests {
         assert!(read_positions(&path).unwrap().is_empty());
         assert!(write_positions(&path.join("impossible.json"), &p).is_err());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn copy_rejects_descendants_including_symlinked_parents() {
+        let dir = temp();
+        let src = dir.join("src");
+        std::fs::create_dir_all(src.join("Desktop")).unwrap();
+        std::os::unix::fs::symlink(src.join("Desktop"), dir.join("alias")).unwrap();
+        for dest in [src.clone(), src.join("Desktop/copy"), dir.join("alias/copy")] {
+            assert!(copy_tree(&src, &dest).is_err());
+        }
+        assert_eq!(std::fs::read_dir(src.join("Desktop")).unwrap().count(), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn cut_cleanup_preserves_new_changed_and_replaced_entries() {
+        let dir = temp();
+        let src = dir.join("src");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        for name in ["unchanged", "changed", "mtime", "replaced"] {
+            std::fs::write(src.join(name), b"original").unwrap();
+        }
+        std::os::unix::fs::symlink("unchanged", src.join("link")).unwrap();
+        let copied = copy_tree(&src, &dir.join("dest")).unwrap();
+        std::fs::write(src.join("new"), b"new").unwrap();
+        std::fs::write(src.join("changed"), b"changed size").unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(src.join("mtime")).unwrap();
+        file.set_modified(std::time::SystemTime::UNIX_EPOCH).unwrap();
+        std::fs::rename(src.join("replaced"), dir.join("old")).unwrap();
+        std::fs::write(src.join("replaced"), b"original").unwrap();
+        assert!(remove_import_source(&copied).is_err());
+        for name in ["new", "changed", "mtime", "replaced"] { assert!(src.join(name).exists()); }
+        assert!(!src.join("unchanged").exists());
+        assert!(src.join("link").symlink_metadata().is_err());
+        assert!(!src.join("sub").exists());
+        assert_eq!(std::fs::read(dir.join("dest/changed")).unwrap(), b"original");
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]

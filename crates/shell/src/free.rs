@@ -22,6 +22,19 @@ struct Track {
     saved: HashMap<u64, Geo>,
 }
 
+impl Track {
+    fn retain(&mut self, live: &HashSet<u64>) {
+        self.floating.retain(|id, _| live.contains(id));
+        self.maxed.retain(|id| live.contains(id));
+        self.saved.retain(|id, _| live.contains(id));
+    }
+}
+
+pub fn retain(ids: impl Iterator<Item = u64>) {
+    let live = ids.collect();
+    TRACK.with(|t| t.borrow_mut().retain(&live));
+}
+
 thread_local! {
     static TRACK: RefCell<Track> = RefCell::new(Track::default());
     static MODE: RefCell<(bool, Option<std::time::SystemTime>)> = const { RefCell::new((false, None)) };
@@ -249,4 +262,19 @@ pub fn snap(app: &Rc<App>, which: &str) {
             let _ = gio::spawn_blocking(move || place(id, g, !floating)).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closed_windows_leave_all_tracking_maps() {
+        let g = Geo { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let mut track = Track { floating: HashMap::from([(1, g), (2, g)]), maxed: HashSet::from([1, 2]), saved: HashMap::from([(1, g), (2, g)]) };
+        track.retain(&HashSet::from([2]));
+        assert_eq!(track.floating, HashMap::from([(2, g)]));
+        assert_eq!(track.maxed, HashSet::from([2]));
+        assert_eq!(track.saved, HashMap::from([(2, g)]));
+    }
 }

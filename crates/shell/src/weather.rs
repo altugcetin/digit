@@ -76,11 +76,13 @@ fn minutes(iso: &str) -> Option<f64> {
     Some(h.parse::<f64>().ok()? * 60.0 + m.get(..2)?.parse::<f64>().ok()?)
 }
 
-async fn refresh(app: Rc<App>) -> bool {
+async fn refresh(app: Rc<App>, generation: u64) -> bool {
+    let current = || GEN.with(Cell::get) == generation;
     let (city, unit) = {
         let p = app.prefs.borrow();
         (p.weather_city.trim().to_string(), p.weather_unit.clone())
     };
+    if !current() { return false; }
     if city.is_empty() {
         *app.weather.borrow_mut() = None;
         return true;
@@ -90,6 +92,7 @@ async fn refresh(app: Rc<App>) -> bool {
         Some((_, lat, lon, place)) => (lat, lon, place),
         None => {
             let Some((lat, lon, place)) = locate(&city).await else { return false };
+            if !current() { return false; }
             PLACE.with(|p| *p.borrow_mut() = Some((city.clone(), lat, lon, place.clone())));
             (lat, lon, place)
         }
@@ -113,16 +116,19 @@ async fn refresh(app: Rc<App>) -> bool {
         place,
         unit: if f { 'F' } else { 'C' },
     };
+    if !current() { return false; }
     if let (Some(rise), Some(set)) = (first("sunrise").and_then(|v| v.as_str().and_then(minutes)), first("sunset").and_then(|v| v.as_str().and_then(minutes))) {
         crate::night::set_sun(rise, set);
         crate::night::apply(&app);
     }
+    if !current() { return false; }
     if app.weather.borrow().as_ref() != Some(&w) {
         *app.weather.borrow_mut() = Some(w);
-        if let Some(c) = app.control.borrow().as_ref() {
+        let control = app.control.borrow().clone();
+        if let Some(c) = control {
             c.changed();
         }
-        crate::desk::changed(&app);
+        if current() { crate::desk::changed(&app); }
     }
     true
 }
@@ -144,7 +150,7 @@ pub fn start(app: &Rc<App>) {
                 crate::desk::changed(&app);
                 return;
             }
-            let ok = refresh(app).await;
+            let ok = refresh(app, generation).await;
             glib::timeout_future(Duration::from_secs(if ok { 1800 } else { 300 })).await;
         }
     });

@@ -116,7 +116,7 @@ fn entities(text: &str) -> String {
     while let Some(at) = rest.find('&') {
         out.push_str(&rest[..at]);
         rest = &rest[at..];
-        let end = rest.find(';').filter(|&n| n <= 16);
+        let end = rest.as_bytes().iter().take(17).position(|&b| b == b';');
         let decoded = end.and_then(|end| {
             let entity = &rest[1..end];
             match entity {
@@ -347,6 +347,16 @@ mod tests {
             Some(url)
         );
         assert!(decode_text(&[0xff, 0xfe, 0], "text/html;charset=utf-16").is_none());
+    }
+
+    #[test]
+    fn entities_bound_lookahead_and_preserve_unicode_and_invalid_entities() {
+        let text = format!("{};雪&amp;&#x1F600;&unknown;", "&".repeat(100_000));
+        assert_eq!(entities(&text), format!("{};雪&😀&unknown;", "&".repeat(100_000)));
+        assert_eq!(entities("&雪雪雪雪雪雪;&amp;"), "&雪雪雪雪雪雪;&");
+        assert_eq!(entities("&#0000000000065;"), "A");
+        assert_eq!(entities("&#00000000000065;"), "A");
+        assert_eq!(entities("&#000000000000065;"), "&#000000000000065;");
     }
 
     #[test]
