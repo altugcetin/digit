@@ -99,17 +99,26 @@ fn string(map: &HashMap<String, OwnedValue>, k: &str) -> String {
     map.get(k).and_then(|v| v.downcast_ref::<String>().ok()).unwrap_or_default()
 }
 
+fn pixmap_len(w: i32, h: i32, len: usize) -> Option<usize> {
+    if !(1..=1024).contains(&w) || !(1..=1024).contains(&h) {
+        return None;
+    }
+    let size = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+    (len >= size).then_some(size)
+}
+
 fn pixmap(map: &HashMap<String, OwnedValue>, k: &str, want: i32) -> Option<gdk::Paintable> {
     let v = map.get(k)?.try_clone().ok()?;
     let list: Vec<(i32, i32, Vec<u8>)> = Vec::try_from(v).ok()?;
-    let pick = list.iter().filter(|(w, h, d)| *w > 0 && *h > 0 && d.len() >= (*w * *h * 4) as usize).min_by_key(|(w, _, _)| if *w >= want { *w - want } else { 10_000 + want - *w })?;
+    let pick = list.iter().filter(|(w, h, d)| pixmap_len(*w, *h, d.len()).is_some()).min_by_key(|(w, _, _)| if *w >= want { *w - want } else { 10_000 + want - *w })?;
     let (w, h, data) = pick;
-    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-    for px in data.chunks_exact(4).take((w * h) as usize) {
+    let size = pixmap_len(*w, *h, data.len())?;
+    let mut rgba = Vec::with_capacity(size);
+    for px in data[..size].chunks_exact(4) {
         rgba.extend_from_slice(&[px[1], px[2], px[3], px[0]]);
     }
     let bytes = glib::Bytes::from_owned(rgba);
-    Some(gdk::MemoryTexture::new(*w, *h, gdk::MemoryFormat::R8g8b8a8, &bytes, (*w * 4) as usize).upcast())
+    Some(gdk::MemoryTexture::new(*w, *h, gdk::MemoryFormat::R8g8b8a8, &bytes, *w as usize * 4).upcast())
 }
 
 fn named(name: &str, theme_path: &str, px: i32, scale: i32) -> Option<gdk::Paintable> {
@@ -427,4 +436,19 @@ pub fn activate(app: &Rc<App>, index: usize, monitor: Option<gdk::Monitor>, x: f
             popmenu::settle();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pixmap_len;
+
+    #[test]
+    fn rejects_invalid_pixmap_sizes_and_short_buffers() {
+        for (w, h, len) in [(65536, 16384, 0), (0, 20, 1600), (-1, 20, 1600), (20, 0, 1600), (1025, 1, 4100), (1, 1025, 4100), (20, 20, 1599), (i32::MAX, i32::MAX, usize::MAX)] {
+            assert_eq!(pixmap_len(w, h, len), None);
+        }
+        assert_eq!(pixmap_len(20, 20, 1600), Some(1600));
+        assert_eq!(pixmap_len(20, 20, 1604), Some(1600));
+        assert_eq!(pixmap_len(1024, 1024, 4_194_304), Some(4_194_304));
+    }
 }

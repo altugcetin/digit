@@ -359,20 +359,42 @@ pub fn set(key: &str, value: toml::Value) -> Result<(), String> {
     kit::prefs::set(key, value)
 }
 
+thread_local! {
+    static LAST: std::cell::RefCell<Config> = std::cell::RefCell::new(Config::default());
+}
+
+fn update(last: &mut Config, text: &str) -> Result<(), toml::de::Error> {
+    *last = toml::from_str(text)?;
+    Ok(())
+}
+
 pub fn load() -> Config {
     let path = dir().join("config.toml");
-    match std::fs::read_to_string(&path) {
-        Ok(text) => toml::from_str(&text).unwrap_or_else(|e| {
-            eprintln!("digit: {}: {e}", path.display());
-            Config::default()
-        }),
-        Err(_) => Config::default(),
-    }
+    LAST.with(|last| {
+        let mut last = last.borrow_mut();
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Err(e) = update(&mut last, &text) {
+                eprintln!("digit: {}: {e}", path.display());
+            }
+        }
+        last.clone()
+    })
 }
 
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
+
+    #[test]
+    fn invalid_typed_value_keeps_previous_config() {
+        let mut last = Config::default();
+        update(&mut last, "idle_lock = 300.0\nfont = 'Saved font'").unwrap();
+        let previous = toml::to_string(&last).unwrap();
+        assert!(update(&mut last, "idle_lock = 'never'\nfont = 'Ignored font'").is_err());
+        assert_eq!(toml::to_string(&last).unwrap(), previous);
+        update(&mut last, "idle_lock = 600.0").unwrap();
+        assert_eq!(last.idle_lock, 600.0);
+    }
 
     #[test]
     fn set_preserves_broken_config() {

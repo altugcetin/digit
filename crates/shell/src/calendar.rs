@@ -23,7 +23,7 @@ pub struct Event {
 
 thread_local! {
     static EVENTS: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
-    static LOADED: RefCell<i64> = const { RefCell::new(i64::MIN) };
+    static LOADED: RefCell<Option<i64>> = const { RefCell::new(None) };
 }
 
 pub fn month(day: &Day) -> String {
@@ -70,13 +70,17 @@ pub fn clock(at: i64) -> String {
     glib::DateTime::from_unix_local(at).ok().and_then(|d| d.format("%H:%M").ok()).map(|s| s.to_string()).unwrap_or_default()
 }
 
+fn stale(now: i64, loaded: Option<i64>) -> bool {
+    loaded.is_none_or(|loaded| now.saturating_sub(loaded) > 15 * 60 * 1_000_000)
+}
+
 pub fn refresh(app: &Rc<App>) {
     let now = glib::monotonic_time();
-    let stale = LOADED.with(|l| now - *l.borrow() > 15 * 60 * 1_000_000);
+    let stale = LOADED.with(|l| stale(now, *l.borrow()));
     if !stale || app.cfg.calendars.is_empty() {
         return;
     }
-    LOADED.with(|l| *l.borrow_mut() = now);
+    LOADED.with(|l| *l.borrow_mut() = Some(now));
     let sources = app.cfg.calendars.clone();
     let weak = Rc::downgrade(app);
     glib::spawn_future_local(async move {
@@ -166,7 +170,16 @@ fn parse(text: &str) -> Vec<Event> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{parse, stale};
+
+    #[test]
+    fn refreshes_unloaded_and_expired_calendar() {
+        assert!(stale(0, None));
+        assert!(!stale(900_000_000, Some(0)));
+        assert!(stale(900_000_001, Some(0)));
+        assert!(!stale(0, Some(1)));
+        assert!(stale(i64::MAX, Some(i64::MIN)));
+    }
 
     #[test]
     fn reads_timed_and_all_day_events() {
