@@ -273,9 +273,10 @@ fn open_base(app: &gtk::Application, base: draw::Base, output: String, origin: R
             glib::Propagation::Proceed
         }
     });
-    let keep = ed.clone();
+    let keep = RefCell::new(Some(ed));
     window.connect_destroy(move |_| {
-        keep.marks.borrow_mut().clear();
+        let ed = keep.borrow_mut().take();
+        drop(ed);
     });
 }
 

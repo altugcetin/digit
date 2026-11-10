@@ -348,6 +348,10 @@ fn watch(window: &gtk::ApplicationWindow) {
 
 fn window(app: &gtk::Application) -> gtk::ApplicationWindow {
     let window = gtk::ApplicationWindow::builder().application(app).title("Settings").default_width(1080).default_height(720).build();
+    window.connect_close_request(|_| {
+        displays::revert_pending();
+        glib::Propagation::Proceed
+    });
     kit::scroll::smooth(&window);
     window.set_decorated(false);
     // Settings opens as a full-screen overlay unless it is set to open as a window.
@@ -611,6 +615,7 @@ fn main() -> glib::ExitCode {
     install();
     let app = gtk::Application::new(Some(APP_ID), gio::ApplicationFlags::HANDLES_COMMAND_LINE);
     app.connect_startup(|_| gtk::Window::set_default_icon_name(APP_ID));
+    app.connect_shutdown(|_| displays::revert_pending());
     app.connect_command_line(|app, cmd| {
         let args = cmd.arguments();
         let page = args.get(1).and_then(|a| a.to_str().map(str::to_string));

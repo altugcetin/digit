@@ -263,7 +263,7 @@ fn hypr_restore(old: Option<String>) {
             let _ = std::fs::remove_file(path);
         }
     }
-    hypr_reload_if_needed();
+    run(&["hyprctl", "reload"]);
 }
 
 fn hypr_error() -> Option<String> {
@@ -319,6 +319,17 @@ fn persist(wm: Wm, outs: &[Out]) -> Result<String, String> {
         }
         Wm::Hypr => Ok("Saved to Digit's Hyprland display config".into()),
         Wm::Other => Err("Display settings work on niri and Hyprland".into()),
+    }
+}
+
+thread_local! {
+    static REVERT: RefCell<Option<Rc<dyn Fn(bool)>>> = const { RefCell::new(None) };
+}
+
+pub fn revert_pending() {
+    let finish = REVERT.with(|r| r.borrow_mut().take());
+    if let Some(finish) = finish {
+        finish(false);
     }
 }
 
@@ -839,6 +850,8 @@ pub fn build() -> gtk::Widget {
     let finish = {
         let (s2, a2, f2, bar, apply) = (st.clone(), area.clone(), fill.clone(), bar.clone(), apply.clone());
         Rc::new(move |keep: bool| {
+            let previous = REVERT.with(|r| r.borrow_mut().take());
+            drop(previous);
             let (wm, outs, saved, pending, undo) = {
                 let mut s = s2.borrow_mut();
                 (s.wm, s.outs.clone(), s.saved.clone(), s.pending.take(), s.undo.take())
@@ -876,6 +889,7 @@ pub fn build() -> gtk::Widget {
     {
         let (s2, bar, ask, finish, apply2) = (st.clone(), bar.clone(), ask.clone(), finish.clone(), apply.clone());
         apply.connect_clicked(move |_| {
+            revert_pending();
             let (wm, outs, saved) = {
                 let s = s2.borrow();
                 (s.wm, s.outs.clone(), s.saved.clone())
@@ -907,6 +921,7 @@ pub fn build() -> gtk::Widget {
                 ui::fail(&e);
                 return;
             }
+            REVERT.with(|r| *r.borrow_mut() = Some(finish.clone()));
             apply2.set_sensitive(false);
             bar.show();
             let left = Rc::new(std::cell::Cell::new(15));
@@ -933,6 +948,20 @@ pub fn build() -> gtk::Widget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_revert_runs_once_and_can_reenter() {
+        let calls = Rc::new(std::cell::Cell::new(0));
+        let count = calls.clone();
+        REVERT.with(|r| *r.borrow_mut() = Some(Rc::new(move |keep| {
+            assert!(!keep);
+            count.set(count.get() + 1);
+            revert_pending();
+        })));
+        revert_pending();
+        revert_pending();
+        assert_eq!(calls.get(), 1);
+    }
 
     #[test]
     fn moving_a_workspace_keeps_other_and_unplugged_assignments() {
