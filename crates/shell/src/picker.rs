@@ -8,7 +8,7 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use kit::motion::{self, Tween};
 use kit::palette::Rgb;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
@@ -70,6 +70,7 @@ struct State {
     scrim: Option<gtk::Window>,
     size: (f64, f64),
     source: Source,
+    listing: u64,
     all: Rc<Vec<String>>,
     items: Rc<Vec<String>>,
     pointed: usize,
@@ -190,13 +191,10 @@ pub fn slideshow(app: &Rc<App>) {
     let weak = Rc::downgrade(app);
     let id = glib::timeout_add_local(Duration::from_secs((every * 60.0) as u64), move || {
         let Some(app) = weak.upgrade() else { return glib::ControlFlow::Break };
-        let mut images = Vec::new();
-        for dir in wallpaper::directories() {
-            for image in wallpaper::listed(&dir) {
-                if !images.contains(&image) { images.push(image); }
-            }
-        }
-        if !images.is_empty() && (images.len() > 1 || app.wallpapers.layout() == wallpaper::Layout::Separate) && app.wallpapers.rotate(&images) { crate::retheme(&app); }
+        glib::spawn_future_local(async move {
+            let images = gio::spawn_blocking(|| unique_images(Vec::new())).await.unwrap_or_default();
+            if !images.is_empty() && (images.len() > 1 || app.wallpapers.layout() == wallpaper::Layout::Separate) && app.wallpapers.rotate(&images) { crate::retheme(&app); }
+        });
         glib::ControlFlow::Continue
     });
     SLIDES.with(|s| *s.borrow_mut() = Some(id));
@@ -213,18 +211,20 @@ fn source_dir(source: Source) -> Option<std::path::PathBuf> {
 fn list(source: Source) -> Vec<String> {
     match source {
         Source::Yours => {
-            let mut out = wallpaper::used();
-            for dir in wallpaper::directories() {
-                for p in wallpaper::listed(&dir) {
-                    if !out.contains(&p) {
-                        out.push(p);
-                    }
-                }
-            }
-            out
+            unique_images(wallpaper::used())
         }
         other => source_dir(other).map(|d| wallpaper::listed(&d)).unwrap_or_default(),
     }
+}
+
+fn unique_paths(paths: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    paths.into_iter().filter(|p| seen.insert(p.clone())).collect()
+}
+
+fn unique_images(mut out: Vec<String>) -> Vec<String> {
+    for dir in wallpaper::directories() { out.extend(wallpaper::listed(&dir)); }
+    unique_paths(out)
 }
 
 fn colors_file() -> std::path::PathBuf {
@@ -385,7 +385,7 @@ fn build(master: &gdk::gdk_pixbuf::Pixbuf, kind: &str, sf: f64) -> Option<gdk::T
     Some(gdk::MemoryTexture::new(pw, ph, gdk::MemoryFormat::B8g8r8a8Premultiplied, &glib::Bytes::from_owned(bytes), stride).upcast())
 }
 
-fn cards(path: &str, want: &[&'static str], sf: f64, screen: Option<(i32, i32)>) -> Vec<(&'static str, gdk::Texture)> {
+fn cards(path: &str, want: &[&'static str], sf: f64) -> Vec<(&'static str, gdk::Texture)> {
     let mut out = Vec::new();
     let mut make = Vec::new();
     for kind in ["big", "side", "grid"] {
@@ -404,11 +404,7 @@ fn cards(path: &str, want: &[&'static str], sf: f64, screen: Option<(i32, i32)>)
     if !make.iter().any(|k| want.contains(k)) {
         return out;
     }
-    let screen = screen.filter(|_| !want.contains(&"preview")).map(|s| (s, format!("screen-{}x{}", s.0, s.1))).filter(|(_, t)| !crate::stash::has(path, t));
-    let mut need: Vec<(i32, i32)> = make.iter().map(|k| if *k == "preview" { ((BIG_W * sf) as i32, (BIG_H * sf) as i32) } else { let (w, h, _) = card_box(k, sf); (w, h) }).collect();
-    if let Some((size, _)) = &screen {
-        need.push(*size);
-    }
+    let need: Vec<(i32, i32)> = make.iter().map(|k| if *k == "preview" { ((BIG_W * sf) as i32, (BIG_H * sf) as i32) } else { let (w, h, _) = card_box(k, sf); (w, h) }).collect();
     let Some(master) = crate::stash::master(path, &need) else { return out };
     for kind in make {
         if kind == "preview" {
@@ -420,11 +416,6 @@ fn cards(path: &str, want: &[&'static str], sf: f64, screen: Option<(i32, i32)>)
             if want.contains(&kind) {
                 out.push((kind, t));
             }
-        }
-    }
-    if let Some(((w, h), tag)) = screen {
-        if let Some(pb) = crate::stash::cover(&master, w, h) {
-            crate::stash::put(path, &tag, crate::stash::texture(&pb));
         }
     }
     drop(master);
@@ -511,6 +502,7 @@ impl Picker {
             scrim: None,
             size: (1920.0, 1080.0),
             source: Source::Yours,
+            listing: 0,
             all: Rc::default(),
             items: Rc::default(),
             pointed: 0,
@@ -817,16 +809,27 @@ impl Picker {
     }
 
     fn load(&self, source: Source) {
-        {
+        let generation = {
             let mut s = self.0.borrow_mut();
             s.source = source;
-            s.all = Rc::new(list(source));
-            if source == Source::Yours && !s.original.is_empty() && !s.all.contains(&s.original) {
-                let original = s.original.clone();
-                Rc::make_mut(&mut s.all).insert(0, original);
+            s.listing += 1;
+            s.listing
+        };
+        let weak = Rc::downgrade(&self.0);
+        glib::spawn_future_local(async move {
+            let all = gio::spawn_blocking(move || list(source)).await.unwrap_or_default();
+            let Some(state) = weak.upgrade() else { return };
+            {
+                let mut s = state.borrow_mut();
+                if s.listing != generation || !s.open { return; }
+                s.all = Rc::new(all);
+                if source == Source::Yours && !s.original.is_empty() && !s.all.contains(&s.original) {
+                    let original = s.original.clone();
+                    Rc::make_mut(&mut s.all).insert(0, original);
+                }
             }
-        }
-        self.refilter();
+            Picker(state).refilter();
+        });
         let weak = Rc::downgrade(&self.0);
         glib::timeout_add_local_once(Duration::from_millis(1600), move || {
             if let Some(state) = weak.upgrade() {
@@ -1052,15 +1055,11 @@ impl Picker {
 
     fn fetch(&self, job: Job, sf: f64) {
         let weak = Rc::downgrade(&self.0);
-        let screen = {
-            let st = self.0.borrow();
-            if st.app.wallpapers.layout() == wallpaper::Layout::Span { None } else { st.app.wallpapers.size_of(&st.output) }
-        };
         glib::spawn_future_local(async move {
             let Job { path, kinds } = job;
             let file = path.clone();
             let want = kinds.clone();
-            let made = gio::spawn_blocking(move || cards(&file, &want, sf, screen)).await.unwrap_or_default();
+            let made = gio::spawn_blocking(move || cards(&file, &want, sf)).await.unwrap_or_default();
             let Some(state) = weak.upgrade() else { return };
             {
                 let mut s = state.borrow_mut();
@@ -1069,7 +1068,7 @@ impl Picker {
                     s.pending.retain(|p| *p != tag);
                 }
                 s.busy = s.busy.saturating_sub(1);
-                if s.open {
+                if s.open && s.order.contains(&path) {
                     let now = glib::monotonic_time();
                     let warm = s.fade.value(now) < 0.05;
                     for (kind, t) in made {
@@ -1509,4 +1508,14 @@ glib::wrapper! {
     pub struct Canvas(ObjectSubclass<imp::Canvas>)
         @extends gtk::Widget,
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wallpaper_paths_keep_history_and_directory_order_without_duplicates() {
+        assert_eq!(unique_paths(["recent", "a", "recent", "b", "a"].map(str::to_string)), ["recent", "a", "b"]);
+    }
 }

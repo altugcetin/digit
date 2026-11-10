@@ -33,19 +33,26 @@ pub fn get(path: &str, tag: &str) -> Option<gdk::Texture> {
 }
 
 pub fn put(path: &str, tag: &str, texture: gdk::Texture) {
-    let Some(f) = file(path, tag) else { return };
-    let _ = std::thread::Builder::new().name("digit-stash".into()).spawn(move || {
-        use std::os::unix::fs::DirBuilderExt;
-        if std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir()).is_err() {
-            return;
-        }
-        let tmp = f.with_extension(format!("{}.part", SEQ.fetch_add(1, Ordering::Relaxed)));
-        if texture.save_to_png(&tmp).is_ok() {
-            let _ = std::fs::rename(&tmp, &f);
-        } else {
-            let _ = std::fs::remove_file(&tmp);
-        }
+    use std::sync::{OnceLock, mpsc::{SyncSender, sync_channel}};
+    static WRITER: OnceLock<SyncSender<(PathBuf, gdk::Texture)>> = OnceLock::new();
+    let sender = WRITER.get_or_init(|| {
+        let (tx, rx) = sync_channel::<(PathBuf, gdk::Texture)>(2);
+        let _ = std::thread::Builder::new().name("digit-stash".into()).spawn(move || {
+            use std::os::unix::fs::DirBuilderExt;
+            for (f, texture) in rx {
+                if std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir()).is_err() { continue; }
+                let tmp = f.with_extension(format!("{}.part", SEQ.fetch_add(1, Ordering::Relaxed)));
+                if texture.save_to_png(&tmp).is_ok() {
+                    let _ = std::fs::rename(&tmp, &f);
+                } else {
+                    let _ = std::fs::remove_file(&tmp);
+                }
+            }
+        });
+        tx
     });
+    let Some(f) = file(path, tag) else { return };
+    let _ = sender.try_send((f, texture));
 }
 
 pub fn master(path: &str, need: &[(i32, i32)]) -> Option<Pixbuf> {
@@ -57,11 +64,15 @@ pub fn master(path: &str, need: &[(i32, i32)]) -> Option<Pixbuf> {
 }
 
 pub fn cover(pb: &Pixbuf, w: i32, h: i32) -> Option<Pixbuf> {
-    let (pw, ph) = (pb.width().max(1) as f64, pb.height().max(1) as f64);
-    let k = (w as f64 / pw).max(h as f64 / ph);
-    let (cw, ch) = (((pw * k).ceil() as i32).max(w), ((ph * k).ceil() as i32).max(h));
-    let scaled = if cw == pb.width() && ch == pb.height() { pb.clone() } else { pb.scale_simple(cw, ch, InterpType::Bilinear)? };
-    scaled.new_subpixbuf((cw - w) / 2, (ch - h) / 2, w, h).copy()
+    if w < 1 || h < 1 { return None; }
+    let (x, y, cw, ch) = crop_size(pb.width(), pb.height(), w, h);
+    pb.new_subpixbuf(x, y, cw, ch).scale_simple(w, h, InterpType::Bilinear)
+}
+
+fn crop_size(pw: i32, ph: i32, w: i32, h: i32) -> (i32, i32, i32, i32) {
+    let cw = ((ph as f64 * w as f64 / h as f64).round() as i32).clamp(1, pw);
+    let ch = ((pw as f64 * h as f64 / w as f64).round() as i32).clamp(1, ph);
+    ((pw - cw) / 2, (ph - ch) / 2, cw, ch)
 }
 
 pub fn texture(pb: &Pixbuf) -> gdk::Texture {
@@ -90,5 +101,27 @@ pub fn prune() {
         if std::fs::remove_file(&p).is_ok() {
             total = total.saturating_sub(len);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cover_retains_only_target_pixels() {
+        let pb = Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, true, 8, 128, 128).unwrap();
+        pb.fill(0xffffffff);
+        let cropped = cover(&pb, 128, 32).unwrap();
+        assert_eq!((cropped.width(), cropped.height()), (128, 32));
+        assert_eq!(cropped.read_pixel_bytes().len(), 128 * 32 * 4);
+        assert!(cover(&pb, 0, 32).is_none());
+    }
+
+    #[test]
+    fn cover_crops_extreme_sources_before_scaling() {
+        assert_eq!(crop_size(82, 8192, 1920, 1080), (0, 4073, 82, 46));
+        assert_eq!(crop_size(8192, 82, 1080, 1920), (4073, 0, 46, 82));
+        assert_eq!(crop_size(7680, 7680, 7680, 2160), (0, 2760, 7680, 2160));
     }
 }

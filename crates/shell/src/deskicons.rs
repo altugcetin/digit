@@ -1371,7 +1371,7 @@ fn draw_desktop(d: &Rc<RefCell<Desktop>>, s: &gtk::Snapshot) {
     // even before the scan finishes, on an empty folder, and on empty pages.
     // Match Paint::present's barely visible fill; alpha zero is optimized away.
     s.append_color(
-        &pal.body.alpha(0.004).rgba(),
+        &Rgb::new(0.0, 0.0, 0.0).alpha(0.004).rgba(),
         &graphene::Rect::new(
             0.0,
             0.0,
