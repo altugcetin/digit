@@ -48,7 +48,7 @@ pub fn apply_buttons() {
 }
 
 /// Set or remove only the named keys in one INI section, preserving unrelated values.
-fn ini(old: &str, section: &str, values: &[(&str, Option<&str>)]) -> String {
+pub fn ini(old: &str, section: &str, values: &[(&str, Option<&str>)]) -> String {
     let mut lines: Vec<String> = old.lines().map(str::to_owned).collect();
     if !lines.iter().any(|l| l.trim() == section) {
         lines.push(section.into());
@@ -76,53 +76,35 @@ fn ini(old: &str, section: &str, values: &[(&str, Option<&str>)]) -> String {
     format!("{}\n", lines.join("\n"))
 }
 
-/// Persist GTK/Qt settings and broadcast desktop settings only inside a Digit session.
-pub fn apply() -> Result<(), String> {
-    if !crate::hyprconf::installed() && !crate::niriconf::installed() {
-        return Ok(());
-    }
-    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _one = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+/// Explicit icon selection only; the shell calls this on a preference change, never at start.
+pub fn apply_icons() -> Result<(), String> {
     let prefs = crate::prefs::read();
     let icons = icon_theme(&prefs);
-    let (cursor, size) = crate::cursors::current(&prefs);
+    for version in ["gtk-3.0", "gtk-4.0"] {
+        update(&gtk::glib::user_config_dir().join(version).join("settings.ini"), "[Settings]", &[("gtk-icon-theme-name", Some(&icons))])?;
+    }
+    if crate::prefs::flag(&prefs, "theme_qt", false) && crate::distro::qt_platform() != crate::distro::QtPlatform::Missing {
+        update(&gtk::glib::user_config_dir().join("qt6ct/qt6ct.conf"), "[Appearance]", &[("icon_theme", Some(&icons))])?;
+    }
+    let value = format!("'{}'", icons.replace('\\', "\\\\").replace('\'', "\\'"));
+    let _ = std::process::Command::new("gsettings").args(["set", "org.gnome.desktop.interface", "icon-theme", &value]).output();
+    Ok(())
+}
+
+/// Explicit cursor selection only, serialized with toolkit writes by the shell.
+pub fn apply_cursor() -> Result<(), String> {
+    let (cursor, size) = crate::cursors::current(&crate::prefs::read());
     let size = size.to_string();
     for version in ["gtk-3.0", "gtk-4.0"] {
-        update(
-            &gtk::glib::user_config_dir()
-                .join(version)
-                .join("settings.ini"),
-            "[Settings]",
-            &[
-                ("gtk-icon-theme-name", Some(&icons)),
-                (
-                    "gtk-cursor-theme-name",
-                    (!cursor.is_empty()).then_some(cursor.as_str()),
-                ),
-                ("gtk-cursor-theme-size", Some(&size)),
-            ],
-        )?;
+        update(&gtk::glib::user_config_dir().join(version).join("settings.ini"), "[Settings]", &[
+            ("gtk-cursor-theme-name", (!cursor.is_empty()).then_some(cursor.as_str())), ("gtk-cursor-theme-size", Some(&size)),
+        ])?;
     }
-    update(
-        &gtk::glib::user_config_dir().join("qt6ct/qt6ct.conf"),
-        "[Appearance]",
-        &[("icon_theme", Some(&icons))],
-    )?;
-    for (key, value) in [
-        ("icon-theme", icons.as_str()),
-        ("cursor-theme", cursor.as_str()),
-        ("cursor-size", size.as_str()),
-    ] {
+    for (key, value) in [("cursor-theme", cursor.as_str()), ("cursor-size", size.as_str())] {
         let mut cmd = std::process::Command::new("gsettings");
-        if key == "cursor-theme" && value.is_empty() {
-            cmd.args(["reset", "org.gnome.desktop.interface", key]);
-        } else {
-            // String values are GVariant literals, not shell expressions.
-            let value = if key == "cursor-size" {
-                value.to_owned()
-            } else {
-                format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
-            };
+        if key == "cursor-theme" && value.is_empty() { cmd.args(["reset", "org.gnome.desktop.interface", key]); }
+        else {
+            let value = if key == "cursor-size" { value.into() } else { format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'")) };
             cmd.args(["set", "org.gnome.desktop.interface", key, &value]);
         }
         let _ = cmd.output();
@@ -140,8 +122,7 @@ fn update(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e.to_string()),
     };
-    crate::hyprconf::write_if_changed(path, &ini(&old, section, values))
-        .map(|_| ())
+    crate::app_themes::atomic_write(path, ini(&old, section, values).as_bytes())
         .map_err(|e| e.to_string())
 }
 

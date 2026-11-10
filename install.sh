@@ -298,20 +298,41 @@ install_wm() {
     esac
 }
 
+installed_pkg() {
+    case $FAMILY in
+        arch) pacman -Qq "$1" >/dev/null 2>&1 ;;
+        fedora|suse) rpm -q "$1" >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+}
+
+qt_platform() {
+    if installed_pkg qt6ct-kde; then echo qt6ct-kde
+    elif installed_pkg qt6ct || command -v qt6ct >/dev/null 2>&1; then echo qt6ct
+    else echo missing; fi
+}
+
 package_lists() {
     build=()
     run_pkgs=()
     case $FAMILY in
         suse)
             build=(gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel wayland-devel)
-            run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct breeze6-style adw-gtk3 adw-gtk3-dark gpu-screen-recorder cava) ;;
+            run_pkgs=(wtype curl upower polkit flatpak playerctl breeze6-style adw-gtk3 adw-gtk3-dark gpu-screen-recorder cava) ;;
         fedora)
             build=(gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel wayland-devel)
-            run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct plasma-breeze-qt6 plasma-breeze-common adw-gtk3-theme gpu-screen-recorder cava) ;;
+            run_pkgs=(wtype curl upower polkit flatpak playerctl plasma-breeze-qt6 plasma-breeze-common adw-gtk3-theme gpu-screen-recorder cava) ;;
         arch)
             build=(base-devel pkgconf gtk4 gtk4-layer-shell wayland)
-            run_pkgs=(wtype curl upower polkit flatpak playerctl qt6ct breeze adw-gtk-theme gpu-screen-recorder cava archlinux-appstream-data) ;;
+            run_pkgs=(wtype curl upower polkit flatpak playerctl breeze adw-gtk-theme gpu-screen-recorder cava archlinux-appstream-data) ;;
     esac
+    if ! installed_pkg qt6ct-kde; then
+        if [ "$FAMILY" = fedora ] && ! installed_pkg qt6ct && dnf -q repoquery --available qt6ct-kde 2>/dev/null | grep -q '^qt6ct-kde'; then
+            run_pkgs+=(qt6ct-kde)
+        else
+            run_pkgs+=(qt6ct)
+        fi
+    fi
     run_pkgs+=(xdg-desktop-portal-gtk)
     case $WM in
         hyprland) run_pkgs+=(xdg-desktop-portal-hyprland) ;;
@@ -648,6 +669,7 @@ check_system() {
     # A rustup proxy must not try to install a missing toolchain during a check.
     if RUSTUP_AUTO_INSTALL=0 cargo_ok cargo || RUSTUP_AUTO_INSTALL=0 cargo_ok "$HOME/.cargo/bin/cargo"; then rust_state=ok
     elif command -v cargo >/dev/null 2>&1 || [ -x "$HOME/.cargo/bin/cargo" ]; then rust_state=old; fi
+    printf 'qt_platform=%s\n' "$(qt_platform)"
     gtk=$(pkg-config --modversion gtk4 2>/dev/null || echo none)
     package_lists
     mapfile -t missing < <(missing_pkgs "${build[@]}" "${run_pkgs[@]}")

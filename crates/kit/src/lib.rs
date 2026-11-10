@@ -1,3 +1,4 @@
+pub mod app_themes;
 pub mod appearance;
 pub mod cursors;
 pub mod app;

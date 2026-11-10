@@ -219,6 +219,8 @@ impl Installer {
             add("", check.get("distro"), if supported { "Supported" } else { "Not supported yet" }, supported);
             let gpu = match check.get("gpu") { "nvidia" => "NVIDIA", "amd" => "AMD", "intel" => "Intel", _ => "Ready" };
             add("developer_board", "Graphics", gpu, true);
+            let qt = check.get("qt_platform");
+            add("palette", "Qt app themes", if qt == "missing" { "Needs qt6ct" } else { qt }, qt != "missing");
             let disk = check.get("disk_free_mb").parse::<u64>().ok();
             let roomy = disk.is_none_or(|mb| mb >= 3000);
             let space = disk.map(|mb| if mb >= 10_240 { format!("{} GB free", mb / 1024) } else { format!("{mb} MB free") });

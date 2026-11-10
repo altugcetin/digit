@@ -300,7 +300,12 @@ pub(crate) fn rounding() -> i64 {
 fn base() -> String {
     let enabled = nvidia_env();
     let gpu = NVIDIA_ENV.iter().filter(|_| enabled).map(|(k, v)| format!("hl.env(\"{k}\", \"{v}\")\n")).collect::<String>();
-    fill(BASE, &[("gpu", &gpu), ("cursor", &crate::cursors::hypr(&crate::prefs::read()))])
+    base_with(&crate::prefs::read(), &gpu)
+}
+
+fn base_with(prefs: &toml::Table, gpu: &str) -> String {
+    let qt = if crate::prefs::flag(prefs, "theme_qt", false) { "hl.env(\"QT_QPA_PLATFORMTHEME\", \"qt6ct\")" } else { "" };
+    fill(BASE, &[("gpu", gpu), ("cursor", &crate::cursors::hypr(prefs)), ("qt", qt)])
 }
 
 /// What the NVIDIA driver needs for hardware video (screen sharing, players) and GLX apps.
@@ -545,6 +550,12 @@ pub fn capture(on: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qt_environment_is_opt_in() {
+        assert!(!base_with(&toml::Table::new(), "").contains("QT_QPA_PLATFORMTHEME"));
+        assert!(base_with(&"theme_qt = true".parse().unwrap(), "").contains("hl.env(\"QT_QPA_PLATFORMTHEME\", \"qt6ct\")"));
+    }
 
     #[test]
     fn minimize_uses_a_native_silent_move_and_is_unsupported_on_niri() {

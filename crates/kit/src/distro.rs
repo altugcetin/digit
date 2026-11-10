@@ -52,3 +52,30 @@ pub fn logo(px: i32, scale: i32, symbolic: bool) -> Option<gtk::IconPaintable> {
     let found = names(symbolic).into_iter().find(|n| theme.has_icon(n))?;
     Some(theme.lookup_icon(&found, &[], px, scale, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty()))
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QtPlatform { Missing, Qt6ct, Kde }
+impl QtPlatform {
+    pub fn name(self) -> &'static str { match self { Self::Missing => "missing", Self::Qt6ct => "qt6ct", Self::Kde => "qt6ct-kde" } }
+}
+
+/// Package probes and PATH scans belong on a worker. Cache for the process lifetime.
+pub fn qt_platform() -> QtPlatform {
+    static FOUND: std::sync::OnceLock<QtPlatform> = std::sync::OnceLock::new();
+    *FOUND.get_or_init(|| {
+        let os = release();
+        let family = format!("{} {}", os.get("ID").map_or("", String::as_str), os.get("ID_LIKE").map_or("", String::as_str));
+        let installed = |package: &str| {
+            let (cmd, args) = if family.split_whitespace().any(|id| matches!(id, "arch" | "manjaro")) { ("pacman", vec!["-Qq", package]) }
+                else if family.split_whitespace().any(|id| matches!(id, "debian" | "ubuntu")) { ("dpkg-query", vec!["-W", "-f=${Status}", package]) }
+                else { ("rpm", vec!["-q", package]) };
+            std::process::Command::new(cmd).args(args).output().is_ok_and(|o| o.status.success() && (cmd != "dpkg-query" || String::from_utf8_lossy(&o.stdout).trim() == "install ok installed"))
+        };
+        if installed("qt6ct-kde") { QtPlatform::Kde }
+        else if installed("qt6ct") || std::env::var_os("PATH").is_some_and(|paths| std::env::split_paths(&paths).any(|p| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(p.join("qt6ct")).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })) { QtPlatform::Qt6ct }
+        else { QtPlatform::Missing }
+    })
+}

@@ -88,7 +88,6 @@ fn main() {
             }
         },
         Some("release") => {
-            theming::give_back();
             hooks::run("stop", &[]);
         }
         Some("theme") => theme_cli(&args[1..]),
@@ -168,7 +167,10 @@ fn run() {
         }
     }
     place(&app, &display);
-    theming::refresh(None, &app.cfg.scheme, app.wallpapers.theme_image(), false);
+    let (scheme, image) = (app.cfg.scheme.clone(), app.wallpapers.theme_image());
+    glib::spawn_future_local(async move {
+        let _ = gio::spawn_blocking(move || theming::refresh(None, &scheme, image, false)).await;
+    });
     load_palette(&app);
     watch_palette(&app);
     intro::play(&app);
@@ -233,7 +235,7 @@ fn run() {
     if app.cfg.polkit {
         polkit::start(&app);
     }
-    theming::take();
+    theming::changed(false);
     if app.cfg.wallpaper && !app.wallpapers.is_empty() {
         app.wallpapers.when_ready(|| hooks::spawn("start"));
     } else {
@@ -241,7 +243,6 @@ fn run() {
     }
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        theming::give_back();
         hooks::run("stop", &[]);
         previous(info);
     }));
@@ -262,7 +263,6 @@ fn run() {
     }
     polkit::stop();
     kit::wm::release_pointer_focus();
-    theming::give_back();
     hooks::run("stop", &[]);
     for n in app.notches.borrow().iter() {
         n.destroy();
@@ -362,15 +362,13 @@ fn place(app: &Rc<App>, display: &gdk::Display) {
     }
 }
 
-fn apply_buttons() {
-    glib::spawn_future_local(async {
-        let _ = gio::spawn_blocking(kit::appearance::apply_buttons).await;
-    });
+fn theme_preferences() -> Vec<Option<toml::Value>> {
+    let prefs = kit::prefs::read();
+    ["theme_gtk", "theme_qt", "gtk_theme", "qt_theme", "icon_theme", "cursor_theme", "cursor_size"].iter().map(|key| prefs.get(*key).cloned()).collect()
 }
 
 fn watch_config(app: &Rc<App>) {
-    apply_buttons();
-    let buttons = Rc::new(std::cell::RefCell::new(kit::appearance::button_layout(&kit::prefs::read())));
+    let themes = Rc::new(std::cell::RefCell::new(theme_preferences()));
     let _ = std::fs::create_dir_all(config::dir());
     glib::timeout_add_seconds_local_once(3, confignote::check);
     let dir = gio::File::for_path(config::dir());
@@ -389,13 +387,15 @@ fn watch_config(app: &Rc<App>) {
         let weak = weak.clone();
         let pending = pending.clone();
         let primary = primary.clone();
-        let buttons = buttons.clone();
+        let themes = themes.clone();
         glib::timeout_add_local_once(std::time::Duration::from_millis(90), move || {
             pending.set(false);
             if let Some(app) = weak.upgrade() {
                 confignote::check();
-                let next = kit::appearance::button_layout(&kit::prefs::read());
-                if buttons.replace(next.clone()) != next { apply_buttons(); }
+                let next = theme_preferences();
+                let before = themes.replace(next.clone());
+                if before[..5] != next[..5] { theming::changed(before[4] != next[4]); }
+                if before[5..] != next[5..] { theming::cursor_changed(); }
                 app.apply_prefs(config::Prefs::from(&config::load()));
                 let next = kit::prefs::text(&kit::prefs::read(), "primary_monitor", "");
                 if primary.replace(next.clone()) != next && kit::setup::installed() {
@@ -480,6 +480,7 @@ pub(crate) fn retheme(app: &Rc<App>) {
             app.retheming.set(false);
             return;
         }
+        theming::changed(false);
         let wait = (app.wallpapers.remaining_ms() as f64 * 0.45) as u64;
         drop(app);
         glib::timeout_future(std::time::Duration::from_millis(wait)).await;
@@ -493,7 +494,6 @@ pub(crate) fn retheme(app: &Rc<App>) {
 }
 
 fn watch(app: &Rc<App>, dir: std::path::PathBuf, name: Option<&'static str>, on: fn(&Rc<App>)) {
-    let _ = std::fs::create_dir_all(&dir);
     let Ok(monitor) = gio::File::for_path(&dir).monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE) else { return };
     let weak = Rc::downgrade(app);
     monitor.connect_changed(move |_, file, other, _| {
@@ -508,6 +508,7 @@ fn watch(app: &Rc<App>, dir: std::path::PathBuf, name: Option<&'static str>, on:
 }
 
 fn watch_palette(app: &Rc<App>) {
+    let _ = std::fs::create_dir_all(kit::theme::state_dir());
     watch(app, kit::theme::state_dir(), Some("theme.json"), |app| {
         if !app.retheming.get() {
             load_palette(app);

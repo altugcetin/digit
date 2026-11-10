@@ -64,7 +64,6 @@ pub(crate) fn entry(root: &std::path::Path, main: &str, body: &str, user: &str, 
 
 /// Regenerates digit's part of the config after a setting or shortcut changed.
 pub fn apply() -> Result<(), String> {
-    crate::appearance::apply()?;
     let result = match kind() {
         Some(Kind::Hyprland) => hyprconf::apply(),
         Some(Kind::Niri) => niriconf::sync().map(|_| ()),
