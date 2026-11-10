@@ -229,6 +229,14 @@ fn overrides() -> toml::Table {
     std::fs::read_to_string(path()).ok().and_then(|t| t.parse::<toml::Table>().ok()).unwrap_or_default()
 }
 
+fn for_writing(file: &std::path::Path) -> Result<toml::Table, String> {
+    match std::fs::read_to_string(file) {
+        Ok(text) => text.parse::<toml::Table>().map_err(|e| format!("{} has an error, so nothing was saved: {e}", file.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml::Table::new()),
+        Err(e) => Err(format!("{} could not be read, so nothing was saved: {e}", file.display())),
+    }
+}
+
 /// The shortcuts in effect: the defaults with the user's changes and own shortcuts. Turned-off
 /// ones are dropped.
 pub fn effective() -> Vec<Bind> {
@@ -287,14 +295,27 @@ fn save(t: &toml::Table) -> Result<(), String> {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
     let body = format!("# digit's shortcuts that differ from its defaults. Settings > Keyboard writes this file.\n{}", toml::to_string_pretty(t).map_err(|e| e.to_string())?);
-    let tmp = file.with_extension("toml.new");
-    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &file).map_err(|e| e.to_string())
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let (tmp, mut out) = loop {
+        let tmp = file.with_extension(format!("toml.{}.{}.new", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(out) => break (tmp, out),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    let result = out.write_all(body.as_bytes()).and_then(|()| std::fs::rename(&tmp, &file));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.map_err(|e| e.to_string())
 }
 
 /// Moves a default shortcut to new keys; empty keys turn it off.
 pub fn set_keys(id: &str, keys: &str) -> Result<(), String> {
-    let mut t = overrides();
+    let mut t = for_writing(&path())?;
     let table = t.entry("keys").or_insert_with(|| toml::Value::Table(toml::Table::new()));
     if let Some(k) = table.as_table_mut() {
         k.insert(id.to_string(), toml::Value::String(keys.trim().to_string()));
@@ -304,7 +325,7 @@ pub fn set_keys(id: &str, keys: &str) -> Result<(), String> {
 
 /// Puts a default shortcut back on its default keys.
 pub fn reset(id: &str) -> Result<(), String> {
-    let mut t = overrides();
+    let mut t = for_writing(&path())?;
     if let Some(k) = t.get_mut("keys").and_then(|v| v.as_table_mut()) {
         k.remove(id);
     }
@@ -406,7 +427,7 @@ pub fn custom() -> Vec<(String, String, String)> {
 
 /// Replaces the user's own shortcuts.
 pub fn set_custom(list: &[(String, String, String)]) -> Result<(), String> {
-    let mut t = overrides();
+    let mut t = for_writing(&path())?;
     let arr: Vec<toml::Value> = list
         .iter()
         .map(|(k, c, l)| {
@@ -459,6 +480,37 @@ fn with_modifiers(trigger: String, mods: gtk::gdk::ModifierType) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edits_preserve_invalid_shortcut_files() {
+        const CHILD: &str = "DIGIT_KEYBINDS_WRITE_TEST";
+        if std::env::var_os(CHILD).is_some() {
+            let file = path();
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            for body in [b"[keys".as_slice(), b"invalid = \"unterminated", b"\xff"] {
+                std::fs::write(&file, body).unwrap();
+                assert!(set_keys("launcher", "SUPER + A").is_err());
+                assert!(reset("launcher").is_err());
+                assert!(set_custom(&[]).is_err());
+                assert_eq!(std::fs::read(&file).unwrap(), body);
+            }
+            std::fs::remove_file(&file).unwrap();
+            set_keys("launcher", "SUPER + A").unwrap();
+            assert!(for_writing(&file).unwrap().contains_key("keys"));
+            assert_eq!(std::fs::read_dir(file.parent().unwrap()).unwrap().count(), 1);
+            std::fs::remove_file(&file).unwrap();
+            std::fs::create_dir(&file).unwrap();
+            assert!(set_custom(&[]).is_err());
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("digit-keybinds-xdg-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "keybinds::tests::edits_preserve_invalid_shortcut_files"])
+            .env(CHILD, "1").env("XDG_CONFIG_HOME", &root).output().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+        assert!(result.status.success(), "{}{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+    }
 
     #[test]
     fn recording_group_contains_only_recording_actions() {
