@@ -16,6 +16,7 @@ pub fn apply_gtk() {
         return;
     };
     let prefs = crate::prefs::read();
+    crate::app::refresh_controls(&prefs);
     settings.set_gtk_icon_theme_name(Some(&icon_theme(&prefs)));
     let (theme, size) = crate::cursors::current(&prefs);
     if theme.is_empty() {
@@ -24,6 +25,26 @@ pub fn apply_gtk() {
         settings.set_gtk_cursor_theme_name(Some(&theme));
     }
     settings.set_gtk_cursor_theme_size(size as i32);
+}
+
+/// GTK headerbar order, shared by Digit controls and other GTK applications.
+pub fn button_layout(prefs: &toml::Table) -> String {
+    let names: Vec<_> = [("button_minimize", "minimize"), ("button_maximize", "maximize"), ("button_close", "close")]
+        .into_iter().filter(|(key, _)| crate::prefs::flag(prefs, key, true)).map(|(_, name)| name).collect();
+    format!(":{}", names.join(","))
+}
+
+/// Runs on a worker, including the read-before-write and serialization of rapid changes.
+pub fn apply_buttons() {
+    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    let value = button_layout(&crate::prefs::read());
+    let schema = "org.gnome.desktop.wm.preferences";
+    let Ok(old) = std::process::Command::new("gsettings").args(["get", schema, "button-layout"]).output() else { return };
+    if !old.status.success() { return; }
+    if String::from_utf8_lossy(&old.stdout).trim().trim_matches(['\'', '"']) != value {
+        let _ = std::process::Command::new("gsettings").args(["set", schema, "button-layout", &format!("'{value}'")]).output();
+    }
 }
 
 /// Set or remove only the named keys in one INI section, preserving unrelated values.
@@ -127,6 +148,19 @@ fn update(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn button_layout_defaults_and_all_combinations() {
+        assert_eq!(button_layout(&toml::Table::new()), ":minimize,maximize,close");
+        for (mask, expected) in [":", ":minimize", ":maximize", ":minimize,maximize", ":close", ":minimize,close", ":maximize,close", ":minimize,maximize,close"].iter().enumerate() {
+            let mut prefs = toml::Table::new();
+            for (i, name) in ["minimize", "maximize", "close"].iter().enumerate() {
+                prefs.insert(format!("button_{name}"), (mask & (1 << i) != 0).into());
+            }
+            assert_eq!(button_layout(&prefs), *expected);
+        }
+        assert_eq!(button_layout(&"button_minimize = false".parse().unwrap()), ":maximize,close");
+    }
+
     #[test]
     fn qt_icons_follow_the_preference_and_automatic_default() {
         for (prefs, expected) in [

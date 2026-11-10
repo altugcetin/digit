@@ -29,6 +29,11 @@ pub(crate) fn save_many(values: &[(&str, toml::Value)]) -> bool {
     if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "ui_accent" | "border_color" | "reduced_effects" | "terminal" | "nvidia_env" | "cursor_theme" | "cursor_size")) {
         apply_compositor();
     }
+    if values.iter().any(|(key, _)| matches!(*key, "button_minimize" | "button_maximize" | "button_close")) {
+        glib::spawn_future_local(async {
+            let _ = gio::spawn_blocking(kit::appearance::apply_buttons).await;
+        });
+    }
     true
 }
 
@@ -501,7 +506,7 @@ pub fn sections(page: &str) -> &'static [Section] {
         "appearance" => &[shell_look, app_look, effects],
         "dock" => &[dock],
         "notch" => &[notch, menu_bar, panels, screen_edges],
-        "desktop" => &[desktop, weather],
+        "desktop" => &[desktop, window_buttons, weather],
         "spotlight" => &[search, scopes, clipboard],
         "compositor" => &[session],
         "displays" => &[night_light],
@@ -708,6 +713,13 @@ pub fn session_notice(body: &gtk::Box, kind: kit::setup::Kind) {
     let (row, _) = ui::row(Some("info"), &format!("Log in to {} with Digit to change these", kind.name()), "Choose the session on your login screen");
     card.append(&row);
     body.append(&card);
+}
+
+fn window_buttons(body: &gtk::Box, t: &toml::Table) {
+    let win = section(body, "Window buttons");
+    toggle(&win, "remove", "Minimize button", "Show the minimize button in window headers", "button_minimize", prefs::get_bool(t, "button_minimize", true));
+    toggle(&win, "crop_square", "Maximize button", "Show the maximize button in window headers", "button_maximize", prefs::get_bool(t, "button_maximize", true));
+    toggle(&win, "close", "Close button", "Show the close button in window headers", "button_close", prefs::get_bool(t, "button_close", true));
 }
 
 pub fn session(body: &gtk::Box, _: &toml::Table) {
