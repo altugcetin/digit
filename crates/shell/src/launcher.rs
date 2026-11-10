@@ -12,6 +12,7 @@ use kit::palette::{Palette, Rgb};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
+use std::time::Duration;
 
 const PAD: f64 = 40.0;
 const WIDTH: f64 = 680.0;
@@ -307,6 +308,7 @@ struct State {
     caret_shown: bool,
     caret_paint: crate::paint::Paint,
     caret_ticking: bool,
+    caret_blink: Option<glib::SourceId>,
     caret_measure: Option<(glib::GString, i32, f64)>,
     tip_wait: u64,
     field_w: i32,
@@ -526,6 +528,7 @@ impl Launcher {
             caret_shown: false,
             caret_paint: caret_paint.clone(),
             caret_ticking: false,
+            caret_blink: None,
             caret_measure: None,
             tip_wait: 0,
             field_w: 0,
@@ -788,6 +791,7 @@ impl Launcher {
             s.fade.go(0.0, now, 200, motion::STANDARD);
             s.rise.go(0.0, now, 240, LEAVE);
             s.caret_shown = false;
+            if let Some(id) = s.caret_blink.take() { id.remove(); }
             (s.window.clone(), s.caret_paint.clone(), s.scrim.take())
         };
         window.set_keyboard_mode(KeyboardMode::None);
@@ -888,7 +892,10 @@ impl Launcher {
             let visible = s.open && s.smooth_caret() && s.field.has_focus();
             if !visible {
                 s.caret_shown = false;
-                s.caret_paint.queue_draw();
+                if let Some(id) = s.caret_blink.take() { id.remove(); }
+                let paint = s.caret_paint.clone();
+                drop(s);
+                paint.queue_draw();
                 return;
             }
             let text = s.field.text();
@@ -900,6 +907,22 @@ impl Launcher {
                 s.caret_moved = glib::monotonic_time();
             }
             s.retarget_caret(glib::monotonic_time());
+            if s.caret_blink.is_none() {
+                let weak = Rc::downgrade(&self.0);
+                s.caret_blink = Some(glib::timeout_add_local(Duration::from_millis(50), move || {
+                    let Some(state) = weak.upgrade() else { return glib::ControlFlow::Break };
+                    let paint = {
+                        let mut s = state.borrow_mut();
+                        if !s.caret_shown || !s.open || !s.smooth_caret() || !s.field.has_focus() {
+                            s.caret_blink = None;
+                            return glib::ControlFlow::Break;
+                        }
+                        s.caret_paint.clone()
+                    };
+                    paint.queue_draw();
+                    glib::ControlFlow::Continue
+                }));
+            }
             if std::mem::replace(&mut s.caret_ticking, true) {
                 return;
             }
@@ -909,12 +932,11 @@ impl Launcher {
         paint.add_tick_callback(move |paint, _| {
             let Some(state) = weak.upgrade() else { return glib::ControlFlow::Break };
             let mut s = state.borrow_mut();
+            let moving = s.caret_shown && s.open && s.smooth_caret() && s.field.has_focus() && !s.caret.settled(glib::monotonic_time());
+            s.caret_ticking = moving;
+            drop(s);
             paint.queue_draw();
-            if s.caret_shown && s.open && s.smooth_caret() && s.field.has_focus() {
-                return glib::ControlFlow::Continue;
-            }
-            s.caret_ticking = false;
-            glib::ControlFlow::Break
+            if moving { glib::ControlFlow::Continue } else { glib::ControlFlow::Break }
         });
     }
 
@@ -1546,8 +1568,12 @@ impl State {
                 self.region = rect;
             }
         }
+        if self.caret_shown && !self.caret.settled(now) {
+            self.caret_paint.queue_draw();
+        }
         let moving = [&self.fade, &self.rise, &self.panel, &self.bar, &self.bubbles, &self.scroll, &self.pill_y, &self.pill_h, &self.tip].iter().any(|t| !t.settled(now))
             || self.glow.iter().any(|t| !t.settled(now))
+            || (self.caret_shown && !self.caret.settled(now))
             || !self.clear_glow.settled(now)
             || self.app.palette_moving(now);
         if !moving && !self.open && self.window.is_visible() {

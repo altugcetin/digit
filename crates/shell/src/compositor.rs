@@ -479,7 +479,10 @@ pub fn watch(app: &std::rc::Rc<crate::app::App>) {
                     });
                 }
                 Feed::Spaces(spaces) => app.set_spaces(spaces),
-                Feed::Windows(list) => app.set_running(list),
+                Feed::Windows(list) => {
+                    crate::free::retain(list.iter().map(|w| w.id));
+                    app.set_running(list);
+                }
                 Feed::Opened(w) => crate::free::opened(&app, w),
                 Feed::Changed(w) => crate::free::changed(&app, w),
                 Feed::Layouts(c) => crate::free::layouts(&app, c),

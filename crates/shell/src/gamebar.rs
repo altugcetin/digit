@@ -509,8 +509,26 @@ fn region(st: &Shared) {
 fn save_notes(s: &State) {
     let b = s.notes.buffer();
     let text = b.text(&b.start_iter(), &b.end_iter(), false);
-    let _ = std::fs::create_dir_all(kit::theme::state_dir());
-    let _ = std::fs::write(notes_file(), text.as_str());
+    if let Err(e) = write_notes(&notes_file(), text.as_str()) {
+        eprintln!("digit: save notes: {e}");
+    }
+}
+
+fn write_notes(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path.parent().ok_or_else(|| std::io::Error::other("No notes directory"))?;
+    std::fs::create_dir_all(dir)?;
+    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+    let result = (|| {
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
 }
 
 /// Runs once a second while cards are on screen: samples, rereads the mixer and moves the clocks.
@@ -1282,5 +1300,31 @@ impl State {
             let text = format!("{level}%");
             draw::text(s, &self.paint, cfg, &text, 14.0, Face::Number(560), pal.ink_main, x + 20.0, mid, 60.0, pango::Alignment::Left);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notes_replace_atomically_and_keep_old_file_on_failure() {
+        let dir = std::env::temp_dir().join(format!("digit-notes-{}-{}", std::process::id(), glib::monotonic_time()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("notes.txt");
+        write_notes(&path, "old").unwrap();
+        write_notes(&path, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+        std::fs::write(&temp, "occupied").unwrap();
+        assert!(write_notes(&path, "lost").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(&temp).unwrap(), "occupied");
+        std::fs::remove_file(&temp).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(write_notes(&path, "cannot rename").is_err());
+        assert!(!temp.exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

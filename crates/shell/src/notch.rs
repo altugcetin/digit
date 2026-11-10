@@ -34,6 +34,7 @@ const TILE: f64 = 82.0;
 const TILES: usize = 5;
 const PHONE_W: f64 = 300.0;
 const NOTES: usize = 3;
+
 const DEVICES: usize = 2;
 const CHIP: f64 = 28.0;
 const CHIPS: usize = 7;
@@ -48,6 +49,10 @@ const ORANGE: Rgb = Rgb::new(1.0, 0.62, 0.04);
 const PURPLE: Rgb = Rgb::new(0.75, 0.35, 0.95);
 const ACTION_BLUE: Rgb = Rgb::new(0.04, 0.52, 1.0);
 const RED: Rgb = Rgb::new(1.0, 0.27, 0.23);
+
+fn phone_rows(call: bool, notes: usize) -> impl Iterator<Item = (usize, usize)> {
+    (usize::from(call)..NOTES).zip(0..notes)
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Hot {
@@ -1558,7 +1563,7 @@ impl View {
                 if let Some(i) = (0..crate::phone::ACTIONS.len()).find(|&i| self.phone_action_rect(i).contains(x, y)) {
                     return Some(Hot::PhoneAction(i));
                 }
-                (0..phone.notes.len().min(NOTES)).find(|&i| phone.notes[i].dismissable && self.note_rect(i).contains(x, y)).map(Hot::PhoneDismiss)
+                phone_rows(crate::phone::call().is_some(), phone.notes.len()).find(|&(row, i)| phone.notes[i].dismissable && self.note_rect(row).contains(x, y)).map(|(_, i)| Hot::PhoneDismiss(i))
             }
             Tab::Tray => {
                 for i in 0..crate::tray::len().min(TILES) {
@@ -3040,17 +3045,15 @@ impl View {
             self.text(s, msg, 13.0, REST, pal.ink_meta, x, top + 76.0, w, center);
             return;
         }
-        let mut row = 0;
         if let Some(c) = &call {
-            let r = self.note_rect(row);
+            let r = self.note_rect(0);
             let mid = r.y + r.h / 2.0;
             self.icon(s, "call", 18.0, true, GREEN, r.x + 16.0, mid);
             self.text(s, c, 13.0, Face::Text(560), pal.ink_main, r.x + 36.0, mid, r.w - 44.0, start);
-            row += 1;
         }
-        for (i, n) in phone.notes.iter().enumerate().take(NOTES.saturating_sub(row)) {
+        for (row, i) in phone_rows(call.is_some(), phone.notes.len()) {
+            let n = &phone.notes[i];
             let r = self.note_rect(row);
-            row += 1;
             let hot = self.hot == Some(Hot::PhoneDismiss(i));
             let mid = r.y + r.h / 2.0;
             match &n.icon {
@@ -3248,4 +3251,16 @@ fn legible(tint: Rgb, pal: &kit::palette::Palette) -> Rgb {
 
 fn dots_width(n: usize) -> f64 {
     if n == 0 { 0.0 } else { (n - 1) as f64 * (DOT + GAP) + PILL }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phone_call_reserves_first_row() {
+        assert_eq!(phone_rows(false, 4).collect::<Vec<_>>(), vec![(0, 0), (1, 1), (2, 2)]);
+        assert_eq!(phone_rows(true, 4).collect::<Vec<_>>(), vec![(1, 0), (2, 1)]);
+        assert_eq!(phone_rows(true, 0).count(), 0);
+    }
 }
