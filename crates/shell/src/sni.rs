@@ -121,18 +121,27 @@ fn pixmap(map: &HashMap<String, OwnedValue>, k: &str, want: i32) -> Option<gdk::
     Some(gdk::MemoryTexture::new(*w, *h, gdk::MemoryFormat::R8g8b8a8, &bytes, *w as usize * 4).upcast())
 }
 
-fn named(name: &str, theme_path: &str, px: i32, scale: i32) -> Option<gdk::Paintable> {
+pub(super) async fn file_icon(path: String, px: i32) -> Option<gdk::Texture> {
+    let (w, h, stride, alpha, bytes) = gtk::gio::spawn_blocking(move || {
+        let pb = gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(path, px, px, true).ok()?;
+        Some((pb.width(), pb.height(), pb.rowstride(), pb.has_alpha(), pb.read_pixel_bytes().as_ref().to_vec()))
+    }).await.ok()??;
+    let format = if alpha { gdk::MemoryFormat::R8g8b8a8 } else { gdk::MemoryFormat::R8g8b8 };
+    Some(gdk::MemoryTexture::new(w, h, format, &glib::Bytes::from_owned(bytes), stride as usize).upcast())
+}
+
+async fn named(name: &str, theme_path: &str, px: i32, scale: i32) -> Option<gdk::Paintable> {
     if name.is_empty() {
         return None;
     }
     if name.starts_with('/') && std::path::Path::new(name).is_file() {
-        return gdk::Texture::from_filename(name).ok().map(|t| t.upcast());
+        return file_icon(name.to_string(), px * scale).await.map(|t| t.upcast());
     }
     if !theme_path.is_empty() {
         for ext in ["png", "svg"] {
             let p = std::path::Path::new(theme_path).join(format!("{name}.{ext}"));
             if p.is_file() {
-                return gdk::Texture::from_filename(p).ok().map(|t| t.upcast());
+                return file_icon(p.to_string_lossy().into_owned(), px * scale).await.map(|t| t.upcast());
             }
         }
     }
@@ -158,9 +167,10 @@ async fn load(conn: &zbus::Connection, key: &str) -> Option<Item> {
     let scale = gdk::Display::default().and_then(|d| d.monitors().item(0)).and_then(|m| m.downcast::<gdk::Monitor>().ok()).map(|m| m.scale_factor()).unwrap_or(1);
     let want = 20 * scale;
     let theme_path = string(&map, "IconThemePath");
-    let icon = if attention { named(&string(&map, "AttentionIconName"), &theme_path, 20, scale).or_else(|| pixmap(&map, "AttentionIconPixmap", want)) } else { None }
-        .or_else(|| named(&string(&map, "IconName"), &theme_path, 20, scale))
-        .or_else(|| pixmap(&map, "IconPixmap", want));
+    let mut icon = if attention { named(&string(&map, "AttentionIconName"), &theme_path, 20, scale).await.or_else(|| pixmap(&map, "AttentionIconPixmap", want)) } else { None };
+    if icon.is_none() {
+        icon = named(&string(&map, "IconName"), &theme_path, 20, scale).await.or_else(|| pixmap(&map, "IconPixmap", want));
+    }
     let menu = map.get("Menu").and_then(|v| v.downcast_ref::<zbus::zvariant::ObjectPath>().ok()).map(|p| p.to_string()).filter(|p| p != "/");
     let is_menu = map.get("ItemIsMenu").and_then(|v| v.downcast_ref::<bool>().ok()).unwrap_or(false);
     let title = map.get("ToolTip").and_then(|v| v.try_clone().ok()).and_then(|v| <(String, Vec<(i32, i32, Vec<u8>)>, String, String)>::try_from(v).ok()).map(|t| t.2).filter(|t| !t.is_empty()).unwrap_or_else(|| string(&map, "Title"));
