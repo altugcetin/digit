@@ -425,6 +425,18 @@ pub fn restore(id: u64) -> bool {
     focus(id)
 }
 
+/// Silently minimize a known Hyprland window without switching workspaces.
+pub fn minimize_window(id: u64) -> bool {
+    if which() != Wm::Hyprland { return false; }
+    let Some(clients) = hypr_json("clients").and_then(|v| v.as_array().cloned()) else { return false };
+    let Some(client) = clients.iter().find(|c| hex(c) == Some(id)) else { return false };
+    if hypr_minimized(client) || client.get("mapped").and_then(Value::as_bool) == Some(false) { return false; }
+    hypr_dispatch(
+        &format!("movetoworkspacesilent special:minimized,address:0x{id:x}"),
+        &format!("hl.dsp.window.move({{ workspace = \"special:minimized\", follow = false, window = \"address:0x{id:x}\" }})"),
+    )
+}
+
 pub fn minimize(app_id: &str) -> bool {
     let Some(me) = focused_window().filter(|w| w.app_id == app_id) else { return false };
     match which() {
@@ -437,10 +449,7 @@ pub fn minimize(app_id: &str) -> bool {
                 _ => false,
             }
         }
-        Wm::Hyprland => hypr_dispatch(
-            &format!("movetoworkspacesilent special:minimized,address:0x{:x}", me.id),
-            &format!("hl.dsp.window.move({{ workspace = \"special:minimized\", follow = false, window = \"address:0x{:x}\" }})", me.id),
-        ),
+        Wm::Hyprland => minimize_window(me.id),
         Wm::Other => false,
     }
 }

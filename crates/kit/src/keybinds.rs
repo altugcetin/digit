@@ -36,6 +36,7 @@ pub enum Act {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Win {
     Close,
+    Minimize,
     Float,
     /// Hyprland: toggle pseudotiling in dwindle.
     Pseudo,
@@ -166,6 +167,7 @@ pub fn defaults() -> Vec<Bind> {
         bind("kbd-down", "Media keys", "Keyboard light down", "XF86KbdBrightnessDown", ctl("key kbd-down"), MEDIA, false),
         bind("terminal", "Windows", "Terminal", "SUPER + RETURN", Act::Terminal, n, true),
         bind("close", "Windows", "Close the window", "SUPER + Q", Act::Window(Win::Close), n, true),
+        bind("minimize", "Windows", "Minimize window", "SUPER + M", Act::Window(Win::Minimize), n, true),
         bind("float", "Windows", "Float or tile the window", "SUPER + V", Act::Window(Win::Float), n, true),
         bind("pseudo", "Windows", "Pseudotile the window", "SUPER + SHIFT + V", Act::Window(Win::Pseudo), n, true),
         bind("maximize", "Windows", "Maximize", "SUPER + F", Act::Window(Win::Maximize), n, true),
@@ -480,6 +482,19 @@ fn with_modifiers(trigger: String, mods: gtk::gdk::ModifierType) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn minimize_is_a_window_action_with_a_unique_default_key() {
+        let binds = defaults();
+        let minimize = binds.iter().find(|b| b.id == "minimize").unwrap();
+        assert_eq!(minimize.group, "Windows");
+        assert_eq!(minimize.label, "Minimize window");
+        assert_eq!(minimize.keys, "SUPER + M");
+        assert_eq!(minimize.act, Act::Window(Win::Minimize));
+        assert!(minimize.window);
+        assert_eq!(binds.iter().filter(|b| normalize(&b.keys) == normalize(&minimize.keys)).count(), 1);
+        assert_eq!(binds.iter().filter(|b| b.id == minimize.id).count(), 1);
+    }
 
     #[test]
     fn edits_preserve_invalid_shortcut_files() {
