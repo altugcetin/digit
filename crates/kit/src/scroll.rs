@@ -20,9 +20,6 @@ thread_local! {
 
 /// The "smooth_scroll" preference, re-read at most every two seconds so toggling it applies live.
 fn enabled() -> bool {
-    if !animated(true, crate::motion::reduced(), crate::effects::software()) {
-        return false;
-    }
     let now = glib::monotonic_time();
     ENABLED.with(|e| {
         let (on, at) = e.get();
@@ -33,10 +30,6 @@ fn enabled() -> bool {
         e.set((on, now));
         on
     })
-}
-
-fn animated(smooth: bool, motion: bool, software: bool) -> bool {
-    smooth && !motion && !software
 }
 
 struct Glide {
@@ -443,20 +436,4 @@ fn glide(widget: &gtk::Widget, adj: &gtk::Adjustment, delta: f64, bounce: Option
         }
         glib::ControlFlow::Continue
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reduced_motion_or_software_disables_glide_and_elastic_scrolling() {
-        for smooth in [false, true] {
-            assert!(!animated(smooth, true, false));
-            assert!(!animated(smooth, false, true));
-            assert!(!animated(smooth, true, true));
-        }
-        assert!(animated(true, false, false));
-        assert!(!animated(false, false, false));
-    }
 }
