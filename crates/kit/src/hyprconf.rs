@@ -66,6 +66,7 @@ fn action(b: &Bind, snap: bool) -> String {
         Act::Terminal => exec(terminal()),
         Act::Window(w) => match w {
             Win::Close => "hl.dsp.window.close()".into(),
+            Win::Minimize => "hl.dsp.window.move({ workspace = \"special:minimized\", follow = false })".into(),
             Win::Float => "require(\"digit.digit-floating\").float_key(hl.dsp.window.float({ action = \"toggle\" }))".into(),
             Win::Pseudo => "hl.dsp.window.pseudo()".into(),
             Win::Maximize => "per_layout({ default = hl.dsp.window.fullscreen({ mode = 1 }), scrolling = column_maximize })".into(),
@@ -299,7 +300,7 @@ pub(crate) fn rounding() -> i64 {
 fn base() -> String {
     let enabled = nvidia_env();
     let gpu = NVIDIA_ENV.iter().filter(|_| enabled).map(|(k, v)| format!("hl.env(\"{k}\", \"{v}\")\n")).collect::<String>();
-    fill(BASE, &[("settings", &compositor()), ("gpu", &gpu), ("cursor", &crate::cursors::hypr(&crate::prefs::read()))])
+    fill(BASE, &[("gpu", &gpu), ("cursor", &crate::cursors::hypr(&crate::prefs::read()))])
 }
 
 /// What the NVIDIA driver needs for hardware video (screen sharing, players) and GLX apps.
@@ -317,7 +318,12 @@ pub(crate) fn nvidia_env() -> bool {
 
 /// Settings > Compositor, as Lua: every value, with digit's defaults for the ones never changed.
 fn compositor() -> String {
-    let t = crate::prefs::read();
+    crate::motion::refresh();
+    crate::effects::invalidate();
+    compositor_with(&crate::prefs::read(), crate::motion::reduced(), crate::effects::reduced())
+}
+
+fn compositor_with(t: &toml::Table, motion: bool, reduced: bool) -> String {
     let pick = |key: &str| t.get(&format!("hypr_{key}")).cloned();
     let text = |key: &str, def: &str| pick(key).and_then(|v| v.as_str().map(str::to_string)).or_else(|| Some(def.to_string()));
     let num = |key: &str, def: f64| pick(key).and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))).or(Some(def));
@@ -379,7 +385,7 @@ fn compositor() -> String {
     if !touch.is_empty() {
         input.push(format!("touchpad = {{ {} }}", touch.join(", ")));
     }
-    general.push(format!("layout = {}", lua_str(&tiled_layout(&t))));
+    general.push(format!("layout = {}", lua_str(&tiled_layout(t))));
     if let Some(v) = num("gaps_in", 4.0) {
         general.push(format!("gaps_in = {}", int(v)));
     }
@@ -401,7 +407,6 @@ fn compositor() -> String {
     }
     let mut decoration = Vec::new();
     // Reduced effects switch the compositor's shadows and blur off too.
-    let reduced = crate::effects::reduced();
     let flag = |key: &str, def: bool| if reduced && (key == "shadow" || key == "blur") { Some(false) } else { flag(key, def) };
     if let Some(on) = flag("shadow", true) {
         let range = match text("shadow_size", "medium").as_deref() {
@@ -420,7 +425,7 @@ fn compositor() -> String {
         decoration.push(format!("blur = {{ enabled = {on}, size = {size}, passes = {passes} }}"));
     }
     let mut out = String::from("-- Settings > Compositor\n");
-    let mut sections = Vec::new();
+    let mut sections = vec![format!("    animations = {{ enabled = {} }},", !motion)];
     if !input.is_empty() {
         sections.push(format!("    input = {{\n{}\n    }},", input.iter().map(|l| format!("        {l},")).collect::<Vec<_>>().join("\n")));
     }
@@ -434,6 +439,7 @@ fn compositor() -> String {
         out.push_str(&format!("hl.config({{\n{}\n}})\n", sections.join("\n")));
     }
     // Motion: how windows open and close, and which way workspaces slide.
+    let enabled = !motion;
     let windows = text("window_anim", "popin");
     let spaces = text("workspace_anim", "vertical");
     if windows.is_some() || spaces.is_some() {
@@ -443,12 +449,12 @@ fn compositor() -> String {
     }
     if let Some(w) = windows {
         let style = if w == "slide" { "slide" } else { "popin 85%" };
-        out.push_str(&format!("hl.animation({{ leaf = \"windowsIn\", enabled = true, speed = 3, bezier = \"md3_decel\", style = \"{style}\" }})\n"));
-        out.push_str(&format!("hl.animation({{ leaf = \"windowsOut\", enabled = true, speed = 3, bezier = \"md3_accel\", style = \"{style}\" }})\n"));
+        out.push_str(&format!("hl.animation({{ leaf = \"windowsIn\", enabled = {enabled}, speed = 3, bezier = \"md3_decel\", style = \"{style}\" }})\n"));
+        out.push_str(&format!("hl.animation({{ leaf = \"windowsOut\", enabled = {enabled}, speed = 3, bezier = \"md3_accel\", style = \"{style}\" }})\n"));
     }
     if let Some(sp) = spaces {
         let style = if sp == "horizontal" { "slidefade 20%" } else { "slidefadevert 20%" };
-        out.push_str(&format!("hl.animation({{ leaf = \"workspaces\", enabled = true, speed = 3, bezier = \"md3_standard\", style = \"{style}\" }})\n"));
+        out.push_str(&format!("hl.animation({{ leaf = \"workspaces\", enabled = {enabled}, speed = 3, bezier = \"md3_standard\", style = \"{style}\" }})\n"));
     }
     if flag("gesture", true) == Some(true) {
         out.push_str("-- Three fingers sideways switch workspaces.\nhl.gesture({ fingers = 3, direction = \"horizontal\", action = \"workspace\" })\n");
@@ -459,7 +465,7 @@ fn compositor() -> String {
 /// digit-decorations.lua: gaps, borders, corners, shadows and motion of windows. The corner
 /// radius follows digit's Corners setting.
 fn decorations() -> String {
-    fill(DECORATIONS, &[("rounding", &rounding().to_string())])
+    fill(DECORATIONS, &[("rounding", &rounding().to_string()), ("settings", &compositor())])
 }
 
 pub(crate) fn write_if_changed(path: &Path, body: &str) -> std::io::Result<bool> {
@@ -539,6 +545,55 @@ pub fn capture(on: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn minimize_uses_a_native_silent_move_and_is_unsupported_on_niri() {
+        let binds = keybinds::defaults();
+        let minimize = binds.iter().find(|b| b.id == "minimize").unwrap();
+        assert!(supports(minimize));
+        let rendered = render_keybinds(std::slice::from_ref(minimize));
+        assert!(rendered.lines().any(|line| line == "bind(\"SUPER + M\", hl.dsp.window.move({ workspace = \"special:minimized\", follow = false })) -- Minimize window"));
+        assert!(!crate::niriconf::supports(minimize));
+        assert_eq!(crate::niriconf::render_keybinds(&binds), crate::niriconf::render_keybinds(&binds.into_iter().filter(|b| b.id != "minimize").collect::<Vec<_>>()));
+    }
+
+    #[test]
+    fn reduced_motion_disables_all_animations_without_changing_stored_choices() {
+        for windows in ["popin", "slide"] {
+            for spaces in ["vertical", "horizontal"] {
+                let t: toml::Table = format!("reduce_motion = true\nreduced_effects = false\nhypr_window_anim = '{windows}'\nhypr_workspace_anim = '{spaces}'").parse().unwrap();
+                let stored = toml::to_string(&t).unwrap();
+                let rendered = compositor_with(&t, crate::effects::effective(&t, "reduce_motion", false), false);
+                assert!(rendered.contains("animations = { enabled = false }"));
+                assert_eq!(rendered.lines().filter(|l| l.starts_with("hl.animation(")).count(), 3);
+                assert!(rendered.lines().filter(|l| l.starts_with("hl.animation(")).all(|l| l.contains("enabled = false")));
+                // The master follows the template defaults, including layers and fades.
+                let full = fill(DECORATIONS, &[("rounding", "20"), ("settings", &rendered)]);
+                assert!(!full.contains("{{"));
+                assert!(full.rfind("animations = { enabled = false }").unwrap() > full.rfind("leaf = \"layersOut\"").unwrap());
+                let restored = compositor_with(&t, false, false);
+                assert!(restored.contains("animations = { enabled = true }"));
+                assert!(restored.contains(if windows == "slide" { "style = \"slide\"" } else { "style = \"popin 85%\"" }));
+                assert!(restored.contains(if spaces == "horizontal" { "style = \"slidefade 20%\"" } else { "style = \"slidefadevert 20%\"" }));
+                assert_eq!(toml::to_string(&t).unwrap(), stored, "config.toml choices stay stored");
+            }
+        }
+    }
+
+    #[test]
+    fn effects_never_change_hyprland_motion() {
+        let t = "hypr_blur = true\nhypr_shadow = true".parse().unwrap();
+        for motion in [false, true] {
+            let normal = compositor_with(&t, motion, false);
+            let reduced = compositor_with(&t, motion, true);
+            let animation_lines = |s: &str| s.lines().filter(|l| l.contains("animations =") || l.starts_with("hl.animation(")).map(str::to_string).collect::<Vec<_>>();
+            assert_eq!(animation_lines(&normal), animation_lines(&reduced));
+            assert!(reduced.contains("shadow = { enabled = false"));
+            assert!(reduced.contains("blur = { enabled = false"));
+            assert!(normal.contains("shadow = { enabled = true"));
+            assert!(normal.contains("blur = { enabled = true"));
+        }
+    }
 
     #[test]
     fn floating_generation_preserves_real_layouts_and_load_order() {

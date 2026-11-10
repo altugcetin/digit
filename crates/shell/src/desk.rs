@@ -107,7 +107,8 @@ fn draw_desk(s: &gtk::Snapshot, p: &Paint, app: &App, output: &str, center: bool
     let date = dt.as_ref().and_then(|d| d.format("%A, %-d %B").ok()).map(|s| s.to_string()).unwrap_or_default();
     let align = if center { pango::Alignment::Center } else { pango::Alignment::Left };
     let w = W as f64;
-    s.push_shadow(&[gtk::gsk::Shadow::new(shade, 0.0, 1.0, 14.0)]);
+    let shadow = !kit::effects::reduced();
+    if shadow { s.push_shadow(&[gtk::gsk::Shadow::new(shade, 0.0, 1.0, 14.0)]); }
     draw::text(s, p, cfg, &date, 21.0, Face::Text(560), ink.alpha(0.88), 0.0, 22.0, w, align);
     draw::text(s, p, cfg, &time, 96.0, Face::Text(330), ink.alpha(0.96), 0.0, 92.0, w, align);
     if let Some(wx) = app.weather.borrow().as_ref() {
@@ -118,5 +119,5 @@ fn draw_desk(s: &gtk::Snapshot, p: &Paint, app: &App, output: &str, center: bool
         draw::text(s, p, cfg, &line, 17.0, Face::Text(500), ink.alpha(0.88), gx + 30.0, 168.0, tw + 2.0, pango::Alignment::Left);
         draw::text(s, p, cfg, &wx.place, 14.0, Face::Text(450), ink.alpha(0.66), 0.0, 194.0, if center { w } else { w - 4.0 }, align);
     }
-    s.pop();
+    if shadow { s.pop(); }
 }

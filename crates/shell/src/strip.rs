@@ -209,7 +209,7 @@ impl Strip {
         let ink_meta = top.alpha(0.80).mix(pal.ink_meta.mix(pal.ink_main, 0.4), 1.0 - t);
         s.push_rounded_clip(&body);
         s.push_opacity(show);
-        let halo = clear * (1.0 - t);
+        let halo = if kit::effects::reduced() { 0.0 } else { clear * (1.0 - t) };
         if halo > 0.02 {
             let c = if dark > 0.5 { white.alpha(0.30 * halo) } else { kit::palette::Rgb::new(0.0, 0.0, 0.0).alpha(0.42 * halo) };
             s.push_shadow(&[gtk::gsk::Shadow::new(c.rgba(), 0.0, 0.5, 5.0)]);

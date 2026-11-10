@@ -289,7 +289,7 @@ struct Scene {
 
 impl Scene {
     fn progress(&self, now: i64) -> f64 {
-        if motion::reduced() || kit::effects::software() || self.old.is_none() || self.start == 0 {
+        if motion::reduced() || self.old.is_none() || self.start == 0 {
             return 1.0;
         }
         let span = if self.blend { self.span.max(1) } else { SPAN };
@@ -403,7 +403,7 @@ impl Canvas {
     fn show(&self, texture: Frame) {
         {
             let mut scene = self.imp().scene.borrow_mut();
-            if scene.new.is_none() || motion::reduced() || kit::effects::software() {
+            if scene.new.is_none() || motion::reduced() {
                 scene.old = None;
                 scene.prime = None;
                 scene.new = Some(texture);
@@ -442,7 +442,7 @@ impl Canvas {
     }
 
     fn swap(&self, texture: Frame, ms: i64) {
-        if motion::reduced() || kit::effects::software() { self.show(texture); return; }
+        if motion::reduced() { self.show(texture); return; }
         let now = glib::monotonic_time();
         {
             let mut scene = self.imp().scene.borrow_mut();
@@ -1061,7 +1061,7 @@ mod tests {
         scene.step(200);
         assert_eq!(scene.old.as_ref().unwrap().region, old.region);
         assert_eq!(scene.new.as_ref().unwrap().region, new.region);
-        assert_eq!(scene.moving(201), !motion::reduced() && !kit::effects::software());
+        assert_eq!(scene.moving(201), !motion::reduced());
         scene.step(200 + SPAN);
         assert!(scene.old.is_none());
         assert_eq!(scene.new.as_ref().unwrap().region, new.region);

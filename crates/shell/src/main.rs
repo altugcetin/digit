@@ -153,7 +153,7 @@ fn run() {
     kit::style::live_glyphs(&display, draw::glyphs_changed);
 
     let cfg = config::load();
-    kit::motion::apply(cfg.reduce_motion);
+    kit::motion::refresh();
     let gtk_owns_blur = (gtk::major_version(), gtk::minor_version(), gtk::micro_version()) >= (4, 23, 3);
     let frost = if cfg.dock == config::Dock::Screen && !gtk_owns_blur { blur::Blur::new(&display) } else { None };
     let app = App::new(cfg, frost);
@@ -370,6 +370,7 @@ fn apply_buttons() {
 
 fn watch_config(app: &Rc<App>) {
     apply_buttons();
+    let buttons = Rc::new(std::cell::RefCell::new(kit::appearance::button_layout(&kit::prefs::read())));
     let _ = std::fs::create_dir_all(config::dir());
     glib::timeout_add_seconds_local_once(3, confignote::check);
     let dir = gio::File::for_path(config::dir());
@@ -388,11 +389,13 @@ fn watch_config(app: &Rc<App>) {
         let weak = weak.clone();
         let pending = pending.clone();
         let primary = primary.clone();
+        let buttons = buttons.clone();
         glib::timeout_add_local_once(std::time::Duration::from_millis(90), move || {
             pending.set(false);
             if let Some(app) = weak.upgrade() {
                 confignote::check();
-                apply_buttons();
+                let next = kit::appearance::button_layout(&kit::prefs::read());
+                if buttons.replace(next.clone()) != next { apply_buttons(); }
                 app.apply_prefs(config::Prefs::from(&config::load()));
                 let next = kit::prefs::text(&kit::prefs::read(), "primary_monitor", "");
                 if primary.replace(next.clone()) != next && kit::setup::installed() {

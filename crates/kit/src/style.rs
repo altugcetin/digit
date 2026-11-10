@@ -181,7 +181,7 @@ fn live_at(display: &gtk::gdk::Display, build: fn() -> String, changed: fn(), pr
     let initial = std::cell::Cell::new(true);
     let reload: Rc<dyn Fn()> = Rc::new(move || {
         crate::effects::invalidate();
-        crate::motion::apply(crate::prefs::flag(&crate::prefs::read(), "reduce_motion", false));
+        crate::motion::refresh();
         refresh_glyphs();
         crate::appearance::apply_gtk();
         let css = build();
@@ -190,7 +190,7 @@ fn live_at(display: &gtk::gdk::Display, build: fn() -> String, changed: fn(), pr
             *loaded.borrow_mut() = css.clone();
             provider.load_from_string(&css);
         }
-        let css = format!("{RESETS}{}", effects_css(crate::effects::reduced()));
+        let css = format!("{RESETS}{}", reduction_css(crate::effects::reduced(), crate::motion::reduced()));
         let different = *loaded_overrides.borrow() != css;
         if different {
             *loaded_overrides.borrow_mut() = css.clone();
@@ -234,13 +234,11 @@ fn live_at(display: &gtk::gdk::Display, build: fn() -> String, changed: fn(), pr
     unsafe { display.set_data(key, monitors) };
 }
 
-fn effects_css(reduced: bool) -> &'static str {
-    if reduced {
-        // A universal rule at higher priority also catches app-specific popovers and shadows.
-        "* { box-shadow: none; animation: none; transition-property: none; }"
-    } else {
-        ""
-    }
+fn reduction_css(effects: bool, motion: bool) -> String {
+    let mut css = String::new();
+    if effects { css.push_str("* { box-shadow: none; }\n"); }
+    if motion { css.push_str("* { animation: none; transition-property: none; }\n"); }
+    css
 }
 
 pub fn css() -> String {
@@ -259,6 +257,8 @@ pub fn css() -> String {
         })
         .collect();
     let (r_card, r_row, r_ctl, r_pop, r_dialog, r_hero) = (px(20.0), px(15.0), px(12.0), px(18.0), px(26.0), px(26.0));
+    let roles = crate::theme::load().and_then(|t| t.shell_roles()).unwrap_or_default();
+    let faint = crate::palette::Palette::new(roles, card_color(&lk.surface, Rgb::hex(accent).unwrap_or(roles.primary))).ink_faint.rgba().to_string();
     let row_y = if lk.dense { "7px" } else { "11px" };
     format!(
         r#"
@@ -362,6 +362,7 @@ entry.side-search {{ margin: 0 2px 10px 2px; }}
 .row {{ padding: var(--row-y) 14px; border-radius: var(--r-row); }}
 .name {{ font-size: 15px; font-weight: 520; }}
 .sub {{ color: {meta}; font-size: 13px; }}
+.controlled label {{ color: {faint}; }}
 .mono {{ font-family: "Rubik", sans-serif; font-feature-settings: "tnum"; }}
 .hero {{ font-size: 34px; font-weight: 650; }}
 .dim {{ color: {meta}; }}
@@ -442,9 +443,13 @@ scrollbar slider:active {{ background: alpha({main}, 0.5); }}
 mod glyph_tests {
     use super::*;
     #[test]
-    fn effects_override_is_empty_when_enabled_and_covers_all_nodes_when_reduced() {
-        assert_eq!(effects_css(false), "");
-        assert!(effects_css(true).starts_with("* { box-shadow: none;"));
+    fn effects_and_motion_css_are_independent() {
+        assert_eq!(reduction_css(false, false), "");
+        assert_eq!(reduction_css(true, false), "* { box-shadow: none; }\n");
+        assert!(!reduction_css(true, false).contains("animation"));
+        assert!(!reduction_css(true, false).contains("transition"));
+        assert!(reduction_css(false, true).contains("transition-property: none"));
+        assert!(!reduction_css(false, true).contains("box-shadow"));
     }
 
     #[test]

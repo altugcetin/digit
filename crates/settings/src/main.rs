@@ -307,18 +307,71 @@ pub(crate) fn search_enabled(window: &gtk::Window, enabled: bool) {
     });
 }
 
+/// Child indices keep focus on the same control when a settings page is rebuilt.
+fn focus_path(page: &gtk::Widget) -> Option<Vec<usize>> {
+    let mut widget = page.root()?.focus()?;
+    let mut path = Vec::new();
+    while widget != *page {
+        let mut index = 0;
+        let mut sibling = widget.prev_sibling();
+        while let Some(w) = sibling { index += 1; sibling = w.prev_sibling(); }
+        path.push(index);
+        widget = widget.parent()?;
+    }
+    path.reverse();
+    Some(path)
+}
+
+fn restore_page(page: &gtk::Widget, value: f64, focus: Option<Vec<usize>>) {
+    let Some(scroll) = page.downcast_ref::<gtk::ScrolledWindow>() else { return };
+    let target = focus.and_then(|path| {
+        let mut widget = page.clone();
+        for index in path {
+            widget = widget.first_child()?;
+            for _ in 0..index { widget = widget.next_sibling()?; }
+        }
+        Some(widget.downgrade())
+    });
+    let viewport = scroll.child().and_downcast::<gtk::Viewport>().map(|v| v.downgrade());
+    let restored = std::cell::Cell::new(false);
+    // A new adjustment has no range until layout. Restore during its first usable
+    // range change, before painting, so set_value cannot be clamped to zero.
+    scroll.vadjustment().connect_changed(move |adj| {
+        if restored.get() || adj.page_size() <= 0.0 || adj.upper() - adj.page_size() < value { return; }
+        restored.set(true);
+        if let Some(target) = target.as_ref().and_then(|w| w.upgrade()) {
+            let viewport = viewport.as_ref().and_then(|v| v.upgrade());
+            let follow = viewport.as_ref().is_some_and(|v| v.is_scroll_to_focus());
+            if let Some(v) = &viewport { v.set_scroll_to_focus(false); }
+            target.grab_focus();
+            if let Some(v) = &viewport { v.set_scroll_to_focus(follow); }
+        }
+        adj.set_value(value);
+    });
+}
+
 pub(crate) fn reload(name: &str) {
     search::forget();
     SHELL.with(|s| {
         let Some(stack) = s.borrow().as_ref().map(|s| s.stack.clone()) else { return };
         let Some(old) = stack.child_by_name(name) else { return };
         let visible = stack.visible_child_name().is_some_and(|v| v == name);
+        let value = old.downcast_ref::<gtk::ScrolledWindow>().map_or(0.0, |s| s.vadjustment().value());
+        let focus = if visible { focus_path(&old) } else { None };
         stack.remove(&old);
         if visible {
-            stack.add_named(&build_page(name), Some(name));
+            let page = build_page(name);
+            restore_page(&page, value, focus);
+            stack.add_named(&page, Some(name));
             stack.set_visible_child_name(name);
         }
     });
+}
+
+pub(crate) fn reload_reductions() {
+    for name in ["appearance", "spotlight", "compositor", "notch"] {
+        reload(name);
+    }
 }
 
 fn watch(window: &gtk::ApplicationWindow) {
@@ -335,9 +388,12 @@ fn watch(window: &gtk::ApplicationWindow) {
         glib::timeout_add_local_once(std::time::Duration::from_millis(300), move || {
             pending.set(false);
             if !prefs::ours() {
+                kit::motion::refresh();
+                kit::effects::invalidate();
                 // Pages made of settings show the new values; the others don't read config.toml.
                 let visible = SHELL.with(|s| s.borrow().as_ref().map(|s| s.current.borrow().clone())).unwrap_or_default();
-                if !desktop::sections(&visible).is_empty() && visible != "displays" || visible == "compositor" {
+                reload_reductions();
+                if !["appearance", "spotlight", "compositor", "notch"].contains(&visible.as_str()) && !desktop::sections(&visible).is_empty() && visible != "displays" {
                     reload(&visible);
                 }
             }

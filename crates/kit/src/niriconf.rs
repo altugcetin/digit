@@ -117,8 +117,8 @@ fn action(b: &Bind) -> Option<String> {
             Win::Overview => "toggle-overview;".into(),
             Win::Center => "center-column;".into(),
             // Moving and resizing with Super and the mouse is built into niri; it has no pinned
-            // windows, pseudotiling or scratchpad.
-            Win::Drag | Win::Resize | Win::Snap(_) | Win::ToMonitor(_) | Win::Pin | Win::Pseudo | Win::Scratchpad | Win::ToScratchpad => return None,
+            // windows, minimization, pseudotiling or scratchpad.
+            Win::Drag | Win::Resize | Win::Snap(_) | Win::ToMonitor(_) | Win::Pin | Win::Minimize | Win::Pseudo | Win::Scratchpad | Win::ToScratchpad => return None,
         },
     })
 }
@@ -186,7 +186,12 @@ pub fn render_keybinds(binds: &[Bind]) -> String {
 /// Settings > Compositor in KDL: every value, with digit's defaults for the ones never changed.
 /// niri can't switch a flag off from an included file, so an off flag is just left out.
 fn compositor() -> String {
-    let t = crate::prefs::read();
+    crate::motion::refresh();
+    crate::effects::invalidate();
+    compositor_with(&crate::prefs::read(), crate::motion::reduced(), crate::effects::reduced())
+}
+
+fn compositor_with(t: &toml::Table, motion: bool, reduced: bool) -> String {
     let pick = |key: &str| t.get(&format!("hypr_{key}")).cloned();
     let text = |key: &str, def: &str| pick(key).and_then(|v| v.as_str().map(str::to_string)).or_else(|| Some(def.to_string()));
     let num = |key: &str, def: f64| pick(key).and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))).or(Some(def));
@@ -319,7 +324,6 @@ fn compositor() -> String {
         }
     }
     // Reduced effects switch the compositor's shadows and blur off too.
-    let reduced = crate::effects::reduced();
     let flag = |key: &str, def: bool| if reduced && (key == "shadow" || key == "blur") { Some(false) } else { flag(key, def) };
     if let Some(on) = flag("shadow", true) {
         let softness = match text("shadow_size", "medium").as_deref() {
@@ -336,7 +340,7 @@ fn compositor() -> String {
     if !layout.is_empty() {
         out.push_str(&format!("layout {{\n{}\n}}\n\n", layout.join("\n")));
     }
-    let mut cursor = crate::cursors::niri(&t);
+    let mut cursor = crate::cursors::niri(t);
     if niri_flag("hide_cursor", false) == Some(true) {
         cursor.push("    hide-when-typing".into());
     }
@@ -347,7 +351,7 @@ fn compositor() -> String {
         let zoom = match z.as_str() { "small" => "0.35", "large" => "0.65", _ => "0.5" };
         out.push_str(&format!("overview {{\n    zoom {zoom}\n}}\n\n"));
     }
-    match niri_text("motion", "normal").as_deref() {
+    match if motion { Some("off".to_string()) } else { niri_text("motion", "normal") }.as_deref() {
         Some("slow") => out.push_str("animations {\n    slowdown 2.0\n}\n\n"),
         Some("off") => out.push_str("animations {\n    off\n}\n\n"),
         _ => {}
@@ -451,6 +455,40 @@ pub fn prepare() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reduced_motion_disables_niri_animations_without_changing_stored_choices() {
+        for choice in ["normal", "slow", "off"] {
+            let t: toml::Table = format!("reduce_motion = true\nniri_motion = '{choice}'").parse().unwrap();
+            let stored = toml::to_string(&t).unwrap();
+            let rendered = compositor_with(&t, crate::effects::effective(&t, "reduce_motion", false), false);
+            assert!(rendered.contains("animations {\n    off\n}"));
+            assert!(!rendered.contains("slowdown"));
+            let restored = compositor_with(&t, false, false);
+            match choice {
+                "normal" => assert!(!restored.contains("animations {")),
+                "slow" => assert!(restored.contains("animations {\n    slowdown 2.0\n}")),
+                _ => assert!(restored.contains("animations {\n    off\n}")),
+            }
+            assert_eq!(toml::to_string(&t).unwrap(), stored, "config.toml choices stay stored");
+        }
+    }
+
+    #[test]
+    fn effects_never_change_niri_motion() {
+        let t = "niri_motion = 'slow'\nhypr_blur = true\nhypr_shadow = true".parse().unwrap();
+        for motion in [false, true] {
+            let normal = compositor_with(&t, motion, false);
+            let reduced = compositor_with(&t, motion, true);
+            let animations = if motion { "animations {\n    off\n}" } else { "animations {\n    slowdown 2.0\n}" };
+            assert!(normal.contains(animations));
+            assert!(reduced.contains(animations));
+            assert!(normal.contains("shadow {\n        on"));
+            assert!(reduced.contains("shadow {\n        off"));
+            assert!(normal.contains("blur true"));
+            assert!(!reduced.contains("blur true"));
+        }
+    }
 
     #[test]
     fn primary_focus_preserves_geometry_and_never_duplicates_output_blocks() {

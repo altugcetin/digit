@@ -2,9 +2,11 @@
 //! slower graphics (no shadows, blur or frosted panels). Settings > Desktop sets both.
 
 use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static RENDERER: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
-    static RENDERER: Cell<bool> = const { Cell::new(false) };
     static SOFTWARE: Cell<(bool, i64)> = const { Cell::new((false, i64::MIN)) };
     static REDUCED: Cell<(bool, i64)> = const { Cell::new((false, i64::MIN)) };
 }
@@ -17,7 +19,7 @@ pub fn reduced() -> bool {
         if now.saturating_sub(at) < 2_000_000 {
             return on;
         }
-        let on = effective(&crate::prefs::read(), software());
+        let on = effective(&crate::prefs::read(), "reduced_effects", software());
         r.set((on, now));
         on
     })
@@ -28,8 +30,9 @@ pub fn invalidate() {
     REDUCED.with(|r| r.set((false, i64::MIN)));
 }
 
-fn effective(t: &toml::Table, software: bool) -> bool {
-    t.get("reduced_effects").and_then(toml::Value::as_bool).unwrap_or(software)
+/// Both masters default to software detection only when no explicit boolean is stored.
+pub(crate) fn effective(t: &toml::Table, key: &str, software: bool) -> bool {
+    crate::prefs::flag(t, key, software)
 }
 
 /// Whether drawing uses software, independent of the Reduce effects preference.
@@ -41,7 +44,7 @@ pub fn software() -> bool {
         if now.saturating_sub(at) < 2_000_000 {
             return on;
         }
-        let on = software_in(has_gpu(), RENDERER.get(), std::env::var("GSK_RENDERER").ok().as_deref(), std::env::var_os("LIBGL_ALWAYS_SOFTWARE").is_some());
+        let on = software_in(has_gpu(), RENDERER.load(Ordering::Relaxed), std::env::var("GSK_RENDERER").ok().as_deref(), std::env::var_os("LIBGL_ALWAYS_SOFTWARE").is_some());
         s.set((on, now));
         on
     })
@@ -66,7 +69,7 @@ fn has_gpu() -> bool {
 /// Rendering setting. Automatic draws on the GPU when there is one and in software otherwise.
 pub fn renderer(env: &str) -> String {
     let r = resolve_renderer(env);
-    RENDERER.set(r == "cairo");
+    RENDERER.store(r == "cairo", Ordering::Relaxed);
     SOFTWARE.with(|s| s.set((false, i64::MIN)));
     invalidate();
     r
@@ -91,11 +94,11 @@ mod tests {
     #[test]
     fn explicit_effects_override_software_detection() {
         for software in [false, true] {
-            assert_eq!(effective(&toml::Table::new(), software), software);
+            assert_eq!(effective(&toml::Table::new(), "reduced_effects", software), software);
             for on in [false, true] {
                 let mut t = toml::Table::new();
                 t.insert("reduced_effects".into(), on.into());
-                assert_eq!(effective(&t, software), on);
+                assert_eq!(effective(&t, "reduced_effects", software), on);
             }
         }
     }

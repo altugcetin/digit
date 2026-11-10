@@ -24,12 +24,18 @@ pub(crate) fn save_many(values: &[(&str, toml::Value)]) -> bool {
         ui::fail(&format!("Could not save: {e}"));
         return false;
     }
+    if values.iter().any(|(key, _)| matches!(*key, "reduce_motion" | "reduced_effects")) {
+        kit::motion::refresh();
+        kit::effects::invalidate();
+        // Rebuild after the switch callback finishes; cached child pages must also be dropped.
+        glib::idle_add_local_once(crate::reload_reductions);
+    }
     // Compositor settings (and the accent, which colors niri's window border) go straight into
     // digit's part of the compositor config.
-    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "ui_accent" | "border_color" | "reduced_effects" | "terminal" | "nvidia_env" | "cursor_theme" | "cursor_size")) {
+    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "ui_accent" | "border_color" | "reduce_motion" | "reduced_effects" | "terminal" | "nvidia_env" | "cursor_theme" | "cursor_size")) {
         apply_compositor();
     }
-    if values.iter().any(|(key, _)| matches!(*key, "button_minimize" | "button_maximize" | "button_close")) {
+    if values.iter().any(|(key, _)| matches!(*key, "button_maximize" | "button_close")) {
         glib::spawn_future_local(async {
             let _ = gio::spawn_blocking(kit::appearance::apply_buttons).await;
         });
@@ -82,6 +88,26 @@ pub(crate) fn accent(card: &gtk::Box, t: &toml::Table) {
     card.append(&block);
 }
 
+/// One row state for all controls owned by a reduction master.
+pub(crate) fn controlled(key: &str) -> Option<&'static str> {
+    controlled_in(key, kit::motion::reduced(), kit::effects::reduced())
+}
+
+fn controlled_in(key: &str, motion: bool, effects: bool) -> Option<&'static str> {
+    match key {
+        "smooth_scroll" | "smooth_caret" | "intro" | "hypr_window_anim" | "hypr_workspace_anim" | "niri_motion" if motion => Some("Off while Reduce motion is on"),
+        "hypr_blur" | "hypr_shadow" | "menubar_look" if effects => Some("Off while Reduce effects is on"),
+        _ => None,
+    }
+}
+
+pub(crate) fn controlled_row(row: &gtk::Box, detail: Option<&str>) {
+    if detail.is_some() {
+        row.add_css_class("controlled");
+        row.set_sensitive(false);
+    }
+}
+
 pub(crate) struct Choice {
     pub row: gtk::Box,
     controls: Vec<gtk::Widget>,
@@ -110,7 +136,16 @@ impl Choice {
 }
 
 pub(crate) fn choice(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, options: &[(&str, &str)], current: &str) -> Choice {
-    let (row, end) = ui::row(Some(icon), title, sub);
+    let detail = controlled(key);
+    let mut options = options.to_vec();
+    let current = if detail.is_some() {
+        if key == "menubar_look" { "clear" } else {
+            if !options.iter().any(|o| o.0 == "off") { options.push(("off", "Off")); }
+            "off"
+        }
+    } else { current };
+    let (row, end) = ui::row(Some(icon), title, detail.unwrap_or(sub));
+    controlled_row(&row, detail);
     let labels: Vec<&str> = options.iter().map(|o| o.1).collect();
     let at = options.iter().position(|o| o.0 == current).unwrap_or(0);
     let values: Rc<Vec<String>> = Rc::new(options.iter().map(|o| o.0.to_string()).collect());
@@ -269,16 +304,19 @@ fn find_switch(w: &gtk::Widget) -> Option<gtk::Switch> {
 
 fn when_on(source: &gtk::Box, target: &impl IsA<gtk::Widget>) {
     if let Some(sw) = find_switch(source.upcast_ref()) {
-        target.set_sensitive(sw.is_active());
+        target.set_sensitive(sw.is_active() && !target.has_css_class("controlled"));
         let target = target.as_ref().downgrade();
         sw.connect_active_notify(move |s| {
-            if let Some(target) = target.upgrade() { target.set_sensitive(s.is_active()); }
+            if let Some(target) = target.upgrade() { target.set_sensitive(s.is_active() && !target.has_css_class("controlled")); }
         });
     }
 }
 
 pub(crate) fn toggle(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, on: bool) -> gtk::Box {
-    let (row, end) = ui::row(Some(icon), title, sub);
+    let detail = controlled(key);
+    let (row, end) = ui::row(Some(icon), title, detail.unwrap_or(sub));
+    controlled_row(&row, detail);
+    let on = on && detail.is_none();
     let sw = gtk::Switch::new();
     sw.set_valign(gtk::Align::Center);
     ui::bind_switch(&sw, on, move |on| save(key, toml::Value::Boolean(on)));
@@ -680,13 +718,15 @@ fn app_look(body: &gtk::Box, t: &toml::Table) {
 
 fn effects(body: &gtk::Box, t: &toml::Table) {
     let look = section(body, "Motion and effects");
-    toggle(&look, "motion_photos_off", "Reduce motion", "Turn off panel transitions and decorative animations in Digit", "reduce_motion", prefs::get_bool(&t, "reduce_motion", false));
+    kit::motion::refresh();
+    let motion_detail = if kit::motion::automatic() { "On automatically for software rendering" } else { "Turn off motion in Digit and compositor animations" };
+    toggle(&look, "motion_photos_off", "Reduce motion", motion_detail, "reduce_motion", kit::motion::reduced());
     toggle(&look, "swipe_vertical", "Smooth scrolling", "Mouse wheel steps glide instead of jumping. Touchpads always scroll smoothly", "smooth_scroll", prefs::get_bool(&t, "smooth_scroll", true));
+    toggle(&look, "auto_awesome", "Startup animation", "Greet each start of the shell with a short full-screen animation", "intro", prefs::get_bool(&t, "intro", true));
     kit::effects::invalidate();
     let effects_detail = if kit::effects::automatic() { "On automatically for software rendering" } else { "No shadows, blur or frosted panels in digit and the compositor; smoother on older laptops" };
     toggle(&look, "speed", "Reduce effects", effects_detail, "reduced_effects", kit::effects::reduced());
     choice(&look, "memory", "Rendering", "How digit and its apps draw. Takes effect when they next start", "renderer", &[("auto", "Automatic"), ("gl", "GPU (OpenGL)"), ("vulkan", "GPU (Vulkan)"), ("cairo", "Software")], &prefs::get_str(&t, "renderer", "auto"));
-    toggle(&look, "auto_awesome", "Startup animation", "Greet each start of the shell with a short full-screen animation", "intro", prefs::get_bool(&t, "intro", true));
 }
 
 fn dock(body: &gtk::Box, t: &toml::Table) {
@@ -719,9 +759,9 @@ pub fn session_notice(body: &gtk::Box, kind: kit::setup::Kind) {
 
 fn window_buttons(body: &gtk::Box, t: &toml::Table) {
     let win = section(body, "Window buttons");
-    toggle(&win, "remove", "Minimize button", "Show the minimize button in window headers", "button_minimize", prefs::get_bool(t, "button_minimize", true));
-    toggle(&win, "crop_square", "Maximize button", "Show the maximize button in window headers", "button_maximize", prefs::get_bool(t, "button_maximize", true));
-    toggle(&win, "close", "Close button", "Show the close button in window headers", "button_close", prefs::get_bool(t, "button_close", true));
+    toggle(&win, "remove", "Minimize button", "In Digit's own apps", "button_minimize", prefs::get_bool(t, "button_minimize", true));
+    toggle(&win, "crop_square", "Maximize button", "In Digit's apps and other GTK apps", "button_maximize", prefs::get_bool(t, "button_maximize", true));
+    toggle(&win, "close", "Close button", "In Digit's apps and other GTK apps", "button_close", prefs::get_bool(t, "button_close", true));
 }
 
 pub fn session(body: &gtk::Box, _: &toml::Table) {
@@ -1291,5 +1331,22 @@ mod tests {
         assert!(super::screenshot_folder("/tmp/bad\nfolder").is_err());
         let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         assert!(super::screenshot_folder(file.to_str().unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod reduction_tests {
+    use super::*;
+
+    #[test]
+    fn each_child_is_controlled_only_by_its_own_master() {
+        for (key, motion) in [("smooth_scroll", true), ("smooth_caret", true), ("intro", true), ("hypr_window_anim", true), ("hypr_workspace_anim", true), ("niri_motion", true), ("hypr_shadow", false), ("hypr_blur", false), ("menubar_look", false)] {
+            assert_eq!(controlled_in(key, false, false), None);
+            assert_eq!(controlled_in(key, !motion, motion), None);
+            assert_eq!(controlled_in(key, motion, !motion), Some(if motion { "Off while Reduce motion is on" } else { "Off while Reduce effects is on" }));
+        }
+        for key in ["reduce_motion", "reduced_effects", "renderer"] {
+            assert_eq!(controlled_in(key, true, true), None);
+        }
     }
 }

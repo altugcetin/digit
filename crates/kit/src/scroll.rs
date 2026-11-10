@@ -21,7 +21,7 @@ thread_local! {
 /// The "smooth_scroll" preference, re-read at most every two seconds so toggling it applies live.
 fn enabled() -> bool {
     let now = glib::monotonic_time();
-    ENABLED.with(|e| {
+    let on = ENABLED.with(|e| {
         let (on, at) = e.get();
         if now.saturating_sub(at) < 2_000_000 {
             return on;
@@ -29,7 +29,8 @@ fn enabled() -> bool {
         let on = crate::prefs::flag(&crate::prefs::read(), "smooth_scroll", true);
         e.set((on, now));
         on
-    })
+    });
+    crate::motion::enabled(on)
 }
 
 struct Glide {
@@ -199,8 +200,8 @@ fn spring(sw: &gtk::ScrolledWindow) {
         let mut dt = ((now - st.at).max(0) as f64 / 1e6).min(0.05);
         st.at = now;
         if st.held {
-            st.ticking = false;
-            return glib::ControlFlow::Break;
+            // Keep watching the policy while the user holds a stretched page still.
+            return glib::ControlFlow::Continue;
         }
         // Critically damped spring, in small steps so it stays stable on slow frames.
         while dt > 0.0 {
@@ -359,6 +360,7 @@ fn pull(held: &Rc<RefCell<Option<gtk::ScrolledWindow>>>, target: gtk::Widget, dy
     }
     drop(st);
     show(&sw, &e);
+    spring(&sw);
     *held.borrow_mut() = Some(sw);
     glib::Propagation::Stop
 }
