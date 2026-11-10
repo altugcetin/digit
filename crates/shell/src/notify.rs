@@ -2,7 +2,7 @@ use crate::app::{App, Peek};
 use futures_util::StreamExt;
 use gtk::{gdk, gio, glib, prelude::*};
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -42,7 +42,7 @@ struct Look {
 }
 
 enum Event {
-    Notify { id: u32, app: String, summary: String, body: String, default: bool, urgent: bool, look: Look, transient: bool, actions: Vec<(String, String)> },
+    Notify { id: u32, app: String, summary: String, body: String, default: bool, urgent: bool, timeout: Option<u64>, look: Look, transient: bool, actions: Vec<(String, String)> },
     Close(u32),
 }
 
@@ -51,6 +51,7 @@ struct Server {
     queue: Arc<Mutex<VecDeque<Event>>>,
     image_px: i32,
     next: AtomicU32,
+    active: Arc<Mutex<HashSet<u32>>>,
 }
 
 #[zbus::interface(name = "org.freedesktop.Notifications")]
@@ -69,7 +70,7 @@ impl Server {
         body: String,
         actions: Vec<String>,
         hints: HashMap<String, OwnedValue>,
-        _expire_timeout: i32,
+        expire_timeout: i32,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<u32> {
         let id = if replaces_id > 0 { replaces_id } else { self.next.fetch_add(1, Ordering::Relaxed) };
@@ -92,6 +93,7 @@ impl Server {
         let transient = hints.get("transient").and_then(|v| bool::try_from(v.try_clone().ok()?).ok().or_else(|| u8::try_from(v.try_clone().ok()?).ok().map(|x| x != 0))).unwrap_or(false);
         let event = Event::Notify {
             transient,
+            timeout: timeout_ms(expire_timeout),
             id,
             app: app_name.chars().take(256).collect(),
             summary: plain(&summary.chars().take(4096).collect::<String>()),
@@ -101,6 +103,7 @@ impl Server {
             look,
             actions: buttons,
         };
+        if let Ok(mut active) = self.active.lock() { active.insert(id); }
         self.enqueue(event, &emitter).await?;
         Ok(id)
     }
@@ -135,10 +138,15 @@ impl Server {
         }
         if let Some(event) = dropped {
             let (id, reason) = match event { Event::Notify { id, .. } => (id, 4), Event::Close(id) => (id, 3) };
-            Server::notification_closed(emitter, id, reason).await?;
+            let removed = self.active.lock().map(|mut a| a.remove(&id)).unwrap_or(false);
+            if removed { Server::notification_closed(emitter, id, reason).await?; }
         }
         Ok(())
     }
+}
+
+fn timeout_ms(timeout: i32) -> Option<u64> {
+    (timeout > 0).then(|| (timeout as u64).clamp(100, 300_000))
 }
 
 fn icon_from_str(value: &str) -> Option<IconSource> {
@@ -367,6 +375,8 @@ fn plain(text: &str) -> String {
 pub struct Handle {
     conn: zbus::Connection,
     defaults: Rc<RefCell<VecDeque<u32>>>,
+    active: Arc<Mutex<HashSet<u32>>>,
+    timeouts: Rc<RefCell<HashMap<u32, u64>>>,
 }
 
 impl Handle {
@@ -385,7 +395,11 @@ impl Handle {
         }
     }
 
+    pub fn timeout(&self, id: u32) -> Option<u64> { self.timeouts.borrow().get(&id).copied() }
+
     fn emit(&self, id: u32, reason: u32, action: Option<String>) {
+        if !self.active.lock().map(|mut a| a.remove(&id)).unwrap_or(false) { return; }
+        self.timeouts.borrow_mut().remove(&id);
         let conn = self.conn.clone();
         glib::spawn_future_local(async move {
             let Ok(iface) = conn.object_server().interface::<_, Server>(PATH).await else { return };
@@ -426,7 +440,8 @@ pub fn start(app: &Rc<App>) {
     let image_px = 96 * crate::images::scale();
     let weak = Rc::downgrade(app);
     glib::spawn_future_local(async move {
-        let server = Server { tx, queue: queue.clone(), image_px, next: AtomicU32::new(1) };
+        let active = Arc::new(Mutex::new(HashSet::new()));
+        let server = Server { tx, queue: queue.clone(), image_px, next: AtomicU32::new(1), active: active.clone() };
         let conn = match async {
             let conn = crate::bus::session().await?;
             conn.object_server().at(PATH, server).await?;
@@ -441,7 +456,7 @@ pub fn start(app: &Rc<App>) {
             }
         };
         let Some(app) = weak.upgrade() else { return };
-        *app.notify.borrow_mut() = Some(Handle { conn: conn.clone(), defaults: Rc::new(RefCell::new(VecDeque::new())) });
+        *app.notify.borrow_mut() = Some(Handle { conn: conn.clone(), defaults: Rc::new(RefCell::new(VecDeque::new())), active, timeouts: Rc::new(RefCell::new(HashMap::new())) });
         drop(app);
         glib::spawn_future_local(acquire(conn));
         loop {
@@ -452,11 +467,15 @@ pub fn start(app: &Rc<App>) {
             };
             let Some(app) = weak.upgrade() else { break };
             match event {
-                Event::Notify { id, app: source, summary, body, default, urgent, look, transient, actions } => {
+                Event::Notify { id, app: source, summary, body, default, urgent, timeout, look, transient, actions } => {
                     // Resolve in one serial consumer so slow file loads cannot reorder arrivals.
                     let look = load_files(look, image_px).await;
                     let handle = app.notify.borrow().clone();
-                    if let Some(h) = handle { h.set_default(id, default); }
+                    if let Some(h) = handle {
+                        h.set_default(id, default);
+                        h.timeouts.borrow_mut().remove(&id);
+                        if let Some(timeout) = timeout { h.timeouts.borrow_mut().insert(id, timeout); }
+                    }
                     let full = body.clone();
                     let summary = if summary.is_empty() { body } else { summary };
                     let line = if full == summary { String::new() } else { full.split_whitespace().collect::<Vec<_>>().join(" ") };
@@ -549,6 +568,15 @@ mod tests {
         assert_eq!(pixel_layout(-1, 2, 8, 4, 16), None);
         assert_eq!(pixel_layout(i32::MAX, i32::MAX, i32::MAX, 4, usize::MAX), None);
         assert_eq!(pixel_layout(4096, 4096, 16384, 4, usize::MAX), None);
+    }
+
+    #[test]
+    fn notification_timeout_uses_defaults_and_bounds() {
+        assert_eq!(super::timeout_ms(-1), None);
+        assert_eq!(super::timeout_ms(0), None);
+        assert_eq!(super::timeout_ms(1), Some(100));
+        assert_eq!(super::timeout_ms(2400), Some(2400));
+        assert_eq!(super::timeout_ms(i32::MAX), Some(300_000));
     }
 
     #[test]

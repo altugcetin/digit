@@ -259,7 +259,10 @@ fn sleep_watch(weak: Weak<App>) {
                     if going {
                         if app.prefs.borrow().lock_on_sleep {
                             crate::lock::lock(&app);
-                            glib::timeout_future(Duration::from_millis(600)).await;
+                            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                            while !crate::lock::confirmed() && std::time::Instant::now() < deadline {
+                                glib::timeout_future(Duration::from_millis(25)).await;
+                            }
                         }
                         held = None;
                     } else if held.is_none() {

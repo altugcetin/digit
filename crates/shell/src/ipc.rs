@@ -35,14 +35,36 @@ pub fn serve(app: &Rc<App>) {
         while let Ok((conn, _)) = listener.accept_future().await {
             let Some(app) = weak.upgrade() else { break };
             glib::spawn_future_local(async move {
-                let input = gio::DataInputStream::new(&conn.input_stream());
-                let Ok(Some(line)) = input.read_line_utf8_future(glib::Priority::DEFAULT).await else { return };
+                let input = conn.input_stream();
+                let read = Box::pin(read_request(&input));
+                let timer = Box::pin(glib::timeout_future(std::time::Duration::from_secs(5)));
+                let futures_util::future::Either::Left((Some(line), _)) = futures_util::future::select(read, timer).await else { return };
                 let words: Vec<String> = serde_json::from_str(&line).unwrap_or_default();
                 let reply = handle(&app, &words).await;
                 let _ = conn.output_stream().write_all_future(format!("{reply}\n").into_bytes(), glib::Priority::DEFAULT).await;
             });
         }
     });
+}
+
+const REQUEST_MAX: usize = 64 * 1024;
+
+fn request_line(bytes: &[u8]) -> Result<Option<String>, ()> {
+    if let Some(end) = bytes.iter().position(|b| *b == b'\n') {
+        if end > REQUEST_MAX { return Err(()); }
+        return std::str::from_utf8(&bytes[..end]).map(|s| Some(s.to_string())).map_err(|_| ());
+    }
+    if bytes.len() > REQUEST_MAX { Err(()) } else { Ok(None) }
+}
+
+async fn read_request(input: &gio::InputStream) -> Option<String> {
+    let mut bytes = Vec::new();
+    loop {
+        let (chunk, count) = input.read_future(vec![0u8; 4096], glib::Priority::DEFAULT).await.ok()?;
+        if count == 0 { return None; }
+        bytes.extend_from_slice(&chunk[..count]);
+        match request_line(&bytes) { Ok(Some(line)) => return Some(line), Ok(None) => {}, Err(()) => return None }
+    }
 }
 
 async fn focused_output() -> Option<String> {
@@ -424,5 +446,17 @@ fn record(app: &Rc<App>, words: &[String]) -> String {
         }
         "status" => gsr::describe().to_string(),
         _ => RECORD.into(),
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+    #[test]
+    fn rejects_oversize_and_invalid_requests() {
+        assert_eq!(request_line(b"[]\nignored"), Ok(Some("[]".into())));
+        assert_eq!(request_line(b"["), Ok(None));
+        assert_eq!(request_line(&vec![b'x'; REQUEST_MAX + 1]), Err(()));
+        assert_eq!(request_line(b"\xff\n"), Err(()));
     }
 }

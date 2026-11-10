@@ -81,6 +81,10 @@ struct Entry {
     position_at: i64,
     counted: bool,
     task: glib::JoinHandle<()>,
+    generation: u64,
+    refreshing: bool,
+    refresh_again: bool,
+    attempts: u8,
 }
 
 struct Inner {
@@ -89,6 +93,8 @@ struct Inner {
     active: Option<String>,
     pending: HashMap<String, u64>,
     generation: u64,
+    art_task: Option<glib::JoinHandle<()>>,
+    art_track: Option<(Option<String>, u8, String)>,
     art_cache: Vec<(String, i32, gdk::Texture, Option<Rgb>)>,
     polling: Option<glib::SourceId>,
     recheck: Option<glib::SourceId>,
@@ -108,6 +114,8 @@ impl Players {
             active: None,
             pending: HashMap::new(),
             generation: 0,
+            art_task: None,
+            art_track: None,
             art_cache: Vec::new(),
             polling: None,
             recheck: None,
@@ -117,8 +125,17 @@ impl Players {
         })));
         *app.players.borrow_mut() = Some(players.clone());
         glib::spawn_future_local(async move {
-            if let Err(e) = players.run().await {
-                eprintln!("digit: media: {e}");
+            let mut wait = 1;
+            loop {
+                if players.0.borrow().app.upgrade().is_none() { break; }
+                if let Err(e) = players.run().await {
+                    eprintln!("digit: media: {e}");
+                }
+                let names: Vec<_> = players.0.borrow().entries.keys().cloned().collect();
+                players.0.borrow_mut().pending.clear();
+                for name in names { players.remove(&name); }
+                glib::timeout_future(Duration::from_secs(wait)).await;
+                wait = (wait * 2).min(30);
             }
         });
     }
@@ -199,7 +216,6 @@ impl Players {
         self.0.borrow_mut().pending.remove(&name);
         let this = self.clone();
         let listener = proxy.clone();
-        let reader = fresh.clone();
         let key = name.clone();
         let task = glib::spawn_future_local(async move {
             enum Change {
@@ -221,16 +237,14 @@ impl Players {
             while let Some(change) = all.next().await {
                 match change {
                     Change::Props => {
-                        let mut track = read(&reader).await;
-                        track.browser = browser;
-                        this.update(&key, track);
+                        this.refresh(&key, false).await;
                     }
                     Change::Seeked(position) => this.set_position(&key, position as f64 / 1e6, true),
                 }
             }
         });
         let desktop = if desktop.is_empty() { name.trim_start_matches(PREFIX).split(".instance").next().unwrap_or_default().to_string() } else { desktop };
-        let entry = Entry { proxy, fresh, track: Track::default(), app_name, desktop, position: 0.0, position_at: App::now(), counted: false, task };
+        let entry = Entry { proxy, fresh, track: Track::default(), app_name, desktop, position: 0.0, position_at: App::now(), counted: false, task, generation, refreshing: false, refresh_again: false, attempts: 0 };
         if let Some(old) = self.0.borrow_mut().entries.insert(name.clone(), entry) {
             old.task.abort();
         }
@@ -257,6 +271,7 @@ impl Players {
             let new_track = track_key(&track) != track_key(&entry.track);
             let toggled = track.status != entry.track.status;
             if new_track {
+                entry.attempts = 0;
                 let seen = !entry.track.title.is_empty() && track.status == "Playing";
                 entry.position = 0.0;
                 entry.position_at = now;
@@ -340,12 +355,17 @@ impl Players {
         // Some players publish a new track before its duration and never signal the duration
         // afterwards; poll until it shows up so the progress bar does not vanish.
         self.keep_refreshing(active.as_deref().filter(|_| playing && track.length <= 0.0 && !track.browser));
+        let track_changed = {
+            let (kind, key) = track_key(&track);
+            let identity = (active.clone(), kind, key.to_string());
+            self.0.borrow_mut().art_track.replace(identity.clone()).as_ref() != Some(&identity)
+        };
         let (announce, art_changed) = {
             let mut m = app.media.borrow_mut();
             let was_playing = m.playing;
             let switched = m.bus != active;
             let announce = playing && !track.title.is_empty() && (track.title != m.title || !was_playing && switched);
-            let art_changed = track.art != m.art_url;
+            let art_changed = track_changed || track.art != m.art_url;
             if was_playing && !playing {
                 m.paused_at = Some(now);
             }
@@ -385,8 +405,40 @@ impl Players {
         app.media_changed();
     }
 
+    async fn refresh(&self, name: &str, poll: bool) {
+        let (fresh, browser, generation) = {
+            let mut inner = self.0.borrow_mut();
+            let Some(e) = inner.entries.get_mut(name) else { return };
+            if e.refreshing {
+                if !poll { e.refresh_again = true; }
+                return;
+            }
+            if poll {
+                if !duration_retry(&e.track, e.attempts) { return; }
+                e.attempts += 1;
+            }
+            e.refreshing = true;
+            (e.fresh.clone(), e.track.browser, e.generation)
+        };
+        loop {
+            let mut track = read(&fresh).await;
+            track.browser = browser;
+            let again = {
+                let mut inner = self.0.borrow_mut();
+                let Some(e) = inner.entries.get_mut(name).filter(|e| e.generation == generation) else { return };
+                std::mem::take(&mut e.refresh_again)
+            };
+            self.update(name, track);
+            if !again { break; }
+        }
+        if let Some(e) = self.0.borrow_mut().entries.get_mut(name).filter(|e| e.generation == generation) {
+            e.refreshing = false;
+        }
+    }
+
     fn keep_refreshing(&self, name: Option<&str>) {
         let mut inner = self.0.borrow_mut();
+        let name = name.filter(|n| inner.entries.get(*n).is_some_and(|e| duration_retry(&e.track, e.attempts)));
         if inner.refresh.as_ref().map(|(n, _)| n.as_str()) == name {
             return;
         }
@@ -397,21 +449,17 @@ impl Players {
         let this = self.clone();
         let key = name.clone();
         let id = glib::timeout_add_local(Duration::from_millis(1200), move || {
-            let entry = this.0.borrow().entries.get(&key).map(|e| (e.fresh.clone(), e.track.browser));
-            let Some((fresh, browser)) = entry else { return glib::ControlFlow::Continue };
             let this = this.clone();
             let key = key.clone();
-            glib::spawn_future_local(async move {
-                let mut track = read(&fresh).await;
-                track.browser = browser;
-                this.update(&key, track);
-            });
+            glib::spawn_future_local(async move { this.refresh(&key, true).await; });
             glib::ControlFlow::Continue
         });
         inner.refresh = Some((name, id));
     }
 
     fn load_art(&self, app: &Rc<App>, url: String) {
+        let old = self.0.borrow_mut().art_task.take();
+        if let Some(task) = old { task.abort(); }
         if url.is_empty() {
             return;
         }
@@ -428,11 +476,18 @@ impl Players {
         }
         let this = self.clone();
         let weak = Rc::downgrade(app);
-        glib::spawn_future_local(async move {
+        let task = glib::spawn_future_local(async move {
             let file = gio::File::for_uri(&url);
-            let Ok((bytes, _)) = file.load_bytes_future().await else { return };
-            let Ok(Some(texture)) = gio::spawn_blocking(move || crate::images::decode(&bytes, px)).await else { return };
+            let Ok(stream) = file.read_future(glib::Priority::DEFAULT).await else { return };
+            let mut data = Vec::new();
+            loop {
+                let Ok(bytes) = stream.read_bytes_future(64 * 1024, glib::Priority::DEFAULT).await else { return };
+                if bytes.is_empty() { break; }
+                if !append_art(&mut data, &bytes) { return; }
+            }
+            let Ok(Some(texture)) = gio::spawn_blocking(move || crate::images::decode(&glib::Bytes::from_owned(data), px)).await else { return };
             let Some(app) = weak.upgrade() else { return };
+            if app.media.borrow().art_url != url { return; }
             let tint = tint_of(&texture);
             {
                 let mut inner = this.0.borrow_mut();
@@ -450,6 +505,7 @@ impl Players {
                 app.redraw();
             }
         });
+        self.0.borrow_mut().art_task = Some(task);
     }
 
     fn active_entry(&self) -> Option<(String, PlayerProxy<'static>, Track)> {
@@ -658,6 +714,16 @@ fn track_key(track: &Track) -> (u8, &str) {
     }
 }
 
+fn append_art(data: &mut Vec<u8>, bytes: &[u8]) -> bool {
+    if bytes.len() > (16 * 1024 * 1024usize).saturating_sub(data.len()) { return false; }
+    data.extend_from_slice(bytes);
+    true
+}
+
+fn duration_retry(track: &Track, attempts: u8) -> bool {
+    attempts < 5 && track.length <= 0.0 && !track.browser
+}
+
 /// Live streams report no duration; their title, URL or lack of seeking gives them away.
 fn timing(track: &Track) -> Timing {
     if track.length > 0.0 {
@@ -713,6 +779,28 @@ async fn read(proxy: &PlayerProxy<'static>) -> Track {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn album_art_limit_rejects_extra_bytes_without_growing() {
+        let mut data = vec![0; 16 * 1024 * 1024 - 1];
+        assert!(super::append_art(&mut data, &[1]));
+        assert!(!super::append_art(&mut data, &[2]));
+        assert_eq!(data.len(), 16 * 1024 * 1024);
+        assert_eq!(data.last(), Some(&1));
+    }
+
+    #[test]
+    fn duration_retries_are_bounded() {
+        let mut track = super::Track::default();
+        assert!(super::duration_retry(&track, 0));
+        assert!(super::duration_retry(&track, 4));
+        assert!(!super::duration_retry(&track, 5));
+        track.length = 10.0;
+        assert!(!super::duration_retry(&track, 0));
+        track.length = 0.0;
+        track.browser = true;
+        assert!(!super::duration_retry(&track, 0));
+    }
+
     use super::*;
 
     fn track(title: &str, url: &str, length: f64, can_seek: bool) -> Track {

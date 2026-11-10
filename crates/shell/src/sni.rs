@@ -211,118 +211,128 @@ pub fn start(app: &Rc<App>) {
     }
     let weak: Weak<App> = Rc::downgrade(app);
     glib::spawn_future_local(async move {
-        let Ok(conn) = crate::bus::session().await else { return };
-        CONN.with(|c| *c.borrow_mut() = Some(conn.clone()));
-        let host = format!("org.kde.StatusNotifierHost-{}", std::process::id());
-        let _ = conn.request_name(host.as_str()).await;
-        let Ok(dbus) = zbus::fdo::DBusProxy::new(&conn).await else { return };
-        let mut own = false;
-        if !dbus.name_has_owner(zbus::names::BusName::try_from(WATCHER).unwrap()).await.unwrap_or(false) {
-            own = serve(&conn).await;
-        }
-        let keys = register(&conn, &host).await;
-        let mut items: Vec<Item> = Vec::new();
-        for k in keys.iter().take(32) {
-            if let Some(i) = load(&conn, k).await {
-                items.push(i);
-            }
-        }
-        let Some(app) = weak.upgrade() else { return };
-        publish(&app, &items);
-        drop(app);
-        let rule = |iface: &'static str| zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).interface(iface).map(|b| b.build());
-        let streams: Vec<_> = {
-            let mut v = Vec::new();
-            for iface in [WATCHER, ITEM, "org.freedesktop.DBus"] {
-                if let Ok(r) = rule(iface) {
-                    if let Ok(s) = zbus::MessageStream::for_match_rule(r, &conn, Some(64)).await {
-                        v.push(s);
-                    }
-                }
-            }
-            v
-        };
-        let mut all = futures_util::stream::select_all(streams);
-        while let Some(Ok(msg)) = all.next().await {
-            let header = msg.header();
-            let member = header.member().map(|m| m.to_string()).unwrap_or_default();
-            let iface = header.interface().map(|i| i.to_string()).unwrap_or_default();
-            let sender = header.sender().map(|s| s.to_string()).unwrap_or_default();
-            let mut changed = false;
-            match (iface.as_str(), member.as_str()) {
-                (WATCHER, "StatusNotifierItemRegistered") => {
-                    if let Ok(key) = msg.body().deserialize::<String>() {
-                        if !items.iter().any(|i| i.key == key) {
-                            if let Some(i) = load(&conn, &key).await {
-                                items.push(i);
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-                (WATCHER, "StatusNotifierItemUnregistered") => {
-                    if let Ok(key) = msg.body().deserialize::<String>() {
-                        let before = items.len();
-                        items.retain(|i| i.key != key);
-                        changed = before != items.len();
-                    }
-                }
-                (ITEM, m) if m.starts_with("New") => {
-                    glib::timeout_future(Duration::from_millis(120)).await;
-                    let keys: Vec<String> = items.iter().filter(|i| i.owner == sender || i.bus == sender).map(|i| i.key.clone()).collect();
-                    for k in keys {
-                        if let Some(fresh) = load(&conn, &k).await {
-                            if let Some(slot) = items.iter_mut().find(|i| i.key == k) {
-                                *slot = fresh;
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-                ("org.freedesktop.DBus", "NameOwnerChanged") => {
-                    let Ok((name, _old, new)) = msg.body().deserialize::<(String, String, String)>() else { continue };
-                    if name == WATCHER {
-                        if new.is_empty() && !own {
-                            own = serve(&conn).await;
-                            items.clear();
-                            changed = true;
-                        } else if !new.is_empty() && !own {
-                            let keys = register(&conn, &host).await;
-                            items.clear();
-                            for k in keys.iter().take(32) {
-                                if let Some(i) = load(&conn, k).await {
-                                    items.push(i);
-                                }
-                            }
-                            changed = true;
-                        }
-                    } else if new.is_empty() {
-                        let gone: Vec<String> = items.iter().filter(|i| i.owner == name || i.bus == name).map(|i| i.key.clone()).collect();
-                        if !gone.is_empty() {
-                            items.retain(|i| !gone.contains(&i.key));
-                            changed = true;
-                        }
-                        if own {
-                            let stale: Vec<String> = match conn.object_server().interface::<_, Watcher>(WPATH).await {
-                                Ok(iface) => iface.get().await.items.iter().filter(|k| split(k).0 == name).cloned().collect(),
-                                Err(_) => Vec::new(),
-                            };
-                            for k in stale {
-                                forget(&conn, &k).await;
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-            if changed {
-                let Some(app) = weak.upgrade() else { break };
-                publish(&app, &items);
-            }
+        let mut wait = 1;
+        loop {
+            if weak.upgrade().is_none() { break; }
+            watch(&weak).await;
+            CONN.with(|c| *c.borrow_mut() = None);
+            glib::timeout_future(Duration::from_secs(wait)).await;
+            wait = (wait * 2).min(30);
         }
     });
 }
 
+async fn watch(weak: &Weak<App>) {
+    let Ok(conn) = crate::bus::session().await else { return };
+    CONN.with(|c| *c.borrow_mut() = Some(conn.clone()));
+    let host = format!("org.kde.StatusNotifierHost-{}", std::process::id());
+    let _ = conn.request_name(host.as_str()).await;
+    let Ok(dbus) = zbus::fdo::DBusProxy::new(&conn).await else { return };
+    let mut own = false;
+    if !dbus.name_has_owner(zbus::names::BusName::try_from(WATCHER).unwrap()).await.unwrap_or(false) {
+        own = serve(&conn).await;
+    }
+    let keys = register(&conn, &host).await;
+    let mut items: Vec<Item> = Vec::new();
+    for k in keys.iter().take(32) {
+        if let Some(i) = load(&conn, k).await {
+            items.push(i);
+        }
+    }
+    let Some(app) = weak.upgrade() else { return };
+    publish(&app, &items);
+    drop(app);
+    let rule = |iface: &'static str| zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).interface(iface).map(|b| b.build());
+    let streams: Vec<_> = {
+        let mut v = Vec::new();
+        for iface in [WATCHER, ITEM, "org.freedesktop.DBus"] {
+            if let Ok(r) = rule(iface) {
+                if let Ok(s) = zbus::MessageStream::for_match_rule(r, &conn, Some(64)).await {
+                    v.push(s);
+                }
+            }
+        }
+        v
+    };
+    let mut all = futures_util::stream::select_all(streams);
+    while let Some(Ok(msg)) = all.next().await {
+        let header = msg.header();
+        let member = header.member().map(|m| m.to_string()).unwrap_or_default();
+        let iface = header.interface().map(|i| i.to_string()).unwrap_or_default();
+        let sender = header.sender().map(|s| s.to_string()).unwrap_or_default();
+        let mut changed = false;
+        match (iface.as_str(), member.as_str()) {
+            (WATCHER, "StatusNotifierItemRegistered") => {
+                if let Ok(key) = msg.body().deserialize::<String>() {
+                    if !items.iter().any(|i| i.key == key) {
+                        if let Some(i) = load(&conn, &key).await {
+                            items.push(i);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            (WATCHER, "StatusNotifierItemUnregistered") => {
+                if let Ok(key) = msg.body().deserialize::<String>() {
+                    let before = items.len();
+                    items.retain(|i| i.key != key);
+                    changed = before != items.len();
+                }
+            }
+            (ITEM, m) if m.starts_with("New") => {
+                glib::timeout_future(Duration::from_millis(120)).await;
+                let keys: Vec<String> = items.iter().filter(|i| i.owner == sender || i.bus == sender).map(|i| i.key.clone()).collect();
+                for k in keys {
+                    if let Some(fresh) = load(&conn, &k).await {
+                        if let Some(slot) = items.iter_mut().find(|i| i.key == k) {
+                            *slot = fresh;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            ("org.freedesktop.DBus", "NameOwnerChanged") => {
+                let Ok((name, _old, new)) = msg.body().deserialize::<(String, String, String)>() else { continue };
+                if name == WATCHER {
+                    if new.is_empty() && !own {
+                        own = serve(&conn).await;
+                        items.clear();
+                        changed = true;
+                    } else if !new.is_empty() && !own {
+                        let keys = register(&conn, &host).await;
+                        items.clear();
+                        for k in keys.iter().take(32) {
+                            if let Some(i) = load(&conn, k).await {
+                                items.push(i);
+                            }
+                        }
+                        changed = true;
+                    }
+                } else if new.is_empty() {
+                    let gone: Vec<String> = items.iter().filter(|i| i.owner == name || i.bus == name).map(|i| i.key.clone()).collect();
+                    if !gone.is_empty() {
+                        items.retain(|i| !gone.contains(&i.key));
+                        changed = true;
+                    }
+                    if own {
+                        let stale: Vec<String> = match conn.object_server().interface::<_, Watcher>(WPATH).await {
+                            Ok(iface) => iface.get().await.items.iter().filter(|k| split(k).0 == name).cloned().collect(),
+                            Err(_) => Vec::new(),
+                        };
+                        for k in stale {
+                            forget(&conn, &k).await;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        if changed {
+            let Some(app) = weak.upgrade() else { break };
+            publish(&app, &items);
+        }
+    }
+}
 fn label(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();

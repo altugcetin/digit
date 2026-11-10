@@ -773,7 +773,11 @@ impl App {
         if let Some(cur) = current {
             if cur.same_kind(&peek) {
                 *self.peek.borrow_mut() = Some(peek.clone());
-                self.hold(peek.hold());
+                let ms = match &peek {
+                    Peek::Notification { id, .. } => self.notify.borrow().as_ref().and_then(|n| n.timeout(*id)).unwrap_or_else(|| peek.hold()),
+                    _ => peek.hold(),
+                };
+                self.hold(ms);
                 self.changed();
                 return;
             }
@@ -805,7 +809,11 @@ impl App {
 
     fn activate(self: &Rc<Self>, peek: Peek) {
         *self.peek.borrow_mut() = Some(peek.clone());
-        self.hold(peek.hold());
+        let ms = match &peek {
+            Peek::Notification { id, .. } => self.notify.borrow().as_ref().and_then(|n| n.timeout(*id)).unwrap_or_else(|| peek.hold()),
+            _ => peek.hold(),
+        };
+        self.hold(ms);
         self.changed();
     }
 
@@ -834,7 +842,7 @@ impl App {
             let notify = self.notify.borrow().clone();
             if let Some(n) = notify {
                 match how {
-                    Ending::Expired => {}
+                    Ending::Expired => n.closed(id, 1),
                     Ending::Clicked => {
                         n.clicked(id);
                         self.history.borrow_mut().retain(|x| x.id != id);
