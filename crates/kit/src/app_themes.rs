@@ -23,7 +23,7 @@ impl Toolkit {
     pub fn files(self) -> &'static [&'static str] {
         match self {
             Self::Gtk => &["gtk-3.0/gtk.css", "gtk-3.0/settings.ini", "gtk-4.0/gtk.css", "gtk-4.0/settings.ini"],
-            Self::Qt => &["qt6ct/qt6ct.conf", "qt6ct/colors/digit.conf"],
+            Self::Qt => &["qt6ct/qt6ct.conf"],
         }
     }
 }
@@ -91,12 +91,14 @@ impl Store {
         let Some(bytes) = read(&self.path(kind))? else { return Ok(None) };
         let snapshot: Snapshot = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
         let keys: &[&str] = if matches!(kind, Toolkit::Gtk) { &["color-scheme", "gtk-theme"] } else { &[] };
-        if snapshot.files.len() != kind.files().len()
+        if snapshot.files.len() < kind.files().len()
             || snapshot.settings.len() != keys.len()
             || keys.iter().any(|k| !snapshot.settings.contains_key(*k))
         {
             return Err(io::Error::other("Incomplete theme snapshot"));
         }
+        let mut snapshot = snapshot;
+        snapshot.files.truncate(kind.files().len());
         Ok(Some(snapshot))
     }
     pub fn enable(&self, kind: Toolkit, settings: &impl DesktopSettings) -> io::Result<()> {
@@ -288,6 +290,14 @@ pub fn qt_styles() -> Vec<String> {
     qt_styles_in(&roots)
 }
 
+pub fn effective_qt_style(choice: Option<&str>, styles: &[String]) -> String {
+    choice.filter(|name| *name != "digit" && styles.iter().any(|style| style == *name))
+        .or_else(|| styles.iter().find(|style| style.as_str() == "Breeze").map(String::as_str))
+        .or_else(|| styles.iter().find(|style| style.as_str() == "Fusion").map(String::as_str))
+        .map(str::to_owned)
+        .unwrap_or_else(|| "Fusion".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,6 +379,29 @@ mod tests {
         std::fs::remove_dir(&path).unwrap();
         store.disable(Toolkit::Qt, &settings).unwrap();
         assert_eq!(std::fs::read(path).unwrap(), b"original");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_snapshot_with_extra_trailing_file_restores_current_files() {
+        let root = root("extra-file");
+        let store = Store::new(root.join("config"), root.join("state"));
+        let settings = Settings::default();
+        let path = store.config.join(Toolkit::Qt.files()[0]);
+        let original = b"original\0\xff\r\n";
+        atomic_write(&path, original).unwrap();
+        std::fs::create_dir_all(&store.state).unwrap();
+        let snapshot = Snapshot {
+            files: vec![Some(original.to_vec()), Some(b"stale trailing file".to_vec())],
+            settings: BTreeMap::new(),
+        };
+        atomic_write(&store.path(Toolkit::Qt), &serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        atomic_write(&path, b"changed").unwrap();
+
+        store.disable(Toolkit::Qt, &settings).unwrap();
+
+        assert_eq!(std::fs::read(path).unwrap(), original);
+        assert!(!store.path(Toolkit::Qt).exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
