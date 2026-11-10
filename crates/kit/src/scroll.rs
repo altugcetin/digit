@@ -20,6 +20,9 @@ thread_local! {
 
 /// The "smooth_scroll" preference, re-read at most every two seconds so toggling it applies live.
 fn enabled() -> bool {
+    if !animated(true, crate::motion::reduced(), crate::effects::software()) {
+        return false;
+    }
     let now = glib::monotonic_time();
     ENABLED.with(|e| {
         let (on, at) = e.get();
@@ -30,6 +33,10 @@ fn enabled() -> bool {
         e.set((on, now));
         on
     })
+}
+
+fn animated(smooth: bool, motion: bool, software: bool) -> bool {
+    smooth && !motion && !software
 }
 
 struct Glide {
@@ -57,6 +64,8 @@ struct Elastic {
     at: i64,
     /// The stretched widget's own margins, put back when the page settles.
     base: Option<(gtk::Widget, i32, i32)>,
+    /// Ignore adjustment changes caused by applying the stretch itself.
+    updating: bool,
     /// Recent travel of the page, to tell a fling that hits the edge from a jump.
     last: (f64, i64),
     velocity: f64,
@@ -109,8 +118,10 @@ fn elastic(sw: &gtk::ScrolledWindow) -> Rc<RefCell<Elastic>> {
         let Some(sw) = weak.upgrade() else { return };
         let now = glib::monotonic_time();
         let max = a.upper() - a.page_size();
-        // The stretch itself moves the page while it holds the state; that isn't a fling.
-        let Ok(mut st) = state.try_borrow_mut() else { return };
+        if !enabled() { return; }
+        // The stretch itself moves the page; that isn't a fling.
+        let mut st = state.borrow_mut();
+        if st.updating { return; }
         let (was, at) = st.last;
         let dt = (now - at) as f64 / 1e6;
         let step = a.value() - was;
@@ -118,7 +129,7 @@ fn elastic(sw: &gtk::ScrolledWindow) -> Rc<RefCell<Elastic>> {
         // Only steady motion counts; a jump (Page Down, Home) has no speed to carry.
         st.velocity = if dt > 0.0 && dt < 0.05 && step.abs() < 120.0 { step / dt } else { 0.0 };
         let edge = (a.value() <= 0.0 && st.velocity < 0.0) || (a.value() >= max && st.velocity > 0.0);
-        if edge && st.velocity.abs() > 900.0 && !st.held && st.shown == 0.0 && enabled() {
+        if edge && st.velocity.abs() > 900.0 && !st.held && st.shown == 0.0 {
             let v = -st.velocity.clamp(-4000.0, 4000.0) * 0.35;
             st.velocity = 0.0;
             drop(st);
@@ -129,45 +140,67 @@ fn elastic(sw: &gtk::ScrolledWindow) -> Rc<RefCell<Elastic>> {
 }
 
 /// Puts the stretch on screen by growing the margin on the pulled side.
-fn show(sw: &gtk::ScrolledWindow, st: &mut Elastic) {
+fn show(sw: &gtk::ScrolledWindow, e: &Rc<RefCell<Elastic>>) {
     let Some(w) = stretched(sw) else { return };
-    if st.base.as_ref().is_none_or(|(b, _, _)| b != &w) {
-        st.base = Some((w.clone(), w.margin_top(), w.margin_bottom()));
-    }
-    let (_, top, bottom) = st.base.clone().unwrap();
-    let px = st.shown.round() as i32;
+    let margins = (w.margin_top(), w.margin_bottom());
+    let (top, bottom, px) = {
+        let mut st = e.borrow_mut();
+        if st.base.as_ref().is_none_or(|(b, _, _)| b != &w) {
+            st.base = Some((w.clone(), margins.0, margins.1));
+        }
+        st.updating = true;
+        let (_, top, bottom) = st.base.as_ref().unwrap();
+        (*top, *bottom, st.shown.round() as i32)
+    };
     w.set_margin_top(top + px.max(0));
     w.set_margin_bottom(bottom + (-px).max(0));
     if px < 0 {
-        // A bottom margin only grows the page; keep it scrolled to the end so the content rises.
         let adj = sw.vadjustment();
         adj.set_value(adj.upper() - adj.page_size());
     }
+    e.borrow_mut().updating = false;
 }
 
-fn settle(sw: &gtk::ScrolledWindow, st: &mut Elastic) {
-    if let Some((w, top, bottom)) = st.base.take() {
+fn settle(e: &Rc<RefCell<Elastic>>) {
+    let base = {
+        let mut st = e.borrow_mut();
+        st.shown = 0.0;
+        st.pull = 0.0;
+        st.speed = 0.0;
+        st.held = false;
+        st.updating = true;
+        st.base.take()
+    };
+    if let Some((w, top, bottom)) = base {
         w.set_margin_top(top);
         w.set_margin_bottom(bottom);
     }
-    st.shown = 0.0;
-    st.pull = 0.0;
-    st.speed = 0.0;
-    let _ = sw;
+    e.borrow_mut().updating = false;
 }
 
 /// Runs the spring that brings a stretched page back to rest.
 fn spring(sw: &gtk::ScrolledWindow) {
     let e = elastic(sw);
+    if !enabled() {
+        settle(&e);
+        return;
+    }
+    let at = sw.frame_clock().map_or_else(glib::monotonic_time, |c| c.frame_time());
     {
         let mut st = e.borrow_mut();
         if std::mem::replace(&mut st.ticking, true) {
             return;
         }
-        st.at = sw.frame_clock().map_or_else(glib::monotonic_time, |c| c.frame_time());
+        st.at = at;
     }
     sw.add_tick_callback(move |sw, clock| {
         let sw = sw.downcast_ref::<gtk::ScrolledWindow>().expect("scrolled window");
+        if !enabled() {
+            e.borrow_mut().ticking = false;
+            settle(&e);
+            return glib::ControlFlow::Break;
+        }
+        let size = sw.height().max(1) as f64;
         let mut st = e.borrow_mut();
         let now = clock.frame_time();
         let mut dt = ((now - st.at).max(0) as f64 / 1e6).min(0.05);
@@ -184,21 +217,23 @@ fn spring(sw: &gtk::ScrolledWindow) {
             st.shown += st.speed * h;
             dt -= h;
         }
-        let size = sw.height().max(1) as f64;
         st.shown = st.shown.clamp(-size * STRETCH, size * STRETCH);
         if st.shown.abs() < 0.5 && st.speed.abs() < 20.0 {
-            settle(sw, &mut st);
             st.ticking = false;
+            drop(st);
+            settle(&e);
             return glib::ControlFlow::Break;
         }
         st.pull = unrubber(st.shown, size);
-        show(sw, &mut st);
+        drop(st);
+        show(sw, &e);
         glib::ControlFlow::Continue
     });
 }
 
 /// Bounces the page off an edge: `speed` in px/s, positive out of the top, negative out of the bottom.
 fn kick(sw: &gtk::ScrolledWindow, speed: f64) {
+    if !enabled() { return; }
     let e = elastic(sw);
     {
         let mut st = e.borrow_mut();
@@ -244,15 +279,21 @@ pub fn smooth(window: &impl IsA<gtk::Window>) {
     window.add_controller(motion);
     // The page being pulled with the touchpad, so lifting the fingers can let it spring back.
     let pulling: Rc<RefCell<Option<gtk::ScrolledWindow>>> = Rc::new(RefCell::new(None));
-    let w = window.clone();
+    let w = window.downgrade();
     let held = pulling.clone();
     wheel.connect_scroll(move |c, dx, dy| {
         // Ctrl, Shift or Alt with the wheel mean something else (zoom, sideways), so leave those alone.
         let mods = gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::SHIFT_MASK | gtk::gdk::ModifierType::ALT_MASK;
-        if !enabled() || c.current_event_state().intersects(mods) {
+        if !enabled() {
+            let released = held.borrow_mut().take();
+            if let Some(sw) = released { settle(&elastic(&sw)); }
+            return glib::Propagation::Proceed;
+        }
+        if c.current_event_state().intersects(mods) {
             return glib::Propagation::Proceed;
         }
         let Some((x, y)) = pointer.get() else { return glib::Propagation::Proceed };
+        let Some(w) = w.upgrade() else { return glib::Propagation::Proceed };
         let Some(target) = w.pick(x, y, gtk::PickFlags::DEFAULT) else { return glib::Propagation::Proceed };
         if c.unit() != gtk::gdk::ScrollUnit::Wheel {
             return pull(&held, target, dy);
@@ -263,12 +304,13 @@ pub fn smooth(window: &impl IsA<gtk::Window>) {
         let bounce = (adj == sw.vadjustment() && stretched(&sw).is_some()).then(|| sw.clone());
         if bounce.is_some() {
             let e = elastic(&sw);
-            let mut st = e.borrow_mut();
+            let st = e.borrow();
             if st.shown != 0.0 {
                 // Scrolling away from a bouncing edge drops the stretch at once and scrolls on,
                 // as on a Mac; scrolling further into it lets the bounce play out.
                 if st.shown.signum() == delta.signum() {
-                    settle(&sw, &mut st);
+                    drop(st);
+                    settle(&e);
                 } else {
                     return glib::Propagation::Stop;
                 }
@@ -294,14 +336,14 @@ fn pull(held: &Rc<RefCell<Option<gtk::ScrolledWindow>>>, target: gtk::Widget, dy
         return glib::Propagation::Proceed;
     }
     let e = elastic(&sw);
-    let mut st = e.borrow_mut();
     let max = adj.upper() - adj.page_size();
     let at_top = adj.value() <= 0.0 && dy < 0.0;
     let at_bottom = adj.value() >= max - 0.5 && dy > 0.0;
+    let size = sw.height().max(1) as f64;
+    let mut st = e.borrow_mut();
     if st.shown == 0.0 && !at_top && !at_bottom {
         return glib::Propagation::Proceed;
     }
-    let size = sw.height().max(1) as f64;
     if !st.held {
         // Catch a page that is still springing back, from where it is now.
         st.pull = unrubber(st.shown, size);
@@ -317,12 +359,13 @@ fn pull(held: &Rc<RefCell<Option<gtk::ScrolledWindow>>>, target: gtk::Widget, dy
     st.shown = rubber(st.pull, size);
     if st.shown == 0.0 {
         st.held = false;
-        settle(&sw, &mut st);
+        drop(st);
+        settle(&e);
         held.borrow_mut().take();
         return glib::Propagation::Stop;
     }
-    show(&sw, &mut st);
     drop(st);
+    show(&sw, &e);
     *held.borrow_mut() = Some(sw);
     glib::Propagation::Stop
 }
@@ -355,6 +398,13 @@ fn glide(widget: &gtk::Widget, adj: &gtk::Adjustment, delta: f64, bounce: Option
     }
     let adj = adj.clone();
     widget.add_tick_callback(move |_, clock| {
+        if !enabled() {
+            let mut g = state.borrow_mut();
+            g.left = 0.0;
+            g.carry = 0.0;
+            g.ticking = false;
+            return glib::ControlFlow::Break;
+        }
         let mut g = state.borrow_mut();
         let now = clock.frame_time();
         let dt = (now - g.at).max(0) as f64;
@@ -367,26 +417,46 @@ fn glide(widget: &gtk::Widget, adj: &gtk::Adjustment, delta: f64, bounce: Option
         let travel = part + g.carry;
         let whole = travel.trunc();
         g.carry = travel - whole;
+        drop(g);
         let before = adj.value();
         let max = adj.upper() - adj.page_size();
         adj.set_value((before + whole).clamp(0.0, max.max(0.0)));
         // Stop at either end, or once the distance is used up.
         let stuck = whole != 0.0 && (adj.value() - before).abs() < 0.5;
+        let mut g = state.borrow_mut();
         if g.left == 0.0 || stuck {
-            if stuck {
-                // Running into the edge with distance to spare bounces off it, gently.
-                if let Some(sw) = &bounce {
-                    let speed = (g.left + whole) / (TAU_US / 1e6);
-                    kick(sw, -speed.clamp(-1600.0, 1600.0) * 0.3);
-                }
-            } else if g.carry.abs() >= 0.5 {
-                adj.set_value((adj.value() + g.carry.signum()).clamp(0.0, max.max(0.0)));
-            }
+            let (left, carry) = (g.left, g.carry);
             g.left = 0.0;
             g.carry = 0.0;
             g.ticking = false;
+            drop(g);
+            if stuck {
+                // Running into the edge with distance to spare bounces off it, gently.
+                if let Some(sw) = &bounce {
+                    let speed = (left + whole) / (TAU_US / 1e6);
+                    kick(sw, -speed.clamp(-1600.0, 1600.0) * 0.3);
+                }
+            } else if carry.abs() >= 0.5 {
+                adj.set_value((adj.value() + carry.signum()).clamp(0.0, max.max(0.0)));
+            }
             return glib::ControlFlow::Break;
         }
         glib::ControlFlow::Continue
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reduced_motion_or_software_disables_glide_and_elastic_scrolling() {
+        for smooth in [false, true] {
+            assert!(!animated(smooth, true, false));
+            assert!(!animated(smooth, false, true));
+            assert!(!animated(smooth, true, true));
+        }
+        assert!(animated(true, false, false));
+        assert!(!animated(false, false, false));
+    }
 }

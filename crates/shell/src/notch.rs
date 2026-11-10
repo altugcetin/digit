@@ -293,6 +293,7 @@ impl Notch {
             }
             None => window.set_child(Some(&layer)),
         }
+        crate::spectrum::watch(app, &bars);
         let clock: Vec<char> = app.clock.borrow().chars().collect();
         let view = Rc::new(RefCell::new(View {
             app: app.clone(),
@@ -409,8 +410,8 @@ impl Notch {
         target.connect_accept(|_, drop| crate::tray::accepts_drop(drop));
         let host: gtk::Widget = self.0.borrow().window.child().unwrap_or_else(|| canvas.clone().upcast());
         let to_canvas = {
-            let (host, canvas) = (host.clone(), canvas.clone());
-            move |x: f64, y: f64| host.compute_point(&canvas, &graphene::Point::new(x as f32, y as f32)).map(|p| (p.x() as f64, p.y() as f64)).unwrap_or((x, y))
+            let (host, canvas) = (host.downgrade(), canvas.downgrade());
+            move |x: f64, y: f64| host.upgrade().zip(canvas.upgrade()).and_then(|(host, canvas)| host.compute_point(&canvas, &graphene::Point::new(x as f32, y as f32))).map(|p| (p.x() as f64, p.y() as f64)).unwrap_or((x, y))
         };
         let weak = Rc::downgrade(&self.0);
         target.connect_drag_enter(move |_, _, _, _| {
@@ -546,8 +547,9 @@ impl Notch {
             });
             use crate::strip::Zone;
             let weak = Rc::downgrade(&self.0);
-            let target = st.clone();
+            let target = st.downgrade();
             let open_menu: Rc<dyn Fn(Zone, u32)> = Rc::new(move |zone: Zone, button: u32| {
+                let Some(target) = target.upgrade() else { return };
                 let Some(v) = weak.upgrade() else { return };
                 let (app, below, monitor) = {
                     let v = v.borrow();
@@ -555,8 +557,9 @@ impl Notch {
                 };
                 let Some(left) = target.zone_x(zone) else { return };
                 target.hold(Some(zone));
-                let held = target.clone();
+                let held = target.downgrade();
                 crate::popmenu::then(move || {
+                    let Some(held) = held.upgrade() else { return };
                     if held.held() == Some(zone) {
                         held.hold(None);
                     }
@@ -596,12 +599,13 @@ impl Notch {
             self.0.borrow_mut().opener = Some(open_menu.clone());
             let menu_zone = |z: Option<Zone>| matches!(z, Some(Zone::Logo | Zone::App | Zone::Menu(_) | Zone::Win));
             let motion = gtk::EventControllerMotion::new();
-            let hover = st.clone();
+            let hover = st.downgrade();
             let slide = open_menu.clone();
             let cornered = Rc::new(Cell::new(None));
             let motion_cornered = cornered.clone();
             let weak = Rc::downgrade(&self.0);
             motion.connect_motion(move |_, x, y| {
+                let Some(hover) = hover.upgrade() else { return };
                 let full = hover.width() as f64 >= hover.root().map(|r| r.width() as f64).unwrap_or(0.0) - 1.0;
                 let corner = if full && y <= 1.5 {
                     if x <= 1.5 { Some(kit::corners::Corner::TopLeft) }
@@ -621,8 +625,9 @@ impl Notch {
                     }
                 }
             });
-            let hover = st.clone();
+            let hover = st.downgrade();
             motion.connect_leave(move |_| {
+                let Some(hover) = hover.upgrade() else { return };
                 cornered.set(None);
                 hover.hover(None);
             });
@@ -631,13 +636,15 @@ impl Notch {
             click.set_button(0);
             let pressed: Rc<Cell<Option<Zone>>> = Rc::new(Cell::new(None));
             let was = pressed.clone();
-            let target = st.clone();
+            let target = st.downgrade();
             click.connect_pressed(move |_, _, _, _| {
+                let Some(target) = target.upgrade() else { return };
                 was.set(if crate::popmenu::is_open() || crate::datepop::is_open() { target.held() } else { None });
             });
             let weak = Rc::downgrade(&self.0);
-            let target = st.clone();
+            let target = st.downgrade();
             click.connect_released(move |g, _, x, y| {
+                let Some(target) = target.upgrade() else { return };
                 let Some(v) = weak.upgrade() else { return };
                 let notch = Notch(v);
                 let app = notch.0.borrow().app.clone();

@@ -32,8 +32,37 @@ impl Drop for Cava {
     }
 }
 
+thread_local! {
+    static BARS: std::cell::RefCell<Vec<glib::WeakRef<crate::bars::Bars>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub fn watch(app: &Rc<App>, bars: &crate::bars::Bars) {
+    BARS.with(|b| b.borrow_mut().push(bars.downgrade()));
+    for mapped in [true, false] {
+        let weak = Rc::downgrade(app);
+        let changed = move |_: &crate::bars::Bars| {
+            let weak = weak.clone();
+            // Mapping can change while the notch View is borrowed.
+            glib::idle_add_local_once(move || {
+                let Some(app) = weak.upgrade() else { return };
+                let on = app.media.borrow().wings(App::now()) || app.call.borrow().is_some();
+                want(&app, on);
+            });
+        };
+        if mapped { bars.connect_map(changed); } else { bars.connect_unmap(changed); }
+    }
+}
+
+fn visible() -> bool {
+    BARS.with(|b| {
+        let mut b = b.borrow_mut();
+        b.retain(|w| w.upgrade().is_some());
+        b.iter().filter_map(|w| w.upgrade()).any(|b| b.is_mapped())
+    })
+}
+
 pub fn want(app: &Rc<App>, on: bool) {
-    if !on || kit::motion::reduced() {
+    if !on || kit::motion::reduced() || kit::effects::software() || !visible() {
         if app.cava.borrow_mut().take().is_some() {
             app.spectrum.borrow_mut().clear();
         }
@@ -60,6 +89,11 @@ pub fn want(app: &Rc<App>, on: bool) {
         while let Ok(Some(line)) = lines.read_line_utf8_future(glib::Priority::DEFAULT).await {
             let Some(app) = weak.upgrade() else { break };
             if app.cava.borrow().as_ref().is_none_or(|c| c.process != process) {
+                break;
+            }
+            if kit::effects::software() || kit::motion::reduced() || !visible() {
+                want(&app, false);
+                app.redraw_wings();
                 break;
             }
             let bars: Vec<f64> = line.split(';').filter_map(|v| v.trim().parse::<f64>().ok()).map(|v| v / 1000.0).collect();

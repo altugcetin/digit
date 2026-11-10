@@ -12,10 +12,16 @@ fn glyph_family_in(value: &str, installed: impl Fn(&str) -> bool) -> &'static st
     if family == "Material Symbols Rounded" || installed(family) { family } else { "Material Symbols Rounded" }
 }
 
+static FONT_FAMILIES: std::sync::OnceLock<[bool; 2]> = std::sync::OnceLock::new();
+
+fn installed_glyphs(fonts: &str) -> [bool; 2] {
+    ["Material Symbols Outlined", "Material Symbols Sharp"].map(|family| fonts.lines().flat_map(|line| line.split(',')).any(|name| name.trim().eq_ignore_ascii_case(family)))
+}
+
 fn selected_glyph_family() -> &'static str {
     let value = crate::prefs::text(&crate::prefs::read(), "ui_glyphs", "rounded");
     glyph_family_in(&value, |family| {
-        std::process::Command::new("fc-list").args(["--format=%{family}\n"]).output().is_ok_and(|out| String::from_utf8_lossy(&out.stdout).lines().flat_map(|line| line.split(',')).any(|name| name.trim().eq_ignore_ascii_case(family)))
+        FONT_FAMILIES.get().is_some_and(|fonts| fonts[usize::from(family == "Material Symbols Sharp")])
     })
 }
 
@@ -155,43 +161,85 @@ pub fn live_glyphs(display: &gtk::gdk::Display, changed: fn()) {
 
 fn live_at(display: &gtk::gdk::Display, build: fn() -> String, changed: fn(), priority: u32) {
     use gtk::{gio, glib, prelude::*};
-    let update_motion = || {
+    use std::{cell::RefCell, rc::Rc};
+    let key = if priority == gtk::STYLE_PROVIDER_PRIORITY_APPLICATION { "digit-style-monitors" } else { "digit-glyph-monitors" };
+    if unsafe { display.data::<Vec<gio::FileMonitor>>(key).is_some() } {
+        return;
+    }
+    unsafe { display.set_data(key, Vec::<gio::FileMonitor>::new()) };
+    let provider = gtk::CssProvider::new();
+    gtk::style_context_add_provider_for_display(display, &provider, priority);
+    // One display-wide override, above app CSS and the user's gtk.css.
+    let overrides = unsafe { display.data::<gtk::CssProvider>("digit-style-overrides").map(|p| p.as_ref().clone()) }.unwrap_or_else(|| {
+        let p = gtk::CssProvider::new();
+        gtk::style_context_add_provider_for_display(display, &p, gtk::STYLE_PROVIDER_PRIORITY_USER + 1);
+        unsafe { display.set_data("digit-style-overrides", p.clone()) };
+        p
+    });
+    let loaded = Rc::new(RefCell::new(String::new()));
+    let loaded_overrides = Rc::new(RefCell::new(String::new()));
+    let initial = std::cell::Cell::new(true);
+    let reload: Rc<dyn Fn()> = Rc::new(move || {
+        crate::effects::invalidate();
         crate::motion::apply(crate::prefs::flag(&crate::prefs::read(), "reduce_motion", false));
         refresh_glyphs();
         crate::appearance::apply_gtk();
-    };
-    update_motion();
-    let provider = gtk::CssProvider::new();
-    provider.load_from_string(&build());
-    gtk::style_context_add_provider_for_display(display, &provider, priority);
-    // The user's own gtk.css outranks the application's; these few resets must hold anyway.
-    let resets = gtk::CssProvider::new();
-    resets.load_from_string(RESETS);
-    gtk::style_context_add_provider_for_display(display, &resets, gtk::STYLE_PROVIDER_PRIORITY_USER + 1);
-    let pending = std::rc::Rc::new(std::cell::Cell::new(false));
+        let css = build();
+        let different = *loaded.borrow() != css;
+        if different {
+            *loaded.borrow_mut() = css.clone();
+            provider.load_from_string(&css);
+        }
+        let css = format!("{RESETS}{}", effects_css(crate::effects::reduced()));
+        let different = *loaded_overrides.borrow() != css;
+        if different {
+            *loaded_overrides.borrow_mut() = css.clone();
+            overrides.load_from_string(&css);
+        }
+        if !initial.replace(false) { changed(); }
+    });
+    reload();
+    // Font discovery can be slow. Run it once off the GTK thread, then refresh the family.
+    if FONT_FAMILIES.get().is_none() {
+        let reload = reload.clone();
+        glib::spawn_future_local(async move {
+            let _ = gio::spawn_blocking(|| {
+                FONT_FAMILIES.get_or_init(|| {
+                    std::process::Command::new("fc-list").args(["--format=%{family}\n"]).output().ok().filter(|out| out.status.success()).map(|out| installed_glyphs(&String::from_utf8_lossy(&out.stdout))).unwrap_or_default()
+                });
+            }).await;
+            reload();
+        });
+    }
+    let pending = Rc::new(std::cell::Cell::new(false));
     let mut monitors = Vec::new();
     for path in [crate::prefs::path(), crate::theme::path()] {
         let Some(dir) = path.parent().map(gio::File::for_path) else { continue };
         let Ok(m) = dir.monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE) else { continue };
         let name = path.file_name().map(|n| n.to_os_string());
-        let (provider, pending) = (provider.clone(), pending.clone());
+        let (reload, pending) = (reload.clone(), pending.clone());
         m.connect_changed(move |_, file, other, _| {
             let ours = |f: &gio::File| f.basename().map(|b| b.into_os_string()) == name;
             if !ours(file) && !other.is_some_and(ours) || pending.replace(true) {
                 return;
             }
-            let (provider, pending) = (provider.clone(), pending.clone());
+            let (reload, pending) = (reload.clone(), pending.clone());
             glib::timeout_add_local_once(std::time::Duration::from_millis(220), move || {
                 pending.set(false);
-                update_motion();
-                provider.load_from_string(&build());
-                changed();
+                reload();
             });
         });
         monitors.push(m);
     }
-    unsafe {
-        display.set_data("digit-style-monitors", monitors);
+    unsafe { display.set_data(key, monitors) };
+}
+
+fn effects_css(reduced: bool) -> &'static str {
+    if reduced {
+        // A universal rule at higher priority also catches app-specific popovers and shadows.
+        "* { box-shadow: none; animation: none; transition-property: none; }"
+    } else {
+        ""
     }
 }
 
@@ -212,15 +260,6 @@ pub fn css() -> String {
         .collect();
     let (r_card, r_row, r_ctl, r_pop, r_dialog, r_hero) = (px(20.0), px(15.0), px(12.0), px(18.0), px(26.0), px(26.0));
     let row_y = if lk.dense { "7px" } else { "11px" };
-    // Reduced effects: flat cards and popovers, no soft shadows to draw.
-    let reduced = if crate::effects::reduced() {
-        format!(
-            "popover > contents, popover.menu > contents, popover.menu-pop > contents, .dialog, .overlay-card, .toast, .look, .pinned, .snapbar, .lifted {{ box-shadow: 0 0 0 1px alpha({main}, 0.10); animation: none; }}\n\
-             .seg > button:checked {{ box-shadow: inset 0 0 0 1px alpha({main}, 0.10); }}\n"
-        )
-    } else {
-        String::new()
-    };
     format!(
         r#"
 @define-color d_ink_main {main};
@@ -395,7 +434,6 @@ scrollbar.vertical:hover slider {{ min-width: 8px; margin: 3px 3px; }}
 scrollbar.horizontal:hover slider {{ min-height: 8px; margin: 3px 3px; }}
 scrollbar slider:hover {{ background: alpha({main}, 0.36); }}
 scrollbar slider:active {{ background: alpha({main}, 0.5); }}
-{reduced}
 "#
     )
 }
@@ -403,6 +441,19 @@ scrollbar slider:active {{ background: alpha({main}, 0.5); }}
 #[cfg(test)]
 mod glyph_tests {
     use super::*;
+    #[test]
+    fn effects_override_is_empty_when_enabled_and_covers_all_nodes_when_reduced() {
+        assert_eq!(effects_css(false), "");
+        assert!(effects_css(true).starts_with("* { box-shadow: none;"));
+    }
+
+    #[test]
+    fn font_discovery_accepts_aliases_and_requires_complete_family_names() {
+        assert_eq!(installed_glyphs("Other, material symbols outlined\nMaterial Symbols Sharp\n"), [true, true]);
+        assert_eq!(installed_glyphs("Material Symbols Sharp Extra\n"), [false, false]);
+        assert_eq!(installed_glyphs(""), [false, false]);
+    }
+
     #[test]
     fn missing_glyph_variants_fall_back_to_rounded() {
         for value in ["outlined", "sharp", "rounded", "unknown"] {

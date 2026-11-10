@@ -165,23 +165,31 @@ pub fn ask(parent: Option<&gtk::Window>, title: &str, detail: &str, cancel: &str
         layer.add_overlay(&root);
         settle(&root, &content, 0, true, || {});
         let closing = std::rc::Rc::new(std::cell::Cell::new(false));
+        let ok = std::rc::Rc::new(std::cell::RefCell::new(Some(ok)));
         let close: std::rc::Rc<dyn Fn()> = {
-            let (root, content) = (root.clone(), content.clone());
+            let (root, content, layer) = (root.downgrade(), content.downgrade(), layer.downgrade());
+            let ok = ok.clone();
             std::rc::Rc::new(move || {
                 if closing.replace(true) {
                     return;
                 }
-                let (layer, gone) = (layer.clone(), root.clone());
-                settle(&root, &content, 0, false, move || layer.remove_overlay(&gone));
+                let discarded = ok.borrow_mut().take();
+                drop(discarded);
+                let (Some(root), Some(content)) = (root.upgrade(), content.upgrade()) else { return };
+                let (layer, gone) = (layer.clone(), root.downgrade());
+                settle(&root, &content, 0, false, move || {
+                    if let (Some(layer), Some(gone)) = (layer.upgrade(), gone.upgrade()) {
+                        layer.remove_overlay(&gone);
+                    }
+                });
             })
         };
         let c = close.clone();
         no.connect_clicked(move |_| c());
         let c = close.clone();
-        let ok = std::cell::RefCell::new(Some(ok));
         go.connect_clicked(move |_| {
-            c();
             let confirmed = ok.borrow_mut().take();
+            c();
             if let Some(f) = confirmed {
                 f();
             }
@@ -204,22 +212,22 @@ pub fn ask(parent: Option<&gtk::Window>, title: &str, detail: &str, cancel: &str
     window.add_css_class("digit-dialog");
     window.set_child(Some(&content));
     float_over(&window, parent);
-    let w = window.clone();
-    no.connect_clicked(move |_| w.close());
-    let w = window.clone();
+    let w = window.downgrade();
+    no.connect_clicked(move |_| { if let Some(w) = w.upgrade() { w.close(); } });
+    let w = window.downgrade();
     let ok = std::cell::RefCell::new(Some(ok));
     go.connect_clicked(move |_| {
-        w.close();
+        if let Some(w) = w.upgrade() { w.close(); }
         let confirmed = ok.borrow_mut().take();
         if let Some(f) = confirmed {
             f();
         }
     });
     let keys = gtk::EventControllerKey::new();
-    let w = window.clone();
+    let w = window.downgrade();
     keys.connect_key_pressed(move |_, key, _, _| {
         if key == gtk::gdk::Key::Escape {
-            w.close();
+            if let Some(w) = w.upgrade() { w.close(); }
             return gtk::glib::Propagation::Stop;
         }
         gtk::glib::Propagation::Proceed
@@ -303,8 +311,9 @@ pub fn overlay_handling(window: &gtk::Window, backdrop: &gtk::Box, card: &impl I
     type Grab = ((f64, f64), (i32, i32));
     let resize: Rc<Cell<Option<Grab>>> = Rc::new(Cell::new(None));
     let edge = {
-        let (card, backdrop) = (card.clone(), backdrop.clone());
+        let (card, backdrop) = (card.downgrade(), backdrop.downgrade());
         move |x: f64, y: f64| -> Option<(f64, f64)> {
+            let (card, backdrop) = (card.upgrade()?, backdrop.upgrade()?);
             let b = card.compute_bounds(&backdrop)?;
             let (l, t, r, btm) = (b.x() as f64, b.y() as f64, (b.x() + b.width()) as f64, (b.y() + b.height()) as f64);
             if x < l - GRIP || x > r + GRIP || y < t - GRIP || y > btm + GRIP {
@@ -322,14 +331,18 @@ pub fn overlay_handling(window: &gtk::Window, backdrop: &gtk::Box, card: &impl I
         _ => "nesw-resize",
     };
     let inside = {
-        let (card, backdrop) = (card.clone(), backdrop.clone());
-        move |x: f64, y: f64| card.compute_bounds(&backdrop).is_some_and(|b| b.contains_point(&gtk::graphene::Point::new(x as f32, y as f32)))
+        let (card, backdrop) = (card.downgrade(), backdrop.downgrade());
+        move |x: f64, y: f64| {
+            let (Some(card), Some(backdrop)) = (card.upgrade(), backdrop.upgrade()) else { return false };
+            card.compute_bounds(&backdrop).is_some_and(|b| b.contains_point(&gtk::graphene::Point::new(x as f32, y as f32)))
+        }
     };
     let motion = gtk::EventControllerMotion::new();
     motion.set_propagation_phase(gtk::PropagationPhase::Capture);
     {
-        let (edge, backdrop, resize) = (edge.clone(), backdrop.clone(), resize.clone());
+        let (edge, backdrop, resize) = (edge.clone(), backdrop.downgrade(), resize.clone());
         motion.connect_motion(move |_, x, y| {
+            let Some(backdrop) = backdrop.upgrade() else { return };
             if resize.get().is_none() {
                 backdrop.set_cursor_from_name(edge(x, y).map(cursor));
             }
@@ -339,9 +352,10 @@ pub fn overlay_handling(window: &gtk::Window, backdrop: &gtk::Box, card: &impl I
     let drag = gtk::GestureDrag::new();
     drag.set_propagation_phase(gtk::PropagationPhase::Capture);
     {
-        let (edge, card, resize) = (edge.clone(), card.clone(), resize.clone());
+        let (edge, card, resize) = (edge.clone(), card.downgrade(), resize.clone());
         drag.connect_drag_begin(move |g, x, y| match edge(x, y) {
             Some(sides) => {
+                let Some(card) = card.upgrade() else { return };
                 resize.set(Some((sides, (card.width(), card.height()))));
                 g.set_state(gtk::EventSequenceState::Claimed);
             }
@@ -351,8 +365,9 @@ pub fn overlay_handling(window: &gtk::Window, backdrop: &gtk::Box, card: &impl I
         });
     }
     {
-        let (card, backdrop, resize) = (card.clone(), backdrop.clone(), resize.clone());
+        let (card, backdrop, resize) = (card.downgrade(), backdrop.downgrade(), resize.clone());
         drag.connect_drag_update(move |_, dx, dy| {
+            let (Some(card), Some(backdrop)) = (card.upgrade(), backdrop.upgrade()) else { return };
             let Some(((sx, sy), (w0, h0))) = resize.get() else { return };
             let (wmax, hmax) = ((backdrop.width() - 32).max(480), (backdrop.height() - 32).max(360));
             let (cw, ch) = card.size_request();
@@ -363,11 +378,11 @@ pub fn overlay_handling(window: &gtk::Window, backdrop: &gtk::Box, card: &impl I
     }
     {
         let resize = resize.clone();
-        let card = card.clone();
+        let card = card.downgrade();
         drag.connect_drag_end(move |_, _, _| {
             // Keep the size for next time, when the caller asks for it.
             if resize.take().is_some() {
-                if let Some(key) = remember {
+                if let (Some(key), Some(card)) = (remember, card.upgrade()) {
                     let (w, h) = card.size_request();
                     let _ = crate::prefs::set(key, toml::Value::Array(vec![toml::Value::Integer(w as i64), toml::Value::Integer(h as i64)]));
                 }
@@ -382,10 +397,10 @@ pub fn overlay_handling(window: &gtk::Window, backdrop: &gtk::Box, card: &impl I
         click.connect_pressed(move |_, _, x, y| pressed_out.set(!inside(x, y) && edge(x, y).is_none()));
     }
     {
-        let window = window.clone();
+        let window = window.downgrade();
         click.connect_released(move |_, _, x, y| {
             if pressed_out.replace(false) && !inside(x, y) && edge(x, y).is_none() && resize.get().is_none() {
-                window.close();
+                if let Some(window) = window.upgrade() { window.close(); }
             }
         });
     }
@@ -522,7 +537,7 @@ pub const SETTLE_DROP: f64 = 18.0;
 /// closing runs it back, quicker. `margin` is the card's resting top and bottom margin.
 pub fn settle(root: &gtk::Box, card: &gtk::Box, margin: i32, opening: bool, done: impl FnOnce() + 'static) {
     use crate::motion::{Curve, Tween};
-    if crate::motion::reduced() {
+    if crate::motion::reduced() || crate::effects::software() {
         root.set_opacity(if opening { 1.0 } else { 0.0 });
         card.set_margin_top(margin);
         card.set_margin_bottom(margin);
@@ -536,9 +551,17 @@ pub fn settle(root: &gtk::Box, card: &gtk::Box, margin: i32, opening: bool, done
     } else {
         t.go(0.0, now, 150, Curve::new(0.4, 0.0, 0.9, 0.6));
     }
-    let card = card.clone();
+    let card = card.downgrade();
     let done = std::cell::Cell::new(Some(done));
     root.add_tick_callback(move |w, clock| {
+        let Some(card) = card.upgrade() else { return gtk::glib::ControlFlow::Break };
+        if crate::motion::reduced() || crate::effects::software() {
+            w.set_opacity(if opening { 1.0 } else { 0.0 });
+            card.set_margin_top(margin);
+            card.set_margin_bottom(margin);
+            if let Some(f) = done.take() { f(); }
+            return gtk::glib::ControlFlow::Break;
+        }
         let now = clock.frame_time();
         let v = t.value(now).clamp(0.0, 1.0);
         w.set_opacity(v);
