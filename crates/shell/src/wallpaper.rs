@@ -257,6 +257,7 @@ struct Frame {
     path: String,
     region: Rect,
     span_size: Option<(i32, i32)>,
+    luma: std::sync::Arc<Vec<f32>>,
 }
 
 impl Frame {
@@ -288,7 +289,7 @@ struct Scene {
 
 impl Scene {
     fn progress(&self, now: i64) -> f64 {
-        if motion::reduced() || self.old.is_none() || self.start == 0 {
+        if motion::reduced() || kit::effects::software() || self.old.is_none() || self.start == 0 {
             return 1.0;
         }
         let span = if self.blend { self.span.max(1) } else { SPAN };
@@ -402,7 +403,7 @@ impl Canvas {
     fn show(&self, texture: Frame) {
         {
             let mut scene = self.imp().scene.borrow_mut();
-            if scene.new.is_none() || motion::reduced() {
+            if scene.new.is_none() || motion::reduced() || kit::effects::software() {
                 scene.old = None;
                 scene.prime = None;
                 scene.new = Some(texture);
@@ -441,6 +442,7 @@ impl Canvas {
     }
 
     fn swap(&self, texture: Frame, ms: i64) {
+        if motion::reduced() || kit::effects::software() { self.show(texture); return; }
         let now = glib::monotonic_time();
         {
             let mut scene = self.imp().scene.borrow_mut();
@@ -482,7 +484,7 @@ fn decode_frames(requests: Vec<Render>, layout: Layout, b: Rect, global: String,
             else { f.span_size.is_none() && (f.texture.width(), f.texture.height()) == size }) {
             return Some(frame.texture.clone());
         }
-        if layout == Layout::Span { crate::stash::master(path, &[size]).map(|pb| crate::stash::texture(&pb)) }
+        if layout == Layout::Span { crate::stash::master(path, &[size]).and_then(|pb| crate::stash::cover(&pb, size.0, size.1)).map(|pb| crate::stash::texture(&pb)) }
         else { decode(path, size.0, size.1) }
     })
 }
@@ -490,6 +492,7 @@ fn decode_frames(requests: Vec<Render>, layout: Layout, b: Rect, global: String,
 fn render_frames(requests: Vec<Render>, layout: Layout, b: Rect, global: String, mut decode: impl FnMut(&str, (i32, i32)) -> Option<gdk::Texture>) -> Vec<(String, Frame)> {
     let mut decoded = HashMap::new();
     let mut get = |path: &str, size| decoded.entry((path.to_string(), size)).or_insert_with(|| decode(path, size)).clone();
+    let mut maps: HashMap<usize, std::sync::Arc<Vec<f32>>> = HashMap::new();
     let mut out = Vec::new();
     for Render { output, mut path, size, view } in requests {
         let mut texture = get(&path, size);
@@ -500,7 +503,15 @@ fn render_frames(requests: Vec<Render>, layout: Layout, b: Rect, global: String,
         if let Some(texture) = texture {
             let crop = cover_crop((texture.width() as f64, texture.height() as f64), if layout == Layout::Span { (b.w, b.h) } else { (size.0 as f64, size.1 as f64) });
             let region = if layout == Layout::Span { crop.sub(view) } else { crop };
-            out.push((output, Frame { texture, path, region, span_size: (layout == Layout::Span).then_some(size) }));
+            let luma = maps.entry(texture.as_ptr() as usize).or_insert_with(|| {
+                let mut downloader = gdk::TextureDownloader::new(&texture);
+                downloader.set_format(gdk::MemoryFormat::B8g8r8a8);
+                let (bytes, stride) = downloader.download_bytes();
+                let pb = Pixbuf::from_bytes(&bytes, gtk::gdk_pixbuf::Colorspace::Rgb, true, 8, texture.width(), texture.height(), stride as i32);
+                let small = pb.scale_simple(128, 72, gtk::gdk_pixbuf::InterpType::Bilinear).unwrap();
+                std::sync::Arc::new(small.read_pixel_bytes().chunks_exact(4).map(|p| luminance(p[0], p[1], p[2]) as f32).collect())
+            }).clone();
+            out.push((output, Frame { texture, path, region, luma, span_size: (layout == Layout::Span).then_some(size) }));
         }
     }
     out
@@ -510,7 +521,23 @@ struct Screen {
     monitor: RefCell<Monitor>,
     window: gtk::Window,
     canvas: Canvas,
-    luma: RefCell<Vec<(usize, Rect, u64, f64)>>,
+}
+
+#[derive(Default)]
+struct DecodeQueue {
+    running: Cell<bool>,
+    pending: Cell<Option<Option<i64>>>,
+}
+
+impl DecodeQueue {
+    fn begin(&self, fade: Option<i64>) -> bool {
+        if self.running.replace(true) { self.pending.set(Some(fade)); false } else { true }
+    }
+
+    fn finish(&self) -> Option<Option<i64>> {
+        self.running.set(false);
+        self.pending.take()
+    }
 }
 
 #[derive(Default)]
@@ -520,6 +547,7 @@ pub struct Wallpapers {
     prefs: RefCell<toml::Table>,
     previews: RefCell<HashMap<String, String>>,
     loading: Cell<u64>,
+    decode_queue: DecodeQueue,
     ready: RefCell<Option<Box<dyn FnOnce()>>>,
 }
 
@@ -571,7 +599,7 @@ impl Wallpapers {
             let seed = old.iter().find_map(|s| s.canvas.imp().scene.borrow().new.clone());
             if let Some(frame) = seed { canvas.show(frame); }
             window.present();
-            next.push(Rc::new(Screen { monitor: RefCell::new(meta), window, canvas, luma: RefCell::new(Vec::new()) }));
+            next.push(Rc::new(Screen { monitor: RefCell::new(meta), window, canvas }));
             changed = true;
         }
         *self.screens.borrow_mut() = next.clone();
@@ -689,20 +717,7 @@ impl Wallpapers {
         let frame = screen.canvas.imp().scene.borrow().new.clone()?;
         let monitor = screen.monitor.borrow().clone();
         let region = frame.region_for(monitor.rect.w, monitor.rect.h);
-        let texture = frame.texture;
-        let key = texture.as_ptr() as usize;
-        let bits = band.to_bits();
-        let cached = screen.luma.borrow().iter().find(|(k, r, b, _)| *k == key && *r == region && *b == bits).map(|(_, _, _, v)| *v);
-        if cached.is_some() { return cached; }
-        let (w, h) = (texture.width() as usize, texture.height() as usize);
-        let stride = w * 4;
-        let mut data = vec![0u8; stride * h];
-        texture.download(&mut data, stride);
-        let v = region_luma(&data, w, h, region, band);
-        let mut cache = screen.luma.borrow_mut();
-        cache.retain(|(k, r, _, _)| *k == key && *r == region);
-        cache.push((key, region, bits, v));
-        Some(v)
+        Some(region_luma(&frame.luma, 128, 72, region, band))
     }
 
     pub fn set(self: &Rc<Self>, path: String) {
@@ -734,6 +749,7 @@ impl Wallpapers {
         self.loading.set(generation);
         let monitors = self.monitors();
         if monitors.is_empty() || self.is_empty() { return; }
+        if !self.decode_queue.begin(fade) { return; }
         let layout = self.layout();
         let b = bounds(&monitors);
         let scale = monitors.iter().map(|m| m.scale).fold(1.0, f64::max);
@@ -759,6 +775,7 @@ impl Wallpapers {
             let frames = gio::spawn_blocking(move || {
                 decode_frames(requests, layout, b, global, live)
             }).await;
+            if let Some(fade) = this.decode_queue.finish() { this.load(fade); return; }
             let Ok(frames) = frames else { return };
             if this.loading.get() != generation { return; }
             let screens = this.screens();
@@ -766,7 +783,6 @@ impl Wallpapers {
                 if let Some(screen) = screens.iter().find(|s| s.monitor.borrow().output == output) {
                     let before = screen.canvas.imp().scene.borrow().new.clone();
                     if before.as_ref().is_some_and(|f| f.path == frame.path && f.region == frame.region && f.span_size == frame.span_size && f.texture.width() == frame.texture.width() && f.texture.height() == frame.texture.height()) { continue; }
-                    screen.luma.borrow_mut().clear();
                     let geometry_changed = before.as_ref().is_some_and(|f| f.path == frame.path && (f.region != frame.region || f.span_size != frame.span_size));
                     if let Some(ms) = fade.or(geometry_changed.then_some(420)) { screen.canvas.swap(frame, ms); } else { screen.canvas.show(frame); }
                 }
@@ -778,6 +794,7 @@ impl Wallpapers {
 
     pub fn destroy(&self) {
         self.loading.set(self.loading.get() + 1);
+        self.decode_queue.pending.set(None);
         let screens: Vec<_> = self.screens.borrow_mut().drain(..).collect();
         for s in screens { s.window.destroy(); }
     }
@@ -811,18 +828,20 @@ pub fn watch_layout(app: &Rc<crate::app::App>) {
     });
 }
 
-/// GDK downloads native premultiplied BGRA on the supported little-endian desktops.
-fn region_luma(data: &[u8], w: usize, h: usize, region: Rect, band: f64) -> f64 {
+fn luminance(b: u8, g: u8, r: u8) -> f64 {
+    let lin = |c: u8| { let c = c as f64 / 255.0; if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) } };
+    0.0722 * lin(b) + 0.7152 * lin(g) + 0.2126 * lin(r)
+}
+
+fn region_luma(data: &[f32], w: usize, h: usize, region: Rect, band: f64) -> f64 {
     let left = (region.x * w as f64).floor() as usize;
     let top = (region.y * h as f64).floor() as usize;
     let right = ((region.x + region.w) * w as f64).ceil().min(w as f64) as usize;
     let bottom = ((region.y + region.h * band.clamp(0.0, 1.0)) * h as f64).ceil().max((top + 1) as f64).min(h as f64) as usize;
     let (mut sum, mut n) = (0.0, 0usize);
-    for y in (top..bottom).step_by(2) {
-        for x in (left..right).step_by(6) {
-            let i = (y * w + x) * 4;
-            let lin = |c: u8| { let c = c as f64 / 255.0; if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) } };
-            sum += 0.0722 * lin(data[i]) + 0.7152 * lin(data[i + 1]) + 0.2126 * lin(data[i + 2]);
+    for y in top..bottom {
+        for x in left..right {
+            sum += data[y * w + x] as f64;
             n += 1;
         }
     }
@@ -832,6 +851,18 @@ fn region_luma(data: &[u8], w: usize, h: usize, region: Rect, band: f64) -> f64 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_queue_replaces_pending_requests_with_the_latest() {
+        let queue = DecodeQueue::default();
+        assert!(queue.begin(None));
+        assert!(!queue.begin(Some(340)));
+        assert!(!queue.begin(Some(420)));
+        assert!(!queue.begin(None));
+        assert_eq!(queue.finish(), Some(None));
+        assert!(queue.begin(Some(420)));
+        assert_eq!(queue.finish(), None);
+    }
 
     fn monitor(output: &str, x: f64, y: f64, w: f64, h: f64, scale: f64) -> Monitor {
         Monitor { output: output.into(), rect: Rect { x, y, w, h }, scale }
@@ -948,12 +979,20 @@ mod tests {
     }
 
     #[test]
+    fn luminance_uses_linear_light_and_bgra_channel_order() {
+        close(luminance(0, 0, 255), 0.2126);
+        close(luminance(255, 0, 0), 0.0722);
+        close(luminance(255, 255, 255), 1.0);
+        assert!(luminance(128, 128, 128) < 0.22);
+    }
+
+    #[test]
     fn luma_samples_each_monitors_region_and_its_top_band() {
         let (w, h) = (24, 12);
-        let mut data = vec![0; w * h * 4];
+        let mut data = vec![0.0; w * h];
         // Upper-right is white, lower-left is white; the other two quadrants are black.
         for y in 0..h { for x in 0..w {
-            if (x >= w / 2) == (y < h / 2) { data[(y * w + x) * 4..(y * w + x) * 4 + 3].fill(255); }
+            if (x >= w / 2) == (y < h / 2) { data[y * w + x] = 1.0; }
         } }
         let left = Rect { x: 0.0, y: 0.0, w: 0.5, h: 1.0 };
         let right = Rect { x: 0.5, y: 0.0, w: 0.5, h: 1.0 };
@@ -1004,7 +1043,7 @@ mod tests {
     #[test]
     fn old_frame_covers_a_resized_output_without_distortion() {
         let texture = gdk::MemoryTexture::new(80, 40, gdk::MemoryFormat::R8g8b8a8, &glib::Bytes::from_owned(vec![255u8; 80 * 40 * 4]), 80 * 4).upcast();
-        let frame = Frame { texture, path: "image".into(), region: Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }, span_size: None };
+        let frame = Frame { texture, luma: Default::default(), path: "image".into(), region: Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }, span_size: None };
         assert_eq!(frame.region_for(40.0, 40.0), Rect { x: 0.25, y: 0.0, w: 0.5, h: 1.0 });
         let fit = frame.fit(40.0, 40.0, 1.0);
         close(fit.width() as f64 / fit.height() as f64, 2.0);
@@ -1014,7 +1053,7 @@ mod tests {
     #[test]
     fn transition_keeps_the_previous_crop_until_the_new_region_is_warm() {
         let texture = gdk::MemoryTexture::new(2, 1, gdk::MemoryFormat::R8g8b8a8, &glib::Bytes::from_owned(vec![255u8; 8]), 8).upcast();
-        let old = Frame { texture, path: "image".into(), region: Rect { x: 0.0, y: 0.0, w: 0.5, h: 1.0 }, span_size: Some((2, 1)) };
+        let old = Frame { texture, luma: Default::default(), path: "image".into(), region: Rect { x: 0.0, y: 0.0, w: 0.5, h: 1.0 }, span_size: Some((2, 1)) };
         let new = Frame { region: Rect { x: 0.5, ..old.region }, ..old.clone() };
         let mut scene = Scene { new: Some(old.clone()), prime: Some(new.clone()), ..Scene::default() };
         scene.step(100);
@@ -1022,7 +1061,7 @@ mod tests {
         scene.step(200);
         assert_eq!(scene.old.as_ref().unwrap().region, old.region);
         assert_eq!(scene.new.as_ref().unwrap().region, new.region);
-        assert!(scene.moving(201));
+        assert_eq!(scene.moving(201), !motion::reduced() && !kit::effects::software());
         scene.step(200 + SPAN);
         assert!(scene.old.is_none());
         assert_eq!(scene.new.as_ref().unwrap().region, new.region);
