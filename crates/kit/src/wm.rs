@@ -37,6 +37,7 @@ pub struct Win {
     pub title: String,
     pub app_id: String,
     pub focused: bool,
+    pub minimized: bool,
     pub space: u64,
     pub floating: bool,
     pub stamp: u64,
@@ -161,6 +162,10 @@ pub fn focused_output() -> Option<String> {
     }
 }
 
+fn hypr_minimized(client: &Value) -> bool {
+    client.get("workspace").and_then(|w| w.get("name")).and_then(Value::as_str) == Some("special:minimized")
+}
+
 pub fn windows() -> Vec<Win> {
     let mut out: Vec<Win> = match which() {
         Wm::Niri => niri(json!("Windows"))
@@ -173,6 +178,7 @@ pub fn windows() -> Vec<Win> {
                     title: text(w, "title"),
                     app_id: text(w, "app_id"),
                     focused: w.get("is_focused").and_then(Value::as_bool).unwrap_or(false),
+                    minimized: false,
                     space: w.get("workspace_id").and_then(Value::as_u64).unwrap_or(0),
                     floating: w.get("is_floating").and_then(Value::as_bool).unwrap_or(false),
                     stamp: w.get("focus_timestamp").and_then(|t| Some(t.get("secs")?.as_u64()? * 1_000_000_000 + t.get("nanos")?.as_u64()?)).unwrap_or(0),
@@ -201,6 +207,7 @@ pub fn windows() -> Vec<Win> {
                         title: text(c, "title"),
                         app_id: text(c, "class"),
                         focused: history == 0,
+                        minimized: hypr_minimized(c),
                         space: if space > 0 { space as u64 } else { 0 },
                         floating: c.get("floating").and_then(Value::as_bool).unwrap_or(false),
                         stamp: (1_000_000 - history.clamp(0, 1_000_000)) as u64,
@@ -405,6 +412,19 @@ pub fn toggle_special(name: &str) -> bool {
     hypr_dispatch(&format!("togglespecialworkspace {arg}"), &format!("hl.dsp.workspace.toggle_special({})", serde_json::to_string(&arg).unwrap_or_default()))
 }
 
+/// Restore to the focused monitor's normal workspace, then focus without opening a special workspace.
+pub fn restore(id: u64) -> bool {
+    if which() != Wm::Hyprland { return false; }
+    let Some(monitor) = hypr_outputs().into_iter().find(|m| m.get("focused").and_then(Value::as_bool) == Some(true)) else { return false };
+    let Some(space) = monitor.get("activeWorkspace").and_then(|w| w.get("id")).and_then(Value::as_i64).filter(|id| *id > 0) else { return false };
+    // Close first: moving the last special window can close its overlay automatically.
+    if let Some(name) = monitor.get("specialWorkspace").and_then(|w| w.get("name")).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        if !toggle_special(name.strip_prefix("special:").unwrap_or(name)) { return false; }
+    }
+    if !move_to_space(id, space as u64) { return false; }
+    focus(id)
+}
+
 pub fn minimize(app_id: &str) -> bool {
     let Some(me) = focused_window().filter(|w| w.app_id == app_id) else { return false };
     match which() {
@@ -506,5 +526,18 @@ pub fn layouts() -> Option<(Vec<String>, usize)> {
             Some((names, idx))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod minimized_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_minimized_special_workspace_is_minimized() {
+        for (name, expected) in [("special:minimized", true), ("minimized", false), ("special:other", false), ("1", false)] {
+            assert_eq!(hypr_minimized(&json!({ "workspace": { "id": -99, "name": name } })), expected);
+        }
+        assert!(!hypr_minimized(&json!({})));
     }
 }
