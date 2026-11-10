@@ -7,6 +7,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use futures_util::StreamExt;
 use zbus::zvariant::{OwnedValue, Value};
 
 const PATH: &str = "/dev/digit/PolkitAgent";
@@ -234,9 +236,29 @@ impl Drop for Secret {
     fn drop(&mut self) { wipe(&mut self.0); }
 }
 
-fn authenticate(user: &str, cookie: &str, mut secret: Secret) -> (bool, Vec<String>) {
+#[derive(Default)]
+struct Cancellation {
+    cancelled: bool,
+    socket: Option<UnixStream>,
+    child: Option<std::process::Child>,
+}
+
+fn cancel_worker(cancel: &Mutex<Cancellation>) {
+    let mut job = cancel.lock().unwrap_or_else(|e| e.into_inner());
+    job.cancelled = true;
+    if let Some(socket) = job.socket.take() { let _ = socket.shutdown(std::net::Shutdown::Both); }
+    if let Some(child) = job.child.as_mut() { let _ = child.kill(); }
+}
+
+fn authenticate(user: &str, cookie: &str, mut secret: Secret, cancel: &Mutex<Cancellation>) -> (bool, Vec<String>) {
     if std::path::Path::new(SOCKET).exists() {
         if let Ok(stream) = UnixStream::connect(SOCKET) {
+            {
+                let mut job = cancel.lock().unwrap_or_else(|e| e.into_inner());
+                if job.cancelled { return (false, Vec::new()); }
+                let Ok(socket) = stream.try_clone() else { return (false, Vec::new()); };
+                job.socket = Some(socket);
+            }
             let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
             let Ok(mut writer) = stream.try_clone() else {
                 wipe(&mut secret.0);
@@ -267,8 +289,14 @@ fn authenticate(user: &str, cookie: &str, mut secret: Secret) -> (bool, Vec<Stri
     let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
         wipe(&mut secret.0);
         let _ = child.kill();
+        let _ = child.wait();
         return (false, Vec::new());
     };
+    {
+        let mut job = cancel.lock().unwrap_or_else(|e| e.into_inner());
+        if job.cancelled { let _ = child.kill(); }
+        job.child = Some(child);
+    }
     let result = if stdin.write_all(format!("{cookie}\n").as_bytes()).is_ok() {
         let mut reader = BufReader::new(stdout);
         converse(&mut reader, &mut stdin, &mut secret.0)
@@ -277,7 +305,11 @@ fn authenticate(user: &str, cookie: &str, mut secret: Secret) -> (bool, Vec<Stri
         (false, Vec::new())
     };
     drop(stdin);
-    let _ = child.wait();
+    let child = cancel.lock().unwrap_or_else(|e| e.into_inner()).child.take();
+    if let Some(mut child) = child {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     result
 }
 
@@ -295,6 +327,7 @@ struct Live {
     id: u64,
     request: Request,
     dialog: Dialog,
+    cancel: Arc<Mutex<Cancellation>>,
 }
 
 thread_local! {
@@ -449,9 +482,7 @@ fn show(request: &Request, id: u64) -> Option<Dialog> {
     window.set_child(Some(&card));
     window.present();
     entry.grab_focus();
-    let w = window.clone();
     window.connect_destroy(move |_| {
-        let _ = &w;
         if let Some(d) = gdk::Display::default() {
             gtk::style_context_remove_provider_for_display(&d, &provider);
         }
@@ -466,7 +497,7 @@ fn next() {
     let Some(request) = QUEUE.with(|q| q.borrow_mut().pop_front()) else { return };
     let id = NEXT.with(|n| { n.set(n.get() + 1); n.get() });
     match show(&request, id) {
-        Some(dialog) => LIVE.with(|l| *l.borrow_mut() = Some(Live { id, request, dialog })),
+        Some(dialog) => LIVE.with(|l| *l.borrow_mut() = Some(Live { id, request, dialog, cancel: Arc::new(Mutex::new(Cancellation::default())) })),
         None => {
             let _ = request.reply.try_send(Outcome::Failed("The authentication dialog could not be shown".into()));
             next();
@@ -476,6 +507,7 @@ fn next() {
 
 fn finish(outcome: Outcome) {
     let Some(live) = LIVE.with(|l| l.borrow_mut().take()) else { return };
+    cancel_worker(&live.cancel);
     live.dialog.entry.set_text("");
     live.dialog.window.destroy();
     let _ = live.request.reply.try_send(outcome);
@@ -526,8 +558,10 @@ fn submit(id: u64) {
     let at = pick.as_ref().map_or(0, |p| p.selected() as usize);
     let Some(user) = users.get(at).or(users.first()).map(|u| u.1.clone()) else { return };
     let (tx, rx) = async_channel::bounded(1);
+    let cancel = LIVE.with(|l| l.borrow().as_ref().filter(|l| l.id == id).map(|l| l.cancel.clone()));
+    let Some(cancel) = cancel else { return };
     let spawned = std::thread::Builder::new().name("digit-auth".into()).spawn(move || {
-        let _ = tx.send_blocking(authenticate(&user, &cookie, secret));
+        let _ = tx.send_blocking(authenticate(&user, &cookie, secret, &cancel));
     });
     if spawned.is_err() {
         finish_if(id, Outcome::Failed("Could not start authentication".into()));
@@ -608,6 +642,8 @@ pub fn start(app: &Rc<App>) {
             eprintln!("digit: polkit: no login session");
             return;
         };
+        let Ok(dbus) = zbus::fdo::DBusProxy::new(&conn).await else { return };
+        let Ok(mut changes) = dbus.receive_name_owner_changed().await else { return };
         let mut attempts = 0u32;
         let mut said = false;
         loop {
@@ -615,7 +651,15 @@ pub fn start(app: &Rc<App>) {
                 Ok(()) => {
                     REGISTERED.with(|r| *r.borrow_mut() = Some((id.clone(), conn.clone())));
                     eprintln!("digit: polkit agent registered for session {id}");
-                    break;
+                    while let Some(change) = changes.next().await {
+                        let Ok(args) = change.args() else { continue };
+                        if args.name().as_str() == POLKIT {
+                            REGISTERED.with(|r| r.borrow_mut().take());
+                            if args.new_owner().is_some() { break; }
+                        }
+                    }
+                    attempts = 0;
+                    said = false;
                 }
                 Err(e) => {
                     if !said {
@@ -663,6 +707,17 @@ mod tests {
         assert_eq!(auth_reply(2, Some((2, 0)), false), AuthReply::Retry(1));
         assert_eq!(auth_reply(2, Some((2, 2)), false), AuthReply::Failed);
         assert_eq!(auth_reply(2, Some((2, 2)), true), AuthReply::Done);
+    }
+
+    #[test]
+    fn cancellation_closes_socket_and_is_idempotent() {
+        use std::io::Read;
+        let (socket, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let cancel = std::sync::Mutex::new(super::Cancellation { socket: Some(socket), ..Default::default() });
+        super::cancel_worker(&cancel);
+        super::cancel_worker(&cancel);
+        assert!(cancel.lock().unwrap().cancelled);
+        assert_eq!(peer.read(&mut [0u8; 1]).unwrap(), 0);
     }
 
     #[test]

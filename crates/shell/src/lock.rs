@@ -29,7 +29,9 @@ enum Mode {
     Preview,
 }
 
+#[derive(Clone)]
 struct Sheet {
+    monitor: gdk::Monitor,
     window: gtk::Window,
     paint: Paint,
     column: gtk::Box,
@@ -49,6 +51,7 @@ struct State {
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
     static GENERATION: Cell<u64> = const { Cell::new(0) };
+    static FALLBACK: RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> = const { RefCell::new(None) };
     static STYLED: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -108,18 +111,24 @@ async fn locked_hint(on: bool) {
     let _ = s.call_method("SetLockedHint", &(on,)).await;
 }
 
+pub fn confirmed() -> bool {
+    STATE.with(|s| s.borrow().as_ref().is_some_and(|st| matches!(st.mode, Mode::Real(_)) && st.locked))
+        || FALLBACK.with(|f| f.borrow().as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst)))
+}
+
 fn fallback() {
-    glib::spawn_future_local(async {
-        if !gio::spawn_blocking(|| crate::hooks::run("key", &["lock"])).await.unwrap_or(false) {
-            swaylock();
-        }
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    FALLBACK.with(|f| *f.borrow_mut() = Some(started.clone()));
+    glib::spawn_future_local(async move {
+        let hooked = gio::spawn_blocking(|| crate::hooks::run("key", &["lock"])).await.unwrap_or(false);
+        started.store(hooked || swaylock(), std::sync::atomic::Ordering::SeqCst);
     });
 }
 
-fn swaylock() {
-    if glib::find_program_in_path("swaylock").is_some() {
-        let _ = gio::Subprocess::newv(&[std::ffi::OsStr::new("swaylock"), std::ffi::OsStr::new("-f")], gio::SubprocessFlags::NONE);
-    }
+fn swaylock() -> bool {
+    let Ok(process) = gio::Subprocess::newv(&[std::ffi::OsStr::new("swaylock"), std::ffi::OsStr::new("-f")], gio::SubprocessFlags::NONE) else { return false };
+    glib::spawn_future_local(async move { let _ = process.wait_future().await; });
+    true
 }
 
 pub fn lock(app: &Rc<App>) -> bool {
@@ -134,6 +143,7 @@ pub fn lock(app: &Rc<App>) -> bool {
         fallback();
         return false;
     }
+    FALLBACK.with(|f| f.borrow_mut().take());
     style(app);
     let ptr = unsafe { ffi::gtk_session_lock_instance_new() };
     if ptr.is_null() {
@@ -148,6 +158,17 @@ pub fn lock(app: &Rc<App>) -> bool {
         if !current(generation) { return None; }
         let inst = args.first()?.get::<glib::Object>().ok()?;
         let monitor = args.get(1)?.get::<gdk::Monitor>().ok()?;
+        if STATE.with(|s| s.borrow().as_ref().is_some_and(|st| st.faces.iter().any(|f| f.monitor == monitor))) { return None; }
+        monitor.connect_invalidate(move |monitor| {
+            if !current(generation) { return; }
+            let removed = STATE.with(|s| {
+                let mut slot = s.borrow_mut();
+                let st = slot.as_mut()?;
+                let index = st.faces.iter().position(|f| f.monitor == *monitor)?;
+                Some(st.faces.remove(index))
+            });
+            if let Some(face) = removed { face.window.destroy(); }
+        });
         let face = build(&a, &monitor, false, generation);
         unsafe {
             ffi::gtk_session_lock_instance_assign_window_to_monitor(inst.as_ptr(), face.window.to_glib_none().0, monitor.to_glib_none().0);
@@ -186,8 +207,13 @@ pub fn lock(app: &Rc<App>) -> bool {
     });
     start_clock();
     let ok = unsafe { ffi::gtk_session_lock_instance_lock(ptr) } != 0;
-    if !ok && !STATE.with(|s| s.borrow().as_ref().is_some_and(|st| st.locked)) {
-        STATE.with(|s| s.borrow_mut().take());
+    if !ok && current(generation) && !STATE.with(|s| s.borrow().as_ref().is_some_and(|st| st.locked)) {
+        let was = STATE.with(|s| s.borrow_mut().take());
+        if let Some(st) = was {
+            if let Some(id) = st.clock { id.remove(); }
+        }
+        fallback();
+        return false;
     }
     true
 }
@@ -274,33 +300,43 @@ fn wipe(buf: &mut [u8]) {
     }
 }
 
-async fn verify(bytes: Vec<u8>) -> bool {
+async fn verify(bytes: Vec<u8>) -> Option<bool> {
     let argv = [std::ffi::OsStr::new("/proc/self/exe"), std::ffi::OsStr::new("auth")];
     let Ok(p) = gio::Subprocess::newv(&argv, gio::SubprocessFlags::STDIN_PIPE | gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE) else {
         let mut b = bytes;
         wipe(&mut b);
-        return false;
+        return Some(false);
     };
     let Some(stdin) = p.stdin_pipe() else {
         let mut b = bytes;
         wipe(&mut b);
         p.force_exit();
-        return false;
+        let _ = p.wait_future().await;
+        return Some(false);
     };
-    match stdin.write_all_future(bytes, glib::Priority::DEFAULT).await {
-        Ok((mut b, _, _)) => wipe(&mut b),
-        Err((mut b, _)) => wipe(&mut b),
+    let work = Box::pin(async {
+        match stdin.write_all_future(bytes, glib::Priority::DEFAULT).await {
+            Ok((mut b, _, _)) => wipe(&mut b),
+            Err((mut b, _)) => wipe(&mut b),
+        }
+        let _ = stdin.close_future(glib::Priority::DEFAULT).await;
+        p.wait_future().await.is_ok() && p.is_successful()
+    });
+    match futures_util::future::select(work, Box::pin(glib::timeout_future(Duration::from_secs(30)))).await {
+        futures_util::future::Either::Left((ok, _)) => Some(ok),
+        futures_util::future::Either::Right((_, work)) => {
+            p.force_exit();
+            // Complete the pending write so its password buffer is wiped, then reap.
+            let _ = work.await;
+            let _ = p.wait_future().await;
+            None
+        }
     }
-    let _ = stdin.close_future(glib::Priority::DEFAULT).await;
-    p.wait_future().await.is_ok() && p.is_successful()
 }
 
 fn each(f: impl Fn(&Sheet)) {
-    STATE.with(|s| {
-        if let Some(st) = s.borrow().as_ref() {
-            st.faces.iter().for_each(&f);
-        }
-    });
+    let faces = STATE.with(|s| s.borrow().as_ref().map(|st| st.faces.clone()).unwrap_or_default());
+    faces.iter().for_each(f);
 }
 
 fn shake(column: &gtk::Box) {
@@ -350,7 +386,7 @@ fn submit(entry: &gtk::PasswordEntry, generation: u64) {
     glib::spawn_future_local(async move {
         let ok = verify(bytes).await;
         if !current(generation) { return; }
-        if ok {
+        if ok == Some(true) {
             each(|f| f.status.set_text(""));
             unlock(generation);
             return;
@@ -363,7 +399,7 @@ fn submit(entry: &gtk::PasswordEntry, generation: u64) {
         each(|f| {
             f.entry.set_sensitive(true);
             f.status.add_css_class("error");
-            f.status.set_text("Incorrect password");
+            f.status.set_text(if ok.is_none() { "Authentication timed out" } else { "Incorrect password" });
             shake(&f.column);
         });
         each(|f| {
@@ -586,7 +622,7 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64) 
             e.grab_focus();
         }
     });
-    Sheet { window, paint, column, entry, status }
+    Sheet { monitor: monitor.clone(), window, paint, column, entry, status }
 }
 
 #[cfg(test)]
@@ -604,8 +640,12 @@ mod tests {
         let preview = state(Mode::Preview);
         assert!(showing());
         assert!(!active());
+        assert!(!confirmed());
         let real = state(Mode::Real(glib::Object::new()));
         assert!(active());
+        assert!(!confirmed());
+        STATE.with(|s| s.borrow_mut().as_mut().unwrap().locked = true);
+        assert!(confirmed());
         assert!(!current(preview));
         finish(preview);
         assert!(current(real));

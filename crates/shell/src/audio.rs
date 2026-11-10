@@ -95,7 +95,7 @@ enum News {
 }
 
 thread_local! {
-    static ASK: RefCell<Option<mpsc::Sender<(u64, Ask)>>> = const { RefCell::new(None) };
+    static ASK: RefCell<Option<mpsc::SyncSender<(u64, Ask)>>> = const { RefCell::new(None) };
     static SEQ: Cell<u64> = const { Cell::new(0) };
     static GUESS: Cell<u64> = const { Cell::new(0) };
 }
@@ -109,7 +109,10 @@ struct Link {
 impl Link {
     fn open(name: &str) -> Option<Self> {
         let path = pulseaudio::socket_path_from_env()?;
-        let mut sock = BufReader::new(UnixStream::connect(path).ok()?);
+        let stream = UnixStream::connect(path).ok()?;
+        stream.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
+        stream.set_write_timeout(Some(Duration::from_secs(3))).ok()?;
+        let mut sock = BufReader::new(stream);
         let cookie = pulseaudio::cookie_path_from_env().and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
         let auth = protocol::AuthParams { version: protocol::MAX_VERSION, supports_shm: false, supports_memfd: false, cookie };
         protocol::write_command_message(sock.get_mut(), 0, &protocol::Command::Auth(auth), protocol::MAX_VERSION).ok()?;
@@ -408,6 +411,7 @@ fn listen(news: async_channel::Sender<News>) {
         if let Some(mut link) = Link::open("digit") {
             let mask = protocol::SubscriptionMask::SINK | protocol::SubscriptionMask::SERVER | protocol::SubscriptionMask::SOURCE | protocol::SubscriptionMask::SOURCE_OUTPUT | protocol::SubscriptionMask::SINK_INPUT;
             if link.send(protocol::Command::Subscribe(mask)).is_some() && protocol::read_ack_message(&mut link.sock).is_ok() {
+                let _ = link.sock.get_mut().set_read_timeout(None);
                 wait = 2;
                 LIVE.store(true, Ordering::Relaxed);
                 if news.send_blocking(News::Changed(false)).is_err() || news.send_blocking(News::Inputs).is_err() {
@@ -623,19 +627,18 @@ pub fn ask(a: Ask) {
             s.get()
         })
     };
-    if matches!(a, Ask::Level(_) | Ask::Mute(_)) {
-        GUESS.with(|g| g.set(seq));
-    }
     ASK.with(|s| {
         if let Some(tx) = s.borrow().as_ref() {
-            let _ = tx.send((seq, a));
+            if tx.try_send((seq, a)).is_ok() && matches!(a, Ask::Level(_) | Ask::Mute(_)) {
+                GUESS.with(|g| g.set(seq));
+            }
         }
     });
 }
 
 pub fn start(app: &Rc<App>) {
     let (news_tx, news_rx) = async_channel::unbounded::<News>();
-    let (ask_tx, ask_rx) = mpsc::channel::<(u64, Ask)>();
+    let (ask_tx, ask_rx) = mpsc::sync_channel::<(u64, Ask)>(64);
     ASK.with(|s| *s.borrow_mut() = Some(ask_tx));
     let events = news_tx.clone();
     let _ = std::thread::Builder::new().name("digit-audio-events".into()).stack_size(64 * 1024).spawn(move || listen(events));

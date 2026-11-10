@@ -92,9 +92,58 @@ impl Sampler {
     }
 }
 
+static NVIDIA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn gpu_usage(out: &str) -> Option<f64> {
+    out.lines().next()?.trim().parse::<f64>().ok().map(|g| (g / 100.0).clamp(0.0, 1.0))
+}
+
 pub async fn nvidia() -> Option<f64> {
-    let argv = ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"].map(std::ffi::OsStr::new);
-    let p = gio::Subprocess::newv(&argv, gio::SubprocessFlags::STDOUT_PIPE | gio::SubprocessFlags::STDERR_SILENCE).ok()?;
-    let (out, _) = p.communicate_utf8_future(None).await.ok()?;
-    out?.lines().next()?.trim().parse::<f64>().ok().map(|g| (g / 100.0).clamp(0.0, 1.0))
+    use std::sync::atomic::Ordering;
+    if NVIDIA.swap(true, Ordering::AcqRel) {
+        return None;
+    }
+    gio::spawn_blocking(|| {
+        struct Busy;
+        impl Drop for Busy {
+            fn drop(&mut self) { NVIDIA.store(false, Ordering::Release); }
+        }
+        let _busy = Busy;
+        let mut child = std::process::Command::new("nvidia-smi")
+            .args(["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"])
+            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().ok()?;
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() { return None; }
+                    use std::io::Read;
+                    let mut out = String::new();
+                    child.stdout.take()?.take(4096).read_to_string(&mut out).ok()?;
+                    return gpu_usage(&out);
+                }
+                Ok(None) if start.elapsed() < std::time::Duration::from_secs(3) => {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+            }
+        }
+    }).await.ok().flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpu_usage_reads_first_device_and_rejects_missing_data() {
+        assert_eq!(gpu_usage(" 42\n80\n"), Some(0.42));
+        assert_eq!(gpu_usage("120"), Some(1.0));
+        assert_eq!(gpu_usage("N/A"), None);
+        assert_eq!(gpu_usage(""), None);
+    }
 }
