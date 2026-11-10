@@ -1,5 +1,18 @@
 use gtk::glib;
 use gtk::subclass::prelude::*;
+use gtk::glib::translate::ToGlibPtr;
+
+mod ffi {
+    #[link(name = "gtk4-layer-shell")]
+    unsafe extern "C" {
+        pub fn gtk_layer_get_namespace(window: *mut gtk::ffi::GtkWindow) -> *const std::ffi::c_char;
+    }
+}
+
+pub(crate) fn layer_namespace(window: &gtk::Window) -> Option<String> {
+    let ptr = unsafe { ffi::gtk_layer_get_namespace(window.to_glib_none().0) };
+    if ptr.is_null() { None } else { Some(unsafe { std::ffi::CStr::from_ptr(ptr) }.to_string_lossy().into_owned()) }
+}
 
 type Draw = Box<dyn Fn(&gtk::Snapshot)>;
 
@@ -69,7 +82,7 @@ pub fn refresh_palette(until: i64) {
         if !window.is_mapped() || !window.is_layer_window() {
             continue;
         }
-        if !matches!(window.namespace().as_deref(), Some(
+        if !matches!(layer_namespace(&window).as_deref(), Some(
             "digit-control" | "digit-dock" | "digit-dock-menu" | "digit-layouts" |
             "digit-desktop-icons" | "digit-menu" | "digit-session" | "digit-spaces" | "digit-switcher" | "digit-wallpapers"
         )) {
