@@ -907,7 +907,7 @@ fn left(st: &Shared) {
         let Ok(mut s) = st.try_borrow_mut() else { return };
         s.inside = false;
         s.hover = None;
-        s.pointer = None;
+        // Keep the last pointer position: the magnification shrinks around it as `magnify` fades.
         s.leave += 1;
         let now = glib::monotonic_time();
         s.magnify.go(0.0, now, 300, motion::STANDARD);
