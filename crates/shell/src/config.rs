@@ -13,6 +13,10 @@ pub enum Dock {
 #[serde(default)]
 pub struct Config {
     pub dock: Dock,
+    /// The compositor gaps Settings writes; the island keeps the same distance from the screen
+    /// edge and from windows.
+    pub hypr_gaps_in: f64,
+    pub hypr_gaps_out: f64,
     pub bar_height: i32,
     pub bar_color: Option<String>,
     pub font: String,
@@ -91,6 +95,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             dock: Dock::Screen,
+            hypr_gaps_in: 4.0,
+            hypr_gaps_out: 8.0,
             bar_height: 44,
             bar_color: None,
             font: "Readex Pro".into(),
@@ -190,6 +196,8 @@ pub struct Prefs {
     pub corners: [kit::corners::Panel; 4],
     pub icon_theme: Option<String>,
     pub style: String,
+    /// Space between the island and the screen edge, and between the island and windows.
+    pub gap: f64,
     pub menubar: bool,
     pub menubar_look: String,
     pub wide_height: f64,
@@ -256,6 +264,7 @@ impl From<&Config> for Prefs {
             ].into_iter().collect()),
             icon_theme: c.icon_theme.clone(),
             style: c.notch_style.clone(),
+            gap: outer_gap(c.hypr_gaps_in, c.hypr_gaps_out, kit::wm::which() == kit::wm::Wm::Niri),
             menubar: c.menubar,
             menubar_look: c.menubar_look.clone(),
             wide_height: c.wide_height,
@@ -340,6 +349,13 @@ impl Config {
     }
 }
 
+/// The compositor's gap at the screen edge: Hyprland's outer gap, or niri's single gap (twice
+/// the inner gap, see kit::niriconf).
+pub fn outer_gap(gaps_in: f64, gaps_out: f64, niri: bool) -> f64 {
+    let gap = if niri { gaps_in * 2.0 } else { gaps_out };
+    if gap.is_finite() { gap.clamp(0.0, 32.0).round() } else { 8.0 }
+}
+
 pub fn dir() -> PathBuf {
     gtk::glib::user_config_dir().join("digit")
 }
@@ -396,6 +412,16 @@ pub fn load() -> Config {
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
+
+    #[test]
+    fn island_gap_follows_the_compositor_edge_gap() {
+        assert_eq!(outer_gap(4.0, 8.0, false), 8.0);
+        assert_eq!(outer_gap(4.0, 8.0, true), 8.0);
+        assert_eq!(outer_gap(2.0, 4.0, false), 4.0);
+        assert_eq!(outer_gap(3.0, 0.0, true), 6.0);
+        assert_eq!(outer_gap(0.0, 90.0, false), 32.0);
+        assert_eq!(outer_gap(0.0, f64::NAN, false), 8.0);
+    }
 
     #[test]
     fn trash_and_recent_default_on_and_change_dock_preferences() {

@@ -209,10 +209,8 @@ pub fn discord_place(title: &str) -> Option<(String, String)> {
     }
 }
 
-pub const LIFT: f64 = 7.0;
 /// How long a panel in "leave" mode waits after the pointer leaves before it closes.
 pub const LEAVE_MS: u64 = 350;
-pub const MENU_LIFT: f64 = 4.0;
 
 const PALETTE_FADE_US: i64 = 900_000;
 
@@ -509,13 +507,18 @@ impl App {
         if self.wide() { self.prefs.borrow().wide_height.clamp(26.0, 64.0).round() } else { self.cfg.header() }
     }
 
+    /// How far the floating island sits below the screen edge: the compositor's outer gap.
+    pub fn lift(&self) -> f64 {
+        self.prefs.borrow().gap
+    }
+
     pub fn reserve(&self) -> i32 {
         if self.wide() {
             self.header() as i32
-        } else if self.floating() && self.menubar() {
-            (self.header() + 2.0 * MENU_LIFT) as i32
         } else if self.floating() {
-            (self.header() + LIFT + 4.0) as i32
+            // The island sits one compositor gap below the screen edge; the compositor adds the
+            // same gap again under it, so it is centred between the edge and the windows.
+            (self.header() + self.lift()) as i32
         } else {
             self.cfg.reserve()
         }
@@ -613,7 +616,7 @@ impl App {
                 launcher.refresh_caret();
             }
         }
-        let restyle = before.style != next.style || before.menubar != next.menubar || (next.wide(&self.cfg) && before.wide_height != next.wide_height);
+        let restyle = before.style != next.style || before.gap != next.gap || before.menubar != next.menubar || (next.wide(&self.cfg) && before.wide_height != next.wide_height);
         if before.surface != next.surface || restyle || effects_changed {
             self.set_roles(self.roles.get());
         }

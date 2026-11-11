@@ -1992,7 +1992,7 @@ impl View {
     }
 
     fn lift(&self, now: i64) -> f64 {
-        Self::lift_at(self.float.value(now), self.menu.value(now) * (1.0 - self.widen.value(now)))
+        self.lift_at(self.float.value(now))
     }
 
     /// Where the content sits below the shape's top: the float lift, plus the island's top
@@ -2003,13 +2003,12 @@ impl View {
     }
 
     fn body_lift(&self, now: i64) -> f64 {
-        let open = (self.depth.value(now).max(0.0) / 24.0).clamp(0.0, 1.0);
-        Self::lift_at(self.float.value(now), self.menu.value(now) * (1.0 - self.widen.value(now)) * (1.0 - open))
+        self.lift_at(self.float.value(now))
     }
 
-    fn lift_at(float: f64, bar: f64) -> f64 {
-        let bar = bar.clamp(0.0, 1.0);
-        (crate::app::LIFT + (crate::app::MENU_LIFT - crate::app::LIFT) * bar) * float.clamp(0.0, 1.0)
+    /// The island floats one compositor gap below the screen edge, with or without a menu bar.
+    fn lift_at(&self, float: f64) -> f64 {
+        self.app.lift() * float.clamp(0.0, 1.0)
     }
 
     fn band(&self, now: i64) -> f64 {
@@ -2023,9 +2022,9 @@ impl View {
 
     fn update_region(&mut self, now: i64) {
         let w = self.w.value(now).max(self.w.target()) + 12.0;
-        let lift = Self::lift_at(self.float.value(now).max(self.float.target()), self.menu.value(now).max(self.menu.target()) * (1.0 - self.widen.target()));
+        let lift = self.lift_at(self.float.value(now).max(self.float.target()));
         let band = self.band(now).max(self.header() + 2.0 * lift * self.menu.target() * (1.0 - self.widen.target())).ceil() as i32;
-        let body = crate::app::LIFT * self.float.value(now).max(self.float.target()).clamp(0.0, 1.0);
+        let body = lift;
         let h = self.header() + lift.max(body) + self.depth.value(now).max(self.depth.target());
         let mut rect = ((CX - w / 2.0).floor() as i32 + self.off(), 0, w.ceil() as i32, h.ceil() as i32);
         if self.dropping {
