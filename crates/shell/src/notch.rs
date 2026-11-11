@@ -551,6 +551,16 @@ impl Notch {
             let open_menu: Rc<dyn Fn(Zone, u32)> = Rc::new(move |zone: Zone, button: u32| {
                 let Some(target) = target.upgrade() else { return };
                 let Some(v) = weak.upgrade() else { return };
+                if zone == Zone::Spaces {
+                    // A dot in the workspace pill switches to its workspace.
+                    let picked = target.hovered_space().and_then(|i| v.borrow().spaces().0.get(i).map(|s| s.id));
+                    if let Some(id) = picked {
+                        glib::spawn_future_local(async move {
+                            let _ = gtk::gio::spawn_blocking(move || kit::wm::focus_space(id)).await;
+                        });
+                    }
+                    return;
+                }
                 let (app, below, monitor) = {
                     let v = v.borrow();
                     (v.app.clone(), v.band(App::now()) + 5.0, Some(v.monitor.clone()))
@@ -657,7 +667,7 @@ impl Notch {
                     return;
                 }
                 match zone {
-                    Some(z) if menu_zone(Some(z)) || matches!(z, Zone::Tray(_) | Zone::Date) => open_menu(z, button),
+                    Some(z) if menu_zone(Some(z)) || matches!(z, Zone::Tray(_) | Zone::Date | Zone::Spaces) => open_menu(z, button),
                     Some(Zone::Status) => crate::control::toggle(&app),
                     _ => {}
                 }
@@ -1711,6 +1721,11 @@ impl View {
         (18.0 + size + 14.0 + (title + 12.0 + stamp).max(line) + 22.0).clamp(340.0, 580.0)
     }
 
+    /// The top bar shows the workspace row beside its logo, so the notch leaves the dots out.
+    fn bar_spaces(&self) -> bool {
+        self.strip.is_some() && (self.app.wide() || self.app.menubar())
+    }
+
     fn spaces(&self) -> (Vec<crate::compositor::Space>, usize) {
         let all = self.app.spaces.borrow();
         let list: Vec<_> = all.iter().filter(|s| s.output == self.output && (s.filled || s.active)).cloned().collect();
@@ -1720,7 +1735,7 @@ impl View {
 
     fn spaces_start(&self, now: i64) -> Option<(f64, f64)> {
         let n = self.spaces().0.len();
-        if n == 0 {
+        if n == 0 || self.bar_spaces() {
             return None;
         }
         let total = dots_width(n);
@@ -1789,8 +1804,13 @@ impl View {
         let room = 2.0 * self.room();
         match head {
             Head::Idle(media) => {
-                let left = dots_width(self.spaces().0.len());
-                let right = if *media { 28.0 + crate::bars::W as f64 } else { 0.0 };
+                // With the workspaces in the top bar, the cover moves to the empty left wing and the
+                // wave stays on the right, like the iPhone's island.
+                let (left, right) = match (self.bar_spaces(), *media) {
+                    (true, true) => (28.0, 8.0 + crate::bars::W as f64),
+                    (true, false) => (0.0, 0.0),
+                    (false, _) => (dots_width(self.spaces().0.len()), if *media { 28.0 + crate::bars::W as f64 } else { 0.0 }),
+                };
                 let side = left.max(right);
                 (self.centre() + room + if side > 0.0 { 2.0 * (side - 8.0).max(0.0) } else { 0.0 }, 0.0, self.idle_r())
             }
@@ -1892,6 +1912,9 @@ impl View {
         }
         {
             let (list, active) = self.spaces();
+            if let Some(st) = &self.strip {
+                st.set_spaces(list.iter().map(|s| s.filled).collect(), active, self.app.prefs.borrow().bar_spaces);
+            }
             if list.len() != self.spots {
                 self.spots = list.len();
                 self.spot.set(active as f64);
@@ -2371,7 +2394,10 @@ impl View {
         match &self.head {
             Head::Idle(media) => {
                 self.draw_spaces(s, now, mid);
-                if *media {
+                if *media && self.bar_spaces() {
+                    let (rect, r) = self.cover(l0, mid);
+                    self.draw_art(s, &rect, r, 1.0);
+                } else if *media {
                     self.draw_art(s, &Rect { x: r1 - crate::bars::W as f64 - 28.0, y: mid - 10.0, w: 20.0, h: 20.0 }, 5.0, 1.0);
                 }
             }
@@ -2422,8 +2448,10 @@ impl View {
                 self.bar(s, &track, value, pal.ink_main.alpha(0.15), pal.ink_main);
             }
             Head::Peek(Peek::Track { title, artist }) => {
-                self.draw_art(s, &Rect { x: l0, y: mid - 10.0, w: 20.0, h: 20.0 }, 5.0, 1.0);
-                self.text(s, title, 15.0, POINT, pal.ink_main, l0 + 28.0, mid, left - 28.0, start);
+                let (rect, r) = self.cover(l0, mid);
+                self.draw_art(s, &rect, r, 1.0);
+                let text = rect.x + rect.w + 9.0;
+                self.text(s, title, 15.0, POINT, pal.ink_main, text, mid, (l0 + left - text).max(0.0), start);
                 self.text(s, artist, 15.0, REST, pal.ink_meta, r0, mid, right, end);
             }
             Head::Peek(peek @ Peek::Notification { summary, body, app, icon, avatar, actions, .. }) => {
@@ -2626,6 +2654,17 @@ impl View {
         let filled = Rect { w: r.w * value.clamp(0.0, 1.0), ..*r };
         s.append_color(&fill.rgba(), &filled.graphene());
         s.pop();
+    }
+
+    /// Where the cover sits on the island's left: as far from the left edge as from the top and
+    /// bottom, with its corner inset from the island's own so the two stay concentric at any
+    /// roundness. `l0` is the left wing's start (12 px in from the edge).
+    fn cover(&self, l0: f64, mid: f64) -> (Rect, f64) {
+        const COVER: f64 = 20.0;
+        let inset = (self.header() - COVER) / 2.0;
+        let outer = self.rounded(self.idle_r(), 0.0);
+        let r = (outer - inset).clamp(1.5, COVER / 2.0);
+        (Rect { x: l0 - 12.0 + inset, y: mid - COVER / 2.0, w: COVER, h: COVER }, r)
     }
 
     fn draw_art(&self, s: &gtk::Snapshot, r: &Rect, radius: f64, scale: f64) {
