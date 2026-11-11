@@ -51,6 +51,7 @@ pub struct Config {
     pub notch_round: f64,
     pub notch_close: String,
     pub spaces_close: String,
+    pub spaces_always: i64,
     pub control_close: String,
     pub calendar_close: String,
     pub notifications: bool,
@@ -125,6 +126,7 @@ impl Default for Config {
             notch_round: 1.0,
             notch_close: "leave".into(),
             spaces_close: "leave".into(),
+            spaces_always: 0,
             control_close: "leave".into(),
             calendar_close: "leave".into(),
             notifications: true,
@@ -213,6 +215,7 @@ pub struct Prefs {
     /// How each panel closes: "leave" when the pointer leaves it, "click" on a click elsewhere.
     pub notch_close: String,
     pub spaces_close: String,
+    pub spaces_always: i64,
     pub control_close: String,
     pub calendar_close: String,
 }
@@ -271,6 +274,7 @@ impl From<&Config> for Prefs {
             notch_round: c.notch_round,
             notch_close: c.notch_close.clone(),
             spaces_close: c.spaces_close.clone(),
+            spaces_always: c.spaces_always.clamp(0, 10),
             control_close: c.control_close.clone(),
             calendar_close: c.calendar_close.clone(),
         }
