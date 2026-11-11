@@ -740,7 +740,7 @@ fn actions(window: &gtk::ApplicationWindow) {
         let picked = p.selected();
         match picked.len() {
             0 => {}
-            1 => ops::rename(picked[0].clone()),
+            1 => p.start_rename(picked[0].clone()),
             _ => ops::batch_rename(picked),
         }
     });
@@ -1271,6 +1271,9 @@ gridview.grid > child:hover .thumbbox {{ background: alpha({main}, 0.05); }}
 gridview.grid > child:selected .thumbbox, gridview.grid > child:active .thumbbox {{ background: alpha({main}, 0.13); }}
 gridview.grid > child:active label.fname {{ background: alpha({accent}, 0.75); color: {on_accent}; }}
 gridview.grid > child:focus-visible .thumbbox {{ box-shadow: inset 0 0 0 1.5px alpha({accent}, 0.7); }}
+entry.inline-rename {{ min-height: 0; min-width: 0; padding: 1px 7px; border: none; outline: none; box-shadow: none; background: @d_field; color: {main}; border-radius: {rename_round}px; font-size: inherit; }}
+entry.inline-rename.grid-name {{ font-size: 13px; }}
+entry.inline-rename.error {{ color: {risk}; }}
 label.fname {{ font-size: 13px; padding: 1px 7px; border-radius: 7px; }}
 gridview.grid > child:selected label.fname {{ background: {accent}; color: {on_accent}; }}
 columnview.list > header > button {{ background: transparent; border: none; box-shadow: none; color: {meta}; font-size: 12px; font-weight: 600; padding: 6px 10px; }}
@@ -1332,6 +1335,7 @@ spinbutton {{ background: alpha({main}, 0.08); border-radius: 10px; border: none
 checkbutton check {{ border-radius: 6px; }}
 checkbutton check:checked {{ background: {accent}; color: {on_accent}; }}
 "#,
+        rename_round = 7.0 * kit::style::look().round,
         base = kit::style::css()
     )
 }

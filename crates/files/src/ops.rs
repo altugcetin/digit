@@ -1,4 +1,4 @@
-use crate::pane::{Pane, file_of, is_dir, target_of};
+use crate::pane::{Pane, file_of, target_of};
 use gtk::{gdk, gio, glib, pango, prelude::*};
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -84,6 +84,7 @@ pub fn open(files: &[gio::File]) {
 }
 
 pub fn dropped(files: Vec<gio::File>, dest: &gio::File, copy: bool) {
+    if is_trash(dest) { trash(files); return; }
     let dest = dest.clone();
     glib::spawn_future_local(async move {
         let target = dest.clone();
@@ -106,13 +107,18 @@ fn same_fs(a: &gio::File, b: &gio::File) -> bool {
 }
 
 pub fn run(label: &str, plan: Plan) {
+    let mut seen = std::collections::HashSet::new();
+    let flights = match &plan {
+        Plan::Trash(files) => crate::panes().iter().flat_map(|p| p.trash_flights(files)).filter(|flight| seen.insert(flight.uri.clone())).take(3).collect(),
+        _ => Vec::new(),
+    };
     let state: State = Arc::new((Mutex::new(Shared::default()), Condvar::new()));
     let cancel = gio::Cancellable::new();
     let row = crate::jobs_row(label, &cancel);
     let st = state.clone();
     let c = cancel.clone();
     std::thread::spawn(move || {
-        work(plan, &st, &c);
+        work(plan, &st, &c, flights);
         let (m, _) = &*st;
         if let Ok(mut s) = m.lock() {
             s.finished = true;
@@ -481,7 +487,7 @@ fn inside(child: &gio::File, parent: &gio::File) -> bool {
     child.equal(parent) || child.has_prefix(parent)
 }
 
-fn work(plan: Plan, st: &State, cancel: &gio::Cancellable) {
+fn work(plan: Plan, st: &State, cancel: &gio::Cancellable, flights: Vec<crate::pane::TrashFlight>) {
     let mut ctx = Ctx { st, cancel, policy: None, made: Vec::new(), moved: Vec::new(), base: 0 };
     let mut errors = Vec::new();
     match plan {
@@ -552,6 +558,9 @@ fn work(plan: Plan, st: &State, cancel: &gio::Cancellable) {
                 note(st, |s| s.now = name(f));
                 match f.trash(Some(cancel)) {
                     Ok(()) => {
+                        if let Some(flight) = flights.iter().find(|flight| flight.uri == f.uri()) {
+                            flight.send();
+                        }
                         if let Some(p) = f.path() {
                             gone.push(p);
                         }
@@ -992,31 +1001,30 @@ pub fn ask_name(title: &str, initial: &str, action: &str, select_stem: bool, ext
     }
 }
 
-pub fn rename(info: gio::FileInfo) {
-    let Some(file) = file_of(&info) else { return };
+pub fn rename(info: &gio::FileInfo, new: &str) -> bool {
+    let Some(file) = file_of(info) else { return false };
     let old = info.display_name().to_string();
-    let dir = is_dir(&info);
-    let initial = old.clone();
-    ask_name("Rename", &initial, "Rename", !dir, None, move |new, _| {
-        if new == old {
-            return true;
+    if let Err(error) = crate::pane::validate_name(new, false) {
+        crate::toast(error);
+        return false;
+    }
+    let taken = new != old && file.parent().is_some_and(|p| exists(&p.child(new), None));
+    if let Err(error) = crate::pane::validate_name(new, taken) {
+        crate::toast(error);
+        return false;
+    }
+    if new == old { return true; }
+    match file.set_display_name(new, None::<&gio::Cancellable>) {
+        Ok(renamed) => {
+            push_undo(Undo::Renamed(renamed.clone(), old));
+            crate::select_later(&renamed);
+            true
         }
-        if file.parent().is_some_and(|p| p.child(&new).query_exists(None::<&gio::Cancellable>)) && !new.eq_ignore_ascii_case(&old) {
-            crate::toast(&format!("“{new}” already exists"));
-            return false;
+        Err(e) => {
+            crate::toast(e.message());
+            false
         }
-        match file.set_display_name(&new, None::<&gio::Cancellable>) {
-            Ok(renamed) => {
-                push_undo(Undo::Renamed(renamed.clone(), old.clone()));
-                crate::select_later(&renamed);
-                true
-            }
-            Err(e) => {
-                crate::toast(&e.message().to_string());
-                false
-            }
-        }
-    });
+    }
 }
 
 pub fn new_folder(dest: gio::File) {
@@ -1546,7 +1554,7 @@ mod tests {
             fs::create_dir(&dest).unwrap();
             let plan = if moving { Plan::Move(vec![file(&src)], file(&dest)) } else { Plan::Copy(vec![file(&src)], file(&dest)) };
             let st = state();
-            work(plan, &st, &gio::Cancellable::new());
+            work(plan, &st, &gio::Cancellable::new(), Vec::new());
             assert!(st.0.lock().unwrap().errors.is_empty());
             assert_eq!(fs::read_to_string(dest.join(&raw)).unwrap(), "data");
             let expected = std::ffi::OsString::from_vec(b"file\xff (2).txt".to_vec());
@@ -1766,7 +1774,7 @@ mod tests {
         let (done, finished) = std::sync::mpsc::channel();
         let job = st.clone();
         std::thread::spawn(move || {
-            work(plan, &job, &gio::Cancellable::new());
+            work(plan, &job, &gio::Cancellable::new(), Vec::new());
             let _ = done.send(());
         });
         finished.recv_timeout(Duration::from_secs(10)).expect("the tool hung on its own output");

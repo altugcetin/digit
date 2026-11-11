@@ -20,6 +20,11 @@ pub enum View {
 
 pub struct Pane {
     pub root: gtk::Box,
+    rename_generation: Cell<u64>,
+    rename_layer: gtk::Overlay,
+    editor: gtk::Entry,
+    renaming: RefCell<Option<gio::FileInfo>>,
+    rename_label: RefCell<Option<glib::WeakRef<gtk::Widget>>>,
     pub dir: gtk::DirectoryList,
     filter: gtk::CustomFilter,
     filtered: gtk::FilterListModel,
@@ -305,6 +310,15 @@ impl Pane {
         let over = gtk::Overlay::new();
         over.set_child(Some(&stack));
         over.add_overlay(&empty);
+        let editor = gtk::Entry::new();
+        editor.add_css_class("inline-rename");
+        editor.set_halign(gtk::Align::Start);
+        editor.set_valign(gtk::Align::Start);
+        editor.set_width_chars(1);
+        editor.set_visible(false);
+        over.add_overlay(&editor);
+        over.set_measure_overlay(&editor, false);
+        over.set_clip_overlay(&editor, true);
         let status = kit::ui::text("", "status");
         status.set_ellipsize(pango::EllipsizeMode::End);
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -313,6 +327,11 @@ impl Pane {
         root.append(&status);
         let p = Rc::new(Pane {
             root,
+            rename_generation: Cell::new(0),
+            rename_layer: over,
+            editor,
+            renaming: RefCell::new(None),
+            rename_label: RefCell::new(None),
             dir,
             filter,
             filtered,
@@ -362,6 +381,104 @@ impl Pane {
 
     fn weak(self: &Rc<Self>) -> Weak<Pane> {
         Rc::downgrade(self)
+    }
+
+    pub fn start_rename(self: &Rc<Self>, info: gio::FileInfo) {
+        for pane in crate::panes() { pane.cancel_rename(); }
+        let Some(file) = file_of(&info) else { return };
+        let Some(pos) = (0..self.sorted.n_items()).find(|&i| self.sorted.item(i).and_downcast::<gio::FileInfo>().and_then(|i| file_of(&i)).is_some_and(|f| f.equal(&file))) else { return };
+        // Reveal without a deferred row-focus request stealing the editor's focus.
+        match self.view.get() {
+            View::Grid => self.grid.scroll_to(pos, gtk::ListScrollFlags::empty(), None),
+            View::List => self.list.scroll_to(pos, None::<&gtk::ColumnViewColumn>, gtk::ListScrollFlags::empty(), None),
+        }
+        self.editor.remove_css_class("error");
+        self.editor.set_text(&info.display_name());
+        *self.renaming.borrow_mut() = Some(info.clone());
+        self.editor.set_visible(true);
+        self.position_editor();
+        self.editor.grab_focus();
+        let (a, b) = rename_selection(&info.display_name(), is_dir(&info));
+        self.editor.select_region(a, b);
+        let me = self.weak();
+        let generation = self.rename_generation.get();
+        self.editor.add_tick_callback(move |_, _| {
+            let Some(p) = me.upgrade() else { return glib::ControlFlow::Break };
+            if p.rename_generation.get() != generation || p.renaming.borrow().is_none() { return glib::ControlFlow::Break; }
+            p.position_editor();
+            glib::ControlFlow::Continue
+        });
+    }
+
+    fn cancel_rename(&self) {
+        self.rename_generation.set(self.rename_generation.get().wrapping_add(1));
+        self.renaming.borrow_mut().take();
+        if let Some(label) = self.rename_label.borrow_mut().take().and_then(|w| w.upgrade()) { label.set_opacity(1.0); }
+        self.editor.set_visible(false);
+    }
+
+    fn commit_rename(&self) {
+        let info = self.renaming.borrow().clone();
+        let Some(info) = info else { return };
+        if ops::rename(&info, self.editor.text().as_str()) {
+            self.cancel_rename();
+        } else {
+            self.editor.add_css_class("error");
+            self.editor.grab_focus();
+        }
+    }
+
+    fn position_editor(&self) {
+        let Some(file) = self.renaming.borrow().as_ref().and_then(file_of) else { return };
+        if let Some(label) = self.rename_label.borrow_mut().take().and_then(|w| w.upgrade()) { label.set_opacity(1.0); }
+        let view: &gtk::Widget = match self.view.get() { View::Grid => self.grid.upcast_ref(), View::List => self.list.upcast_ref() };
+        self.editor.set_opacity(0.0);
+        self.editor.set_can_target(false);
+        for (pos, widget) in item_widgets(view) {
+            let matches = self.sorted.item(pos).and_downcast::<gio::FileInfo>().and_then(|i| file_of(&i)).is_some_and(|f| f.equal(&file));
+            if !matches { continue; }
+            let Some(label) = widget.last_child() else { continue };
+            let Some(bounds) = label.compute_bounds(&self.rename_layer) else { continue };
+            let Some(scroll) = view.ancestor(gtk::ScrolledWindow::static_type()) else { continue };
+            let Some(clip) = scroll.compute_bounds(&self.rename_layer) else { continue };
+            // Keep the persistent editor focused offscreen, without painting over
+            // adjacent rows or the status line. Recycling never owns its text.
+            if bounds.y() < clip.y() || bounds.y() + bounds.height() > clip.y() + clip.height()
+                || bounds.x() < clip.x() || bounds.x() + bounds.width() > clip.x() + clip.width() { break; }
+            self.editor.set_margin_start(bounds.x().round().max(0.0) as i32);
+            self.editor.set_margin_top(bounds.y().round().max(0.0) as i32);
+            self.editor.set_size_request(bounds.width().round() as i32, bounds.height().round() as i32);
+            gtk::prelude::EntryExt::set_alignment(&self.editor, if self.view.get() == View::Grid { 0.5 } else { 0.0 });
+            if self.view.get() == View::Grid { self.editor.add_css_class("grid-name"); } else { self.editor.remove_css_class("grid-name"); }
+            self.editor.set_opacity(1.0);
+            self.editor.set_can_target(true);
+            label.set_opacity(0.0);
+            *self.rename_label.borrow_mut() = Some(label.downgrade());
+            break;
+        }
+    }
+
+    pub fn trash_flights(&self, files: &[gio::File]) -> Vec<TrashFlight> {
+        if !self.root.is_mapped() { return Vec::new(); }
+        let Some(window) = self.root.root().and_downcast::<gtk::Window>() else { return Vec::new() };
+        let view: &gtk::Widget = match self.view.get() { View::Grid => self.grid.upcast_ref(), View::List => self.list.upcast_ref() };
+        let mut out = Vec::new();
+        for (pos, widget) in item_widgets(view) {
+            let Some(info) = self.sorted.item(pos).and_downcast::<gio::FileInfo>() else { continue };
+            let Some(file) = file_of(&info) else { continue };
+            if !files.iter().any(|f| f.equal(&file)) { continue; }
+            let Some(image) = item_image(&widget) else { continue };
+            let Some(scroll) = view.ancestor(gtk::ScrolledWindow::static_type()) else { continue };
+            let center = gtk::graphene::Point::new(image.width() as f32 / 2.0, image.height() as f32 / 2.0);
+            let Some(visible) = image.compute_point(&scroll, &center) else { continue };
+            if !image.is_mapped() || visible.x() < 0.0 || visible.y() < 0.0 || visible.x() >= scroll.width() as f32 || visible.y() >= scroll.height() as f32 { continue; }
+            let Some(point) = image.compute_point(&window, &center) else { continue };
+            let icon = thumbs::icon(&image).or_else(|| image.gicon()).unwrap_or_else(|| icon_for(&info));
+            let Some(icon) = icon.to_string() else { continue };
+            out.push(TrashFlight { uri: file.uri().to_string(), x: point.x(), y: point.y(), size: image.pixel_size().max(1), icon: icon.to_string() });
+            if out.len() == 3 { break; }
+        }
+        out
     }
 
     fn grid_factory(self: &Rc<Self>) -> gtk::SignalListItemFactory {
@@ -800,6 +917,48 @@ impl Pane {
 
     fn wire(self: &Rc<Self>) {
         let me = self.weak();
+        self.editor.connect_changed(|entry| entry.remove_css_class("error"));
+        self.editor.connect_activate(move |_| {
+            if let Some(p) = me.upgrade() { p.commit_rename(); }
+        });
+        let keys = gtk::EventControllerKey::new();
+        let me = self.weak();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gdk::Key::Escape {
+                if let Some(p) = me.upgrade() { p.cancel_rename(); }
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        self.editor.add_controller(keys);
+        let focus = gtk::EventControllerFocus::new();
+        let me = self.weak();
+        focus.connect_leave(move |_| {
+            let Some(p) = me.upgrade() else { return };
+            let generation = p.rename_generation.get();
+            let me = me.clone();
+            glib::idle_add_local_once(move || {
+                if let Some(p) = me.upgrade() && p.rename_generation.get() == generation { p.commit_rename(); }
+            });
+        });
+        self.editor.add_controller(focus);
+        let me = self.weak();
+        self.sorted.connect_items_changed(move |_, _, _, _| {
+            let me = me.clone();
+            glib::idle_add_local_once(move || {
+                let Some(p) = me.upgrade() else { return };
+                let file = p.renaming.borrow().as_ref().and_then(file_of);
+                let generation = p.rename_generation.get();
+                if let Some(file) = file {
+                    glib::spawn_future_local(async move {
+                        if let Err(e) = file.query_info_future("standard::name", gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS, glib::Priority::DEFAULT).await {
+                            if e.matches(gio::IOErrorEnum::NotFound) && p.rename_generation.get() == generation && p.renaming.borrow().as_ref().and_then(file_of).is_some_and(|f| f.equal(&file)) { p.cancel_rename(); }
+                        }
+                    });
+                }
+            });
+        });
+        let me = self.weak();
         self.grid.connect_activate(move |_, pos| {
             if let Some(p) = me.upgrade() {
                 p.activate(pos);
@@ -898,6 +1057,7 @@ impl Pane {
             let me = self.weak();
             look.connect_key_pressed(move |_, key, _, mods| {
                 let Some(p) = me.upgrade() else { return glib::Propagation::Proceed };
+                if p.renaming.borrow().is_some() { return glib::Propagation::Proceed; }
                 let plain = !mods.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK | gdk::ModifierType::SHIFT_MASK);
                 if key == gdk::Key::space && plain && p.typed.borrow().0.is_empty() {
                     crate::look::toggle();
@@ -944,6 +1104,7 @@ impl Pane {
     }
 
     fn key(self: &Rc<Self>, key: gdk::Key, mods: gdk::ModifierType) -> bool {
+        if self.renaming.borrow().is_some() { return false; }
         let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
         let alt = mods.contains(gdk::ModifierType::ALT_MASK);
         match key {
@@ -1066,6 +1227,7 @@ impl Pane {
         if file.equal(&self.location()) && self.query.borrow().is_empty() {
             return;
         }
+        self.cancel_rename();
         let from = self.location.replace(file.clone());
         if record {
             self.history.borrow_mut().push(from.clone());
@@ -1493,5 +1655,80 @@ mod drag_tests {
         assert_eq!(three.size, (130.0, 134.0));
         assert_eq!(four.size, three.size);
         assert_eq!(four.hotspot, three.hotspot);
+    }
+}
+
+// GTK editable offsets count characters, not UTF-8 bytes.
+pub fn rename_selection(name: &str, folder: bool) -> (i32, i32) {
+    let end = if folder || name.starts_with('.') { name.len() } else {
+        name.rfind('.').filter(|&i| i > 0 && i + 1 < name.len()).unwrap_or(name.len())
+    };
+    (0, name[..end].chars().count() as i32)
+}
+
+pub fn validate_name(name: &str, exists: bool) -> Result<(), &'static str> {
+    if name.is_empty() { Err("Enter a name") }
+    else if name.contains('/') || name.contains('\0') || name == "." || name == ".." { Err("Invalid name") }
+    else if exists { Err("That name already exists") }
+    else { Ok(()) }
+}
+
+pub struct TrashFlight {
+    pub uri: String,
+    x: f32,
+    y: f32,
+    size: i32,
+    icon: String,
+}
+
+impl TrashFlight {
+    // Same socket and JSON word-array protocol as digitctl. Called by the
+    // operation worker after a successful trash; never blocks the GTK thread.
+    pub fn send(&self) {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let Ok(mut stream) = UnixStream::connect(dir.join("digit.sock")) else { return };
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
+        let words = ["trash-fly".to_string(), std::process::id().to_string(), self.x.to_string(), self.y.to_string(), self.size.to_string(), self.icon.clone()];
+        let quoted: Vec<String> = words.iter().map(|word| {
+            let mut out = String::from("\"");
+            for c in word.chars() {
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
+            out
+        }).collect();
+        let _ = writeln!(stream, "[{}]", quoted.join(","));
+    }
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::{rename_selection, validate_name};
+
+    #[test]
+    fn selects_stem_using_character_offsets() {
+        assert_eq!(rename_selection("résumé.tar.gz", false), (0, 10));
+        assert_eq!(rename_selection("photo.png", false), (0, 5));
+    }
+
+    #[test]
+    fn selects_whole_folders_dotfiles_and_extensionless_names() {
+        for (name, folder) in [("folder.ext", true), ("README", false), (".config.json", false), ("name.", false), ("", false)] {
+            assert_eq!(rename_selection(name, folder), (0, name.chars().count() as i32));
+        }
+    }
+
+    #[test]
+    fn rejects_empty_invalid_and_existing_names() {
+        for name in ["", ".", "..", "a/b", "bad\0name"] { assert!(validate_name(name, false).is_err()); }
+        assert!(validate_name("sibling", true).is_err());
+        for name in ["file.txt", ".hidden", " spaced ", "日本語"] { assert!(validate_name(name, false).is_ok()); }
     }
 }

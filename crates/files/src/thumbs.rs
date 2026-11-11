@@ -228,6 +228,18 @@ fn pump() {
     }
 }
 
+// Resolve the on-disk image behind a loaded thumbnail for shell IPC.
+pub fn icon(img: &gtk::Image) -> Option<gio::Icon> {
+    img.paintable()?.downcast::<gdk::Texture>().ok()?;
+    let key = MARK.with(|m| m.borrow().get(&id(img)).cloned())?;
+    let md5 = glib::compute_checksum_for_string(glib::ChecksumType::Md5, &key[1..])?;
+    for big in if key.starts_with('L') { vec![true] } else { vec![false, true] } {
+        let path = cache_dir(big).join(format!("{md5}.png"));
+        if path.exists() { return Some(gio::FileIcon::new(&gio::File::for_path(path)).upcast()); }
+    }
+    None
+}
+
 fn cache_dir(big: bool) -> PathBuf {
     glib::user_cache_dir().join("thumbnails").join(if big { "large" } else { "normal" })
 }
