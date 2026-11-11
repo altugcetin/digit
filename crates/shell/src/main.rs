@@ -364,7 +364,7 @@ fn place(app: &Rc<App>, display: &gdk::Display) {
 
 fn theme_preferences() -> Vec<Option<toml::Value>> {
     let prefs = kit::prefs::read();
-    ["theme_gtk", "theme_qt", "gtk_theme", "qt_theme", "icon_theme", "cursor_theme", "cursor_size"].iter().map(|key| prefs.get(*key).cloned()).collect()
+    ["theme_gtk", "theme_qt", "gtk_theme", "qt_theme", "qt_colors", "icon_theme", "cursor_theme", "cursor_size"].iter().map(|key| prefs.get(*key).cloned()).collect()
 }
 
 fn watch_config(app: &Rc<App>) {
@@ -394,8 +394,8 @@ fn watch_config(app: &Rc<App>) {
                 confignote::check();
                 let next = theme_preferences();
                 let before = themes.replace(next.clone());
-                if before[..5] != next[..5] { theming::changed(before[4] != next[4]); }
-                if before[5..] != next[5..] { theming::cursor_changed(); }
+                if before[..6] != next[..6] { theming::changed(before[5] != next[5]); }
+                if before[6..] != next[6..] { theming::cursor_changed(); }
                 app.apply_prefs(config::Prefs::from(&config::load()));
                 let next = kit::prefs::text(&kit::prefs::read(), "primary_monitor", "");
                 if primary.replace(next.clone()) != next && kit::setup::installed() {

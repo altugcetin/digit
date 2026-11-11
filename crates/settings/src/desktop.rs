@@ -152,7 +152,7 @@ pub(crate) fn choice(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &
     let values: Rc<Vec<String>> = Rc::new(options.iter().map(|o| o.0.to_string()).collect());
     let selected = Rc::new(Cell::new(at));
     let mut controls = Vec::new();
-    let short = !matches!(key, "gtk_theme" | "qt_theme") && options.len() <= 3 && labels.iter().map(|l| l.chars().count()).sum::<usize>() <= 26;
+    let short = !matches!(key, "gtk_theme" | "qt_theme" | "qt_colors") && options.len() <= 3 && labels.iter().map(|l| l.chars().count()).sum::<usize>() <= 26;
     if short {
         let (values, selected) = (values.clone(), selected.clone());
         let bar = ui::segmented(&labels, at, move |i| {
@@ -726,11 +726,14 @@ fn app_themes(body: &gtk::Box, t: &toml::Table) {
     qt.set_sensitive(false);
     let qt_choice = choice(&card, "palette", "Qt theme", "Style for Qt apps", "qt_theme", &[], "Fusion");
     when_on(&qt, &qt_choice.row);
+    let colors_choice = choice(&card, "palette", "Qt colors", "Digit follows your wallpaper and accent", "qt_colors", &[("digit", "Digit"), ("style", "Style default")], "digit");
+    when_on(&qt, &colors_choice.row);
     let t = t.clone();
     glib::spawn_future_local(async move {
-        let Ok((themes, styles, platform)) = gio::spawn_blocking(|| (
-            kit::app_themes::gtk_themes(&kit::app_themes::gtk_roots()), kit::app_themes::qt_styles(), kit::distro::qt_platform()
-        )).await else { return };
+        let Ok((themes, styles, schemes, platform)) = gio::spawn_blocking(|| {
+            let platform = kit::distro::qt_platform();
+            (kit::app_themes::gtk_themes(&kit::app_themes::gtk_roots()), kit::app_themes::qt_styles(), kit::qt_colors::schemes(platform), platform)
+        }).await else { return };
         let replace = |old: &gtk::Box, key, title, detail, names: Vec<String>, default: &str, digit: bool, source: &gtk::Box| {
             let mut options = Vec::new();
             if digit { options.push(("digit", "Digit")); }
@@ -753,6 +756,14 @@ fn app_themes(body: &gtk::Box, t: &toml::Table) {
         card.remove(&qt);
         next.set_sensitive(platform != QtPlatform::Missing);
         replace(&qt_choice.row, "qt_theme", "Qt theme", "Style for Qt apps", styles, "Fusion", false, &next);
+        let mut options = vec![("digit", "Digit"), ("style", "Style default")];
+        options.extend(schemes.iter().map(|s| (s.id.as_str(), s.name.as_str())));
+        let selected = kit::qt_colors::effective(t.get("qt_colors").and_then(toml::Value::as_str), &schemes);
+        let colors = choice(&holder, "palette", "Qt colors", "Digit follows your wallpaper and accent", "qt_colors", &options, selected);
+        holder.remove(&colors.row);
+        card.insert_child_after(&colors.row, colors_choice.row.prev_sibling().as_ref());
+        card.remove(&colors_choice.row);
+        when_on(&next, &colors.row);
     });
 }
 
