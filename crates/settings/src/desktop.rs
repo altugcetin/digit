@@ -1067,8 +1067,9 @@ fn search(body: &gtk::Box, t: &toml::Table) {
 
 /// Spotlight's search shortcuts: key, name and when they're offered. Keep in step with
 /// `providers::scopes` in the shell.
-const SCOPES: [(&str, &str, &str, &str); 8] = [
+const SCOPES: [(&str, &str, &str, &str); 9] = [
     ("set", "Settings", "settings", "Finds a setting and opens it"),
+    ("f", "Files", "folder", "Suggested while Files is in front"),
     ("dc", "Discord", "forum", "When Discord is installed"),
     ("sp", "Spotify", "music_note", "When Spotify is installed"),
     ("st", "Steam store", "sports_esports", "When Steam is installed"),

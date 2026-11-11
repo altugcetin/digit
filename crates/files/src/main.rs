@@ -57,6 +57,8 @@ struct Files {
 
 thread_local! {
     static FILES: RefCell<Option<Rc<Files>>> = const { RefCell::new(None) };
+    static WINDOWS: RefCell<Vec<Rc<Files>>> = const { RefCell::new(Vec::new()) };
+    static LAST_FOCUSED: RefCell<std::rc::Weak<Files>> = const { RefCell::new(std::rc::Weak::new()) };
 }
 
 fn files() -> Option<Rc<Files>> {
@@ -210,7 +212,9 @@ pub fn overlay_remove(w: &gtk::Box) {
 }
 
 pub fn focus_pane(p: &Rc<Pane>) {
-    let Some(f) = files() else { return };
+    let owner = WINDOWS.with(|s| s.borrow().iter().find(|f| f.columns.borrow().iter().any(|c| c.tabs.borrow().iter().any(|t| Rc::ptr_eq(&t.pane, p)))).cloned());
+    let Some(f) = owner else { return };
+    FILES.with(|s| *s.borrow_mut() = Some(f.clone()));
     let i = f.columns.borrow().iter().position(|c| c.tabs.borrow().iter().any(|t| Rc::ptr_eq(&t.pane, p)));
     if let Some(i) = i {
         if f.current.get() != i {
@@ -1444,20 +1448,48 @@ fn build(app: &gtk::Application, start: &gio::File) -> Rc<Files> {
         trash_bar,
         hold: RefCell::new(None),
     });
+    WINDOWS.with(|s| s.borrow_mut().push(f.clone()));
     FILES.with(|s| *s.borrow_mut() = Some(f.clone()));
+    window.connect_is_active_notify(|window| {
+        if window.is_active() {
+            let focused = WINDOWS.with(|s| {
+                let mut windows = s.borrow_mut();
+                let i = windows.iter().position(|f| f.window == *window)?;
+                let f = windows.remove(i);
+                windows.push(f.clone());
+                Some(f)
+            });
+            if let Some(f) = &focused { LAST_FOCUSED.with(|s| *s.borrow_mut() = Rc::downgrade(f)); }
+            FILES.with(|s| *s.borrow_mut() = focused);
+        }
+    });
     new_tab(start);
     apply_sort(&kit::prefs::text(&kit::prefs::read(), "files_sort", "name"));
     window.connect_close_request(|_| {
         look::close();
         glib::Propagation::Proceed
     });
-    window.connect_destroy(|_| {
-        FILES.with(|s| s.borrow_mut().take());
+    window.connect_destroy(|window| {
+        WINDOWS.with(|s| s.borrow_mut().retain(|f| f.window != *window));
+        LAST_FOCUSED.with(|s| {
+            if s.borrow().upgrade().is_some_and(|f| f.window == *window) {
+                *s.borrow_mut() = WINDOWS.with(|w| w.borrow().last().map(Rc::downgrade).unwrap_or_default());
+            }
+        });
+        FILES.with(|s| {
+            if s.borrow().as_ref().is_some_and(|f| f.window == *window) {
+                *s.borrow_mut() = WINDOWS.with(|w| w.borrow().last().cloned());
+            }
+        });
     });
     f
 }
 
 fn open_paths(app: &gtk::Application, targets: Vec<gio::File>, select: bool) {
+    open_paths_in(app, targets, select, false);
+}
+
+fn open_paths_in(app: &gtk::Application, targets: Vec<gio::File>, select: bool, new_window: bool) {
     let targets = if targets.is_empty() { vec![gio::File::for_path(glib::home_dir())] } else { targets };
     let mut first = true;
     for t in targets {
@@ -1467,6 +1499,7 @@ fn open_paths(app: &gtk::Application, targets: Vec<gio::File>, select: bool) {
             _ => (t.parent().unwrap_or_else(|| t.clone()), Some(t.clone())),
         };
         match files() {
+            _ if first && new_window => { build(app, &dir); }
             None => {
                 build(app, &dir);
             }
@@ -1487,6 +1520,46 @@ fn open_paths(app: &gtk::Application, targets: Vec<gio::File>, select: bool) {
         f.window.present();
         f.hold.borrow_mut().take();
     }
+}
+
+#[derive(Debug, PartialEq)]
+enum Request {
+    Service,
+    Search { query: String, home: bool },
+    Open { paths: Vec<String>, select: bool },
+}
+
+fn request(args: &[String]) -> Result<Request, &'static str> {
+    let mut paths = Vec::new();
+    let mut select = false;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--search" | "--search-home" => {
+                let query = args.next().ok_or("Search needs a query")?.clone();
+                if args.next().is_some() { return Err("Unexpected search argument"); }
+                return Ok(Request::Search { query, home: arg == "--search-home" });
+            }
+            "--service" => return Ok(Request::Service),
+            "--select" => select = true,
+            "--" => { paths.extend(args.cloned()); break; }
+            _ if arg.starts_with("--") => return Err("Unknown option"),
+            _ => paths.push(arg.clone()),
+        }
+    }
+    Ok(Request::Open { paths, select })
+}
+
+fn search_files(app: &gtk::Application, query: &str, home: bool) {
+    let focused = if home { None } else { LAST_FOCUSED.with(|s| s.borrow().upgrade()) };
+    let f = focused.unwrap_or_else(|| build(app, &gio::File::for_path(glib::home_dir())));
+    // Select the target before updating the entry: its changed handler uses active().
+    FILES.with(|s| *s.borrow_mut() = Some(f.clone()));
+    f.search.set_text(query);
+    if let Some(p) = active() { p.search(query, query.chars().count() >= 2); }
+    f.window.present();
+    f.search.grab_focus();
+    f.hold.borrow_mut().take();
 }
 
 const BUS_XML: &str = r#"<node><interface name="org.freedesktop.FileManager1">
@@ -1579,7 +1652,9 @@ fn main() -> glib::ExitCode {
         return glib::ExitCode::SUCCESS;
     }
     kit::app::lean("DIGIT_FILES_RENDERER");
-    let app = gtk::Application::new(Some(APP_ID), gio::ApplicationFlags::HANDLES_COMMAND_LINE | gio::ApplicationFlags::NON_UNIQUE);
+    // GApplication forwards command lines to the primary, including a --service
+    // instance. NON_UNIQUE would leave searches in a fresh process without its windows.
+    let app = gtk::Application::new(Some(APP_ID), gio::ApplicationFlags::HANDLES_COMMAND_LINE);
     app.connect_startup(|app| {
         gtk::Window::set_default_icon_name(APP_ID);
         install();
@@ -1591,17 +1666,51 @@ fn main() -> glib::ExitCode {
     });
     app.connect_command_line(|app, cmd| {
         let args: Vec<String> = cmd.arguments().iter().skip(1).filter_map(|a| a.to_str().map(str::to_string)).collect();
-        if args.iter().any(|a| a == "--service") {
-            if files().is_none() {
-                let guard = app.hold();
-                glib::timeout_add_local_once(std::time::Duration::from_secs(20), move || drop(guard));
+        match request(&args) {
+            Ok(Request::Service) => {
+                if files().is_none() {
+                    let guard = app.hold();
+                    glib::timeout_add_local_once(std::time::Duration::from_secs(20), move || drop(guard));
+                }
             }
-            return glib::ExitCode::SUCCESS;
+            Ok(Request::Search { query, home }) => search_files(app, &query, home),
+            Ok(Request::Open { paths, select }) => {
+                let targets = paths.iter().map(|a| cmd.create_file_for_arg(a)).collect();
+                open_paths_in(app, targets, select, true);
+            }
+            Err(message) => {
+                eprintln!("digit-files: {message}");
+                return glib::ExitCode::FAILURE;
+            }
         }
-        let select = args.iter().any(|a| a == "--select");
-        let targets: Vec<gio::File> = args.iter().filter(|a| !a.starts_with("--")).map(|a| cmd.create_file_for_arg(a)).collect();
-        open_paths(app, targets, select);
         glib::ExitCode::SUCCESS
     });
     app.run()
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::{Request, request};
+
+    #[test]
+    fn search_query_is_one_literal_argument() {
+        for query in ["two words", "--select", "--service", "--search", "İstanbul 文書 🦀", "$(touch /tmp/nope); 'quoted'"] {
+            let args = vec!["--search".into(), query.into()];
+            assert_eq!(request(&args), Ok(Request::Search { query: query.into(), home: false }));
+        }
+    }
+
+    #[test]
+    fn home_search_and_missing_query() {
+        assert_eq!(request(&["--search-home".into(), "two words".into()]), Ok(Request::Search { query: "two words".into(), home: true }));
+        assert!(request(&["--search".into()]).is_err());
+        assert!(request(&["--search".into(), "one".into(), "two".into()]).is_err());
+    }
+
+    #[test]
+    fn paths_select_and_service_still_parse() {
+        assert_eq!(request(&["--select".into(), "/tmp/a b".into()]), Ok(Request::Open { paths: vec!["/tmp/a b".into()], select: true }));
+        assert_eq!(request(&["--service".into()]), Ok(Request::Service));
+        assert_eq!(request(&["--".into(), "--service".into()]), Ok(Request::Open { paths: vec!["--service".into()], select: false }));
+    }
 }
