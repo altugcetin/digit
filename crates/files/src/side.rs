@@ -218,6 +218,7 @@ impl Side {
     fn header(&self, title: &str, targets: &mut Vec<Option<Target>>) {
         let l = kit::ui::text(title, "side-head");
         let row = gtk::ListBoxRow::new();
+        row.add_css_class("head");
         row.set_child(Some(&l));
         row.set_activatable(false);
         row.set_selectable(false);

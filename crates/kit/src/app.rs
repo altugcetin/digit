@@ -79,7 +79,7 @@ pub(crate) fn refresh_controls(prefs: &toml::Table) {
     let live: Vec<_> = buttons.iter().map(|(button, key)| (button.downgrade(), *key)).collect();
     CONTROLS.with(|all| all.borrow_mut().extend(live));
     for (button, key) in buttons {
-        button.set_visible(crate::prefs::flag(prefs, key, true));
+        button.set_visible(crate::appearance::button_shown(prefs, key));
     }
 }
 
@@ -110,7 +110,7 @@ pub fn controls(window: &impl IsA<gtk::Window>, app_id: &'static str) -> gtk::Bo
     bar.append(&close);
     let prefs = crate::prefs::read();
     for (button, key) in [(&min, "button_minimize"), (&max, "button_maximize"), (&close, "button_close")] {
-        button.set_visible(crate::prefs::flag(&prefs, key, true));
+        button.set_visible(crate::appearance::button_shown(&prefs, key));
         let weak = button.downgrade();
         CONTROLS.with(|all| all.borrow_mut().push((weak, key)));
     }
