@@ -25,8 +25,7 @@ impl ThemeJobs {
 }
 
 fn gtk_css_for(t: &Theme, gtk4: bool, look: &kit::style::Look) -> String {
-    let accent = look.accent.clone().unwrap_or_else(|| t.hex("primary"));
-    let on_accent = kit::style::custom_accent(&accent).map(|(_, on)| on.to_owned()).unwrap_or_else(|| t.hex("on_primary"));
+    let (accent, on_accent) = kit::style::theme_accent(t, look.accent.as_deref());
     let [base, card, raised, pop, field] = kit::style::surfaces(look, &accent);
     let c = |k: &str| t.hex(k);
     let pairs = [
@@ -127,11 +126,13 @@ fn settings_ini(old: &str, theme: &str) -> String {
     kit::appearance::ini(old, "[Settings]", &[("gtk-theme-name", Some(theme)), ("gtk-application-prefer-dark-theme", Some(if dark { "1" } else { "0" }))])
 }
 
-fn qt_config_for(old: &str, style: &str) -> String {
-    kit::appearance::ini(old, "[Appearance]", &[
-        ("style", Some(style)), ("custom_palette", Some("false")),
-        ("color_scheme_path", None),
-    ])
+fn qt_config_for(old: &str, style: &str, palette: Option<&str>, icons: Option<&str>) -> String {
+    let mut values = vec![
+        ("style", Some(style)), ("custom_palette", Some(if palette.is_some() { "true" } else { "false" })),
+        ("color_scheme_path", palette),
+    ];
+    if let Some(icons) = icons { values.push(("icon_theme", Some(icons))); }
+    kit::appearance::ini(old, "[Appearance]", &values)
 }
 
 /// Runs on a worker. Snapshot, apply, restore and explicit icon changes share one writer.
@@ -176,8 +177,18 @@ fn apply_owned(t: &Theme, icons: bool, prefs: &toml::Table, store: &kit::app_the
         let choice = prefs.get("qt_theme").and_then(toml::Value::as_str);
         let styles = kit::app_themes::qt_styles();
         let style = kit::app_themes::effective_qt_style(choice, &styles);
+        let schemes = kit::qt_colors::schemes(platform);
+        let colors = kit::qt_colors::effective(prefs.get("qt_colors").and_then(toml::Value::as_str), &schemes);
+        let palette = if colors == "digit" {
+            let (accent, on_accent) = kit::style::theme_accent(t, prefs.get("ui_accent").and_then(toml::Value::as_str));
+            let dir = theme::state_dir().join("app-themes");
+            atomic_write(&dir.join("digit.conf"), kit::qt_colors::palette(t, &accent, &on_accent).as_bytes())?;
+            atomic_write(&dir.join("Digit.colors"), kit::qt_colors::kde(t, &accent, &on_accent).as_bytes())?;
+            Some(dir.join(if platform == kit::distro::QtPlatform::Kde { "Digit.colors" } else { "digit.conf" }).to_string_lossy().into_owned())
+        } else if colors == "style" { None } else { Some(colors.to_owned()) };
+        let icons = prefs.get("icon_theme").and_then(toml::Value::as_str).filter(|s| !s.is_empty() && !s.chars().any(char::is_control));
         let path = store.config.join("qt6ct/qt6ct.conf");
-        atomic_write(&path, qt_config_for(&read_ini(&path)?, &style).as_bytes())
+        atomic_write(&path, qt_config_for(&read_ini(&path)?, &style, palette.as_deref(), icons).as_bytes())
     });
     let icons_result = if icons { kit::appearance::apply_icons().map_err(std::io::Error::other) } else { Ok(()) };
     gtk_result.and(qt_result).and(icons_result)
@@ -300,7 +311,7 @@ mod tests {
             use kit::{app_themes::{GSettings, Store, atomic_write}, distro::QtPlatform};
             let store = Store::default();
             let settings = GSettings::default();
-            let mut prefs: toml::Table = "theme_qt = true".parse().unwrap();
+            let mut prefs: toml::Table = "theme_qt = true\nqt_colors = \"style\"".parse().unwrap();
             apply_owned(&theme(), false, &prefs, &store, &settings, QtPlatform::Missing).unwrap();
             assert!(!config.exists());
             let conf = config.join("qt6ct/qt6ct.conf");
@@ -330,6 +341,81 @@ mod tests {
     }
 
     #[test]
+    fn qt_colors_modes_regenerate_only_digit_and_apply_icons_on_enable() {
+        isolated("qt_colors_modes_regenerate_only_digit_and_apply_icons_on_enable", |config| {
+            use kit::{app_themes::{GSettings, Store, atomic_write}, distro::QtPlatform};
+            let store = Store::default();
+            let settings = GSettings::default();
+            let mut prefs: toml::Table = "theme_qt = false\nicon_theme = \"Papirus\"".parse().unwrap();
+            apply_owned(&theme(), false, &prefs, &store, &settings, QtPlatform::Kde).unwrap();
+            assert!(!config.exists());
+            assert!(!theme::state_dir().exists());
+            let conf = config.join("qt6ct/qt6ct.conf");
+            let original = b"[Appearance]\nicon_theme=Original\nextra=keep\n[Fonts]\ngeneral=User\n";
+            atomic_write(&conf, original).unwrap();
+            prefs.insert("theme_qt".into(), true.into());
+            apply_owned(&theme(), false, &prefs, &store, &settings, QtPlatform::Qt6ct).unwrap();
+            let dir = theme::state_dir().join("app-themes");
+            let plain = dir.join("digit.conf");
+            let kde = dir.join("Digit.colors");
+            let text = std::fs::read_to_string(&conf).unwrap();
+            assert!(text.contains("icon_theme=Papirus\n"));
+            assert!(text.contains("custom_palette=true\n"));
+            assert!(text.contains(&format!("color_scheme_path={}\n", plain.display())));
+            assert!(text.contains("extra=keep\n"));
+            assert!(text.contains("general=User\n"));
+            prefs.insert("icon_theme".into(), "Breeze".into());
+            apply_owned(&theme(), false, &prefs, &store, &settings, QtPlatform::Qt6ct).unwrap();
+            assert!(std::fs::read_to_string(&conf).unwrap().contains("icon_theme=Breeze\n"));
+            prefs.remove("icon_theme");
+            apply_owned(&theme(), false, &prefs, &store, &settings, QtPlatform::Qt6ct).unwrap();
+            assert!(std::fs::read_to_string(&conf).unwrap().contains("icon_theme=Breeze\n"));
+            let before = std::fs::read(&plain).unwrap();
+            let mut changed = theme();
+            changed.roles.insert("primary".into(), "#123456".into());
+            apply_owned(&changed, false, &prefs, &store, &settings, QtPlatform::Kde).unwrap();
+            assert_ne!(std::fs::read(&plain).unwrap(), before);
+            assert!(std::fs::read_to_string(&conf).unwrap().contains(&format!("color_scheme_path={}\n", kde.display())));
+            prefs.insert("ui_accent".into(), "#ff9f43".into());
+            apply_owned(&changed, false, &prefs, &store, &settings, QtPlatform::Kde).unwrap();
+            let look = kit::style::Look { round: 1.0, surface: "black".into(), accent: Some("#ff9f43".into()), dense: false };
+            assert!(gtk_css_for(&changed, true, &look).contains("@define-color accent_bg_color #ff9f43;"));
+            assert!(std::fs::read_to_string(&kde).unwrap().contains("BackgroundNormal=#ff9f43\n"));
+            let generated = [std::fs::read(&plain).unwrap(), std::fs::read(&kde).unwrap()];
+            let times = [&plain, &kde].map(|p| std::fs::metadata(p).unwrap().modified().unwrap());
+            let installed = config.join("qt6ct/colors/Installed.conf");
+            atomic_write(&installed, b"[ColorScheme]\n").unwrap();
+            for mode in ["style".to_owned(), installed.to_string_lossy().into_owned()] {
+                prefs.insert("qt_colors".into(), mode.clone().into());
+                changed.roles.insert("primary".into(), "#654321".into());
+                apply_owned(&changed, false, &prefs, &store, &settings, QtPlatform::Qt6ct).unwrap();
+                let text = std::fs::read_to_string(&conf).unwrap();
+                if mode == "style" {
+                    assert!(text.contains("custom_palette=false\n"));
+                    assert!(!text.contains("color_scheme_path="));
+                } else {
+                    assert!(text.contains("custom_palette=true\n"));
+                    assert!(text.contains(&format!("color_scheme_path={mode}\n")));
+                }
+                assert_eq!([std::fs::read(&plain).unwrap(), std::fs::read(&kde).unwrap()], generated);
+                assert_eq!([&plain, &kde].map(|p| std::fs::metadata(p).unwrap().modified().unwrap()), times);
+            }
+            std::fs::remove_file(installed).unwrap();
+            apply_owned(&changed, false, &prefs, &store, &settings, QtPlatform::Qt6ct).unwrap();
+            assert!(std::fs::read_to_string(&conf).unwrap().contains(&format!("color_scheme_path={}\n", plain.display())));
+            prefs.insert("theme_qt".into(), false.into());
+            apply_owned(&changed, false, &prefs, &store, &settings, QtPlatform::Kde).unwrap();
+            assert_eq!(std::fs::read(&conf).unwrap(), original);
+            let generated = [std::fs::read(&plain).unwrap(), std::fs::read(&kde).unwrap()];
+            changed.roles.insert("primary".into(), "#abcdef".into());
+            apply_owned(&changed, false, &prefs, &store, &settings, QtPlatform::Kde).unwrap();
+            assert_eq!(std::fs::read(&conf).unwrap(), original);
+            assert_eq!([std::fs::read(&plain).unwrap(), std::fs::read(&kde).unwrap()], generated);
+            assert_eq!(kit::app_themes::Toolkit::Qt.files(), &["qt6ct/qt6ct.conf"]);
+        });
+    }
+
+    #[test]
     fn shell_never_applies_external_button_layout() {
         assert!(!include_str!("main.rs").contains("appearance::apply_buttons"));
         assert!(!include_str!("app.rs").contains("appearance::apply_buttons"));
@@ -341,7 +427,7 @@ mod tests {
     #[test]
     fn qt_config_disables_custom_palette_preserves_unrelated_keys_and_removes_scheme() {
         let old = "[Appearance]\nicon_theme=User\nstyle=Breeze\ncustom_palette=true\ncolor_scheme_path=/old\n[Fonts]\ngeneral=User Font\n";
-        let text = qt_config_for(old, "kvantum");
+        let text = qt_config_for(old, "kvantum", None, None);
         assert!(text.contains("style=kvantum\n"));
         assert!(text.contains("custom_palette=false\n"));
         assert!(!text.contains("color_scheme_path="));
@@ -377,7 +463,7 @@ mod tests {
 
     #[test]
     fn qt6ct_config_preserves_unrelated_appearance_keys() {
-        let config = qt_config_for("[Appearance]\nstyle=Fusion\nicon_theme=Adwaita\ncolor_scheme_path=/old\n", "Breeze");
+        let config = qt_config_for("[Appearance]\nstyle=Fusion\nicon_theme=Adwaita\ncolor_scheme_path=/old\n", "Breeze", None, None);
         assert!(config.contains("style=Breeze"));
         assert!(config.contains("custom_palette=false"));
         assert!(config.contains("icon_theme=Adwaita\n"));
@@ -402,7 +488,7 @@ mod tests {
             use kit::{app_themes::{GSettings, Store}, distro::QtPlatform};
             let store = Store::default();
             let settings = GSettings::default();
-            let prefs: toml::Table = "theme_qt = true\nqt_theme = \"Fusion\"".parse().unwrap();
+            let prefs: toml::Table = "theme_qt = true\nqt_theme = \"Fusion\"\nqt_colors = \"style\"".parse().unwrap();
             apply_owned(&theme(), false, &prefs, &store, &settings, QtPlatform::Qt6ct).unwrap();
             let qt_dir = config.join("qt6ct");
             let conf = qt_dir.join("qt6ct.conf");

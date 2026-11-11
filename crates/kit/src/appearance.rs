@@ -1,6 +1,6 @@
 //! Toolkit appearance shared by Digit apps and the owned desktop session.
 
-/// Automatic icons use Adwaita, consistently across GTK and Qt.
+/// Automatic GTK icons use Adwaita. Qt follows explicit icon preferences.
 pub fn icon_theme(prefs: &toml::Table) -> String {
     prefs
         .get("icon_theme")
@@ -76,15 +76,12 @@ pub fn ini(old: &str, section: &str, values: &[(&str, Option<&str>)]) -> String 
     format!("{}\n", lines.join("\n"))
 }
 
-/// Explicit icon selection only; the shell calls this on a preference change, never at start.
+/// Explicit GTK icon selection; Qt is updated by the shell's snapshot-aware writer.
 pub fn apply_icons() -> Result<(), String> {
     let prefs = crate::prefs::read();
     let icons = icon_theme(&prefs);
     for version in ["gtk-3.0", "gtk-4.0"] {
         update(&gtk::glib::user_config_dir().join(version).join("settings.ini"), "[Settings]", &[("gtk-icon-theme-name", Some(&icons))])?;
-    }
-    if crate::prefs::flag(&prefs, "theme_qt", false) && crate::distro::qt_platform() != crate::distro::QtPlatform::Missing {
-        update(&gtk::glib::user_config_dir().join("qt6ct/qt6ct.conf"), "[Appearance]", &[("icon_theme", Some(&icons))])?;
     }
     let value = format!("'{}'", icons.replace('\\', "\\\\").replace('\'', "\\'"));
     let _ = std::process::Command::new("gsettings").args(["set", "org.gnome.desktop.interface", "icon-theme", &value]).output();

@@ -80,6 +80,13 @@ pub fn custom_accent(value: &str) -> Option<(Rgb, &'static str)> {
     Some((accent, if lum > 0.55 { "#141414" } else { "#ffffff" }))
 }
 
+/// Shared dynamic toolkit accent, including the GTK foreground contrast rule.
+pub fn theme_accent(t: &crate::theme::Theme, custom: Option<&str>) -> (String, String) {
+    let accent = custom.filter(|v| hex_ok(v)).map(str::to_lowercase).unwrap_or_else(|| t.hex("primary"));
+    let on = custom_accent(&accent).map(|(_, on)| on.to_owned()).unwrap_or_else(|| t.hex("on_primary"));
+    (accent, on)
+}
+
 pub fn look() -> Look {
     let t = crate::prefs::read();
     let accent = crate::prefs::text(&t, "ui_accent", "wallpaper");
