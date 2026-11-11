@@ -209,6 +209,8 @@ pub fn discord_place(title: &str) -> Option<(String, String)> {
     }
 }
 
+/// Space between the screen edge and the floating island.
+pub const ISLAND_LIFT: f64 = 4.0;
 /// How long a panel in "leave" mode waits after the pointer leaves before it closes.
 pub const LEAVE_MS: u64 = 350;
 
@@ -507,18 +509,19 @@ impl App {
         if self.wide() { self.prefs.borrow().wide_height.clamp(26.0, 64.0).round() } else { self.cfg.header() }
     }
 
-    /// How far the floating island sits below the screen edge: the compositor's outer gap.
+    /// How far the floating island sits below the screen edge. Fixed: the gap settings only
+    /// space windows, and the compositor adds its own gap under the island.
     pub fn lift(&self) -> f64 {
-        self.prefs.borrow().gap
+        ISLAND_LIFT
     }
 
     pub fn reserve(&self) -> i32 {
         if self.wide() {
             self.header() as i32
         } else if self.floating() {
-            // The island sits one compositor gap below the screen edge; the compositor adds the
-            // same gap again under it, so it is centred between the edge and the windows.
-            (self.header() + self.lift()) as i32
+            // The island, plus whatever keeps windows at least the Tight gap below it; the
+            // compositor's own gap does the rest.
+            (self.header() + self.lift() + self.prefs.borrow().under) as i32
         } else {
             self.cfg.reserve()
         }
@@ -616,7 +619,7 @@ impl App {
                 launcher.refresh_caret();
             }
         }
-        let restyle = before.style != next.style || before.gap != next.gap || before.menubar != next.menubar || (next.wide(&self.cfg) && before.wide_height != next.wide_height);
+        let restyle = before.style != next.style || before.under != next.under || before.menubar != next.menubar || (next.wide(&self.cfg) && before.wide_height != next.wide_height);
         if before.surface != next.surface || restyle || effects_changed {
             self.set_roles(self.roles.get());
         }
