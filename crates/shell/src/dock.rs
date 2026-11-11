@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
+mod stack;
+
 const LIFT: f64 = 8.0;
 const BOUNCE: i64 = 1_400_000;
 const MENU_W: f64 = 236.0;
@@ -104,7 +106,19 @@ fn target_window(windows: &[Window]) -> Option<Window> {
         .or_else(|| ids.iter().max_by_key(|w| w.stamp)).copied()
 }
 
+/// Apps, then the stacks macOS keeps after a second separator.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Kind {
+    App,
+    Recent,
+    Trash,
+}
+
+const RECENT: &str = "digit:recent";
+const TRASH: &str = "digit:trash";
+
 struct Item {
+    kind: Kind,
     key: String,
     name: String,
     entry: Option<usize>,
@@ -136,6 +150,16 @@ struct State {
     output: String,
     running: bool,
     badges: bool,
+    /// Whether the Trash and Recent files stacks are shown, and whether the trash holds anything.
+    trash: bool,
+    recent: bool,
+    /// Slide a hidden dock in while something flies to the Trash; `trash_shown` marks that it did.
+    trash_reveal: bool,
+    trash_shown: bool,
+    trash_full: bool,
+    trash_watch: Option<gio::FileMonitor>,
+    /// When the Trash last swallowed something that flew into it.
+    gulp: Option<i64>,
     style: crate::art::Style,
     art: HashMap<String, gdk::Texture>,
     items: Vec<Item>,
@@ -324,8 +348,32 @@ fn trigger(app: &Rc<App>, monitor: &gdk::Monitor, side: Side) -> gtk::Window {
     let flag = inside;
     motion.connect_leave(move |_| flag.set(flag.get() + 1));
     paint.add_controller(motion);
+    // A file dragged to the edge brings a hidden dock out, so it can be dropped on the Trash.
+    let dnd = gtk::DropControllerMotion::new();
+    let weak = Rc::downgrade(app);
+    let edge_output = monitor.connector().map(|c| c.to_string()).unwrap_or_default();
+    dnd.connect_enter(move |_, _, _| {
+        let Some(app) = weak.upgrade() else { return };
+        if !app.edges_live(&edge_output) {
+            return;
+        }
+        if let Some(st) = current().filter(|st| st.try_borrow().is_ok_and(|s| s.output == edge_output && s.trash)) {
+            st.borrow_mut().reveal = true;
+            settle(&st);
+        }
+    });
+    paint.add_controller(dnd);
     w.present();
     w
+}
+
+/// While files are dragged over the dock: COPY when the pointer is on the Trash, else nothing,
+/// so the source never deletes anything itself.
+fn trash_action(st: &Shared, x: f64, y: f64) -> gdk::DragAction {
+    let s = st.borrow();
+    let (a, _) = s.local(x, y);
+    let on = s.index_at(a, glib::monotonic_time()).and_then(|i| s.items.get(i)).is_some_and(|i| i.kind == Kind::Trash);
+    if on { gdk::DragAction::COPY } else { gdk::DragAction::empty() }
 }
 
 pub fn apply(app: &Rc<App>) {
@@ -391,6 +439,9 @@ pub fn apply(app: &Rc<App>) {
         s.mode = mode;
         s.running = prefs.running;
         s.badges = prefs.badges;
+        s.trash = prefs.trash;
+        s.recent = prefs.recent;
+        s.trash_reveal = prefs.trash_reveal;
         s.style = crate::art::Style::parse(&prefs.icons);
         s.icons.clear();
         s.art.clear();
@@ -410,6 +461,7 @@ pub fn apply(app: &Rc<App>) {
         }).collect()).unwrap_or_default();
     let triggers = extra.iter().flat_map(|m| crate::panel_corner::triggers(app, m)).collect();
     st.borrow_mut().panel_triggers = triggers;
+    watch_trash(&st);
     rebuild(&st);
     settle(&st);
     crate::panel_corner::refresh(app);
@@ -456,6 +508,57 @@ fn counts(app: &App) -> HashMap<String, usize> {
         *map.entry(n.app.clone()).or_insert(0) += 1;
     }
     map
+}
+
+/// Something just went to the trash from `at` (global logical coordinates, the item's centre)
+/// at `size` px: when the dock shows its Trash, the item flies into it. Returns whether it did.
+pub fn fly_to_trash(app: &Rc<App>, at: (f64, f64), size: f64, icon: Option<gio::Icon>) -> bool {
+    let _ = app;
+    current().is_some_and(|st| stack::fly(&st, at, size, icon))
+}
+
+/// Follow the trash so its dock icon shows whether it holds anything.
+fn watch_trash(st: &Shared) {
+    let on = st.borrow().trash;
+    if !on {
+        st.borrow_mut().trash_watch = None;
+        return;
+    }
+    if st.borrow().trash_watch.is_some() {
+        return;
+    }
+    let weak = Rc::downgrade(st);
+    let monitor = kit::trash::watch(move |full| {
+        let Some(st) = weak.upgrade() else { return };
+        let changed = {
+            let mut s = st.borrow_mut();
+            let changed = s.trash_full != full;
+            s.trash_full = full;
+            if changed {
+                s.icons.remove(TRASH);
+                s.art.remove(TRASH);
+            }
+            changed
+        };
+        if changed {
+            rebuild(&st);
+        }
+    });
+    st.borrow_mut().trash_watch = monitor;
+    let weak = Rc::downgrade(st);
+    glib::spawn_future_local(async move {
+        let full = gio::spawn_blocking(kit::trash::is_full).await.unwrap_or(false);
+        let Some(st) = weak.upgrade() else { return };
+        if st.borrow().trash_full != full {
+            {
+                let mut s = st.borrow_mut();
+                s.trash_full = full;
+                s.icons.remove(TRASH);
+                s.art.remove(TRASH);
+            }
+            rebuild(&st);
+        }
+    });
 }
 
 pub fn command(app: &Rc<App>, verb: &str) -> bool {
@@ -546,6 +649,13 @@ fn build(app: &Rc<App>, geo: Geo, monitor: Option<&gdk::Monitor>, output: String
         output,
         running: true,
         badges: true,
+        trash: false,
+        recent: false,
+        trash_reveal: true,
+        trash_shown: false,
+        trash_full: false,
+        trash_watch: None,
+        gulp: None,
         style: crate::art::Style::Light,
         art: HashMap::new(),
         items: Vec::new(),
@@ -656,6 +766,55 @@ fn wire(st: &Shared) {
         }
     });
     paint.add_controller(drag);
+    // Hyprland offers only MOVE before negotiation, so accept both and answer COPY: the dock
+    // trashes the files itself and the source must never delete them. Same as the notch's target.
+    let drop = gtk::DropTargetAsync::new(None, gdk::DragAction::COPY | gdk::DragAction::MOVE);
+    drop.connect_accept(|_, drop| {
+        let formats = drop.formats();
+        formats.contains_type(gdk::FileList::static_type()) || formats.contain_mime_type("text/uri-list")
+    });
+    let weak = Rc::downgrade(st);
+    drop.connect_drag_enter(move |_, _, x, y| {
+        let Some(st) = weak.upgrade() else { return gdk::DragAction::empty() };
+        enter(&st, x, y);
+        trash_action(&st, x, y)
+    });
+    let weak = Rc::downgrade(st);
+    drop.connect_drag_motion(move |_, _, x, y| {
+        let Some(st) = weak.upgrade() else { return gdk::DragAction::empty() };
+        moved(&st, x, y);
+        trash_action(&st, x, y)
+    });
+    let weak = Rc::downgrade(st);
+    drop.connect_drag_leave(move |_, _| {
+        if let Some(st) = weak.upgrade() {
+            left(&st);
+        }
+    });
+    let weak = Rc::downgrade(st);
+    drop.connect_drop(move |_, drop, x, y| {
+        let Some(st) = weak.upgrade() else { return false };
+        if trash_action(&st, x, y).is_empty() {
+            return false;
+        }
+        let weak = Rc::downgrade(&st);
+        let drop = drop.clone();
+        glib::spawn_future_local(async move {
+            let value = drop.read_value_future(gdk::FileList::static_type(), glib::Priority::DEFAULT).await;
+            let paths: Vec<std::path::PathBuf> = value.ok().and_then(|v| v.get::<gdk::FileList>().ok()).map(|l| l.files().iter().filter_map(|f| f.path()).collect()).unwrap_or_default();
+            let ok = !paths.is_empty();
+            if ok {
+                kit::trash::put(paths);
+                if let Some(st) = weak.upgrade() {
+                    st.borrow_mut().gulp = Some(glib::monotonic_time());
+                    kick(&st);
+                }
+            }
+            drop.finish(if ok { gdk::DragAction::COPY } else { gdk::DragAction::empty() });
+        });
+        true
+    });
+    paint.add_controller(drop);
     let weak = Rc::downgrade(st);
     window.connect_map(move |_| {
         if let Some(st) = weak.upgrade() {
@@ -686,7 +845,7 @@ fn rebuild(st: &Shared) {
         .iter()
         .filter_map(|key| {
             let idx = list.iter().position(|e| e.id == *key)?;
-            Some(Item { key: key.clone(), name: list[idx].name.clone(), entry: Some(idx), pinned: true, windows: Vec::new(), badge: 0 })
+            Some(Item { kind: Kind::App, key: key.clone(), name: list[idx].name.clone(), entry: Some(idx), pinned: true, windows: Vec::new(), badge: 0 })
         })
         .collect();
     for r in running.iter().filter(|r| !r.app_id.is_empty()) {
@@ -695,6 +854,7 @@ fn rebuild(st: &Shared) {
         match items.iter_mut().find(|it| it.key == key) {
             Some(it) => it.windows.push(Window { id: r.id, stamp: r.stamp, focused: r.focused, minimized: r.minimized }),
             None if s.running => items.push(Item {
+                kind: Kind::App,
                 name: idx.map(|i| list[i].name.clone()).unwrap_or_else(|| crate::apps::pretty(&r.app_id)),
                 key,
                 entry: idx,
@@ -710,13 +870,24 @@ fn rebuild(st: &Shared) {
     for it in items.iter_mut() {
         it.badge = badges.get(&it.name).copied().unwrap_or(0);
     }
+    for (on, kind, key, name) in [(s.recent, Kind::Recent, RECENT, "Recent Files"), (s.trash, Kind::Trash, TRASH, "Trash")] {
+        if on {
+            items.push(Item { kind, key: key.into(), name: name.into(), entry: None, pinned: false, windows: Vec::new(), badge: 0 });
+        }
+    }
     // Resolve through GTK only after releasing the state borrow: lookups and
     // rendering can synchronously emit signals back into the dock.
     let window = s.window.clone();
     let style = s.style;
     let px = s.geo.icon_px();
+    let full = s.trash_full;
     let wanted: Vec<_> = items.iter().map(|it| {
-        (it.key.clone(), it.entry.and_then(|i| list.get(i)?.icon.clone()))
+        let icon = match it.kind {
+            Kind::App => it.entry.and_then(|i| list.get(i)?.icon.clone()),
+            Kind::Recent => Some(gio::ThemedIcon::from_names(&["folder-recent", "document-open-recent", "folder"]).upcast()),
+            Kind::Trash => Some(gio::ThemedIcon::from_names(if full { &["user-trash-full", "user-trash"][..] } else { &["user-trash"][..] }).upcast()),
+        };
+        (it.key.clone(), icon)
     }).collect();
     drop(s);
     let scale = window.scale_factor().max(1);
@@ -1007,11 +1178,16 @@ fn drop_drag(st: &Shared) {
 }
 
 fn activate(st: &Shared, i: usize) {
-    let (app, windows, key) = {
+    let (app, windows, key, kind) = {
         let s = st.borrow();
         let Some(it) = s.items.get(i) else { return };
-        (s.app.clone(), it.windows.clone(), it.key.clone())
+        (s.app.clone(), it.windows.clone(), it.key.clone(), it.kind)
     };
+    match kind {
+        Kind::Trash => return kit::trash::open(),
+        Kind::Recent => return stack::open(st, i),
+        Kind::App => {}
+    }
     if windows.is_empty() {
         let list = app.apps.list();
         if let Some(e) = list.iter().find(|e| e.id == key) {
@@ -1032,7 +1208,7 @@ fn focus_window(target: Window) {
 }
 
 fn launch(st: &Shared, i: usize) {
-    let key = st.borrow().items.get(i).map(|it| it.key.clone());
+    let key = st.borrow().items.get(i).filter(|it| it.kind == Kind::App).map(|it| it.key.clone());
     if let Some(key) = key {
         launch_key(st, key);
     }
@@ -1124,7 +1300,8 @@ fn kick(st: &Shared) {
             s.bounce.clear();
         }
         let bouncing = s.bounce.iter().any(|(_, t)| now - t < 3 * BOUNCE);
-        let busy = [&s.magnify, &s.shown, &s.tip].iter().any(|t| !t.settled(now))
+        let gulping = s.gulp.is_some_and(|t| now - t < stack::GULP);
+        let busy = gulping || [&s.magnify, &s.shown, &s.tip].iter().any(|t| !t.settled(now))
             || s.slide.values().chain(s.appear.values()).chain(s.away.values()).any(|t| !t.settled(now))
             || bouncing;
         if busy {
@@ -1163,9 +1340,18 @@ impl State {
         }
     }
 
-    fn separator(&self) -> Option<usize> {
+    /// Where separators go: after the kept apps, and before the stacks.
+    fn separators(&self) -> Vec<usize> {
+        let apps = self.items.iter().position(|i| i.kind != Kind::App).unwrap_or(self.items.len());
         let pinned = self.items.iter().filter(|i| i.pinned).count();
-        (pinned > 0 && pinned < self.items.len()).then_some(pinned)
+        let mut out = Vec::new();
+        if pinned > 0 && pinned < apps {
+            out.push(pinned);
+        }
+        if apps > 0 && apps < self.items.len() {
+            out.push(apps);
+        }
+        out
     }
 
     fn layout(&self, now: i64) -> Vec<(f64, f64)> {
@@ -1174,24 +1360,24 @@ impl State {
             return Vec::new();
         }
         let g = self.geo;
-        let split = self.separator();
-        let sep = if split.is_some() { g.gap() * 2.0 + 1.0 } else { 0.0 };
-        let total0 = n as f64 * g.base + (n - 1) as f64 * g.gap() + sep;
+        let splits = self.separators();
+        let sep = g.gap() * 2.0 + 1.0;
+        let total0 = n as f64 * g.base + (n - 1) as f64 * g.gap() + sep * splits.len() as f64;
         let start0 = self.along_len() / 2.0 - total0 / 2.0;
         let m = if g.mag > 1.0 && !motion::reduced() { self.magnify.value(now).clamp(0.0, 1.0) } else { 0.0 };
         let pa = self.pointer.map_or(-1e4, |p| p.0);
         let mut sizes = Vec::with_capacity(n);
         for i in 0..n {
-            let extra = if split.is_some_and(|k| i >= k) { sep } else { 0.0 };
+            let extra = sep * splits.iter().filter(|&&k| i >= k).count() as f64;
             let c = start0 + i as f64 * (g.base + g.gap()) + extra + g.base / 2.0;
             let d = (pa - c) / g.spread();
             sizes.push(g.base * (1.0 + (g.mag - 1.0) * m * (-d * d).exp()));
         }
-        let total = sizes.iter().sum::<f64>() + (n - 1) as f64 * g.gap() + sep;
+        let total = sizes.iter().sum::<f64>() + (n - 1) as f64 * g.gap() + sep * splits.len() as f64;
         let mut a = self.along_len() / 2.0 - total / 2.0;
         let mut out = Vec::with_capacity(n);
         for (i, size) in sizes.into_iter().enumerate() {
-            if split == Some(i) {
+            if splits.contains(&i) {
                 a += sep;
             }
             out.push((a, size));
@@ -1210,7 +1396,7 @@ impl State {
             return (self.along_len() / 2.0, 0.0);
         }
         let g = self.geo;
-        let sep = if self.separator().is_some() { g.gap() * 2.0 + 1.0 } else { 0.0 };
+        let sep = (g.gap() * 2.0 + 1.0) * self.separators().len() as f64;
         let total = n as f64 * g.base + (n - 1) as f64 * g.gap() + sep + 2.0 * g.pad();
         (self.along_len() / 2.0 - total / 2.0, total)
     }
@@ -1255,7 +1441,7 @@ impl State {
         let layout = self.layout(now);
         let (b0, blen) = self.body_span(now);
         self.fill(s, b0, LIFT + off, blen, g.body(), g.radius(), pal.body.alpha(1.0));
-        if let Some(k) = self.separator() {
+        for k in self.separators() {
             let a = (layout[k].0 - g.gap() - 0.5).round();
             let (x, y, w, h) = self.map(a, LIFT + off + g.pad() + 4.0, 1.0, g.base - 8.0);
             s.append_color(&pal.ink_main.alpha(0.16).rgba(), &graphene::Rect::new(x as f32, y as f32, w as f32, h as f32));
@@ -1302,7 +1488,8 @@ impl State {
     #[allow(clippy::too_many_arguments)]
     fn draw_item(&self, s: &gtk::Snapshot, item: &Item, a: f64, c: f64, size: f64, alpha: f64, pal: &kit::palette::Palette, now: i64) {
         let grow = self.appear.get(&item.key).map_or(1.0, |t| t.value(now).clamp(0.0, 1.0));
-        let shown = size * (0.4 + 0.6 * grow);
+        let gulp = if item.kind == Kind::Trash { self.gulp.map_or(0.0, |t| stack::gulp(now - t)) } else { 0.0 };
+        let shown = size * (0.4 + 0.6 * grow) * (1.0 + gulp);
         let (a, c) = (a + (size - shown) / 2.0, c + (size - shown) / 2.0);
         let (x, y, w, _) = self.map(a, c, shown, shown);
         let alpha = alpha * grow;
@@ -1362,6 +1549,11 @@ enum Act {
     Launch,
     Pin,
     Quit(Vec<u64>),
+    OpenTrash,
+    /// Asks once: the first click turns the row into a confirmation.
+    EmptyTrash(bool),
+    Stack,
+    OpenRecent,
 }
 
 struct Menu {
@@ -1397,6 +1589,19 @@ fn open_menu(st: &Shared, i: usize) {
         let s = st.borrow();
         let Some(item) = s.items.get(i) else { return };
         let mut rows: Vec<(String, Act, bool)> = Vec::new();
+        match item.kind {
+            Kind::Trash => {
+                rows.push(("Open".into(), Act::OpenTrash, false));
+                if s.trash_full {
+                    rows.push(("Empty Trash".into(), Act::EmptyTrash(false), true));
+                }
+            }
+            Kind::Recent => {
+                rows.push(("Show Recent Files".into(), Act::Stack, false));
+                rows.push(("Open in Files".into(), Act::OpenRecent, false));
+            }
+            Kind::App => {}
+        }
         let mut ids = item.windows.clone();
         ids.sort_by_key(|w| w.id);
         for window in ids.iter().take(6) {
@@ -1532,6 +1737,12 @@ fn run(m: &Rc<RefCell<Menu>>, r: usize) {
         let Some(row) = m.rows.get(r) else { return };
         (m.dock.upgrade(), row.1.clone(), m.key.clone())
     };
+    if matches!(act, Act::EmptyTrash(false)) {
+        let mut m = m.borrow_mut();
+        m.rows[r] = ("Empty Trash? Click to confirm".into(), Act::EmptyTrash(true), true);
+        m.paint.queue_draw();
+        return;
+    }
     close_menu();
     let Some(st) = dock else { return };
     match act {
@@ -1541,6 +1752,17 @@ fn run(m: &Rc<RefCell<Menu>>, r: usize) {
         Act::Quit(ids) => {
             let app = st.borrow().app.clone();
             crate::quit::quit(&app, &key, ids);
+        }
+        Act::OpenTrash => kit::trash::open(),
+        Act::EmptyTrash(_) => kit::trash::empty(),
+        Act::Stack => {
+            let at = st.borrow().items.iter().position(|i| i.kind == Kind::Recent);
+            if let Some(i) = at {
+                stack::open(&st, i);
+            }
+        }
+        Act::OpenRecent => {
+            let _ = gio::Subprocess::newv(&[std::ffi::OsStr::new("digit-files"), std::ffi::OsStr::new("recent:///")], gio::SubprocessFlags::NONE);
         }
     }
 }

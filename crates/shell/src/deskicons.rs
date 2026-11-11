@@ -1879,6 +1879,19 @@ fn can_undo() -> bool {
 }
 
 fn trash(d: &Rc<RefCell<Desktop>>, paths: Vec<PathBuf>) {
+    // Capture the drawn centres before the folder monitor removes trashed items.
+    let flights: Vec<_> = {
+        let state = d.borrow();
+        let geometry = state.monitor.geometry();
+        let now = glib::monotonic_time();
+        paths.iter().filter_map(|path| {
+            let item = state.items.iter().find(|i| &i.data.path == path)?;
+            let at = (geometry.x() as f64 + item.x.value(now).round() + CELL_W as f64 / 2.0,
+                geometry.y() as f64 + item.y.value(now).round() + ICON as f64 / 2.0);
+            Some((path.clone(), at, item.data.icon.clone(), item.data.directory))
+        }).collect()
+    };
+    let app = d.borrow().app.clone();
     let entries: Vec<Trashed> = {
         let state = d.borrow();
         paths
@@ -1898,6 +1911,16 @@ fn trash(d: &Rc<RefCell<Desktop>>, paths: Vec<PathBuf>) {
             {
                 Ok(()) => gone.push(entry),
                 Err(e) => eprintln!("digit: desktop trash: {e}"),
+            }
+        }
+        if let Some(app) = app.upgrade() {
+            for entry in gone.iter().take(3) {
+                let Some((_, at, icon, directory)) = flights.iter().find(|(p, _, _, _)| p == &entry.path) else { continue };
+                let icon = icon.as_deref().and_then(|i| gio::Icon::for_string(i).ok()).unwrap_or_else(|| {
+                    let content_type = if *directory { "inode/directory".into() } else { gio::content_type_guess(Some(&entry.path), None).0 };
+                    gio::content_type_get_icon(&content_type)
+                });
+                crate::dock::fly_to_trash(&app, *at, ICON as f64, Some(icon));
             }
         }
         if !gone.is_empty() {

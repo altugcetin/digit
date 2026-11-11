@@ -793,6 +793,9 @@ fn dock(body: &gtk::Box, t: &toml::Table) {
     slider(&dock, "photo_size_select_small", "Icon size", "", "dock_size", (32.0, 80.0, 2.0), prefs::get_f64(&t, "dock_size", 50.0), 50.0, 0);
     slider(&dock, "zoom_in", "Magnification", "1.0 turns it off", "dock_magnify", (1.0, 2.0, 0.05), prefs::get_f64(&t, "dock_magnify", 1.5), 1.5, 2);
     toggle(&dock, "apps", "Show running apps", "Apps that are open but not kept in the dock", "dock_running", prefs::get_bool(&t, "dock_running", true));
+    toggle(&dock, "delete", "Trash", "Show the Trash at the end of the dock", "dock_trash", prefs::get_bool(&t, "dock_trash", true));
+    toggle(&dock, "history", "Recent files", "A stack of the files you used last", "dock_recent", prefs::get_bool(&t, "dock_recent", true));
+    toggle(&dock, "auto_delete", "Show trash animation when hidden", "A hidden dock slides in while a deleted file flies to the Trash", "dock_trash_reveal", prefs::get_bool(&t, "dock_trash_reveal", true));
     toggle(&dock, "notifications", "Notification badges", "Unread notification counts on icons", "dock_badges", prefs::get_bool(&t, "dock_badges", true));
     let style = match prefs::get_str(&t, "dock_icons", "light").as_str() {
         "tile" => "graphite".to_string(),
