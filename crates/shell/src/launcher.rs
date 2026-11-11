@@ -319,6 +319,9 @@ struct State {
     scrim: Option<gtk::Window>,
     providers: Vec<providers::Provider>,
     scopes: Vec<providers::Scope>,
+    files_focus: bool,
+    files_folder: Option<String>,
+    opening: u64,
     settings: Vec<Setting>,
     found: Vec<providers::Found>,
     found_q: String,
@@ -539,6 +542,9 @@ impl Launcher {
             scrim: None,
             providers: Vec::new(),
             scopes: Vec::new(),
+            files_focus: false,
+            files_folder: None,
+            opening: 0,
             settings: Vec::new(),
             found: Vec::new(),
             found_q: String::new(),
@@ -728,9 +734,19 @@ impl Launcher {
     }
 
     fn open(&self) {
-        let output = compositor::focused_output();
-        let windows = compositor::windows();
         let app = self.0.borrow().app.clone();
+        // Snapshot the compositor event cache before taking keyboard focus. The IPC
+        // lookup below runs on a worker; panel focus must not change its target.
+        let focused = app.running.borrow().iter().find(|w| w.focused).map(|w| (w.id, w.app_id.clone()));
+        let snapshot = focused.clone();
+        let pending = gio::spawn_blocking(move || {
+            let windows = compositor::windows();
+            let focused = match snapshot {
+                Some((id, app_id)) => Some((app_id, windows.iter().find(|w| w.id == id).map(|w| w.title.clone()))),
+                None => windows.iter().find(|w| w.focused).map(|w| (w.app_id.clone(), Some(w.title.clone()))),
+            };
+            (compositor::focused_output(), windows, focused)
+        });
         let table = kit::prefs::read();
         let found_in = providers::discover(&app, &table);
         let scopes = providers::scopes(&app, &table);
@@ -742,17 +758,9 @@ impl Launcher {
             s.settings = settings;
             s.found.clear();
             s.found_q.clear();
-            if !s.window.is_visible() {
-                if let Some(display) = gdk::Display::default() {
-                    let monitors: Vec<gdk::Monitor> = display.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect();
-                    let monitor = monitors.iter().find(|m| output.as_deref().is_some_and(|o| m.connector().as_deref() == Some(o))).or(monitors.first()).cloned();
-                    if let Some(m) = &monitor {
-                        let top = (m.geometry().height() as f64 * 0.22 - PAD).max(0.0) as i32;
-                        s.window.set_margin(Edge::Top, top);
-                    }
-                    s.window.set_monitor(monitor.as_ref());
-                }
-            }
+            s.opening = s.opening.wrapping_add(1);
+            s.files_focus = focused.as_ref().is_some_and(|(_, id)| id.eq_ignore_ascii_case("dev.digit.Files"));
+            s.files_folder = None;
             if s.scrim.is_none() {
                 let monitor = s.window.monitor();
                 let weak = Rc::downgrade(&self.0);
@@ -762,7 +770,7 @@ impl Launcher {
                     }
                 }));
             }
-            s.windows = windows;
+            s.windows.clear();
             s.open = true;
             s.mode = Mode::All;
             let now = glib::monotonic_time();
@@ -781,6 +789,30 @@ impl Launcher {
         field.grab_focus();
         self.update_caret();
         self.kick();
+        let weak = Rc::downgrade(&self.0);
+        let opening = self.0.borrow().opening;
+        glib::spawn_future_local(async move {
+            let Ok((output, windows, focused)) = pending.await else { return };
+            let Some(state) = weak.upgrade() else { return };
+            {
+                let mut s = state.borrow_mut();
+                if !s.open || s.opening != opening { return; }
+                s.files_focus = focused.as_ref().is_some_and(|(id, _)| id.eq_ignore_ascii_case("dev.digit.Files"));
+                s.files_folder = focused.and_then(|(_, title)| title).filter(|t| !t.is_empty());
+                s.windows = windows;
+                if let Some(display) = gdk::Display::default() {
+                    let monitors: Vec<gdk::Monitor> = display.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect();
+                    let monitor = monitors.iter().find(|m| output.as_deref().is_some_and(|o| m.connector().as_deref() == Some(o))).or(monitors.first());
+                    if let Some(m) = monitor {
+                        let top = (m.geometry().height() as f64 * 0.22 - PAD).max(0.0) as i32;
+                        s.window.set_margin(Edge::Top, top);
+                        s.window.set_monitor(Some(m));
+                        if let Some(scrim) = &s.scrim { scrim.set_monitor(Some(m)); }
+                    }
+                }
+            }
+            Launcher(state).search();
+        });
     }
 
     fn close(&self) {
@@ -1093,11 +1125,25 @@ impl Launcher {
                             items.push(set.item(2700 - rank as i32));
                         }
                     }
-                    items.push(Item { kind: Kind::Scope, act: Act::Scope(i, rest.clone()), title: format!("Search {} for “{}”", sc.name, rest), detail: sc.key.clone(), look, score: 2600 });
+                    items.push(Item {
+                        kind: Kind::Scope,
+                        act: Act::Scope(i, rest.clone()),
+                        title: format!("Search {} for “{}”", sc.name, rest),
+                        detail: if matches!(sc.reach, providers::Reach::Files) { scope_detail(sc, s.files_focus, s.files_folder.as_deref()) } else { sc.key.clone() },
+                        look,
+                        score: scope_score(matches!(sc.reach, providers::Reach::Files), s.files_focus, true, i),
+                    });
                 } else if query.chars().count() >= 2 {
                     for (i, sc) in s.scopes.iter().enumerate().filter(|(_, sc)| sc.app || matches!(sc.reach, providers::Reach::Store)) {
                         let look = sc.icon.clone().map(Look::Icon).unwrap_or(Look::Symbol(sc.symbol));
-                        items.push(Item { kind: Kind::Scope, act: Act::Scope(i, query.clone()), title: format!("Search {} for “{}”", sc.name, query), detail: format!("{} …", sc.key), look, score: -800 - i as i32 });
+                        items.push(Item {
+                            kind: Kind::Scope,
+                            act: Act::Scope(i, query.clone()),
+                            title: format!("Search {} for “{}”", sc.name, query),
+                            detail: scope_detail(sc, s.files_focus, s.files_folder.as_deref()),
+                            look,
+                            score: scope_score(matches!(sc.reach, providers::Reach::Files), s.files_focus, false, i),
+                        });
                     }
                 }
                 for (key, title, symbol, keys) in POWER {
@@ -1353,9 +1399,9 @@ impl Launcher {
             s.lines.clear();
             (item.act, s.app.clone())
         };
-        let (list, scopes, terms) = {
+        let (list, scopes, terms, files_focus) = {
             let s = self.0.borrow();
-            (s.providers.clone(), s.scopes.clone(), s.terms.clone())
+            (s.providers.clone(), s.scopes.clone(), s.terms.clone(), s.files_focus)
         };
         self.close();
         match act {
@@ -1378,7 +1424,14 @@ impl Launcher {
                         let _ = gio::AppInfo::launch_default_for_uri(&url, Some(&context));
                     }
                 }
-                Some(providers::Reach::Switcher { ids, entry }) => providers::switcher(app.clone(), ids, entry, query),
+                Some(providers::Reach::Switcher { ids, entry }) => {
+                    providers::switcher(app.clone(), ids, entry, query)
+                }
+                Some(providers::Reach::Files) => {
+                    let flag = if files_focus { "--search" } else { "--search-home" };
+                    let argv: [&std::ffi::OsStr; 3] = ["digit-files".as_ref(), flag.as_ref(), query.as_ref()];
+                    let _ = gio::Subprocess::newv(&argv, gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE);
+                }
                 Some(providers::Reach::Settings) => {
                     let arg = format!("?{}", query.chars().filter(|c| !c.is_control()).take(80).collect::<String>());
                     let argv: [&std::ffi::OsStr; 2] = ["digit-settings".as_ref(), arg.as_ref()];
@@ -1971,5 +2024,41 @@ mod search_limit_tests {
         assert_eq!(hits, vec![(1, 9), (2, 9)]);
         limit_hits(&mut hits, 0, |a, b| b.1.cmp(&a.1));
         assert!(hits.is_empty());
+    }
+}
+
+// Exact app names score 1000; substring/weak fuzzy matches score at most 600.
+fn scope_score(files: bool, focused: bool, keyed: bool, index: usize) -> i32 {
+    if keyed { 2600 } else if files && focused { 850 } else { -800 - index as i32 }
+}
+
+fn scope_detail(scope: &providers::Scope, focused: bool, folder: Option<&str>) -> String {
+    if matches!(scope.reach, providers::Reach::Files) {
+        if focused {
+            if let Some(folder) = folder { return format!("Search in {folder}"); }
+        } else { return "Search in Home".into(); }
+    }
+    format!("{} …", scope.key)
+}
+
+#[cfg(test)]
+mod files_scope_tests {
+    use super::*;
+
+    #[test]
+    fn focused_files_ranks_between_exact_names_and_poor_matches() {
+        let rank = scope_score(true, true, false, 3);
+        assert!(rank < score("files", "files").unwrap());
+        assert!(rank > score("edit", "credits").unwrap());
+        assert!(rank > score("ffx", "firefox").unwrap());
+        assert_eq!(rank, 850);
+    }
+
+    #[test]
+    fn unfocused_files_stays_low_until_keyed() {
+        assert_eq!(scope_score(true, false, false, 3), -803);
+        assert_eq!(scope_score(true, false, true, 3), 2600);
+        assert_eq!(scope_score(true, true, true, 3), 2600);
+        assert_eq!(scope_score(false, true, false, 3), -803);
     }
 }

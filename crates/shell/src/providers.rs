@@ -31,6 +31,7 @@ pub enum Reach {
     Url(String),
     Switcher { ids: Vec<String>, entry: Option<usize> },
     Store,
+    Files,
     /// digit Settings, searched for what is typed.
     Settings,
 }
@@ -188,6 +189,11 @@ pub fn scopes(app: &App, table: &toml::Table) -> Vec<Scope> {
         if let Some(e) = app.apps.find(id).and_then(|i| list.get(i)) {
             out.push(Scope { key: key.into(), name: e.name.clone(), reach: Reach::Url(url.into()), icon: e.icon.clone(), symbol: "search", app: true });
         }
+    }
+    if glib::find_program_in_path("digit-files").is_some() {
+        let icon = app.apps.find("dev.digit.Files").and_then(|i| list.get(i)).and_then(|e| e.icon.clone())
+            .or_else(|| Some(gio::ThemedIcon::new("dev.digit.Files").upcast()));
+        out.push(Scope { key: "f".into(), name: "Files".into(), reach: Reach::Files, icon, symbol: "folder", app: true });
     }
     if glib::find_program_in_path("digit-settings").is_some() {
         out.push(Scope { key: "set".into(), name: "Settings".into(), reach: Reach::Settings, icon: None, symbol: "settings", app: false });
