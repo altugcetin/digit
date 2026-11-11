@@ -33,6 +33,9 @@ pub struct Config {
     pub dock_magnify: f64,
     pub dock_output: Option<String>,
     pub dock_running: bool,
+    pub dock_trash: bool,
+    pub dock_recent: bool,
+    pub dock_trash_reveal: bool,
     pub dock_badges: bool,
     pub dock_icons: String,
     pub corner_top_left: String,
@@ -108,6 +111,9 @@ impl Default for Config {
             dock_magnify: 1.5,
             dock_output: None,
             dock_running: true,
+            dock_trash: true,
+            dock_recent: true,
+            dock_trash_reveal: true,
             dock_badges: true,
             dock_icons: "light".into(),
             corner_top_left: "workspaces".into(),
@@ -169,6 +175,9 @@ pub struct DockPrefs {
     pub magnify: f64,
     pub output: Option<String>,
     pub running: bool,
+    pub trash: bool,
+    pub recent: bool,
+    pub trash_reveal: bool,
     pub badges: bool,
     pub icons: String,
 }
@@ -229,6 +238,9 @@ impl From<&Config> for Prefs {
             magnify: c.dock_magnify,
             output: c.dock_output.clone(),
             running: c.dock_running,
+            trash: c.dock_trash,
+            recent: c.dock_recent,
+            trash_reveal: c.dock_trash_reveal,
             badges: c.dock_badges,
             icons: c.dock_icons.clone(),
         };
@@ -384,6 +396,21 @@ pub fn load() -> Config {
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
+
+    #[test]
+    fn trash_and_recent_default_on_and_change_dock_preferences() {
+        let mut config: Config = toml::from_str("").unwrap();
+        let before = Prefs::from(&config).dock;
+        assert!(config.dock_trash && config.dock_recent && before.trash && before.recent);
+        update(&mut config, "dock_trash = false").unwrap();
+        let trash_off = Prefs::from(&config).dock;
+        assert!(!trash_off.trash && trash_off.recent);
+        assert_ne!(before, trash_off);
+        update(&mut config, "dock_recent = false").unwrap();
+        let recent_off = Prefs::from(&config).dock;
+        assert!(recent_off.trash && !recent_off.recent);
+        assert_ne!(before, recent_off);
+    }
 
     #[test]
     fn invalid_typed_value_keeps_previous_config() {

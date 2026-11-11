@@ -71,7 +71,7 @@ async fn focused_output() -> Option<String> {
     gio::spawn_blocking(kit::wm::focused_output).await.ok().flatten()
 }
 
-const HELP: &str = "open | close | toggle | tray | phone | note <words> | dnd [on|off|toggle|status] | night [on|off|toggle|status] | awake [on|off|toggle|status] | volume [up|down|mute|<0-150>] | mic | brightness up|down | screenshot | pick | lock [preview] | session | control | spaces | clipboard | settings | launcher [text] | menu <logo|app|window|date|N|traymenu N> | dock show|hide|toggle | layout <name> | wallpaper <image> | demo <peek> | gamebar [toggle|open|close|status] | record [panel|start|stop|toggle|pause|replay [on|off|toggle]|replay-save [seconds]|stream [on|off|toggle]|settings|status] | status | key <action>";
+const HELP: &str = "open | close | toggle | tray | phone | note <words> | dnd [on|off|toggle|status] | night [on|off|toggle|status] | awake [on|off|toggle|status] | volume [up|down|mute|<0-150>] | mic | brightness up|down | screenshot | pick | lock [preview] | session | control | spaces | clipboard | settings | launcher [text] | menu <logo|app|window|date|N|traymenu N> | dock show|hide|toggle | trash-fly <pid> <x> <y> <size> [icon...] | layout <name> | wallpaper <image> | demo <peek> | gamebar [toggle|open|close|status] | record [panel|start|stop|toggle|pause|replay [on|off|toggle]|replay-save [seconds]|stream [on|off|toggle]|settings|status] | status | key <action>";
 
 async fn handle(app: &Rc<App>, words: &[String]) -> String {
     let verb = words.first().map(String::as_str).unwrap_or("");
@@ -99,6 +99,13 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
             }
             notch.set_open(open);
             "ok".into()
+        }
+        "trash-fly" => {
+            let Some((pid, x, y, size)) = trash_fly_args(words) else { return "no".into() };
+            let at = gio::spawn_blocking(move || trash_fly_at(&kit::wm::windows(), pid, x, y)).await.ok().flatten();
+            let Some(at) = at else { return "no".into() };
+            let icon = words.get(5..).filter(|w| !w.is_empty()).and_then(|w| gio::Icon::for_string(&w.join(" ")).ok());
+            if crate::dock::fly_to_trash(app, at, size, icon) { "ok".into() } else { "no".into() }
         }
         "dock" => {
             let verb = words.get(1).map(String::as_str).unwrap_or("toggle");
@@ -371,6 +378,25 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
     }
 }
 
+fn trash_fly_args(words: &[String]) -> Option<(u32, f64, f64, f64)> {
+    let pid = words.get(1)?.parse::<u32>().ok().filter(|p| *p > 0)?;
+    let number = |i: usize| words.get(i)?.parse::<f64>().ok().filter(|v| v.is_finite());
+    let (x, y, size) = (number(2)?, number(3)?, number(4)?);
+    (size > 0.0).then_some((pid, x, y, size))
+}
+
+fn trash_fly_at(windows: &[kit::wm::Win], pid: u32, x: f64, y: f64) -> Option<(f64, f64)> {
+    let window = windows.iter().filter(|w| w.pid == Some(pid)).max_by_key(|w| (w.focused, w.stamp))?;
+    let (wx, wy, _, _) = window.rect?;
+    // Hyprland clients.at is the window geometry origin, excluding external borders
+    // and decorations (HyprCtl.cpp: getWindowData). Files is undecorated, with no
+    // client-side shadow inset: its window-local GTK origin matches that geometry.
+    // Do not add a border/titlebar offset or multiply these logical units by scale.
+    // Backends without a global rect (currently niri) cannot place the flight.
+    let at = (wx + x, wy + y);
+    (at.0.is_finite() && at.1.is_finite()).then_some(at)
+}
+
 const RECORD: &str = "record panel | start | stop | toggle | pause | replay [on|off|toggle] | replay-save [seconds] | stream [on|off|toggle] | settings | status";
 
 fn record(app: &Rc<App>, words: &[String]) -> String {
@@ -438,6 +464,26 @@ fn record(app: &Rc<App>, words: &[String]) -> String {
 #[cfg(test)]
 mod request_tests {
     use super::*;
+    #[test]
+    fn trash_fly_rejects_invalid_numbers_and_selects_the_process_window() {
+        let args = |s: &str| s.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(trash_fly_args(&args("trash-fly 42 -3 4.5 48 icon with spaces")), Some((42, -3.0, 4.5, 48.0)));
+        for bad in ["trash-fly", "trash-fly 0 1 2 48", "trash-fly 42 NaN 2 48", "trash-fly 42 1 inf 48", "trash-fly 42 1 2 0", "trash-fly 42 1 2 -48"] {
+            assert!(trash_fly_args(&args(bad)).is_none());
+        }
+        let mut windows = vec![
+            kit::wm::Win { pid: Some(42), stamp: 10, rect: Some((-1920.0, 100.0, 800.0, 600.0)), ..Default::default() },
+            kit::wm::Win { pid: Some(42), stamp: 5, focused: true, rect: Some((100.0, 200.0, 800.0, 600.0)), ..Default::default() },
+            kit::wm::Win { pid: Some(99), stamp: 20, focused: true, ..Default::default() },
+        ];
+        assert_eq!(trash_fly_at(&windows, 42, 12.5, 24.0), Some((112.5, 224.0)));
+        windows[1].focused = false;
+        assert_eq!(trash_fly_at(&windows, 42, 12.5, 24.0), Some((-1907.5, 124.0)));
+        windows[0].rect = None;
+        assert_eq!(trash_fly_at(&windows, 42, 12.5, 24.0), None);
+        assert_eq!(trash_fly_at(&windows, 1, 12.5, 24.0), None);
+    }
+
     #[test]
     fn rejects_oversize_and_invalid_requests() {
         assert_eq!(request_line(b"[]\nignored"), Ok(Some("[]".into())));
