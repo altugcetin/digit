@@ -336,6 +336,33 @@ pub fn focus_space(id: u64) -> bool {
     }
 }
 
+/// An index can create a Hyprland workspace; niri clamps it to its trailing empty slot.
+pub fn focus_space_index(index: u64, output: &str) -> bool {
+    match which() {
+        Wm::Niri => {
+            if niri(json!({ "Action": { "FocusMonitor": { "output": output } } })).is_none() { return false; }
+            niri(json!({ "Action": { "FocusWorkspace": { "reference": { "Index": index } } } })).is_some()
+        }
+        Wm::Hyprland => {
+            if !hypr_dispatch(&format!("focusmonitor {output}"), &format!("hl.dsp.focus({{ monitor = {} }})", serde_json::to_string(output).unwrap_or_default())) { return false; }
+            focus_space(index)
+        },
+        Wm::Other => false,
+    }
+}
+
+/// Select the panel's output before sending niri an index reference.
+pub fn move_to_space_index(id: u64, index: u64, output: &str) -> bool {
+    match which() {
+        Wm::Niri => {
+            if niri(json!({ "Action": { "FocusMonitor": { "output": output } } })).is_none() { return false; }
+            niri(json!({ "Action": { "MoveWindowToWorkspace": { "window_id": id, "reference": { "Index": index }, "focus": false } } })).is_some()
+        }
+        Wm::Hyprland => move_to_space(id, index),
+        Wm::Other => false,
+    }
+}
+
 /// Moves a window to another workspace without following it there.
 pub fn move_to_space(id: u64, space: u64) -> bool {
     match which() {

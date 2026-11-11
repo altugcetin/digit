@@ -242,6 +242,10 @@ fn workspaces(prefs: &toml::Table) -> String {
             }
         }
     }
+    let always = prefs.get("spaces_always").and_then(toml::Value::as_integer).unwrap_or(0).clamp(0, 10);
+    for number in 1..=always {
+        rules.push_str(&format!("hl.workspace_rule({{ workspace = \"{number}\", persistent = true }})\n"));
+    }
     fill(WORKSPACES, &[("rules", &rules)])
 }
 
@@ -493,7 +497,7 @@ fn generate() -> Result<bool, String> {
     changed |= remove_legacy_floating(&d).map_err(e)?;
     let workspaces_path = d.join("digit-workspaces.lua");
     let managed = std::fs::read_to_string(&workspaces_path).is_ok_and(|text| text.starts_with(WORKSPACES.lines().next().unwrap_or_default()));
-    if prefs.contains_key("monitor_workspaces") || prefs.contains_key("primary_monitor") || prefs.contains_key("hypr_workspace_layouts") || managed || !workspaces_path.exists() {
+    if prefs.contains_key("spaces_always") || prefs.contains_key("monitor_workspaces") || prefs.contains_key("primary_monitor") || prefs.contains_key("hypr_workspace_layouts") || managed || !workspaces_path.exists() {
         changed |= write_if_changed(&workspaces_path, &workspaces(&prefs)).map_err(e)?;
     }
     let monitors_path = d.join("digit-monitors.lua");
@@ -528,6 +532,24 @@ pub fn capture(on: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persistent_workspaces_are_numeric_bounded_and_removed_when_off() {
+        for (value, count) in [(0, 0), (-1, 0), (2, 2), (10, 10), (99, 10)] {
+            let prefs = format!("spaces_always = {value}").parse().unwrap();
+            let rendered = workspaces(&prefs);
+            assert_eq!(rendered.matches("persistent = true").count(), count);
+            for number in 1..=count {
+                assert!(rendered.lines().any(|line| line == format!("hl.workspace_rule({{ workspace = \"{number}\", persistent = true }})")));
+            }
+        }
+        assert!(!workspaces(&toml::Table::new()).contains("persistent"));
+        let prefs = "spaces_always = 2\n[monitor_workspaces]\nDP-1 = [1]\n[hypr_workspace_layouts]\n1 = 'master'".parse().unwrap();
+        let rendered = workspaces(&prefs);
+        assert!(rendered.contains("monitor = \"DP-1\", default = true"));
+        assert!(rendered.contains("layout = \"master\""));
+        assert_eq!(rendered.matches("persistent = true").count(), 2);
+    }
 
     #[test]
     fn qt_environment_is_opt_in() {

@@ -26,8 +26,47 @@ const CHIP_H: f64 = 32.0;
 const CHIP_ICON: f64 = 18.0;
 const SURFACE_H: f64 = TOP + ROWS as f64 * CARD_H + (ROWS - 1) as f64 * GAP + GAP + CHIP_H + PAD + FILLET;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    Id(u64),
+    Index(u64),
+}
+
+#[derive(Debug, PartialEq)]
+struct CardPlan {
+    target: Target,
+    idx: u64,
+    active: bool,
+}
+
+// Select by priority before sorting for display: used/active, trailing, then pins.
+fn card_list(spaces: &[compositor::Space], output: &str, niri: bool, always: i64, cap: usize) -> Vec<CardPlan> {
+    let mut local: Vec<_> = spaces.iter().filter(|s| s.output == output).collect();
+    local.sort_by_key(|s| s.idx);
+    let mut cards: Vec<_> = local.iter().filter(|s| s.filled || s.active).map(|s| CardPlan { target: Target::Id(s.id), idx: s.idx, active: s.active }).collect();
+    let mut trailing = local.iter().filter(|s| s.filled || s.active).map(|s| s.idx).max().unwrap_or(0).saturating_add(1);
+    if niri {
+        // The last existing workspace is niri's own empty slot, even when active.
+        if let Some(s) = local.last().filter(|s| !s.filled) { trailing = s.idx; }
+    } else {
+        // Hyprland numbers are global: never borrow a number owned by another output.
+        while spaces.iter().any(|s| s.idx == trailing && s.output != output) {
+            let Some(next) = trailing.checked_add(1) else { break };
+            trailing = next;
+        }
+    }
+    for idx in std::iter::once(trailing).chain(1..=always.clamp(0, 10) as u64) {
+        if cards.iter().any(|c| c.idx == idx) || (!niri && spaces.iter().any(|s| s.idx == idx && s.output != output)) { continue; }
+        let existing = local.iter().find(|s| s.idx == idx);
+        cards.push(CardPlan { target: existing.map_or(Target::Index(idx), |s| Target::Id(s.id)), idx, active: existing.is_some_and(|s| s.active) });
+    }
+    cards.truncate(cap);
+    cards.sort_by_key(|c| c.idx);
+    cards
+}
+
 struct Card {
-    id: u64,
+    target: Target,
     idx: u64,
     active: bool,
     windows: Vec<(u64, String, Option<gdk::Paintable>)>,
@@ -36,14 +75,14 @@ struct Card {
 
 /// A window icon being dragged onto another workspace card.
 struct Drag {
-    space: u64,
+    space: Target,
     window: u64,
     at: (f64, f64),
     moving: bool,
 }
 
 fn drag_window<'a>(cards: &'a [Card], drag: &Drag) -> Option<&'a (u64, String, Option<gdk::Paintable>)> {
-    cards.iter().find(|c| c.id == drag.space)?.windows.iter().find(|w| w.0 == drag.window)
+    cards.iter().find(|c| c.target == drag.space)?.windows.iter().find(|w| w.0 == drag.window)
 }
 
 /// A special workspace, shown as a small chip under the cards.
@@ -250,7 +289,7 @@ fn build(app: &Rc<App>) -> Shared {
         let Some(st) = weak.upgrade() else { return };
         let mut s = st.borrow_mut();
         s.drag = match s.spot_at(x, y) {
-            Some(Spot::Window(card, win)) => Some(Drag { space: s.cards[card].id, window: s.cards[card].windows[win].0, at: (x, y), moving: false }),
+            Some(Spot::Window(card, win)) => Some(Drag { space: s.cards[card].target, window: s.cards[card].windows[win].0, at: (x, y), moving: false }),
             _ => None,
         };
     });
@@ -290,15 +329,19 @@ fn build(app: &Rc<App>) -> Shared {
             });
             let win = drag_window(&s.cards, &d).map(|w| w.0);
             match (to, win) {
-                (Some(to), Some(win)) if s.cards[to].id != d.space => s.cards.get(to).map(|c| (win, c.id)),
+                (Some(to), Some(win)) if s.cards[to].target != d.space => s.cards.get(to).map(|c| (win, c.target)),
                 _ => None,
             }
         };
         st.borrow().paint.queue_draw();
         if let Some((win, space)) = moved {
+            let output = st.borrow().output.clone();
             let weak = Rc::downgrade(&st);
             glib::spawn_future_local(async move {
-                let _ = gio::spawn_blocking(move || kit::wm::move_to_space(win, space)).await;
+                let _ = gio::spawn_blocking(move || match space {
+                    Target::Id(id) => kit::wm::move_to_space(win, id),
+                    Target::Index(idx) => kit::wm::move_to_space_index(win, idx, &output),
+                }).await;
                 glib::timeout_add_local_once(Duration::from_millis(120), move || {
                     if let Some(st) = weak.upgrade() {
                         load(&st);
@@ -318,24 +361,18 @@ fn load(st: &Shared) {
     let mut s = st.borrow_mut();
     let scale = s.window.scale_factor().max(1);
     let apps = s.app.apps.clone();
-    let spaces: Vec<compositor::Space> = s.app.spaces.borrow().iter().filter(|sp| sp.output == s.output).cloned().collect();
-    let last = spaces.iter().rposition(|sp| sp.filled || sp.active);
-    s.cards = spaces
-        .iter()
-        .enumerate()
-        .filter(|(i, sp)| sp.filled || sp.active || Some(*i) == last.map(|l| l + 1))
-        .take(PER_ROW * ROWS)
-        .map(|(_, sp)| {
-            let mine: Vec<&compositor::Window> = windows.iter().filter(|w| w.space == sp.id).collect();
-            Card {
-                id: sp.id,
-                idx: sp.idx,
-                active: sp.active,
-                title: mine.first().map(|w| w.title.clone()).unwrap_or_default(),
-                windows: mine.iter().map(|w| (w.id, w.app_id.clone(), draw::app_icon(&apps, &w.app_id, ICON as i32, scale))).collect(),
-            }
-        })
-        .collect();
+    let always = s.app.prefs.borrow().spaces_always;
+    let plans = card_list(&s.app.spaces.borrow(), &s.output, kit::wm::which() == kit::wm::Wm::Niri, always, PER_ROW * ROWS);
+    s.cards = plans.into_iter().map(|plan| {
+        let mine: Vec<&compositor::Window> = windows.iter().filter(|w| plan.target == Target::Id(w.space)).collect();
+        Card {
+            target: plan.target,
+            idx: plan.idx,
+            active: plan.active,
+            title: mine.first().map(|w| w.title.clone()).unwrap_or_default(),
+            windows: mine.iter().map(|w| (w.id, w.app_id.clone(), draw::app_icon(&apps, &w.app_id, ICON as i32, scale))).collect(),
+        }
+    }).collect();
     if s.drag.as_ref().is_some_and(|d| drag_window(&s.cards, d).is_none()) {
         s.drag = None;
         s.dropped = true;
@@ -421,11 +458,12 @@ fn close(st: &Shared) {
 }
 
 fn pick(st: &Shared, spot: Spot) {
+    let output = st.borrow().output.clone();
     let target = {
         let s = st.borrow();
         match spot {
-            Spot::Card(i) => s.cards.get(i).map(|c| (true, c.id)),
-            Spot::Window(i, j) => s.cards.get(i).and_then(|c| c.windows.get(j)).map(|w| (false, w.0)),
+            Spot::Card(i) => s.cards.get(i).map(|c| (Some(c.target), 0)),
+            Spot::Window(i, j) => s.cards.get(i).and_then(|c| c.windows.get(j)).map(|w| (None, w.0)),
             Spot::Special(k) => {
                 let name = s.chips.get(k).map(|c| c.name.clone());
                 drop(s);
@@ -442,7 +480,11 @@ fn pick(st: &Shared, spot: Spot) {
     close(st);
     if let Some((space, id)) = target {
         glib::spawn_future_local(async move {
-            let _ = gio::spawn_blocking(move || if space { compositor::focus_space(id) } else { compositor::focus_after_panel(id) }).await;
+            let _ = gio::spawn_blocking(move || match space {
+                Some(Target::Id(id)) => compositor::focus_space(id),
+                Some(Target::Index(idx)) => { kit::wm::focus_space_index(idx, &output); },
+                None => compositor::focus_after_panel(id),
+            }).await;
         });
     }
 }
@@ -660,7 +702,7 @@ impl State {
                 if self.hot == Some(Spot::Window(i, j)) {
                     draw::fill(s, &draw::round(ix - 4.0, iy - 4.0, ICON + 8.0, ICON + 8.0, 10.0), pal.ink_main.alpha(0.12));
                 }
-                let lifted = self.drag.as_ref().is_some_and(|d| d.moving && d.space == card.id && d.window == *id);
+                let lifted = self.drag.as_ref().is_some_and(|d| d.moving && d.space == card.target && d.window == *id);
                 if lifted {
                     s.push_opacity(0.3);
                 }
@@ -718,6 +760,57 @@ impl State {
 mod tests {
     use super::*;
 
+    fn space(id: u64, idx: u64, output: &str, filled: bool, active: bool) -> compositor::Space {
+        compositor::Space { id, idx, output: output.into(), filled, active, focused: active }
+    }
+
+    fn numbers(cards: &[CardPlan]) -> Vec<u64> { cards.iter().map(|c| c.idx).collect() }
+
+    #[test]
+    fn hyprland_synthesizes_trailing_and_pins_in_number_order() {
+        let spaces = [space(5, 5, "A", true, true), space(2, 2, "A", true, false), space(3, 3, "A", false, false)];
+        let cards = card_list(&spaces, "A", false, 4, 12);
+        assert_eq!(numbers(&cards), [1, 2, 3, 4, 5, 6]);
+        assert_eq!(cards[0].target, Target::Index(1));
+        assert_eq!(cards[2].target, Target::Id(3));
+        assert_eq!(cards[5].target, Target::Index(6));
+        assert_eq!(numbers(&card_list(&spaces, "A", false, 0, 12)), [2, 5, 6]);
+        assert_eq!(numbers(&card_list(&[], "A", false, 0, 12)), [1]);
+    }
+
+    #[test]
+    fn hyprland_global_numbers_keep_their_output() {
+        let spaces = [space(2, 2, "A", true, true), space(1, 1, "B", false, false), space(3, 3, "B", true, true)];
+        assert_eq!(numbers(&card_list(&spaces, "A", false, 3, 12)), [2, 4]);
+        assert_eq!(numbers(&card_list(&spaces, "B", false, 3, 12)), [1, 3, 4]);
+    }
+
+    #[test]
+    fn niri_reuses_its_empty_tail_even_when_active_and_pins_local_indexes() {
+        let spaces = [space(101, 1, "A", true, false), space(102, 2, "A", false, true), space(201, 1, "B", true, true)];
+        let cards = card_list(&spaces, "A", true, 4, 12);
+        assert_eq!(numbers(&cards), [1, 2, 3, 4]);
+        assert_eq!(cards[1].target, Target::Id(102));
+        assert_eq!(cards[2].target, Target::Index(3));
+        assert_eq!(numbers(&card_list(&spaces, "A", true, 0, 12)), [1, 2]);
+        assert_eq!(numbers(&card_list(&spaces, "B", true, 2, 12)), [1, 2]);
+    }
+
+    #[test]
+    fn cap_keeps_used_then_tail_then_lowest_pins_and_clamps_pref() {
+        let spaces = [space(7, 7, "A", true, false), space(9, 9, "A", true, true)];
+        assert_eq!(numbers(&card_list(&spaces, "A", false, 10, 4)), [1, 7, 9, 10]);
+        assert_eq!(numbers(&card_list(&spaces, "A", true, 10, 4)), [1, 7, 9, 10]);
+        let full: Vec<_> = (1..=13).map(|idx| space(idx, idx, "A", true, idx == 1)).collect();
+        assert_eq!(numbers(&card_list(&full, "A", false, 10, PER_ROW * ROWS)), (1..=12).collect::<Vec<_>>());
+        assert_eq!(numbers(&card_list(&spaces, "A", false, 10, 3)), [7, 9, 10]);
+        assert_eq!(numbers(&card_list(&spaces, "A", false, 10, 2)), [7, 9]);
+        assert_eq!(numbers(&card_list(&spaces, "A", false, 10, 1)), [7]);
+        assert!(card_list(&spaces, "A", false, 10, 0).is_empty());
+        assert_eq!(numbers(&card_list(&[], "A", false, 99, 12)), (1..=10).collect::<Vec<_>>());
+        assert_eq!(numbers(&card_list(&[], "A", false, -1, 12)), [1]);
+    }
+
     #[test]
     fn default_corner_keeps_heads_fixed_surface_and_unscaled_placement() {
         assert_eq!((SURFACE_W, SURFACE_H), (870.0, 522.0));
@@ -732,8 +825,8 @@ mod tests {
 
     #[test]
     fn drag_follows_ids_and_cancels_missing_source() {
-        let card = |id, ids: &[u64]| Card { id, idx: id, active: false, title: String::new(), windows: ids.iter().map(|id| (*id, String::new(), None)).collect() };
-        let drag = Drag { space: 2, window: 9, at: (0.0, 0.0), moving: true };
+        let card = |id, ids: &[u64]| Card { target: Target::Id(id), idx: id, active: false, title: String::new(), windows: ids.iter().map(|id| (*id, String::new(), None)).collect() };
+        let drag = Drag { space: Target::Id(2), window: 9, at: (0.0, 0.0), moving: true };
         assert_eq!(drag_window(&[card(1, &[9]), card(2, &[8, 9])], &drag).map(|w| w.0), Some(9));
         assert!(drag_window(&[card(2, &[8])], &drag).is_none());
         assert!(drag_window(&[card(1, &[9])], &drag).is_none());

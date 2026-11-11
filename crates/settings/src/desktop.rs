@@ -32,7 +32,7 @@ pub(crate) fn save_many(values: &[(&str, toml::Value)]) -> bool {
     }
     // Compositor settings (and the accent, which colors niri's window border) go straight into
     // digit's part of the compositor config.
-    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "ui_accent" | "border_color" | "reduce_motion" | "reduced_effects" | "terminal" | "theme_qt" | "nvidia_env" | "cursor_theme" | "cursor_size")) {
+    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "spaces_always" | "ui_accent" | "border_color" | "reduce_motion" | "reduced_effects" | "terminal" | "theme_qt" | "nvidia_env" | "cursor_theme" | "cursor_size")) {
         apply_compositor();
     }
     if values.iter().any(|(key, _)| matches!(*key, "button_maximize" | "button_close")) {
@@ -136,6 +136,11 @@ impl Choice {
     }
 }
 
+fn choice_value(key: &str, value: &str) -> toml::Value {
+    if key == "spaces_always" { toml::Value::Integer(value.parse::<i64>().unwrap_or(0).clamp(0, 10)) }
+    else { toml::Value::String(value.to_string()) }
+}
+
 pub(crate) fn choice(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, options: &[(&str, &str)], current: &str) -> Choice {
     let detail = controlled(key);
     let mut options = options.to_vec();
@@ -156,7 +161,7 @@ pub(crate) fn choice(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &
     if short {
         let (values, selected) = (values.clone(), selected.clone());
         let bar = ui::segmented(&labels, at, move |i| {
-            let ok = values.get(i).is_some_and(|v| save(key, toml::Value::String(v.to_string())));
+            let ok = values.get(i).is_some_and(|v| save(key, choice_value(key, v)));
             if ok { selected.set(i); }
             ok
         });
@@ -170,7 +175,7 @@ pub(crate) fn choice(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &
         pick.connect_selected_notify(move |p| {
             if restoring.get() { return; }
             let i = p.selected() as usize;
-            if values.get(i).is_some_and(|v| save(key, toml::Value::String(v.to_string()))) {
+            if values.get(i).is_some_and(|v| save(key, choice_value(key, v))) {
                 selected.set(i);
             } else {
                 restoring.set(true);
@@ -898,6 +903,8 @@ fn panels(body: &gtk::Box, t: &toml::Table) {
     let close = [("leave", "When the pointer leaves"), ("click", "On a click elsewhere")];
     choice(&panels, "toolbar", "Notch", "When the open notch folds away", "notch_close", &close, &prefs::get_str(&t, "notch_close", "leave"));
     choice(&panels, "grid_view", "Workspaces", "When the workspaces panel in the top-left corner closes", "spaces_close", &close, &prefs::get_str(&t, "spaces_close", "leave"));
+    let always = t.get("spaces_always").and_then(toml::Value::as_integer).unwrap_or(0).clamp(0, 10).to_string();
+    choice(&panels, "push_pin", "Always show", "Workspaces listed even when empty", "spaces_always", &[("0", "Used only"), ("2", "1–2"), ("3", "1–3"), ("4", "1–4"), ("5", "1–5"), ("6", "1–6"), ("7", "1–7"), ("8", "1–8"), ("9", "1–9"), ("10", "1–10")], &always);
     choice(&panels, "tune", "Control Center", "When Control Center in the bottom-right corner closes", "control_close", &close, &prefs::get_str(&t, "control_close", "leave"));
     choice(&panels, "calendar_month", "Calendar", "When the calendar under the date closes", "calendar_close", &close, &prefs::get_str(&t, "calendar_close", "leave"));
 }
@@ -1374,6 +1381,14 @@ pub fn advanced(body: &gtk::Box, _: &toml::Table) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workspace_choice_stores_an_integer() {
+        assert_eq!(super::choice_value("spaces_always", "2"), toml::Value::Integer(2));
+        assert_eq!(super::choice_value("spaces_always", "0"), toml::Value::Integer(0));
+        assert_eq!(super::choice_value("spaces_always", "99"), toml::Value::Integer(10));
+        assert_eq!(super::choice_value("spaces_close", "leave"), toml::Value::String("leave".into()));
+    }
+
     #[test]
     fn screenshot_folder_accepts_paths_and_rejects_files() {
         assert!(super::screenshot_folder("").is_ok());
