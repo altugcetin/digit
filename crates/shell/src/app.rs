@@ -463,8 +463,14 @@ impl App {
         self.prefs.borrow().wide(&self.cfg)
     }
 
+    /// Whether the top bar is drawn beside the notch: always on a screen-docked notch. The Menu
+    /// bar setting only decides whether the focused app's name and menus are in it.
     pub fn menubar(&self) -> bool {
-        self.cfg.dock == Dock::Screen && self.prefs.borrow().menubar
+        self.cfg.dock == Dock::Screen
+    }
+
+    pub fn app_menus(&self) -> bool {
+        self.menubar() && self.prefs.borrow().menubar
     }
 
     pub fn floating(&self) -> bool {
@@ -619,7 +625,7 @@ impl App {
                 launcher.refresh_caret();
             }
         }
-        let restyle = before.style != next.style || before.under != next.under || before.menubar != next.menubar || (next.wide(&self.cfg) && before.wide_height != next.wide_height);
+        let restyle = before.style != next.style || before.under != next.under || before.menubar != next.menubar || before.bar_spaces != next.bar_spaces || (next.wide(&self.cfg) && before.wide_height != next.wide_height);
         if before.surface != next.surface || restyle || effects_changed {
             self.set_roles(self.roles.get());
         }
@@ -736,7 +742,8 @@ impl App {
         let now = spaces.iter().find(|s| s.focused).map(|s| (s.id, s.idx));
         *self.spaces.borrow_mut() = spaces;
         if let (Some(before), Some((id, idx))) = (was, now) {
-            if before != id && self.call.borrow().is_some() {
+            // With a menu bar the workspace row opens beside the logo instead.
+            if before != id && self.call.borrow().is_some() && !(self.wide() || self.menubar()) {
                 self.request(Peek::Spaces { idx });
             }
         }

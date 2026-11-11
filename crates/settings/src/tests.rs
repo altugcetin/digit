@@ -292,10 +292,11 @@ fn settings_controls_and_dialogs() {
     std::fs::write(prefs::path(), accepted).unwrap();
     logos[0].set_active(true);
     assert_eq!(prefs::get_str(&prefs::read(), "menubar_logo", ""), "distro");
-    let enabled_row = widgets(&notch_page).into_iter().filter_map(|w| w.downcast::<gtk::Label>().ok()).filter(|l| l.text() == "Menu bar" && l.has_css_class("name")).filter_map(|l| l.parent()?.parent()).find(|row| widgets(row).into_iter().any(|w| w.is::<gtk::Switch>())).unwrap();
+    let enabled_row = widgets(&notch_page).into_iter().filter_map(|w| w.downcast::<gtk::Label>().ok()).filter(|l| l.text() == "App menus" && l.has_css_class("name")).filter_map(|l| l.parent()?.parent()).find(|row| widgets(row).into_iter().any(|w| w.is::<gtk::Switch>())).unwrap();
     let enabled = widgets(&enabled_row).into_iter().find_map(|w| w.downcast::<gtk::Switch>().ok()).unwrap();
+    // App menus only hides the app's name and menus; the logo stays in the bar.
     enabled.set_active(false);
-    assert!(!logo_row.is_sensitive());
+    assert!(logo_row.is_sensitive());
     enabled.set_active(true);
     assert!(logo_row.is_sensitive());
 
