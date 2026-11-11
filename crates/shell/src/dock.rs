@@ -1362,7 +1362,6 @@ enum Act {
     Launch,
     Pin,
     Quit(Vec<u64>),
-    Hide,
 }
 
 struct Menu {
@@ -1408,7 +1407,6 @@ fn open_menu(st: &Shared, i: usize) {
             rows.push((if item.windows.is_empty() { "Open".into() } else { "New Window".into() }, Act::Launch, false));
             rows.push((if item.pinned { "Remove from Dock".into() } else { "Keep in Dock".into() }, Act::Pin, false));
         }
-        rows.push(("Hide Dock".into(), Act::Hide, false));
         if !item.windows.is_empty() {
             rows.push(("Quit".into(), Act::Quit(item.windows.iter().map(|w| w.id).collect()), true));
         } else if item.entry.is_some() && crate::quit::running(&s.app, &item.key) {
@@ -1540,10 +1538,6 @@ fn run(m: &Rc<RefCell<Menu>>, r: usize) {
         Act::Focus(window) => focus_window(window),
         Act::Launch => launch_key(&st, key),
         Act::Pin => toggle_pin(&st, &key),
-        Act::Hide => {
-            let app = st.borrow().app.clone();
-            command(&app, "hide");
-        }
         Act::Quit(ids) => {
             let app = st.borrow().app.clone();
             crate::quit::quit(&app, &key, ids);

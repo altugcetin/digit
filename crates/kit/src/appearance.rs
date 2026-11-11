@@ -27,10 +27,15 @@ pub fn apply_gtk() {
     settings.set_gtk_cursor_theme_size(size as i32);
 }
 
+/// Whether a window button shows: only Close does until the user turns the others on.
+pub fn button_shown(prefs: &toml::Table, key: &str) -> bool {
+    crate::prefs::flag(prefs, key, key == "button_close")
+}
+
 /// GTK headerbar order; app minimize requests are not supported by Hyprland.
 pub fn button_layout(prefs: &toml::Table) -> String {
     let names: Vec<_> = [("button_maximize", "maximize"), ("button_close", "close")]
-        .into_iter().filter(|(key, _)| crate::prefs::flag(prefs, key, true)).map(|(_, name)| name).collect();
+        .into_iter().filter(|(key, _)| button_shown(prefs, key)).map(|(_, name)| name).collect();
     format!(":{}", names.join(","))
 }
 
@@ -128,7 +133,7 @@ mod tests {
     use super::*;
     #[test]
     fn button_layout_defaults_and_all_combinations() {
-        assert_eq!(button_layout(&toml::Table::new()), ":maximize,close");
+        assert_eq!(button_layout(&toml::Table::new()), ":close");
         for (mask, expected) in [":", ":", ":maximize", ":maximize", ":close", ":close", ":maximize,close", ":maximize,close"].iter().enumerate() {
             let mut prefs = toml::Table::new();
             for (i, name) in ["minimize", "maximize", "close"].iter().enumerate() {
@@ -136,7 +141,8 @@ mod tests {
             }
             assert_eq!(button_layout(&prefs), *expected);
         }
-        assert_eq!(button_layout(&"button_minimize = false".parse().unwrap()), ":maximize,close");
+        assert_eq!(button_layout(&"button_minimize = true".parse().unwrap()), ":close");
+        assert_eq!(button_layout(&"button_maximize = true".parse().unwrap()), ":maximize,close");
     }
 
     #[test]

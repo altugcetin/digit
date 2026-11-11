@@ -810,8 +810,8 @@ pub fn session_notice(body: &gtk::Box, kind: kit::setup::Kind) {
 
 fn window_buttons(body: &gtk::Box, t: &toml::Table) {
     let win = section(body, "Window buttons");
-    toggle(&win, "remove", "Minimize button", "In Digit's own apps", "button_minimize", prefs::get_bool(t, "button_minimize", true));
-    toggle(&win, "crop_square", "Maximize button", "In Digit's apps and other GTK apps", "button_maximize", prefs::get_bool(t, "button_maximize", true));
+    toggle(&win, "remove", "Minimize button", "In Digit's own apps", "button_minimize", prefs::get_bool(t, "button_minimize", false));
+    toggle(&win, "crop_square", "Maximize button", "In Digit's apps and other GTK apps", "button_maximize", prefs::get_bool(t, "button_maximize", false));
     toggle(&win, "close", "Close button", "In Digit's apps and other GTK apps", "button_close", prefs::get_bool(t, "button_close", true));
 }
 

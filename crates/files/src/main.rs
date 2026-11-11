@@ -1255,6 +1255,8 @@ menubutton.ctl-menu > button:hover {{ background: alpha({main}, 0.10); color: {m
 list.places {{ background: transparent; }}
 list.places row {{ border-radius: 12px; padding: 7px 10px; margin: 1px 0; color: {meta}; background: transparent; }}
 list.places row:hover {{ background: alpha({main}, 0.06); }}
+list.places row.head, list.places row.head:hover {{ background: transparent; }}
+.topbar .controls {{ margin: 0; }}
 list.places row:selected {{ background: alpha({main}, 0.12); color: {main}; }}
 .side-head {{ font-size: 12px; font-weight: 600; color: alpha({meta}, 0.75); margin: 12px 4px 2px 4px; }}
 .place-icon {{ font-size: 18px; color: {accent}; }}
