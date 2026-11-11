@@ -135,6 +135,33 @@ fn qt_config_for(old: &str, style: &str, palette: Option<&str>, icons: Option<&s
     kit::appearance::ini(old, "[Appearance]", &values)
 }
 
+fn publish_qt_file(source: &PathBuf, target: &PathBuf, marker: &PathBuf) -> std::io::Result<bool> {
+    use kit::app_themes::atomic_write;
+    if target.exists() && !marker.exists() {
+        return Ok(false);
+    }
+    atomic_write(target, &std::fs::read(source)?)?;
+    atomic_write(marker, target.to_string_lossy().as_bytes())?;
+    Ok(true)
+}
+
+fn remove_qt_publications(state: &std::path::Path) -> std::io::Result<()> {
+    for name in ["qt6ct.conf", "Digit.colors"] {
+        let marker = state.join(format!("published-{name}"));
+        if let Ok(path) = std::fs::read_to_string(&marker) {
+            match std::fs::remove_file(path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+            match std::fs::remove_file(&marker) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Runs on a worker. Snapshot, apply, restore and explicit icon changes share one writer.
 fn apply(t: &Theme, icons: bool) -> std::io::Result<()> {
     use kit::app_themes::{GSettings, Store};
@@ -173,6 +200,15 @@ fn apply_owned(t: &Theme, icons: bool, prefs: &toml::Table, store: &kit::app_the
         Ok(())
     });
     let qt = kit::prefs::flag(prefs, "theme_qt", false);
+    if !qt
+        || platform == kit::distro::QtPlatform::Missing
+        || prefs
+            .get("qt_colors")
+            .and_then(toml::Value::as_str)
+            .is_some_and(|v| v != "digit")
+    {
+        remove_qt_publications(&theme::state_dir().join("app-themes"))?;
+    }
     let qt_result = store.apply(Toolkit::Qt, qt && platform != kit::distro::QtPlatform::Missing, settings, || {
         let choice = prefs.get("qt_theme").and_then(toml::Value::as_str);
         let styles = kit::app_themes::qt_styles();
@@ -182,10 +218,44 @@ fn apply_owned(t: &Theme, icons: bool, prefs: &toml::Table, store: &kit::app_the
         let palette = if colors == "digit" {
             let (accent, on_accent) = kit::style::theme_accent(t, prefs.get("ui_accent").and_then(toml::Value::as_str));
             let dir = theme::state_dir().join("app-themes");
-            atomic_write(&dir.join("digit.conf"), kit::qt_colors::palette(t, &accent, &on_accent).as_bytes())?;
-            atomic_write(&dir.join("Digit.colors"), kit::qt_colors::kde(t, &accent, &on_accent).as_bytes())?;
-            Some(dir.join(if platform == kit::distro::QtPlatform::Kde { "Digit.colors" } else { "digit.conf" }).to_string_lossy().into_owned())
-        } else if colors == "style" { None } else { Some(colors.to_owned()) };
+                let plain = dir.join("digit.conf");
+                let kde = dir.join("Digit.colors");
+                atomic_write(
+                    &plain,
+                    kit::qt_colors::palette(t, &accent, &on_accent).as_bytes(),
+                )?;
+                atomic_write(&kde, kit::qt_colors::kde(t, &accent, &on_accent).as_bytes())?;
+                let config_home = std::env::var_os("XDG_CONFIG_HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| glib::user_config_dir());
+                let data_home = std::env::var_os("XDG_DATA_HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| glib::home_dir().join(".local/share"));
+                let published_plain = config_home.join("qt6ct/colors/Digit.conf");
+                let published_kde = data_home.join("color-schemes/Digit.colors");
+                let plain_ok =
+                    publish_qt_file(&plain, &published_plain, &dir.join("published-qt6ct.conf"))?;
+                let kde_ok = platform != kit::distro::QtPlatform::Kde
+                    || publish_qt_file(&kde, &published_kde, &dir.join("published-Digit.colors"))?;
+                Some(
+                    if platform == kit::distro::QtPlatform::Kde && kde_ok {
+                        published_kde
+                    } else if plain_ok {
+                        published_plain
+                    } else {
+                        plain
+                    }
+                    .to_string_lossy()
+                    .into_owned(),
+                )
+            } else {
+                remove_qt_publications(&theme::state_dir().join("app-themes"))?;
+                if colors == "style" {
+                    None
+                } else {
+                    Some(colors.to_owned())
+                }
+            };
         let icons = prefs.get("icon_theme").and_then(toml::Value::as_str).filter(|s| !s.is_empty() && !s.chars().any(char::is_control));
         let path = store.config.join("qt6ct/qt6ct.conf");
         atomic_write(&path, qt_config_for(&read_ini(&path)?, &style, palette.as_deref(), icons).as_bytes())
@@ -361,7 +431,10 @@ mod tests {
             let text = std::fs::read_to_string(&conf).unwrap();
             assert!(text.contains("icon_theme=Papirus\n"));
             assert!(text.contains("custom_palette=true\n"));
-            assert!(text.contains(&format!("color_scheme_path={}\n", plain.display())));
+                assert!(text.contains(&format!(
+                    "color_scheme_path={}\n",
+                    config.join("qt6ct/colors/Digit.conf").display()
+                )));
             assert!(text.contains("extra=keep\n"));
             assert!(text.contains("general=User\n"));
             prefs.insert("icon_theme".into(), "Breeze".into());
@@ -375,7 +448,10 @@ mod tests {
             changed.roles.insert("primary".into(), "#123456".into());
             apply_owned(&changed, false, &prefs, &store, &settings, QtPlatform::Kde).unwrap();
             assert_ne!(std::fs::read(&plain).unwrap(), before);
-            assert!(std::fs::read_to_string(&conf).unwrap().contains(&format!("color_scheme_path={}\n", kde.display())));
+                assert!(std::fs::read_to_string(&conf).unwrap().contains(&format!(
+                    "color_scheme_path={}\n",
+                    std::env::var("XDG_DATA_HOME").unwrap() + "/color-schemes/Digit.colors"
+                )));
             prefs.insert("ui_accent".into(), "#ff9f43".into());
             apply_owned(&changed, false, &prefs, &store, &settings, QtPlatform::Kde).unwrap();
             let look = kit::style::Look { round: 1.0, surface: "black".into(), accent: Some("#ff9f43".into()), dense: false };
@@ -402,7 +478,10 @@ mod tests {
             }
             std::fs::remove_file(installed).unwrap();
             apply_owned(&changed, false, &prefs, &store, &settings, QtPlatform::Qt6ct).unwrap();
-            assert!(std::fs::read_to_string(&conf).unwrap().contains(&format!("color_scheme_path={}\n", plain.display())));
+                assert!(std::fs::read_to_string(&conf).unwrap().contains(&format!(
+                    "color_scheme_path={}\n",
+                    config.join("qt6ct/colors/Digit.conf").display()
+                )));
             prefs.insert("theme_qt".into(), false.into());
             apply_owned(&changed, false, &prefs, &store, &settings, QtPlatform::Kde).unwrap();
             assert_eq!(std::fs::read(&conf).unwrap(), original);

@@ -158,9 +158,7 @@ pub fn palette(t: &Theme, accent: &str, on_accent: &str) -> String {
 pub fn kde(t: &Theme, accent: &str, on_accent: &str) -> String {
     let c = |r| t.hex(r);
     let mut out = format!(
-        "[General]\nName=Digit\nColorScheme=Digit\n[KDE]\ncontrast=4\n[ColorEffects:Inactive]\nChangeSelectionColor=true\nColor={}\nColorAmount=0.025\nColorEffect=0\nContrastAmount=0.1\nContrastEffect=0\nEnable=true\n[ColorEffects:Disabled]\nColor={}\nColorAmount=0.5\nColorEffect=3\nContrastAmount=0\nContrastEffect=0\nEnable=false\n",
-        c("surface_container_lowest"),
-        c("surface_container")
+        "[General]\nName=Digit\nColorScheme=Digit\n[KDE]\ncontrast=4\n[ColorEffects:Disabled]\nChangeSelectionColor=false\nColor=56,56,56\nColorAmount=0\nColorEffect=0\nContrastAmount=0.65\nContrastEffect=1\nEnable=true\nIntensityAmount=0.1\nIntensityEffect=2\n[ColorEffects:Inactive]\nChangeSelectionColor=true\nColor=112,111,110\nColorAmount=0.025\nColorEffect=2\nContrastAmount=0.1\nContrastEffect=2\nEnable=false\nIntensityAmount=0\nIntensityEffect=0\n"
     );
     for (section, bg, alt, normal, active, inactive, hover) in [
         ("Window", "surface_container", "surface_container_highest", "on_surface_variant", "primary", "outline", ""),
@@ -336,28 +334,30 @@ mod tests {
                     vec![
                         ("ChangeSelectionColor", "true"),
                         ("ColorAmount", "0.025"),
-                        ("ColorEffect", "0"),
+                        ("ColorEffect", "2"),
                         ("ContrastAmount", "0.1"),
-                        ("ContrastEffect", "0"),
-                        ("Enable", "true"),
+                        ("ContrastEffect", "2"),
+                        ("Enable", "false"),
                     ],
                 ),
                 (
                     "[ColorEffects:Disabled]",
                     vec![
-                        ("ColorAmount", "0.5"),
-                        ("ColorEffect", "3"),
-                        ("ContrastAmount", "0"),
-                        ("ContrastEffect", "0"),
-                        ("Enable", "false"),
+                        ("ChangeSelectionColor", "false"),
+                        ("ColorAmount", "0"),
+                        ("ColorEffect", "0"),
+                        ("ContrastAmount", "0.65"),
+                        ("ContrastEffect", "1"),
+                        ("Enable", "true"),
+                        ("IntensityAmount", "0.1"),
+                        ("IntensityEffect", "2"),
                     ],
                 ),
             ] {
                 for (key, value) in expected {
                     assert_eq!(sections[section][key], value);
                 }
-                let color = sections[section]["Color"];
-                assert!(color.len() == 7 && color.starts_with('#') && color[1..].bytes().all(|b| b.is_ascii_hexdigit()));
+                assert!(sections[section].contains_key("Color"));
             }
             assert_eq!(sections["[WM]"].len(), 6);
             for key in ["activeBackground", "activeForeground", "inactiveBackground", "inactiveForeground", "activeBlend", "inactiveBlend"]
