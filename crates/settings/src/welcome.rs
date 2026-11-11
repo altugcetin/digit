@@ -180,7 +180,7 @@ fn step(index: usize, t: &toml::Table) -> gtk::Widget {
             page.append(&header("notch", "Pick your notch", "The notch shows the time, music, calls and notifications. Choose how it sits on the screen."));
             page.append(&styles(t));
             let card = ui::card();
-            crate::desktop::toggle(&card, "menu", "Menu bar", "Distro menu, app menus, status and date beside the notch", "menubar", prefs::get_bool(t, "menubar", true));
+            crate::desktop::toggle(&card, "menu", "App menus", "The focused app's name and menus at the top left", "menubar", prefs::get_bool(t, "menubar", true));
             choice(&card, "blur_on", "Menu bar backdrop", "Clear over the wallpaper, frosted when windows are open", "menubar_look", &[("adaptive", "Adaptive"), ("clear", "Clear"), ("glass", "Glass")], &prefs::get_str(t, "menubar_look", "adaptive"));
             choice(&card, "call", "Call activity", "A live pill with the call timer while an app uses the microphone", "notch_call", &[("voice", "Voice and video apps"), ("any", "Any app using the microphone"), ("off", "Off")], &prefs::get_str(t, "notch_call", "voice"));
             page.append(&card);

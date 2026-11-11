@@ -6,12 +6,22 @@ use gtk::{glib, graphene, pango};
 use std::rc::Rc;
 
 const TEXT: f64 = 15.5;
+/// Workspace row beside the logo: dot size, distance between centres, the active pill's size.
+const DOT: f64 = 6.0;
+const STEP: f64 = 16.0;
+const PILL: f64 = 17.0;
+const PILL_H: f64 = 8.0;
+const EDGE: f64 = 10.0;
+/// How long the active pill takes to flow to its new workspace, and how long the row stays out.
+const MORPH: i64 = 520_000;
+const HOLD: i64 = 1_500_000;
 const NUM: f64 = 14.5;
 const ICON: f64 = 18.5;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Zone {
     Logo,
+    Spaces,
     App,
     Menu(u8),
     Win,
@@ -36,6 +46,57 @@ pub struct Look {
 struct Battery {
     level: u8,
     charging: bool,
+}
+
+/// The workspace pill: which workspaces exist on this output (and whether they hold windows),
+/// which is active, and the motion of the active mark between them.
+pub struct Spaces {
+    list: Vec<bool>,
+    active: usize,
+    from: f64,
+    moved: i64,
+    /// Always on, instead of only while switching.
+    always: bool,
+    shown: bool,
+    open: kit::motion::Tween,
+    until: i64,
+    ticking: bool,
+}
+
+impl Default for Spaces {
+    fn default() -> Self {
+        Self { list: Vec::new(), active: 0, from: 0.0, moved: 0, always: false, shown: false, open: kit::motion::Tween::still(0.0), until: 0, ticking: false }
+    }
+}
+
+fn ease_out(x: f64) -> f64 {
+    1.0 - (1.0 - x.clamp(0.0, 1.0)).powi(3)
+}
+
+fn ease_both(x: f64) -> f64 {
+    let x = x.clamp(0.0, 1.0);
+    if x < 0.5 { 4.0 * x * x * x } else { 1.0 - (-2.0 * x + 2.0).powi(3) / 2.0 }
+}
+
+/// Front and back of the active mark, in workspace positions, while it moves from `from` to `to`
+/// (`t` 0..1): the front leaves first, the back follows, so the mark stretches and then settles.
+fn ends(from: f64, to: f64, t: f64) -> (f64, f64) {
+    if t >= 1.0 {
+        return (to, to);
+    }
+    (from + (to - from) * ease_out(t / 0.7), from + (to - from) * ease_both((t - 0.2) / 0.8))
+}
+
+impl Spaces {
+    fn at(&self, now: i64) -> (f64, f64) {
+        let t = if kit::motion::reduced() { 1.0 } else { (now - self.moved) as f64 / MORPH as f64 };
+        ends(self.from, self.active as f64, t)
+    }
+
+    /// The pill's width when fully open.
+    fn width(&self) -> f64 {
+        if self.list.is_empty() { 0.0 } else { 2.0 * EDGE + (self.list.len() - 1) as f64 * STEP + PILL }
+    }
 }
 
 fn motion_in(x: f64) -> f64 {
@@ -106,6 +167,7 @@ impl Strip {
     }
 
     pub fn zone_at(&self, x: f64, y: f64) -> Option<Zone> {
+        self.imp().pointer.set(x);
         if y > self.imp().header.get() + 2.0 * self.imp().lift.get() {
             return None;
         }
@@ -126,6 +188,102 @@ impl Strip {
 
     pub fn held(&self) -> Option<Zone> {
         self.imp().held.get()
+    }
+
+    /// The workspaces on this output changed. When the active one moves, the workspace pill opens
+    /// beside the logo (unless it is always shown) and the active mark slides to its new place;
+    /// the pill folds away again a moment later.
+    pub fn set_spaces(&self, list: Vec<bool>, active: usize, always: bool) {
+        let imp = self.imp();
+        let now = App::now();
+        {
+            let mut sp = imp.spaces.borrow_mut();
+            if sp.list == list && sp.active == active && sp.always == always {
+                return;
+            }
+            let first = sp.list.is_empty();
+            let moved = !first && sp.active != active;
+            if moved {
+                // Leave from wherever the mark is drawn now, even mid-move.
+                let (head, _) = sp.at(now);
+                sp.from = head.min(list.len().saturating_sub(1) as f64);
+                sp.moved = now;
+                sp.until = now + HOLD;
+            } else if first {
+                sp.from = active as f64;
+                sp.moved = now - MORPH;
+            }
+            sp.always = always;
+            let want = always || (moved || sp.shown) && now < sp.until;
+            if want != sp.shown {
+                if want {
+                    sp.open.go(1.0, now, 280, kit::motion::EMPHASIZED_DECEL);
+                } else {
+                    sp.open.go(0.0, now, 320, kit::motion::STANDARD);
+                }
+                sp.shown = want;
+            }
+            sp.list = list;
+            sp.active = active.min(sp.list.len().saturating_sub(1));
+            if std::mem::replace(&mut sp.ticking, true) {
+                drop(sp);
+                self.queue_draw();
+                return;
+            }
+        }
+        self.add_tick_callback(|w, clock| {
+            let now = clock.frame_time().max(App::now());
+            w.queue_draw();
+            let mut sp = w.imp().spaces.borrow_mut();
+            if sp.shown && !sp.always && now >= sp.until {
+                sp.open.go(0.0, now, 320, kit::motion::STANDARD);
+                sp.shown = false;
+            }
+            let busy = (sp.shown && !sp.always) || !sp.open.settled(now) || now - sp.moved < MORPH;
+            if busy {
+                glib::ControlFlow::Continue
+            } else {
+                sp.ticking = false;
+                glib::ControlFlow::Break
+            }
+        });
+    }
+
+    /// Draws the workspace dots inside the pill that starts at `x0`, and the active mark: a bar of
+    /// constant height that stretches toward the new workspace and settles there.
+    fn draw_spaces(&self, s: &gtk::Snapshot, sp: &Spaces, x0: f64, mid: f64, now: i64, ink: kit::palette::Rgb, accent: kit::palette::Rgb) {
+        let first = x0 + EDGE + PILL / 2.0;
+        let at = |i: f64| first + i * STEP;
+        let (head, tail) = sp.at(now);
+        let (lo, hi) = (head.min(tail), head.max(tail));
+        for (i, filled) in sp.list.iter().enumerate() {
+            let i = i as f64;
+            if i >= lo - 0.45 && i <= hi + 0.45 {
+                continue;
+            }
+            let d = if *filled { DOT } else { DOT * 0.8 };
+            let color = if *filled { ink.alpha(0.88) } else { ink.alpha(0.38) };
+            let c = at(i);
+            draw::fill(s, &draw::round(c - d / 2.0, mid - d / 2.0, d, d, d / 2.0), color);
+        }
+        let (l, r) = (at(lo) - PILL / 2.0, at(hi) + PILL / 2.0);
+        draw::fill(s, &draw::round(l, mid - PILL_H / 2.0, r - l, PILL_H, PILL_H / 2.0), accent);
+    }
+
+    /// The workspace dot under the pointer, as last seen by `zone_at`.
+    pub fn hovered_space(&self) -> Option<usize> {
+        self.space_at(self.imp().pointer.get())
+    }
+
+    /// Which workspace dot of the pill is under `x`, if any.
+    pub fn space_at(&self, x: f64) -> Option<usize> {
+        let (x0, _, w, _) = self.imp().zones.borrow().iter().find(|(z, _)| *z == Zone::Spaces).map(|(_, r)| *r)?;
+        let n = self.imp().spaces.borrow().list.len();
+        if n == 0 || x < x0 || x > x0 + w {
+            return None;
+        }
+        let first = x0 + EDGE + PILL / 2.0;
+        Some((((x - first) / STEP).round().max(0.0) as usize).min(n - 1))
     }
 
     fn draw(&self, s: &gtk::Snapshot) {
@@ -247,11 +405,30 @@ impl Strip {
         }
         zones.push((Zone::Logo, (x, 0.0, 36.0, band)));
         x += 42.0;
+        // The workspace pill, its own pill beside the logo: it grows open from the left.
+        let (open, row) = {
+            let sp = imp.spaces.borrow();
+            (sp.open.value(now).clamp(0.0, 1.0), sp.width())
+        };
+        if open > 0.002 && row > 0.0 {
+            let pw = (row * open).max(1.0);
+            let shape = draw::round(x, mid - 14.0, pw, 28.0, 14.0_f64.min(pw / 2.0));
+            pill(s, Zone::Spaces, x, pw);
+            s.push_rounded_clip(&shape);
+            s.push_opacity(open);
+            self.draw_spaces(s, &imp.spaces.borrow(), x, mid, now, ink_main, pal.accent);
+            s.pop();
+            s.pop();
+            if open > 0.5 {
+                zones.push((Zone::Spaces, (x, 0.0, pw, band)));
+            }
+            x += pw + 6.0 * open;
+        }
         let focused = {
             let list = app.running.borrow();
             list.iter().find(|r| r.focused).or_else(|| list.iter().max_by_key(|r| r.stamp)).map(|r| r.app_id.clone())
         };
-        if let Some(id) = focused.filter(|i| !i.is_empty()) {
+        if let Some(id) = focused.filter(|i| !i.is_empty() && app.app_menus()) {
             if imp.icon.borrow().as_ref().is_none_or(|(k, _)| *k != id) {
                 *imp.icon.borrow_mut() = Some((id.clone(), draw::app_icon(&app.apps, &id, 18, scale)));
             }
@@ -385,6 +562,8 @@ mod imp {
         pub(super) icon: RefCell<Option<(String, Option<gdk::Paintable>)>>,
         pub(super) battery: Cell<Option<super::Battery>>,
         pub(super) battery_at: Cell<Option<i64>>,
+        pub(super) spaces: RefCell<super::Spaces>,
+        pub(super) pointer: Cell<f64>,
         #[allow(clippy::type_complexity)]
         pub(super) resize: RefCell<Option<Box<dyn Fn(i32)>>>,
     }

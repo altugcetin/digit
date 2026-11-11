@@ -891,14 +891,12 @@ fn notch(body: &gtk::Box, t: &toml::Table) {
 
 fn menu_bar(body: &gtk::Box, t: &toml::Table) {
     let bar = section(body, "Menu bar");
-    let enabled = toggle(&bar, "menu", "Menu bar", "Distro menu, the focused app's menus, status and date beside the notch", "menubar", prefs::get_bool(&t, "menubar", true));
-    let backdrop = choice(&bar, "blur_on", "Menu bar backdrop", "Adaptive stays clear over the wallpaper and turns to frosted glass when windows are open", "menubar_look", &[("adaptive", "Adaptive"), ("clear", "Clear"), ("glass", "Glass")], &prefs::get_str(&t, "menubar_look", "adaptive"));
-    let logo = choice(&bar, "deployed_code", "Menu bar logo", "The mark beside the app menus", "menubar_logo", &[("distro", "Distribution"), ("digit", "Digit")], &prefs::get_str(t, "menubar_logo", "distro"));
-    when_on(&enabled, &logo.row);
+    toggle(&bar, "menu", "App menus", "The focused app's name and menus at the top left. The logo, workspaces, status and date always show", "menubar", prefs::get_bool(&t, "menubar", true));
+    choice(&bar, "blur_on", "Menu bar backdrop", "Adaptive stays clear over the wallpaper and turns to frosted glass when windows are open", "menubar_look", &[("adaptive", "Adaptive"), ("clear", "Clear"), ("glass", "Glass")], &prefs::get_str(&t, "menubar_look", "adaptive"));
+    choice(&bar, "deployed_code", "Menu bar logo", "The mark at the top left", "menubar_logo", &[("distro", "Distribution"), ("digit", "Digit")], &prefs::get_str(t, "menubar_logo", "distro"));
+    choice(&bar, "workspaces", "Workspaces", "A pill beside the logo with the workspaces on this screen", "menubar_spaces", &[("switch", "While switching"), ("always", "Always")], &prefs::get_str(t, "menubar_spaces", "switch"));
     slider(&bar, "height", "Bar height", "Used by the full-width bar", "wide_height", (28.0, 56.0, 1.0), prefs::get_f64(&t, "wide_height", 34.0), 34.0, 0);
-    let tray = toggle(&bar, "widgets", "Menu bar app icons", "Shows the icons apps like Discord or Steam put in the system tray. Applies after digit restarts", "tray", prefs::get_bool(&t, "tray", true));
-    when_on(&enabled, &backdrop.row);
-    when_on(&enabled, &tray);
+    toggle(&bar, "widgets", "Menu bar app icons", "Shows the icons apps like Discord or Steam put in the system tray. Applies after digit restarts", "tray", prefs::get_bool(&t, "tray", true));
 }
 
 fn panels(body: &gtk::Box, t: &toml::Table) {
