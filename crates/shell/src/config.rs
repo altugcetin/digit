@@ -13,8 +13,7 @@ pub enum Dock {
 #[serde(default)]
 pub struct Config {
     pub dock: Dock,
-    /// The compositor gaps Settings writes; the island keeps the same distance from the screen
-    /// edge and from windows.
+    /// The compositor gaps Settings writes, read so the island keeps a minimum space above windows.
     pub hypr_gaps_in: f64,
     pub hypr_gaps_out: f64,
     pub bar_height: i32,
@@ -196,8 +195,9 @@ pub struct Prefs {
     pub corners: [kit::corners::Panel; 4],
     pub icon_theme: Option<String>,
     pub style: String,
-    /// Space between the island and the screen edge, and between the island and windows.
-    pub gap: f64,
+    /// Extra space the shell reserves under the floating island when the compositor's own gap is
+    /// smaller than the Tight preset's, so None and Tight leave windows the same distance below it.
+    pub under: f64,
     pub menubar: bool,
     pub menubar_look: String,
     pub wide_height: f64,
@@ -264,7 +264,7 @@ impl From<&Config> for Prefs {
             ].into_iter().collect()),
             icon_theme: c.icon_theme.clone(),
             style: c.notch_style.clone(),
-            gap: outer_gap(c.hypr_gaps_in, c.hypr_gaps_out, kit::wm::which() == kit::wm::Wm::Niri),
+            under: under_island(c.hypr_gaps_in, c.hypr_gaps_out, kit::wm::which() == kit::wm::Wm::Niri),
             menubar: c.menubar,
             menubar_look: c.menubar_look.clone(),
             wide_height: c.wide_height,
@@ -349,11 +349,14 @@ impl Config {
     }
 }
 
-/// The compositor's gap at the screen edge: Hyprland's outer gap, or niri's single gap (twice
-/// the inner gap, see kit::niriconf).
-pub fn outer_gap(gaps_in: f64, gaps_out: f64, niri: bool) -> f64 {
+/// The smallest space between the floating island and windows: the Tight gap preset's.
+pub const UNDER_ISLAND: f64 = 4.0;
+
+/// What the shell adds under the island on top of the compositor's edge gap (Hyprland's outer
+/// gap; niri's single gap, twice the inner one) so windows never come closer than `UNDER_ISLAND`.
+pub fn under_island(gaps_in: f64, gaps_out: f64, niri: bool) -> f64 {
     let gap = if niri { gaps_in * 2.0 } else { gaps_out };
-    if gap.is_finite() { gap.clamp(0.0, 32.0).round() } else { 8.0 }
+    if gap.is_finite() { (UNDER_ISLAND - gap.max(0.0)).max(0.0) } else { 0.0 }
 }
 
 pub fn dir() -> PathBuf {
@@ -414,13 +417,13 @@ mod persistence_tests {
     use super::*;
 
     #[test]
-    fn island_gap_follows_the_compositor_edge_gap() {
-        assert_eq!(outer_gap(4.0, 8.0, false), 8.0);
-        assert_eq!(outer_gap(4.0, 8.0, true), 8.0);
-        assert_eq!(outer_gap(2.0, 4.0, false), 4.0);
-        assert_eq!(outer_gap(3.0, 0.0, true), 6.0);
-        assert_eq!(outer_gap(0.0, 90.0, false), 32.0);
-        assert_eq!(outer_gap(0.0, f64::NAN, false), 8.0);
+    fn no_gaps_keep_the_tight_space_under_the_island() {
+        assert_eq!(under_island(0.0, 0.0, false), 4.0);
+        assert_eq!(under_island(2.0, 4.0, false), 0.0);
+        assert_eq!(under_island(4.0, 8.0, false), 0.0);
+        assert_eq!(under_island(0.0, 0.0, true), 4.0);
+        assert_eq!(under_island(2.0, 4.0, true), 0.0);
+        assert_eq!(under_island(0.0, f64::NAN, false), 0.0);
     }
 
     #[test]
