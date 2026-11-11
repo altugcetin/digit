@@ -327,20 +327,6 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
             Err(_) => "digit-snap is missing".into(),
         },
         "control" | "spaces" | "session" | "clipboard" | "settings" => Box::pin(handle(app, &["key".to_string(), verb.to_string()])).await,
-        "snap-zone" => match words.get(1..).unwrap_or_default() {
-            [off] if off == "off" => {
-                crate::snapzone::hide();
-                "ok".into()
-            }
-            [output, x, y, w, h] => match [x, y, w, h].map(|n| n.parse::<f64>()) {
-                [Ok(x), Ok(y), Ok(w), Ok(h)] => {
-                    crate::snapzone::show(app, output, [x, y, w, h]);
-                    "ok".into()
-                }
-                _ => "snap-zone: numbers expected".into(),
-            },
-            _ => "snap-zone <output> <x> <y> <width> <height> | off".into(),
-        },
         "renderer" => crate::gpu::describe().to_string(),
         "status" => {
             let (level, muted) = app.volume.get().unwrap_or((0.0, false));

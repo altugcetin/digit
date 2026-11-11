@@ -101,17 +101,13 @@ pub fn apply_named(app: &App, name: &str) -> bool {
 }
 
 /// Hyprland's tiling layouts, in the order the shortcuts step through them.
-const TILINGS: [(&str, &str); 4] = kit::hyprconf::LAYOUTS;
-
-/// The layout after `now`, skipping the ones left out in Settings > Windows.
-fn next_tiling(now: &str) -> (&'static str, &'static str) {
-    next_tiling_with_prefs(now, &kit::prefs::read())
-}
+const TILINGS: [(&str, &str); 3] = kit::hyprconf::LAYOUTS;
 
 fn next_tiling_with_prefs(now: &str, t: &toml::Table) -> (&'static str, &'static str) {
     let off: Vec<&str> = t.get("hypr_tiling_cycle_off").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
     let on: Vec<(&'static str, &'static str)> = TILINGS.iter().copied().filter(|l| !off.contains(&l.0)).collect();
     let on = if on.len() < 2 { TILINGS.to_vec() } else { on };
+    let now = kit::hyprconf::selected_layout(t, now);
     let start = TILINGS.iter().position(|l| l.0 == now).unwrap_or(0);
     (1..=TILINGS.len()).map(|k| TILINGS[(start + k) % TILINGS.len()]).find(|l| on.contains(l)).unwrap_or(on[0])
 }
@@ -121,7 +117,6 @@ fn flash(app: &Rc<App>, key: &str, text: String) {
     let icon = match key {
         "master" => "view_quilt",
         "scrolling" => "view_column",
-        "floating" => "select_window",
         _ => "auto_awesome_mosaic",
     };
     app.request(crate::app::Peek::Osd { icon, text, level: None });
@@ -130,19 +125,15 @@ fn flash(app: &Rc<App>, key: &str, text: String) {
 /// Hyprland: every workspace moves to the next tiling layout, saved like Settings > Windows
 /// > Tiling. A global change clears workspace overrides.
 fn hypr_next(app: &Rc<App>) {
-    let now = kit::prefs::text(&kit::prefs::read(), "hypr_tiling", "dwindle");
-    let (key, name) = next_tiling(&now);
+    let prefs = kit::prefs::read();
+    let (key, name) = next_tiling_with_prefs(kit::hyprconf::tiled_layout(&prefs), &prefs);
     let app = app.clone();
     glib::spawn_future_local(async move {
         let saved = gio::spawn_blocking(move || {
-            let mut values = vec![
+            let values = [
                 ("hypr_tiling", toml::Value::String(key.into())),
                 ("hypr_workspace_layouts", toml::Value::Table(toml::Table::new())),
-                ("hypr_workspace_tiled_layouts", toml::Value::Table(toml::Table::new())),
             ];
-            if now != "floating" {
-                values.push(("hypr_tiled_layout", toml::Value::String(kit::hyprconf::layout(&now).into())));
-            }
             kit::prefs::set_many(&values)?;
             kit::setup::apply()
         }).await;
@@ -169,17 +160,11 @@ pub fn workspace_next(app: &Rc<App>) {
             if id < 1 { return None; }
             let prefs = kit::prefs::read();
             let mut modes = prefs.get("hypr_workspace_layouts").and_then(toml::Value::as_table).cloned().unwrap_or_default();
-            let global = kit::prefs::text(&prefs, "hypr_tiling", "dwindle");
             let now = modes.get(&id.to_string()).and_then(toml::Value::as_str)
-                .unwrap_or_else(|| if global == "floating" { "floating" } else { ws.get("tiledLayout").and_then(Value::as_str).unwrap_or("dwindle") });
+                .or_else(|| ws.get("tiledLayout").and_then(Value::as_str)).unwrap_or(kit::hyprconf::tiled_layout(&prefs));
             let (key, name) = next_tiling_with_prefs(now, &prefs);
-            let mut underlying = prefs.get("hypr_workspace_tiled_layouts").and_then(toml::Value::as_table).cloned().unwrap_or_default();
-            if key == "floating" {
-                let tiled = ws.get("tiledLayout").and_then(Value::as_str).unwrap_or("dwindle");
-                underlying.insert(id.to_string(), toml::Value::String(kit::hyprconf::layout(tiled).into()));
-            }
             modes.insert(id.to_string(), toml::Value::String(key.into()));
-            kit::prefs::set_many(&[("hypr_workspace_layouts", toml::Value::Table(modes)), ("hypr_workspace_tiled_layouts", toml::Value::Table(underlying))]).ok()?;
+            kit::prefs::set("hypr_workspace_layouts", toml::Value::Table(modes)).ok()?;
             kit::setup::apply().ok()?;
             Some((key, name))
         })
@@ -489,12 +474,15 @@ mod mode_tests {
     use super::*;
 
     #[test]
-    fn hyprland_cycles_floating_and_respects_disabled_modes() {
+    fn hyprland_cycles_native_layouts_and_respects_disabled_modes() {
         let prefs = toml::Table::new();
-        assert_eq!(next_tiling_with_prefs("scrolling", &prefs).0, "floating");
-        assert_eq!(next_tiling_with_prefs("floating", &prefs).0, "dwindle");
-        let prefs = "hypr_tiling_cycle_off = ['floating']".parse().unwrap();
         assert_eq!(next_tiling_with_prefs("scrolling", &prefs).0, "dwindle");
+        assert_eq!(next_tiling_with_prefs("floating", &prefs).0, "master");
+        let prefs = "hypr_tiled_layout = 'master'".parse().unwrap();
+        assert_eq!(next_tiling_with_prefs("floating", &prefs).0, "scrolling");
+        let prefs = "hypr_tiling_cycle_off = ['master']".parse().unwrap();
+        assert_eq!(next_tiling_with_prefs("scrolling", &prefs).0, "dwindle");
+        assert_eq!(next_tiling_with_prefs("dwindle", &prefs).0, "scrolling");
         // The niri layout picker retains exactly its existing ten entries.
         assert_eq!(LAYOUTS.len(), 10);
         assert!(!names().contains(&"floating"));
