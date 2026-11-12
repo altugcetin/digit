@@ -512,6 +512,12 @@ fn arc(from: (f64, f64), to: (f64, f64), t: f64) -> (f64, f64) {
     (u * u * from.0 + 2.0 * u * t * ctrl.0 + t * t * to.0, u * u * from.1 + 2.0 * u * t * ctrl.1 + t * t * to.1)
 }
 
+/// How big a trashed item flies: its own size, but never so small it is lost on the way (list
+/// rows send 16-24 px icons).
+pub fn flight_size(size: f64) -> f64 {
+    size.clamp(48.0, 128.0)
+}
+
 /// Sends an icon from `at` (global logical coordinates) into the dock's Trash. False when the
 /// dock shows no Trash, so the caller knows nothing visible happened.
 pub fn fly(st: &Shared, at: (f64, f64), size: f64, icon: Option<gio::Icon>) -> bool {
@@ -571,7 +577,7 @@ pub fn fly(st: &Shared, at: (f64, f64), size: f64, icon: Option<gio::Icon>) -> b
     let mut f = fx.borrow_mut();
     // Several items leave together: let them follow each other in.
     let queued = f.flights.iter().filter(|q| now - q.start < 60_000).count() as i64;
-    let px = size.clamp(24.0, 128.0);
+    let px = flight_size(size);
     let paintable = paintable(&f.paint, icon.as_ref(), px);
     f.flights.push(Flight { from, size: px, icon: paintable, start: now + queued * 70_000, landed: false });
     true

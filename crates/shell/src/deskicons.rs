@@ -1916,7 +1916,9 @@ fn trash(d: &Rc<RefCell<Desktop>>, paths: Vec<PathBuf>) {
         if let Some(app) = app.upgrade() {
             for entry in gone.iter().take(3) {
                 let Some((_, at, icon, directory)) = flights.iter().find(|(p, _, _, _)| p == &entry.path) else { continue };
-                let icon = icon.as_deref().and_then(|i| gio::Icon::for_string(i).ok()).unwrap_or_else(|| {
+                // Folders fly as the accent folder the desktop draws for them.
+                let folder = directory.then(|| crate::dock::folder_icon(kit::folder::glyph(&gio::File::for_path(&entry.path)), ICON as f64)).flatten();
+                let icon = folder.or_else(|| icon.as_deref().and_then(|i| gio::Icon::for_string(i).ok())).unwrap_or_else(|| {
                     let content_type = if *directory { "inode/directory".into() } else { gio::content_type_guess(Some(&entry.path), None).0 };
                     gio::content_type_get_icon(&content_type)
                 });

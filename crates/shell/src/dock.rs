@@ -512,6 +512,12 @@ fn counts(app: &App) -> HashMap<String, usize> {
 
 /// Something just went to the trash from `at` (global logical coordinates, the item's centre)
 /// at `size` px: when the dock shows its Trash, the item flies into it. Returns whether it did.
+/// Digit's accent folder (as Files and the desktop draw it) as an icon for a trash flight.
+pub fn folder_icon(glyph: &str, size: f64) -> Option<gio::Icon> {
+    let px = (stack::flight_size(size) * 2.0).ceil() as i32;
+    kit::folder::texture(&kit::style::ink().accent, glyph, px).map(|t| t.upcast())
+}
+
 pub fn fly_to_trash(app: &Rc<App>, at: (f64, f64), size: f64, icon: Option<gio::Icon>) -> bool {
     let _ = app;
     current().is_some_and(|st| stack::fly(&st, at, size, icon))
