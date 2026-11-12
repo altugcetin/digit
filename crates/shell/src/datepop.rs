@@ -42,6 +42,12 @@ struct Pop {
     open: bool,
     scrim: Option<gtk::Window>,
     agenda: bool,
+    floating: bool,
+    /// Under a full-width bar the panel meets the bar flat instead of curving off it.
+    bar: bool,
+    /// Surface width: the card plus, when floating, the run to the screen's right edge, so the
+    /// card can slide in from the edge without being cut off.
+    reach: f64,
 }
 
 type Hook = Box<dyn FnOnce()>;
@@ -117,9 +123,9 @@ fn list_top() -> f64 {
     grid_top() + CELL * ROWS as f64 + 12.0
 }
 
-/// The panel hangs off the right screen edge under the bar; fillets above and below it meet the edge.
-fn surface(agenda: bool) -> (f64, f64) {
-    (W, height(agenda) + 2.0 * FILLET)
+/// Docked panels include the concave fillets; floating cards use only their rounded body.
+fn surface(agenda: bool, floating: bool) -> (f64, f64) {
+    (W, height(agenda) + if floating { 0.0 } else { 2.0 * FILLET })
 }
 
 fn height(agenda: bool) -> f64 {
@@ -138,7 +144,7 @@ impl Pop {
     }
 
     fn spot_at(&self, x: f64, y: f64) -> Option<Spot> {
-        let y = y - FILLET;
+        let y = y - if self.floating { 0.0 } else { FILLET };
         if (0.0..HEAD).contains(&y) {
             return if x >= W - PAD - 30.0 {
                 Some(Spot::Ahead)
@@ -194,22 +200,46 @@ impl Pop {
         let pal = self.app.palette_at(now);
         let cfg = &self.app.cfg;
         let h = height(self.agenda);
-        let (sw, sh) = surface(self.agenda);
+        let (sw, sh) = surface(self.agenda, self.floating);
         let hot = |spot: Spot| self.hover == Some(spot);
         s.save();
-        s.translate(&graphene::Point::new(((1.0 - slide) * sw).round() as f32, 0.0));
-        s.save();
-        // A notch hanging from the right edge: the top-edge shape turned a quarter.
-        s.translate(&graphene::Point::new(sw as f32, 0.0));
-        s.rotate(90.0);
+        // One motion for every layout: the panel slides in from the screen's right edge.
+        s.translate(&graphene::Point::new(((1.0 - slide) * self.reach).round() as f32, 0.0));
         let radius = RADIUS * self.app.round();
-        if let Some(p) = shape::docked_parts(sh / 2.0, 0.0, h, W, radius, FILLET) {
-            draw::slab(s, &p, pal.body.alpha(1.0));
+        if self.bar {
+            // Flat against the bar on top, a cove into the screen edge under the right side.
+            let (b, f, r) = ((FILLET + h) as f32, FILLET as f32, radius as f32);
+            let (z, round) = (graphene::Size::zero(), graphene::Size::new(r, r));
+            let body = gtk::gsk::RoundedRect::new(graphene::Rect::new(0.0, f, W as f32, h as f32), z, z, z, round);
+            let (w, c) = (W as f32, f.min(h as f32 / 2.0));
+            let cove = gtk::gsk::PathBuilder::new();
+            cove.move_to(w - c, b - 1.0);
+            cove.line_to(w, b - 1.0);
+            cove.line_to(w, b + c);
+            cove.svg_arc_to(c, c, 0.0, false, false, w - c, b);
+            cove.close();
+            draw::slab(s, &(body, Some(cove.to_path())), pal.body.alpha(1.0));
+        } else if self.floating {
+            let r = graphene::Size::new(radius as f32, radius as f32);
+            s.push_rounded_clip(&gtk::gsk::RoundedRect::new(graphene::Rect::new(0.0, 0.0, W as f32, h as f32), r, r, r, r));
+            s.append_color(&pal.body.alpha(1.0).rgba(), &graphene::Rect::new(0.0, 0.0, W as f32, h as f32));
+            s.pop();
+        } else {
+            s.save();
+            // A notch hanging from the right edge: the top-edge shape turned a quarter.
+            s.translate(&graphene::Point::new(sw as f32, 0.0));
+            s.rotate(90.0);
+            if let Some(p) = shape::docked_parts(sh / 2.0, 0.0, h, W, radius, FILLET) {
+                draw::slab(s, &p, pal.body.alpha(1.0));
+            }
+            s.restore();
         }
-        s.restore();
-        s.translate(&graphene::Point::new(0.0, FILLET as f32));
+        if !self.floating {
+            s.translate(&graphene::Point::new(0.0, FILLET as f32));
+        }
         let (z, r) = (graphene::Size::zero(), graphene::Size::new(radius as f32, radius as f32));
-        s.push_rounded_clip(&gtk::gsk::RoundedRect::new(graphene::Rect::new(0.0, 0.0, W as f32, h as f32), r, z, z, r));
+        let corners = if self.floating { (r, r, r, r) } else if self.bar { (z, z, z, r) } else { (r, z, z, r) };
+        s.push_rounded_clip(&gtk::gsk::RoundedRect::new(graphene::Rect::new(0.0, 0.0, W as f32, h as f32), corners.0, corners.1, corners.2, corners.3));
         s.push_opacity(fade);
         let mid = 28.0;
         let title = midnight(self.year, self.month, 1).and_then(|d| d.format("%B %Y").ok()).map(|t| t.to_string()).unwrap_or_default();
@@ -297,7 +327,7 @@ fn changed(p: &Rc<RefCell<Pop>>) {
 }
 
 /// Opens the calendar as a panel sliding in from the right edge, under the bar.
-pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, _right: f64, _y: f64) {
+pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, right: f64, y: f64) {
     crate::popmenu::close();
     close();
     let hook = crate::popmenu::take_then();
@@ -318,7 +348,9 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, _right: f64, _y: f64) 
     window.set_monitor(monitor.as_ref());
     window.add_css_class("digit");
     window.set_anchor(Edge::Top, true);
-    window.set_anchor(Edge::Right, true);
+    let floating = app.floating();
+    window.set_anchor(Edge::Right, !floating);
+    window.set_anchor(Edge::Left, floating);
     window.set_margin(Edge::Top, (app.reserve() - FILLET as i32).max(0));
     let paint = Paint::new(1, 1);
     let now_us = glib::monotonic_time();
@@ -326,7 +358,16 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, _right: f64, _y: f64) 
     slide.go(1.0, now_us, 420, motion::Curve::new(0.16, 1.0, 0.3, 1.0));
     let mut fade = Tween::still(0.0);
     fade.after(1.0, now_us, 60, 220, motion::STANDARD);
-    let (sw, sh) = surface(agenda);
+    let (mut sw, sh) = surface(agenda, floating);
+    if floating {
+        let screen = monitor.as_ref().map_or(f64::MAX, |m| m.geometry().width() as f64);
+        let left = (right - W).clamp(0.0, (screen - W).max(0.0)).round();
+        window.set_margin(Edge::Left, left as i32);
+        window.set_margin(Edge::Top, y.round() as i32);
+        if screen.is_finite() {
+            sw = (screen - left).max(W);
+        }
+    }
     let pop = Rc::new(RefCell::new(Pop {
         app: app.clone(),
         window: window.clone(),
@@ -340,6 +381,9 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, _right: f64, _y: f64) 
         open: true,
         scrim: None,
         agenda,
+        floating,
+        bar: !floating && app.wide(),
+        reach: sw,
     }));
     window.set_default_size(sw as i32, sh as i32);
     paint.set_size_request(sw as i32, sh as i32);
@@ -450,7 +494,11 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, _right: f64, _y: f64) 
     DONE.with(|d| *d.borrow_mut() = hook);
     window.present();
     if let Some(surface) = window.surface() {
-        let body = cairo::RectangleInt::new(0, FILLET as i32, W as i32, height(agenda) as i32);
+        let body = if floating {
+            cairo::RectangleInt::new(0, 0, W as i32, height(agenda) as i32)
+        } else {
+            cairo::RectangleInt::new(0, FILLET as i32, W as i32, height(agenda) as i32)
+        };
         surface.set_input_region(Some(&cairo::Region::create_rectangle(&body)));
     }
     animate(&pop);
