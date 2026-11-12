@@ -104,7 +104,7 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
             let Some((pid, x, y, size)) = trash_fly_args(words) else { return "no".into() };
             let at = gio::spawn_blocking(move || trash_fly_at(&kit::wm::windows(), pid, x, y)).await.ok().flatten();
             let Some(at) = at else { return "no".into() };
-            let icon = words.get(5..).filter(|w| !w.is_empty()).and_then(|w| gio::Icon::for_string(&w.join(" ")).ok());
+            let icon = words.get(5..).filter(|w| !w.is_empty()).and_then(|w| flight_icon(&w.join(" "), size));
             if crate::dock::fly_to_trash(app, at, size, icon) { "ok".into() } else { "no".into() }
         }
         "dock" => {
@@ -375,6 +375,15 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
         },
         "help" => HELP.into(),
         _ => HELP.into(),
+    }
+}
+
+/// The icon a trashed item flies as. Files sends `digit-folder:<glyph>` for folders so they fly as
+/// the accent folder it draws, not the icon theme's.
+fn flight_icon(name: &str, size: f64) -> Option<gio::Icon> {
+    match name.strip_prefix("digit-folder:") {
+        Some(glyph) => crate::dock::folder_icon(glyph, size),
+        None => gio::Icon::for_string(name).ok(),
     }
 }
 

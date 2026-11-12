@@ -473,9 +473,15 @@ impl Pane {
             let Some(visible) = image.compute_point(&scroll, &center) else { continue };
             if !image.is_mapped() || visible.x() < 0.0 || visible.y() < 0.0 || visible.x() >= scroll.width() as f32 || visible.y() >= scroll.height() as f32 { continue; }
             let Some(point) = image.compute_point(&window, &center) else { continue };
-            let icon = thumbs::icon(&image).or_else(|| image.gicon()).unwrap_or_else(|| icon_for(&info));
-            let Some(icon) = icon.to_string() else { continue };
-            out.push(TrashFlight { uri: file.uri().to_string(), x: point.x(), y: point.y(), size: image.pixel_size().max(1), icon: icon.to_string() });
+            // Folders show Digit's own folder art; tell the shell which one so it flies as drawn.
+            let icon = if info.file_type() == gio::FileType::Directory {
+                format!("digit-folder:{}", kit::folder::glyph(&file))
+            } else {
+                let icon = thumbs::icon(&image).or_else(|| image.gicon()).unwrap_or_else(|| icon_for(&info));
+                let Some(icon) = icon.to_string() else { continue };
+                icon.to_string()
+            };
+            out.push(TrashFlight { uri: file.uri().to_string(), x: point.x(), y: point.y(), size: image.pixel_size().max(1), icon });
             if out.len() == 3 { break; }
         }
         out
