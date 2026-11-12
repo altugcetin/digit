@@ -259,6 +259,22 @@ pub struct App {
     pub mic_muted: Cell<Option<bool>>,
 }
 
+thread_local! {
+    /// Whether the shell's surfaces are frosted glass right now (see `kit::effects::frosted`).
+    static GLASS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the shell's surfaces are frosted glass right now.
+pub fn glass() -> bool {
+    GLASS.with(Cell::get)
+}
+
+/// A panel's surface color: see-through when the surfaces are frosted glass, which the
+/// compositor blurs, and solid otherwise (a translucent notch must not make panels see-through).
+pub fn panel(body: Rgb) -> Rgb {
+    if GLASS.with(Cell::get) { body } else { body.alpha(1.0) }
+}
+
 impl App {
     pub fn new(cfg: Config, blur: Option<blur::Blur>) -> Rc<Self> {
         let frosted = blur.as_ref().is_some_and(|b| b.able()) && !kit::effects::reduced();
@@ -325,10 +341,16 @@ impl App {
     }
 
     fn surface(cfg: &Config, surface: &str, roles: Roles) -> Rgb {
-        if surface == "tinted" { Self::tinted(cfg, roles) } else { Rgb::new(0.0, 0.0, 0.0) }
+        // Frosted falls back to tinted wherever the compositor isn't blurring.
+        if matches!(surface, "tinted" | "frosted") { Self::tinted(cfg, roles) } else { Rgb::new(0.0, 0.0, 0.0) }
     }
 
     fn body_for(cfg: &Config, surface: &str, roles: Roles, frosted: bool, wide: bool) -> Rgb {
+        let glass = kit::effects::frosted(&kit::prefs::read(), kit::effects::reduced());
+        GLASS.with(|g| g.set(glass));
+        if glass {
+            return Self::tinted(cfg, roles).alpha(kit::effects::FROSTED_ALPHA);
+        }
         if wide {
             return Self::surface(cfg, surface, roles);
         }
@@ -622,7 +644,7 @@ impl App {
             }
         }
         let restyle = before.style != next.style || before.under != next.under || before.menubar != next.menubar || before.bar_spaces != next.bar_spaces || before.notch_spaces != next.notch_spaces || (next.wide(&self.cfg) && before.wide_height != next.wide_height);
-        if before.surface != next.surface || restyle || effects_changed {
+        if before.surface != next.surface || before.blur != next.blur || restyle || effects_changed {
             self.set_roles(self.roles.get());
         }
         // Roundness changes reshape the notch at once (restyle retargets its corner radius) and

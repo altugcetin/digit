@@ -100,6 +100,7 @@ struct State {
     app: Rc<App>,
     window: gtk::Window,
     paint: Paint,
+    frost: crate::blur::Frost,
     output: String,
     corner: Corner,
     margins: [i32; 4],
@@ -210,11 +211,13 @@ fn build(app: &Rc<App>) -> Shared {
     window.add_css_class("digit");
     window.set_default_size(SURFACE_W as i32, SURFACE_H as i32);
     let paint = Paint::new(SURFACE_W as i32, SURFACE_H as i32);
-    window.set_child(Some(&paint));
+    let (frosted, frost) = crate::blur::Frost::wrap(&paint);
+    window.set_child(Some(&frosted));
     let st = Rc::new(RefCell::new(State {
         app: app.clone(),
         window: window.clone(),
         paint: paint.clone(),
+        frost,
         output: String::new(),
         corner: panel_corner::selected(app, Panel::Workspaces),
         margins: [0; 4],
@@ -694,6 +697,7 @@ impl State {
         let fade = self.fade.value(now).clamp(0.0, 1.0);
         let rise = self.rise.value(now);
         if fade < 0.003 && rise < 0.003 {
+            self.frost.set(None, 0.0, self.surface_size());
             return;
         }
         let pal = self.app.palette_at(now);
@@ -701,8 +705,9 @@ impl State {
         let (w, _) = self.size();
         let rect = self.placement(now);
         let radius = RADIUS * self.app.round();
+        self.frost.set_corners((fade > 0.02).then_some((rect.x, rect.y, rect.w, rect.h)), panel_corner::radii(self.corner, radius), self.surface_size());
         s.save();
-        panel_corner::slab(s, self.corner, rect, radius, FILLET, pal.body.alpha(1.0));
+        panel_corner::slab(s, self.corner, rect, radius, FILLET, crate::app::panel(pal.body));
         s.push_rounded_clip(&panel_corner::clip(self.corner, rect, radius, FILLET));
         s.translate(&graphene::Point::new(rect.x as f32, rect.y as f32));
         s.push_opacity(fade);

@@ -32,7 +32,7 @@ pub(crate) fn save_many(values: &[(&str, toml::Value)]) -> bool {
     }
     // Compositor settings (and the accent, which colors niri's window border) go straight into
     // digit's part of the compositor config.
-    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "spaces_always" | "ui_accent" | "border_color" | "reduce_motion" | "reduced_effects" | "terminal" | "theme_qt" | "nvidia_env" | "cursor_theme" | "cursor_size")) {
+    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "spaces_always" | "surface" | "ui_accent" | "border_color" | "reduce_motion" | "reduced_effects" | "terminal" | "theme_qt" | "nvidia_env" | "cursor_theme" | "cursor_size")) {
         apply_compositor();
     }
     if values.iter().any(|(key, _)| matches!(*key, "button_maximize" | "button_close")) {
@@ -618,7 +618,16 @@ fn section(body: &gtk::Box, title: &str) -> gtk::Box {
 
 fn shell_look(body: &gtk::Box, t: &toml::Table) {
     let look = section(body, "Shell");
-    choice(&look, "dark_mode", "Shell surfaces", "Notch, dock, menus and panels", "surface", &[("black", "Pure black"), ("tinted", "Tinted by wallpaper")], &prefs::get_str(&t, "surface", "black"));
+    // Frosted glass needs the compositor's blur, so it is offered only while that is on.
+    let glass = kit::effects::frosted(&{ let mut g = t.clone(); g.insert("surface".into(), toml::Value::String("frosted".into())); g }, kit::effects::reduced());
+    let mut surfaces = vec![("black", "Pure black"), ("tinted", "Tinted by wallpaper")];
+    if glass {
+        surfaces.push(("frosted", "Frosted glass"));
+    }
+    let current = prefs::get_str(&t, "surface", "black");
+    let shown = if current == "frosted" && !glass { "tinted".to_string() } else { current };
+    let sub = if glass { "Notch, dock, menus and panels" } else { "Notch, dock, menus and panels. Turn on Blur behind windows for Frosted glass" };
+    choice(&look, "dark_mode", "Shell surfaces", sub, "surface", &surfaces, &shown);
     let (row, end) = ui::row(Some("palette"), "Color scheme", "Colors generated from your wallpaper");
     let current = kit::theme::load().map(|t| t.scheme).unwrap_or_else(|| prefs::get_str(&t, "scheme", "content"));
     let schemes: Vec<&str> = kit::theme::SCHEMES.to_vec();

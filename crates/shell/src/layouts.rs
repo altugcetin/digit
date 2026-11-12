@@ -52,6 +52,7 @@ struct State {
     app: Rc<App>,
     window: gtk::Window,
     paint: Paint,
+    frost: crate::blur::Frost,
     target: Option<u64>,
     selected: usize,
     glow: Vec<Tween>,
@@ -201,13 +202,15 @@ pub fn toggle(app: &Rc<App>) {
     let monitors: Vec<gdk::Monitor> = gdk::Display::default().map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect()).unwrap_or_default();
     window.set_monitor(monitors.iter().find(|m| output.as_deref().is_some_and(|o| m.connector().as_deref() == Some(o))).or(monitors.first()));
     let paint = Paint::new(W as i32, H as i32);
-    window.set_child(Some(&paint));
+    let (frosted, frost) = crate::blur::Frost::wrap(&paint);
+    window.set_child(Some(&frosted));
     let mut fade = Tween::still(0.0);
     fade.go(1.0, glib::monotonic_time(), 200, motion::STANDARD);
     let st = Rc::new(RefCell::new(State {
         app: app.clone(),
         window: window.clone(),
         paint: paint.clone(),
+        frost,
         target,
         selected: 0,
         glow: (0..LAYOUTS.len()).map(|i| Tween::still(if i == 0 { 1.0 } else { 0.0 })).collect(),
@@ -444,7 +447,8 @@ impl State {
         s.save();
         s.translate(&gtk::graphene::Point::new(0.0, -rise as f32));
         s.push_opacity(fade);
-        draw::fill(s, &draw::round(0.0, 0.0, W, H, 26.0), pal.body.alpha(1.0));
+        self.frost.set((fade > 0.02).then_some((0.0, -rise, W, H)), 26.0, (W, H));
+        draw::fill(s, &draw::round(0.0, 0.0, W, H, 26.0), crate::app::panel(pal.body));
         draw::text(s, &self.paint, cfg, "Window layout", 15.0, Face::Text(600), pal.ink_main, PAD + 2.0, PAD + 12.0, 240.0, pango::Alignment::Left);
         draw::text(s, &self.paint, cfg, &kit::keybinds::shown("layouts").unwrap_or_default(), 12.0, Face::Text(450), pal.ink_faint, W - PAD - 120.0, PAD + 12.0, 120.0, pango::Alignment::Right);
         for (i, l) in LAYOUTS.iter().enumerate() {

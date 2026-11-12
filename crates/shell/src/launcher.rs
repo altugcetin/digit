@@ -272,6 +272,8 @@ struct State {
     app: Rc<App>,
     window: gtk::Window,
     canvas: Canvas,
+    /// Frosted glass under the search bar, the results, each mode bubble and the clear bubble.
+    frost: crate::blur::Frost,
     field: gtk::Text,
     lift: crate::lift::Lift,
     rise: Tween,
@@ -481,8 +483,9 @@ impl Launcher {
         field.set_halign(gtk::Align::Start);
         field.set_margin_top((PAD + (BAR - 34.0) / 2.0) as i32);
         field.set_margin_start(FIELD_X as i32);
+        let (frosted, frost) = crate::blur::Frost::wrap_n(&canvas, 3 + MODES.len());
         let overlay = gtk::Overlay::new();
-        overlay.set_child(Some(&canvas));
+        overlay.set_child(Some(&frosted));
         overlay.add_overlay(&field);
         let caret_paint = crate::paint::Paint::new(SURFACE_W as i32, 26);
         caret_paint.set_valign(gtk::Align::Start);
@@ -499,6 +502,7 @@ impl Launcher {
             app: app.clone(),
             window,
             canvas: canvas.clone(),
+            frost,
             field,
             lift,
             rise: Tween::still(0.0),
@@ -1679,7 +1683,12 @@ impl State {
 
     fn draw(&mut self, s: &gtk::Snapshot, now: i64) {
         let fade = self.fade.value(now).clamp(0.0, 1.0);
+        let bounds = (SURFACE_W, SURFACE_H);
+        let on = fade > 0.02;
         if fade < 0.003 {
+            for i in 0..3 + MODES.len() {
+                self.frost.set_nth(i, None, [0.0; 4], bounds);
+            }
             return;
         }
         let pal = self.app.palette_at(now);
@@ -1688,18 +1697,25 @@ impl State {
         s.push_opacity(fade);
         let bar_w = self.bar.value(now);
         let mid = PAD + BAR / 2.0;
+        self.frost.set_nth(0, on.then_some((PAD, PAD, bar_w, BAR)), [BAR / 2.0; 4], bounds);
         slab(s, &rounded(PAD, PAD, bar_w, BAR, BAR / 2.0), pal.body);
         match MODES.iter().find(|m| m.0 == self.shown) {
             Some(m) => draw::icon(s, &canvas, &cfg, m.1, 24.0, true, pal.accent, PAD + 30.0, mid),
             None => draw::icon(s, &canvas, &cfg, "search", 24.0, false, pal.ink_meta, PAD + 30.0, mid),
         }
         let shown = self.bubbles.value(now).clamp(0.0, 1.0);
+        if shown <= 0.01 {
+            for i in 0..MODES.len() {
+                self.frost.set_nth(3 + i, None, [0.0; 4], bounds);
+            }
+        }
         if shown > 0.01 {
             s.push_opacity(shown);
             let rise = if self.open { self.rise.value(now) } else { 1.0 };
             for (i, (mode, icon, _, _)) in MODES.iter().enumerate() {
                 let enter = ((rise - 0.1 * i as f64) / 0.6).clamp(0.0, 1.0);
                 if enter < 0.01 {
+                    self.frost.set_nth(3 + i, None, [0.0; 4], bounds);
                     continue;
                 }
                 s.push_opacity(enter);
@@ -1709,6 +1725,7 @@ impl State {
                 let glow = self.glow[i].value(now).clamp(0.0, 1.0);
                 let grow = if motion::reduced() { 0.0 } else { 1.5 * glow };
                 let fill = if on { pal.accent } else { pal.ink_main.mix(pal.body, 0.09 * glow) };
+                self.frost.set_nth(3 + i, (enter > 0.5 && shown > 0.5).then_some((x - grow, PAD - grow, BUBBLE + 2.0 * grow, BUBBLE + 2.0 * grow)), [BUBBLE / 2.0 + grow; 4], bounds);
                 // The shadow keeps the resting size: a blurred shadow whose size changes every frame
                 // gets re-rendered by the GL renderer and flickers, so only the face grows on hover.
                 shadow(s, &rounded(x, PAD, BUBBLE, BUBBLE, BUBBLE / 2.0));
@@ -1720,7 +1737,11 @@ impl State {
             s.pop();
         }
         let height = self.panel.value(now);
-        if height > 1.0 && !self.lines.is_empty() {
+        let results = height > 1.0 && !self.lines.is_empty();
+        self.frost.set_nth(1, (on && results).then_some((PAD, PANEL_TOP, WIDTH, height)), [PANEL_R; 4], bounds);
+        let (cx, cy) = Launcher::clear_center(height);
+        self.frost.set_nth(2, (on && results && self.clear_on).then_some((cx - BUBBLE / 2.0, cy - BUBBLE / 2.0, BUBBLE, BUBBLE)), [BUBBLE / 2.0; 4], bounds);
+        if results {
             let panel = rounded(PAD, PANEL_TOP, WIDTH, height, PANEL_R);
             slab(s, &panel, pal.body);
             s.push_rounded_clip(&panel);

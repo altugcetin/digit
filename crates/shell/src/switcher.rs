@@ -28,6 +28,7 @@ struct State {
     app: Rc<App>,
     window: gtk::Window,
     paint: Paint,
+    frost: crate::blur::Frost,
     open: bool,
     items: Vec<Item>,
     selected: usize,
@@ -63,11 +64,13 @@ fn build(app: &Rc<App>) -> Shared {
     window.add_css_class("digit");
     window.set_default_size(W as i32, H as i32);
     let paint = Paint::new(W as i32, H as i32);
-    window.set_child(Some(&paint));
+    let (frosted, frost) = crate::blur::Frost::wrap(&paint);
+    window.set_child(Some(&frosted));
     let st = Rc::new(RefCell::new(State {
         app: app.clone(),
         window: window.clone(),
         paint: paint.clone(),
+        frost,
         open: false,
         items: Vec::new(),
         selected: 0,
@@ -353,11 +356,13 @@ impl State {
         let now = self.paint.frame_clock().map(|c| c.frame_time()).unwrap_or_else(glib::monotonic_time);
         let fade = self.fade.value(now).clamp(0.0, 1.0);
         if fade < 0.003 || self.items.is_empty() {
+            self.frost.set(None, 0.0, (W, H));
             return;
         }
         let pal = self.app.palette_at(now);
         let cfg = &self.app.cfg;
         let (px, py, pw, ph) = self.panel();
+        self.frost.set((fade > 0.02).then_some((px, py, pw, ph)), 28.0, (W, H));
         let shape = draw::round(px, py, pw, ph, 28.0);
         s.push_opacity(fade);
         draw::fill(s, &shape, pal.body);
