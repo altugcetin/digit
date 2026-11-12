@@ -19,11 +19,9 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 mod detail;
 
 const W: f64 = 380.0;
-const FILLET: f64 = 12.0;
-const RADIUS: f64 = 26.0;
-const PAD: f64 = 16.0;
+use crate::metrics::{FILLET, PANEL_PAD as PAD, PANEL_RADIUS as RADIUS};
 const TILE_H: f64 = 64.0;
-const TILE_GAP: f64 = 10.0;
+const TILE_GAP: f64 = crate::metrics::GAP;
 const SOUND: f64 = 44.0;
 const HEAD: f64 = 34.0;
 const ROW: f64 = 64.0;
@@ -1129,20 +1127,20 @@ mod tests {
 
     #[test]
     fn default_corner_keeps_heads_unscaled_size_and_height_limit() {
-        assert_eq!(W + FILLET, 392.0);
-        for (screen_h, expected_max, expected_surface_h) in [(1080.0, 820.0, 832.0), (894.0, 820.0, 832.0), (720.0, 646.0, 658.0), (600.0, 526.0, 538.0)] {
+        assert_eq!(W + FILLET, 394.0);
+        for (screen_h, expected_max, expected_surface_h) in [(1080.0, 820.0, 834.0), (894.0, 816.0, 830.0), (720.0, 642.0, 656.0), (600.0, 522.0, 536.0)] {
             let max_h = max_height(screen_h);
             assert_eq!(max_h, expected_max);
             let surface = (W + FILLET, max_h + FILLET);
-            assert_eq!(surface, (392.0, expected_surface_h));
+            assert_eq!(surface, (394.0, expected_surface_h));
             assert_eq!(panel_corner::margins(Corner::BottomRight), [0; 4]);
             // HEAD drew at right = W + FILLET, bottom = max_h + FILLET.
             assert_eq!(panel_corner::placement(Corner::BottomRight, surface, (W, max_h), 1.0, FILLET),
-                panel_corner::Rect { x: 12.0, y: 12.0, w: 380.0, h: expected_max });
+                panel_corner::Rect { x: FILLET, y: FILLET, w: 380.0, h: expected_max });
             for corner in Corner::ALL {
                 let rect = panel_corner::placement(corner, surface, (W, max_h), 1.0, FILLET);
-                assert_eq!(rect.x, if corner.is_left() { 0.0 } else { 12.0 });
-                assert_eq!(rect.y, if corner.is_top() { 0.0 } else { 12.0 });
+                assert_eq!(rect.x, if corner.is_left() { 0.0 } else { FILLET });
+                assert_eq!(rect.y, if corner.is_top() { 0.0 } else { FILLET });
             }
         }
     }

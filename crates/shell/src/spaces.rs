@@ -13,13 +13,10 @@ use std::time::Duration;
 
 const CARD_W: f64 = 196.0;
 const CARD_H: f64 = 124.0;
-const GAP: f64 = 12.0;
-const PAD: f64 = 18.0;
+use crate::metrics::{FILLET, GRID_GAP as GAP, PANEL_PAD as PAD, PANEL_RADIUS as RADIUS};
 const TOP: f64 = 50.0;
 const PER_ROW: usize = 4;
 const ROWS: usize = 3;
-const FILLET: f64 = 14.0;
-const RADIUS: f64 = 28.0;
 const ICON: f64 = 30.0;
 const SURFACE_W: f64 = PER_ROW as f64 * CARD_W + (PER_ROW - 1) as f64 * GAP + 2.0 * PAD + FILLET;
 const CHIP_H: f64 = 32.0;

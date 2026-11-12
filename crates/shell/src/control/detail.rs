@@ -11,7 +11,7 @@ use std::time::Duration;
 const OPEN: Curve = Curve::new(0.16, 1.0, 0.3, 1.0);
 const SHUT: Curve = Curve::new(0.4, 0.0, 0.9, 0.6);
 const TOP: f64 = 10.0;
-const INSET: f64 = 8.0;
+use crate::metrics::INSET;
 const ROW: f64 = 48.0;
 const SUB: f64 = 28.0;
 const NOTE: f64 = 40.0;

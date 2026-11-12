@@ -42,6 +42,7 @@ mod lift;
 mod lock;
 mod media;
 mod menus;
+mod metrics;
 mod night;
 mod notch;
 mod notify;

@@ -5,12 +5,11 @@ use crate::paint::Paint;
 use gtk::{cairo, gdk, glib, graphene, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use kit::motion::{self, Tween};
-use kit::shape;
 use std::cell::RefCell;
 use std::rc::Rc;
 
 const W: f64 = 360.0;
-const PAD: f64 = 20.0;
+use crate::metrics::{FILLET, PANEL_PAD as PAD, PANEL_RADIUS as RADIUS};
 const HEAD: f64 = 52.0;
 const NAMES: f64 = 26.0;
 const CELL: f64 = 44.0;
@@ -18,8 +17,6 @@ const CELL_W: f64 = (W - 2.0 * PAD) / 7.0;
 const ROWS: usize = 6;
 const LINE: f64 = 26.0;
 const LINES: usize = 3;
-const FILLET: f64 = 14.0;
-const RADIUS: f64 = 28.0;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Spot {
@@ -43,11 +40,11 @@ struct Pop {
     scrim: Option<gtk::Window>,
     agenda: bool,
     floating: bool,
-    /// Under a full-width bar the panel meets the bar flat instead of curving off it.
-    bar: bool,
     /// Surface width: the card plus, when floating, the run to the screen's right edge, so the
     /// card can slide in from the edge without being cut off.
     reach: f64,
+    /// Under the full-width top bar the panel meets the bar flat instead of curving off the edge.
+    bar: bool,
 }
 
 type Hook = Box<dyn FnOnce()>;
@@ -200,14 +197,13 @@ impl Pop {
         let pal = self.app.palette_at(now);
         let cfg = &self.app.cfg;
         let h = height(self.agenda);
-        let (sw, sh) = surface(self.agenda, self.floating);
         let hot = |spot: Spot| self.hover == Some(spot);
         s.save();
         // One motion for every layout: the panel slides in from the screen's right edge.
         s.translate(&graphene::Point::new(((1.0 - slide) * self.reach).round() as f32, 0.0));
         let radius = RADIUS * self.app.round();
         if self.bar {
-            // Flat against the bar on top, a cove into the screen edge under the right side.
+            // Flat against the top bar, a cove into the screen edge under the right side.
             let (b, f, r) = ((FILLET + h) as f32, FILLET as f32, radius as f32);
             let (z, round) = (graphene::Size::zero(), graphene::Size::new(r, r));
             let body = gtk::gsk::RoundedRect::new(graphene::Rect::new(0.0, f, W as f32, h as f32), z, z, z, round);
@@ -227,9 +223,10 @@ impl Pop {
         } else {
             s.save();
             // A notch hanging from the right edge: the top-edge shape turned a quarter.
+            let (sw, sh) = surface(self.agenda, false);
             s.translate(&graphene::Point::new(sw as f32, 0.0));
             s.rotate(90.0);
-            if let Some(p) = shape::docked_parts(sh / 2.0, 0.0, h, W, radius, FILLET) {
+            if let Some(p) = kit::shape::docked_parts(sh / 2.0, 0.0, h, W, radius, FILLET) {
                 draw::slab(s, &p, pal.body.alpha(1.0));
             }
             s.restore();
@@ -382,8 +379,8 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, right: f64, y: f64) {
         scrim: None,
         agenda,
         floating,
-        bar: !floating && app.wide(),
         reach: sw,
+        bar: !floating && app.wide(),
     }));
     window.set_default_size(sw as i32, sh as i32);
     paint.set_size_request(sw as i32, sh as i32);
