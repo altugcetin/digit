@@ -269,6 +269,42 @@ impl Notch {
         true
     }
 
+    /// Scrolling over the notch's own workspace dots steps through them.
+    pub(super) fn scroll_spaces_at_pointer(&self, dy: f64) -> bool {
+        let over = {
+            let v = self.0.borrow();
+            v.pointer.is_some_and(|(x, y)| v.space_at(x, y).is_some())
+        };
+        if over {
+            self.scroll_spaces(dy);
+        }
+        over
+    }
+
+    /// Down or right goes to the next workspace in use on this output, up or left to the previous
+    /// one; it stops at either end. Touchpads add up small deltas into one step.
+    pub(super) fn scroll_spaces(&self, dy: f64) {
+        let v = self.0.borrow();
+        let travel = v.space_scroll.get() + dy;
+        if travel.abs() < 1.0 {
+            v.space_scroll.set(travel);
+            return;
+        }
+        v.space_scroll.set(0.0);
+        let (list, active) = v.spaces();
+        let now = App::now();
+        // Steps can come faster than the compositor reports the switch: go on from the last aim.
+        let from = v.space_aim.get().filter(|&(_, at)| now - at < 800_000)
+            .and_then(|(id, _)| list.iter().position(|s| s.id == id))
+            .unwrap_or(active);
+        let Some(to) = step_space(from, list.len(), travel) else { return };
+        let id = list[to].id;
+        v.space_aim.set(Some((id, now)));
+        glib::spawn_future_local(async move {
+            let _ = gtk::gio::spawn_blocking(move || crate::compositor::focus_space(id)).await;
+        });
+    }
+
     pub(super) fn begin_drag(&self, x: f64, y: f64) -> bool {
         let level = {
             let mut v = self.0.borrow_mut();
@@ -580,5 +616,24 @@ impl Notch {
                 glib::ControlFlow::Break
             }
         });
+    }
+}
+
+/// The workspace `travel` scrolls to from position `from` of `n`, or None at either end.
+fn step_space(from: usize, n: usize, travel: f64) -> Option<usize> {
+    let to = if travel > 0.0 { from + 1 } else { from.checked_sub(1)? };
+    (to < n).then_some(to)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::step_space;
+
+    #[test]
+    fn scrolling_steps_one_workspace_and_stops_at_the_ends() {
+        assert_eq!(step_space(1, 4, 1.0), Some(2));
+        assert_eq!(step_space(1, 4, -1.0), Some(0));
+        assert_eq!(step_space(3, 4, 1.0), None);
+        assert_eq!(step_space(0, 4, -1.0), None);
     }
 }

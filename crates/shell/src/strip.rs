@@ -186,6 +186,11 @@ impl Strip {
         }
     }
 
+    /// The zone under the pointer, as last set by `hover`.
+    pub fn hot(&self) -> Option<Zone> {
+        self.imp().hot.get()
+    }
+
     pub fn held(&self) -> Option<Zone> {
         self.imp().held.get()
     }
