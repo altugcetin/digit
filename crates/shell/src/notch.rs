@@ -230,6 +230,10 @@ struct View {
     glow: [Tween; 12],
     /// The open notch shows the player instead of the call it would normally show; cleared when the call ends.
     media_over_call: std::cell::Cell<bool>,
+    /// Scrolling over the workspace dots: wheel travel not yet turned into a step, and the
+    /// workspace the last step went to (with when), since the compositor reports it later.
+    space_scroll: Cell<f64>,
+    space_aim: Cell<Option<(u64, i64)>>,
     /// Fades the media spot back in after flipping between the call and the player.
     flip: Tween,
     tuning: bool,
@@ -338,6 +342,8 @@ impl Notch {
             hot: None,
             glow: [Tween::still(0.0); 12],
             media_over_call: std::cell::Cell::new(false),
+            space_scroll: Cell::new(0.0),
+            space_aim: Cell::new(None),
             flip: Tween::still(1.0),
             tuning: false,
             tune: Tween::still(0.0),
@@ -406,7 +412,10 @@ impl Notch {
         let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
         let weak = Rc::downgrade(&self.0);
         scroll.connect_scroll(move |_, _, dy| {
-            if weak.upgrade().is_some_and(|v| Notch(v).wheel(dy)) {
+            if weak.upgrade().is_some_and(|v| {
+                let notch = Notch(v);
+                notch.wheel(dy) || notch.scroll_spaces_at_pointer(dy)
+            }) {
                 glib::Propagation::Stop
             } else {
                 glib::Propagation::Proceed
@@ -683,6 +692,19 @@ impl Notch {
                 }
             });
             st.add_controller(click);
+            // Scrolling over the workspace pill steps to the previous or next workspace.
+            let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+            let weak = Rc::downgrade(&self.0);
+            let target = st.downgrade();
+            scroll.connect_scroll(move |_, _, dy| {
+                let over = target.upgrade().is_some_and(|t| t.hot() == Some(Zone::Spaces));
+                if over && let Some(v) = weak.upgrade() {
+                    Notch(v).scroll_spaces(dy);
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            });
+            st.add_controller(scroll);
         }
         let weak = Rc::downgrade(&self.0);
         self.0.borrow().window.connect_realize(move |_| {
