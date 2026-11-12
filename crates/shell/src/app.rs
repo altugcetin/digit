@@ -17,7 +17,6 @@ pub enum Peek {
     Note { text: String },
     Mode { icon: &'static str, label: &'static str, on: bool },
     Osd { icon: &'static str, text: String, level: Option<f64> },
-    Spaces { idx: u64 },
     Privacy { light: crate::privacy::Light, who: String },
 }
 
@@ -34,7 +33,7 @@ impl Peek {
     }
 
     fn stale(&self) -> bool {
-        matches!(self, Peek::Volume { .. } | Peek::Mode { .. } | Peek::Osd { .. } | Peek::Spaces { .. })
+        matches!(self, Peek::Volume { .. } | Peek::Mode { .. } | Peek::Osd { .. })
     }
 
     fn waits(&self) -> bool {
@@ -50,7 +49,6 @@ impl Peek {
             Peek::Note { .. } => 65,
             Peek::Mode { .. } => 70,
             Peek::Osd { .. } => 76,
-            Peek::Spaces { .. } => 58,
             Peek::Privacy { .. } => 74,
             Peek::Battery { .. } => 90,
             Peek::Device { .. } => 72,
@@ -68,7 +66,6 @@ impl Peek {
             Peek::Note { .. } => 4000,
             Peek::Mode { .. } => 1600,
             Peek::Osd { .. } => 1400,
-            Peek::Spaces { .. } => 1100,
             Peek::Privacy { .. } => 2600,
             Peek::Battery { .. } => 4200,
             Peek::Device { .. } => 2600,
@@ -85,7 +82,6 @@ impl Peek {
             Peek::Mode { .. } => 96.0,
             Peek::Osd { level: Some(_), .. } => 108.0,
             Peek::Osd { .. } => 120.0,
-            Peek::Spaces { .. } => 112.0,
             Peek::Privacy { .. } => 150.0,
             Peek::Battery { device: Some(_), .. } => 150.0,
             Peek::Battery { .. } => 132.0,
@@ -625,7 +621,7 @@ impl App {
                 launcher.refresh_caret();
             }
         }
-        let restyle = before.style != next.style || before.under != next.under || before.menubar != next.menubar || before.bar_spaces != next.bar_spaces || (next.wide(&self.cfg) && before.wide_height != next.wide_height);
+        let restyle = before.style != next.style || before.under != next.under || before.menubar != next.menubar || before.bar_spaces != next.bar_spaces || before.notch_spaces != next.notch_spaces || (next.wide(&self.cfg) && before.wide_height != next.wide_height);
         if before.surface != next.surface || restyle || effects_changed {
             self.set_roles(self.roles.get());
         }
@@ -738,15 +734,7 @@ impl App {
         if *self.spaces.borrow() == spaces {
             return;
         }
-        let was = self.spaces.borrow().iter().find(|s| s.focused).map(|s| s.id);
-        let now = spaces.iter().find(|s| s.focused).map(|s| (s.id, s.idx));
         *self.spaces.borrow_mut() = spaces;
-        if let (Some(before), Some((id, idx))) = (was, now) {
-            // With a menu bar the workspace row opens beside the logo instead.
-            if before != id && self.call.borrow().is_some() && !(self.wide() || self.menubar()) {
-                self.request(Peek::Spaces { idx });
-            }
-        }
         self.changed();
         crate::dock::settle_all();
         crate::spaces::changed(self);

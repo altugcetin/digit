@@ -232,6 +232,8 @@ pub struct Prefs {
     pub menubar: bool,
     pub menubar_look: String,
     pub bar_spaces: bool,
+    /// The workspace pill shows in the notch, in place of the clock, while switching.
+    pub notch_spaces: bool,
     pub wide_height: f64,
     pub call: String,
     pub call_apps: Vec<String>,
@@ -301,6 +303,7 @@ impl From<&Config> for Prefs {
             menubar: c.menubar,
             menubar_look: c.menubar_look.clone(),
             bar_spaces: c.menubar_spaces == "always",
+            notch_spaces: c.menubar_spaces == "notch",
             wide_height: c.wide_height,
             call: c.notch_call.clone(),
             call_apps: c.call_apps.clone(),

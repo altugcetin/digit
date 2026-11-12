@@ -9,8 +9,39 @@ impl View {
         if hush < 0.01 {
             return;
         }
-        let color = pal.ink_main.mix(pal.ink_meta, 1.0 - self.back.value(now).clamp(0.0, 1.0)).alpha(hush);
         let mid = self.header() / 2.0;
+        // While switching workspaces the pill takes the clock's place. The two overlap rather
+        // than swap: the clock sinks back and fades out while the pill grows from the middle and
+        // fades in, so neither cuts in or out.
+        let open = self.pill.openness(now);
+        let ease = |x: f64| { let x = x.clamp(0.0, 1.0); x * x * (3.0 - 2.0 * x) };
+        if open > 0.002 && self.pill.width() > 0.0 {
+            let full = self.pill.width();
+            let pw = (full * (0.35 + 0.65 * ease(open))).max(1.0);
+            let x = CX - pw / 2.0;
+            let lift = (4.0 * (1.0 - ease(open))).round();
+            s.save();
+            s.translate(&graphene::Point::new(0.0, lift as f32));
+            s.push_rounded_clip(&gsk::RoundedRect::from_rect(graphene::Rect::new(x as f32, (mid - 14.0) as f32, pw as f32, 28.0), 14.0_f64.min(pw / 2.0) as f32));
+            s.push_opacity(ease((open - 0.2) / 0.8) * hush);
+            // Drawn at full width and centred, so the dots stay put while the clip opens.
+            self.pill.draw(s, (CX - full / 2.0).round(), mid, now, pal.ink_main, pal.accent);
+            s.pop();
+            s.pop();
+            s.restore();
+        }
+        let hush = hush * (1.0 - ease(open / 0.7));
+        if hush < 0.01 {
+            return;
+        }
+        // The clock shrinks a little and drops back as it gives way.
+        let give = ease(open / 0.7);
+        let k = 1.0 - 0.12 * give;
+        s.save();
+        s.translate(&graphene::Point::new(CX as f32, (mid - 3.0 * give) as f32));
+        s.scale(k as f32, k as f32);
+        s.translate(&graphene::Point::new(-CX as f32, -mid as f32));
+        let color = pal.ink_main.mix(pal.ink_meta, 1.0 - self.back.value(now).clamp(0.0, 1.0)).alpha(hush);
         let face = Face::Number(500);
         let cells: Vec<(pango::Layout, f64)> = self
             .shown
@@ -52,6 +83,7 @@ impl View {
             }
             x += w;
         }
+        s.restore();
     }
 
     pub(super) fn wings(&self, head: &Head, now: i64) -> (f64, f64, f64, f64) {
@@ -172,12 +204,9 @@ impl View {
         let end = pango::Alignment::Right;
         match &self.head {
             Head::Idle(media) => {
-                self.draw_spaces(s, now, mid);
-                if *media && self.bar_spaces() {
+                if *media {
                     let (rect, r) = self.cover(l0, mid);
                     self.draw_art(s, &rect, r, 1.0);
-                } else if *media {
-                    self.draw_art(s, &Rect { x: r1 - crate::bars::W as f64 - 28.0, y: mid - 10.0, w: 20.0, h: 20.0 }, 5.0, 1.0);
                 }
             }
             Head::Call => {
@@ -251,12 +280,6 @@ impl View {
                     s.append_color(&fill.rgba(), &r.graphene());
                     s.pop();
                     self.text(s, &label, 14.0, POINT, Rgb::new(1.0, 1.0, 1.0), r.x, r.y + r.h / 2.0, r.w, pango::Alignment::Center);
-                }
-            }
-            Head::Peek(Peek::Spaces { idx }) => {
-                self.draw_spaces(s, now, mid);
-                if self.app.call.borrow().is_none() {
-                    self.text(s, &format!("Desktop {idx}"), 14.0, POINT, pal.ink_main, r0 - 40.0, mid, right + 40.0, end);
                 }
             }
             Head::Peek(Peek::Osd { icon, text, level }) => {
