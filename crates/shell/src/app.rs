@@ -96,8 +96,8 @@ impl Peek {
 
     pub fn height(&self) -> f64 {
         match self {
-            Peek::Notification { body, actions, .. } if body.is_empty() => 60.0 + if actions.is_empty() { 0.0 } else { 46.0 },
-            Peek::Notification { actions, .. } => 78.0 + if actions.is_empty() { 0.0 } else { 46.0 },
+            Peek::Notification { body, actions, .. } if body.is_empty() => 60.0 + if actions.is_empty() { 0.0 } else { 60.0 },
+            Peek::Notification { actions, .. } => 78.0 + if actions.is_empty() { 0.0 } else { 60.0 },
             _ => 0.0,
         }
     }

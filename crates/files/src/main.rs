@@ -1253,7 +1253,7 @@ menubutton.ctl-menu > button {{ background: transparent; border: none; box-shado
 menubutton.ctl-menu > button:hover {{ background: alpha({main}, 0.10); color: {main}; }}
 .side {{ background: @d_base; padding: 6px 8px; }}
 list.places {{ background: transparent; }}
-list.places row {{ border-radius: 12px; padding: 7px 10px; margin: 1px 0; color: {meta}; background: transparent; }}
+list.places row {{ border-radius: 12px; padding: 7px 10px; margin: 1px 8px; color: {meta}; background: transparent; }}
 list.places row:hover {{ background: alpha({main}, 0.06); }}
 list.places row.head, list.places row.head:hover {{ background: transparent; }}
 .topbar .controls {{ margin: 0; }}

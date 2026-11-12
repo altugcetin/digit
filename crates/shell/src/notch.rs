@@ -19,11 +19,12 @@ const ROOM: f64 = 420.0;
 const CENTRE: f64 = 116.0;
 const CX: f64 = WIDTH / 2.0;
 const SHEET_W: f64 = 780.0;
-const OPEN_DEPTH: f64 = 156.0;
+const OPEN_DEPTH: f64 = 153.0;
 /// Extra room above an open Dynamic Island's content, so its top edge matches the sides.
 const ISLAND_PAD: f64 = 9.0;
-const LEFT: f64 = CX - SHEET_W / 2.0 + 22.0;
-const RIGHT: f64 = CX + SHEET_W / 2.0 - 22.0;
+const SIDE_PAD: f64 = 22.0;
+const LEFT: f64 = CX - SHEET_W / 2.0 + SIDE_PAD;
+const RIGHT: f64 = CX + SHEET_W / 2.0 - SIDE_PAD;
 const MEDIA_W: f64 = 318.0;
 const CAL_X: f64 = LEFT + MEDIA_W + 28.0;
 const CAL_W: f64 = 262.0;
@@ -561,9 +562,11 @@ impl Notch {
                     }
                     return;
                 }
-                let (app, below, monitor) = {
+                let (app, below, monitor, origin) = {
                     let v = v.borrow();
-                    (v.app.clone(), v.band(App::now()) + 5.0, Some(v.monitor.clone()))
+                    // The notch window is centred on its monitor: where its x = 0 lands.
+                    let origin = (v.monitor.geometry().width() as f64 - v.window.width() as f64) / 2.0;
+                    (v.app.clone(), v.band(App::now()) + 5.0, Some(v.monitor.clone()), origin)
                 };
                 let Some(left) = target.zone_x(zone) else { return };
                 target.hold(Some(zone));
@@ -589,7 +592,7 @@ impl Notch {
                         false
                     }
                     Zone::Date => {
-                        crate::datepop::show(&app, monitor, target.zone_end(zone).unwrap_or(left), below);
+                        crate::datepop::show(&app, monitor, origin + target.zone_end(zone).unwrap_or(left), below);
                         false
                     }
                     Zone::Tray(i) => {
@@ -1522,7 +1525,8 @@ impl View {
         let gap = 10.0;
         let n = actions.len() as f64;
         let bw = ((x1 - x0) - gap * (n - 1.0)) / n;
-        let y = top + peek.height() - 46.0 + 2.0;
+        // Buttons keep the note's side padding at the bottom too.
+        let y = top + peek.height() - 18.0 - 34.0;
         actions.iter().enumerate().map(|(i, (_, label))| (Rect { x: x0 + i as f64 * (bw + gap), y, w: bw, h: 34.0 }, label.clone())).collect()
     }
 
@@ -1624,13 +1628,13 @@ impl View {
     fn day_rects(&self) -> Vec<(Rect, crate::calendar::Day)> {
         let x0 = CAL_X + 64.0;
         let col = (CAL_W - 64.0) / 7.0;
-        let top = self.body_top();
+        let top = self.body_top() + 6.0;
         crate::calendar::week(0).into_iter().enumerate().map(|(i, d)| (Rect { x: x0 + i as f64 * col, y: top, w: col, h: 46.0 }, d)).collect()
     }
 
     fn tool_rect(&self, i: usize) -> Rect {
         let x0 = TOOLS_X + ((RIGHT - TOOLS_X) - 96.0) / 2.0;
-        let y0 = self.body_top() + 4.0;
+        let y0 = self.body_top() + 12.0;
         Rect { x: x0 + (i % 2) as f64 * 52.0, y: y0 + (i / 2) as f64 * 52.0, w: 44.0, h: 44.0 }
     }
 
@@ -1649,8 +1653,13 @@ impl View {
     }
 
     fn note_rect(&self, i: usize) -> Rect {
+        let x = self.phone_section_rect().x + 14.0;
+        Rect { x, y: self.body_top() + 14.0 + i as f64 * 38.0, w: RIGHT - 14.0 - x, h: 36.0 }
+    }
+
+    fn phone_section_rect(&self) -> Rect {
         let x = LEFT + PHONE_W + 14.0;
-        Rect { x, y: self.body_top() + 4.0 + i as f64 * 38.0, w: RIGHT - x, h: 36.0 }
+        Rect { x, y: self.body_top(), w: RIGHT - x, h: 120.0 }
     }
 
     fn files_rect(&self) -> Rect {
@@ -1790,7 +1799,13 @@ impl View {
 
     fn room(&self) -> f64 {
         let n = self.app.lights.borrow().count();
-        if n == 0 { 0.0 } else { 4.0 + 12.0 * n as f64 }
+        if n == 0 { 0.0 } else { 8.0 + 12.0 * n as f64 }
+    }
+
+    /// Left edge for a leading icon or disc `size` tall: as far from the shape's left edge as
+    /// from its top and bottom. `l0` is the left wing's start (12 px in from the edge).
+    fn lead(&self, l0: f64, size: f64) -> f64 {
+        l0 - 12.0 + ((self.header() - size) / 2.0).max(0.0)
     }
 
     /// Applies the notch roundness to a corner radius. A closed notch can grow no rounder
@@ -1830,7 +1845,11 @@ impl View {
             }
             Head::Peek(p) => (self.centre() + room + 2.0 * p.wing(), 0.0, self.idle_r()),
             Head::Call => {
-                let left = 30.0 + self.text_width(&self.call_time(App::now()), 15.0, Face::Number(560)).max(self.text_width("0:00", 15.0, Face::Number(560))).ceil();
+                // Size for the widest digits of the current length, so the island holds still
+                // while the seconds tick (it only grows when a digit is added).
+                let time = self.call_time(App::now());
+                let widest = ['0', '8'].iter().map(|d| self.text_width(&time.chars().map(|c| if c.is_ascii_digit() { *d } else { c }).collect::<String>(), 15.0, Face::Number(560))).fold(0.0, f64::max);
+                let left = 30.0 + widest.max(self.text_width("0:00", 15.0, Face::Number(560))).ceil();
                 let right = 12.0 + crate::bars::W as f64;
                 (self.centre() + room + 2.0 * (left.max(right) - 8.0).max(0.0), 0.0, self.idle_r())
             }
@@ -2021,7 +2040,9 @@ impl View {
     /// Where the content sits below the shape's top: the float lift, plus the island's top
     /// padding while it is open.
     fn content_lift(&self, now: i64) -> f64 {
-        let open = (self.depth.value(now).max(0.0) / OPEN_DEPTH).clamp(0.0, 1.0);
+        // Peeks (notifications and the like) are laid out in their own height; only the open
+        // sheet gets the island's extra top padding.
+        let open = if matches!(self.head, Head::Open) || self.open { (self.depth.value(now).max(0.0) / OPEN_DEPTH).clamp(0.0, 1.0) } else { 0.0 };
         self.body_lift(now) + ISLAND_PAD * self.float.value(now).clamp(0.0, 1.0) * open
     }
 
@@ -2287,8 +2308,9 @@ impl View {
         if screen < 0.01 && capture < 0.01 {
             return;
         }
-        let edge = CX + self.w.value(now) / 2.0 - 14.0;
         let mid = self.header() / 2.0;
+        // The outermost light sits as far from the right edge as from the top and bottom.
+        let edge = CX + self.w.value(now) / 2.0 - mid;
         let mut x = edge;
         for (alpha, color) in [(capture, self.capture.get()), (screen, RED)] {
             if alpha < 0.01 {
@@ -2402,12 +2424,15 @@ impl View {
                 }
             }
             Head::Call => {
-                let disc = graphene::Rect::new(l0 as f32, (mid - 11.0) as f32, 22.0, 22.0);
-                s.push_rounded_clip(&gsk::RoundedRect::from_rect(disc, 11.0));
+                let x = self.lead(l0, 22.0);
+                let r = (self.rounded(self.idle_r(), 0.0) - (x - (l0 - 12.0))).clamp(4.0, 11.0);
+                let disc = graphene::Rect::new(x as f32, (mid - 11.0) as f32, 22.0, 22.0);
+                s.push_rounded_clip(&gsk::RoundedRect::from_rect(disc, r as f32));
                 s.append_color(&GREEN.alpha(0.2).rgba(), &disc);
                 s.pop();
-                self.icon(s, "call", 14.0, true, GREEN, l0 + 11.0, mid);
-                self.text(s, &self.call_time(now), 15.0, Face::Number(560), GREEN, l0 + 30.0, mid, left - 30.0, start);
+                self.icon(s, "call", 14.0, true, GREEN, x + 11.0, mid);
+                let tx = x + 22.0 + 10.0;
+                self.text(s, &self.call_time(now), 15.0, Face::Number(560), GREEN, tx, mid, (l0 + left - tx).max(0.0), start);
             }
             Head::Open => {
                 let _ = (l0, left, r0, right);
@@ -2436,7 +2461,7 @@ impl View {
             }
             Head::Peek(Peek::Volume { level, muted }) => {
                 let icon = if *muted { "volume_off" } else if *level < 0.5 { "volume_down" } else { "volume_up" };
-                self.icon(s, icon, 18.0, false, pal.ink_main, l0 + 9.0, mid);
+                self.icon(s, icon, 18.0, false, pal.ink_main, self.lead(l0, 18.0) + 9.0, mid);
                 self.text(s, if *muted { "Muted" } else { "Volume" }, 15.0, REST, pal.ink_meta, l0 + 24.0, mid, left - 24.0, start);
                 let value = self.meter.value(now).clamp(0.0, 1.0);
                 let percent = format!("{}%", (value * 100.0).round());
@@ -2459,7 +2484,7 @@ impl View {
                     Dock::Screen => (0.0, peek.height()),
                     Dock::Bar => (self.header(), peek.height()),
                 };
-                let content = if actions.is_empty() { height } else { height - 46.0 };
+                let content = if actions.is_empty() { height } else { height - 60.0 };
                 self.draw_note(s, top + content / 2.0, summary, body, app, icon.as_ref(), avatar.as_ref());
                 for (i, (r, label)) in self.note_buttons(peek).into_iter().enumerate() {
                     let last = i + 1 == actions.len();
@@ -2500,13 +2525,13 @@ impl View {
                     _ => (*icon, pal.accent),
                 };
                 let tint = if *on { tint } else { pal.ink_meta };
-                self.icon(s, glyph, 20.0, true, tint, l0 + 11.0, mid);
+                self.icon(s, glyph, 20.0, true, tint, self.lead(l0, 20.0) + 10.0, mid);
                 self.text(s, if *on { "On" } else { "Off" }, 15.0, Face::Text(620), tint, r0, mid, right, end);
             }
             Head::Peek(Peek::Battery { level, device }) => {
                 match device {
                     Some((name, glyph)) => {
-                        self.icon(s, glyph, 20.0, true, pal.ink_main, l0 + 11.0, mid);
+                        self.icon(s, glyph, 20.0, true, pal.ink_main, self.lead(l0, 20.0) + 10.0, mid);
                         self.text(s, name, 14.0, REST, pal.ink_meta, l0 + 28.0, mid, left - 28.0, start);
                     }
                     None => self.text(s, "Low Battery", 15.0, Face::Text(620), pal.ink_main, l0, mid, left, start),
@@ -2710,7 +2735,7 @@ impl View {
     }
 
     fn switch_rect(&self) -> Rect {
-        Rect { x: LEFT + MEDIA_W - 34.0, y: self.body_top() + 6.0, w: 34.0, h: 34.0 }
+        Rect { x: LEFT + MEDIA_W - 34.0, y: self.media_top() + 6.0, w: 34.0, h: 34.0 }
     }
 
     fn draw_switch(&self, s: &gtk::Snapshot, now: i64) {
@@ -2728,15 +2753,19 @@ impl View {
     }
 
     fn call_buttons(&self) -> (Rect, Rect) {
-        let y = self.body_top() + 76.0;
+        let y = self.media_top() + 76.0;
         (Rect { x: LEFT + 82.0, y, w: 104.0, h: 34.0 }, Rect { x: LEFT + 194.0, y, w: 104.0, h: 34.0 })
+    }
+
+    fn media_top(&self) -> f64 {
+        self.body_top() + 2.0
     }
 
     fn draw_call(&self, s: &gtk::Snapshot, now: i64) {
         let pal = self.pal.get();
         let start = pango::Alignment::Left;
         let Some((who, since)) = self.app.call.borrow().as_ref().map(|c| (c.who.clone(), c.since)) else { return };
-        let top = self.body_top();
+        let top = self.media_top();
         let icon_rect = Rect { x: LEFT, y: top + 4.0, w: 68.0, h: 68.0 };
         let gicon = {
             let list = self.app.apps.list();
@@ -2794,7 +2823,7 @@ impl View {
         if self.showing_call(now) || !self.app.media.borrow().present(now) {
             return None;
         }
-        let top = self.body_top();
+        let top = self.media_top();
         let art = Rect { x: LEFT, y: top + 4.0, w: 104.0, h: 104.0 };
         let info_x = LEFT + 122.0;
         let info_w = MEDIA_W - 122.0 - if self.can_switch(now) { 42.0 } else { 0.0 };
@@ -2826,7 +2855,7 @@ impl View {
 
     fn divider(&self, s: &gtk::Snapshot, x: f64) {
         let top = self.body_top();
-        let line = graphene::Rect::new(x as f32, (top + 8.0) as f32, 1.0, 96.0);
+        let line = graphene::Rect::new(x as f32, top as f32, 1.0, 120.0);
         s.append_color(&self.pal.get().ink_main.alpha(0.08).rgba(), &line);
     }
 
@@ -2853,7 +2882,7 @@ impl View {
         let pal = self.pal.get();
         let start = pango::Alignment::Left;
         let Some(p) = self.player(now) else {
-            let mid = self.body_top() + 56.0;
+            let mid = self.media_top() + 56.0;
             self.icon(s, "music_note", 28.0, true, pal.ink_faint, LEFT + MEDIA_W / 2.0, mid - 12.0);
             self.text(s, "Nothing playing", 14.0, REST, pal.ink_meta, LEFT, mid + 18.0, MEDIA_W, pango::Alignment::Center);
             return;
@@ -2934,7 +2963,7 @@ impl View {
 
     fn draw_calendar(&self, s: &gtk::Snapshot, now: i64) {
         let pal = self.pal.get();
-        let top = self.body_top();
+        let top = self.body_top() + 6.0;
         let days = self.day_rects();
         if days.len() < 7 {
             return;
@@ -3081,13 +3110,18 @@ impl View {
             let ink = if phone.reachable { pal.ink_main } else { pal.ink_faint };
             self.icon(s, icon, 18.0, true, ink, r.x + r.w / 2.0, r.y + r.h / 2.0);
         }
-        let x = LEFT + PHONE_W + 14.0;
-        let w = RIGHT - x;
+        let card = self.phone_section_rect();
+        s.push_rounded_clip(&gsk::RoundedRect::from_rect(card.graphene(), 20.0));
+        s.append_color(&pal.ink_main.alpha(0.04).rgba(), &card.graphene());
+        s.pop();
+        let x = card.x + 14.0;
+        let w = card.w - 28.0;
         let call = crate::phone::call();
         if phone.notes.is_empty() && call.is_none() {
             let msg = if phone.reachable { "No notifications from your phone" } else { "Notifications show up while the phone is reachable" };
-            self.icon(s, "notifications", 24.0, false, pal.ink_faint, x + w / 2.0, top + 44.0);
-            self.text(s, msg, 13.0, REST, pal.ink_meta, x, top + 76.0, w, center);
+            self.text(s, msg, 13.0, REST, pal.ink_meta, x, top + 25.0, w - 44.0, start);
+            let close = Rect { x: card.x + card.w - 44.0, y: card.y + 10.0, w: 30.0, h: 30.0 };
+            self.icon(s, "close", 16.0, false, pal.ink_faint, close.x + close.w / 2.0, close.y + close.h / 2.0);
             return;
         }
         if let Some(c) = &call {

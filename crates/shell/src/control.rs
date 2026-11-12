@@ -965,7 +965,7 @@ impl State {
         let rows = tiles.len().div_ceil(2) as f64;
         y += rows * TILE_H + (rows - 1.0).max(0.0) * TILE_GAP + opened + 14.0;
         {
-            draw::text(s, &canvas, &cfg, "System", 14.0, Face::Text(600), pal.ink_main, x0 + 4.0, y + HEAD / 2.0, 220.0, pango::Alignment::Left);
+            draw::text(s, &canvas, &cfg, "System", 14.0, Face::Text(600), pal.ink_main, x0, y + HEAD / 2.0, 220.0, pango::Alignment::Left);
             y += HEAD;
             let cw = inner / PER_ROW as f64;
             let st = self.stats.unwrap_or_default();
@@ -989,7 +989,7 @@ impl State {
         }
         let gadgets = crate::batteries::list(&self.app);
         if !gadgets.is_empty() {
-            draw::text(s, &canvas, &cfg, "Batteries", 14.0, Face::Text(600), pal.ink_main, x0 + 4.0, y + HEAD / 2.0, 220.0, pango::Alignment::Left);
+            draw::text(s, &canvas, &cfg, "Batteries", 14.0, Face::Text(600), pal.ink_main, x0, y + HEAD / 2.0, 220.0, pango::Alignment::Left);
             y += HEAD;
             let cw = inner / PER_ROW as f64;
             for (i, g) in gadgets.iter().enumerate() {
@@ -1020,7 +1020,7 @@ impl State {
         self.slider = (sx, sw);
         y += SOUND + 16.0;
         let history = self.app.history.borrow().clone();
-        draw::text(s, &canvas, &cfg, "Notifications", 14.0, Face::Text(600), pal.ink_main, x0 + 4.0, y + HEAD / 2.0, 200.0, pango::Alignment::Left);
+        draw::text(s, &canvas, &cfg, "Notifications", 14.0, Face::Text(600), pal.ink_main, x0, y + HEAD / 2.0, 200.0, pango::Alignment::Left);
         if !history.is_empty() {
             let cw = draw::width(&canvas, &cfg, "Clear", 13.0, Face::Text(500)) + 20.0;
             let cx = x0 + inner - cw;
