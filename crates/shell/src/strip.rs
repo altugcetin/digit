@@ -93,9 +93,84 @@ impl Spaces {
         ends(self.from, self.active as f64, t)
     }
 
+    /// Takes the workspaces on this output. When the active one moves the pill opens (unless it
+    /// is always shown) and the active mark slides to its new place. False when nothing changed.
+    pub fn update(&mut self, list: Vec<bool>, active: usize, always: bool, now: i64) -> bool {
+        if self.list == list && self.active == active && self.always == always {
+            return false;
+        }
+        let first = self.list.is_empty();
+        let moved = !first && self.active != active;
+        if moved {
+            // Leave from wherever the mark is drawn now, even mid-move.
+            let (head, _) = self.at(now);
+            self.from = head.min(list.len().saturating_sub(1) as f64);
+            self.moved = now;
+            self.until = now + HOLD;
+        } else if first {
+            self.from = active as f64;
+            self.moved = now - MORPH;
+        }
+        self.always = always;
+        let want = always || (moved || self.shown) && now < self.until;
+        if want != self.shown {
+            if want {
+                // An even curve: a sharp decelerating one does most of the change in the first frames.
+                self.open.go(1.0, now, 420, kit::motion::STANDARD);
+            } else {
+                self.open.go(0.0, now, 380, kit::motion::STANDARD);
+            }
+            self.shown = want;
+        }
+        self.list = list;
+        self.active = active.min(self.list.len().saturating_sub(1));
+        true
+    }
+
+    /// Advances to `now`: folds the pill once the switch has been on screen long enough. True
+    /// while anything still moves.
+    pub fn step(&mut self, now: i64) -> bool {
+        if self.shown && !self.always && now >= self.until {
+            self.open.go(0.0, now, 380, kit::motion::STANDARD);
+            self.shown = false;
+        }
+        (self.shown && !self.always) || !self.open.settled(now) || now - self.moved < MORPH
+    }
+
+    /// Whether the pill is shown or opening (not folding away).
+    pub fn showing(&self) -> bool {
+        self.shown
+    }
+
+    /// How far the pill is open, 0..1.
+    pub fn openness(&self, now: i64) -> f64 {
+        self.open.value(now).clamp(0.0, 1.0)
+    }
+
     /// The pill's width when fully open.
-    fn width(&self) -> f64 {
+    pub fn width(&self) -> f64 {
         if self.list.is_empty() { 0.0 } else { 2.0 * EDGE + (self.list.len() - 1) as f64 * STEP + PILL }
+    }
+
+    /// Draws the workspace dots inside the pill that starts at `x0`, and the active mark: a bar of
+    /// constant height that stretches toward the new workspace and settles there.
+    pub fn draw(&self, s: &gtk::Snapshot, x0: f64, mid: f64, now: i64, ink: kit::palette::Rgb, accent: kit::palette::Rgb) {
+        let first = x0 + EDGE + PILL / 2.0;
+        let at = |i: f64| first + i * STEP;
+        let (head, tail) = self.at(now);
+        let (lo, hi) = (head.min(tail), head.max(tail));
+        for (i, filled) in self.list.iter().enumerate() {
+            let i = i as f64;
+            if i >= lo - 0.45 && i <= hi + 0.45 {
+                continue;
+            }
+            let d = if *filled { DOT } else { DOT * 0.8 };
+            let color = if *filled { ink.alpha(0.88) } else { ink.alpha(0.38) };
+            let c = at(i);
+            draw::fill(s, &draw::round(c - d / 2.0, mid - d / 2.0, d, d, d / 2.0), color);
+        }
+        let (l, r) = (at(lo) - PILL / 2.0, at(hi) + PILL / 2.0);
+        draw::fill(s, &draw::round(l, mid - PILL_H / 2.0, r - l, PILL_H, PILL_H / 2.0), accent);
     }
 }
 
@@ -200,36 +275,11 @@ impl Strip {
     /// the pill folds away again a moment later.
     pub fn set_spaces(&self, list: Vec<bool>, active: usize, always: bool) {
         let imp = self.imp();
-        let now = App::now();
         {
             let mut sp = imp.spaces.borrow_mut();
-            if sp.list == list && sp.active == active && sp.always == always {
+            if !sp.update(list, active, always, App::now()) {
                 return;
             }
-            let first = sp.list.is_empty();
-            let moved = !first && sp.active != active;
-            if moved {
-                // Leave from wherever the mark is drawn now, even mid-move.
-                let (head, _) = sp.at(now);
-                sp.from = head.min(list.len().saturating_sub(1) as f64);
-                sp.moved = now;
-                sp.until = now + HOLD;
-            } else if first {
-                sp.from = active as f64;
-                sp.moved = now - MORPH;
-            }
-            sp.always = always;
-            let want = always || (moved || sp.shown) && now < sp.until;
-            if want != sp.shown {
-                if want {
-                    sp.open.go(1.0, now, 280, kit::motion::EMPHASIZED_DECEL);
-                } else {
-                    sp.open.go(0.0, now, 320, kit::motion::STANDARD);
-                }
-                sp.shown = want;
-            }
-            sp.list = list;
-            sp.active = active.min(sp.list.len().saturating_sub(1));
             if std::mem::replace(&mut sp.ticking, true) {
                 drop(sp);
                 self.queue_draw();
@@ -240,12 +290,7 @@ impl Strip {
             let now = clock.frame_time().max(App::now());
             w.queue_draw();
             let mut sp = w.imp().spaces.borrow_mut();
-            if sp.shown && !sp.always && now >= sp.until {
-                sp.open.go(0.0, now, 320, kit::motion::STANDARD);
-                sp.shown = false;
-            }
-            let busy = (sp.shown && !sp.always) || !sp.open.settled(now) || now - sp.moved < MORPH;
-            if busy {
+            if sp.step(now) {
                 glib::ControlFlow::Continue
             } else {
                 sp.ticking = false;
@@ -254,26 +299,6 @@ impl Strip {
         });
     }
 
-    /// Draws the workspace dots inside the pill that starts at `x0`, and the active mark: a bar of
-    /// constant height that stretches toward the new workspace and settles there.
-    fn draw_spaces(&self, s: &gtk::Snapshot, sp: &Spaces, x0: f64, mid: f64, now: i64, ink: kit::palette::Rgb, accent: kit::palette::Rgb) {
-        let first = x0 + EDGE + PILL / 2.0;
-        let at = |i: f64| first + i * STEP;
-        let (head, tail) = sp.at(now);
-        let (lo, hi) = (head.min(tail), head.max(tail));
-        for (i, filled) in sp.list.iter().enumerate() {
-            let i = i as f64;
-            if i >= lo - 0.45 && i <= hi + 0.45 {
-                continue;
-            }
-            let d = if *filled { DOT } else { DOT * 0.8 };
-            let color = if *filled { ink.alpha(0.88) } else { ink.alpha(0.38) };
-            let c = at(i);
-            draw::fill(s, &draw::round(c - d / 2.0, mid - d / 2.0, d, d, d / 2.0), color);
-        }
-        let (l, r) = (at(lo) - PILL / 2.0, at(hi) + PILL / 2.0);
-        draw::fill(s, &draw::round(l, mid - PILL_H / 2.0, r - l, PILL_H, PILL_H / 2.0), accent);
-    }
 
     /// The workspace dot under the pointer, as last seen by `zone_at`.
     pub fn hovered_space(&self) -> Option<usize> {
@@ -413,7 +438,7 @@ impl Strip {
         // The workspace pill, its own pill beside the logo: it grows open from the left.
         let (open, row) = {
             let sp = imp.spaces.borrow();
-            (sp.open.value(now).clamp(0.0, 1.0), sp.width())
+            (sp.openness(now), sp.width())
         };
         if open > 0.002 && row > 0.0 {
             let pw = (row * open).max(1.0);
@@ -421,7 +446,7 @@ impl Strip {
             pill(s, Zone::Spaces, x, pw);
             s.push_rounded_clip(&shape);
             s.push_opacity(open);
-            self.draw_spaces(s, &imp.spaces.borrow(), x, mid, now, ink_main, pal.accent);
+            imp.spaces.borrow().draw(s, x, mid, now, ink_main, pal.accent);
             s.pop();
             s.pop();
             if open > 0.5 {

@@ -47,9 +47,8 @@ const DEVICES: usize = 2;
 const CHIP: f64 = 28.0;
 const CHIPS: usize = 7;
 const ROLL: i64 = 260_000;
-const DOT: f64 = 5.0;
-const PILL: f64 = 16.0;
-const GAP: f64 = 5.0;
+/// Space between the workspace pill and the island's sides when the pill widens it.
+const PILL_MARGIN: f64 = 14.0;
 const GREEN: Rgb = Rgb::new(0.19, 0.82, 0.35);
 const MORPH_MS: i64 = 680;
 const MORPH: motion::Curve = motion::Curve::new(0.33, 0.0, 0.15, 1.0);
@@ -233,6 +232,8 @@ struct View {
     /// Scrolling over the workspace dots: wheel travel not yet turned into a step, and the
     /// workspace the last step went to (with when), since the compositor reports it later.
     space_scroll: Cell<f64>,
+    /// The workspace pill when it shows in the notch instead of beside the logo.
+    pill: crate::strip::Spaces,
     space_aim: Cell<Option<(u64, i64)>>,
     /// Fades the media spot back in after flipping between the call and the player.
     flip: Tween,
@@ -242,8 +243,6 @@ struct View {
     dots: [Tween; 2],
     capture: std::cell::Cell<Rgb>,
     hush: Tween,
-    spot: Tween,
-    spots: usize,
     panel_triggers: Vec<gtk::Window>,
     /// Catches clicks elsewhere while the notch is open in "click" mode; the notch itself is cut out of it.
     scrim: Option<gtk::Window>,
@@ -343,6 +342,7 @@ impl Notch {
             glow: [Tween::still(0.0); 12],
             media_over_call: std::cell::Cell::new(false),
             space_scroll: Cell::new(0.0),
+            pill: crate::strip::Spaces::default(),
             space_aim: Cell::new(None),
             flip: Tween::still(1.0),
             tuning: false,
@@ -351,8 +351,6 @@ impl Notch {
             dots: [Tween::still(0.0); 2],
             capture: std::cell::Cell::new(ORANGE),
             hush: Tween::still(1.0),
-            spot: Tween::still(0.0),
-            spots: 0,
             panel_triggers: Vec::new(),
             scrim: None,
             tab: Tab::Nook,
@@ -959,7 +957,15 @@ impl View {
     }
 
     fn centre(&self) -> f64 {
-        CENTRE + (self.clock_width() - self.text_width("00:00", 16.0, Face::Number(500))).max(0.0)
+        let clock = CENTRE + (self.clock_width() - self.text_width("00:00", 16.0, Face::Number(500))).max(0.0);
+        // A workspace pill wider than the clock widens the island while it shows.
+        if self.pill.showing() { clock.max(self.pill.width() + 2.0 * PILL_MARGIN) } else { clock }
+    }
+
+    /// The workspace pill shows in the notch: chosen in Settings, or when there is no top bar to
+    /// hold it.
+    fn pill_in_notch(&self) -> bool {
+        self.app.prefs.borrow().notch_spaces || !self.bar_spaces()
     }
 
     fn note_buttons(&self, peek: &Peek) -> Vec<(Rect, String)> {
@@ -1134,60 +1140,6 @@ impl View {
         (list, active)
     }
 
-    fn spaces_start(&self, now: i64) -> Option<(f64, f64)> {
-        let n = self.spaces().0.len();
-        if n == 0 || self.bar_spaces() {
-            return None;
-        }
-        let total = dots_width(n);
-        match &self.head {
-            Head::Open => None,
-            Head::Idle(_) => {
-                let (l0, l1, _, _) = self.wings(&self.head, now);
-                Some((((l0 + l1) / 2.0 - total / 2.0).round(), total))
-            }
-            Head::Peek(Peek::Spaces { .. }) => {
-                let (l0, l1, _, _) = self.wings(&self.head, now);
-                Some((((l0 + l1) / 2.0 - total / 2.0).round(), total))
-            }
-            Head::Peek(_) | Head::Call => None,
-        }
-    }
-
-    fn space_at(&self, x: f64, y: f64) -> Option<u64> {
-        let (start, total) = self.spaces_start(App::now())?;
-        if y > self.header() || x < start - 6.0 || x > start + total + 6.0 {
-            return None;
-        }
-        let (list, active) = self.spaces();
-        let mut left = start;
-        for (i, sp) in list.iter().enumerate() {
-            let w = if i == active { PILL } else { DOT };
-            if x <= left + w + GAP / 2.0 || i + 1 == list.len() {
-                return Some(sp.id);
-            }
-            left += w + GAP;
-        }
-        None
-    }
-
-    fn draw_spaces(&self, s: &gtk::Snapshot, now: i64, mid: f64) {
-        let Some((start, _)) = self.spaces_start(now) else { return };
-        let pal = self.pal.get();
-        let (list, _) = self.spaces();
-        let at = self.spot.value(now);
-        let mut x = start;
-        for (i, sp) in list.iter().enumerate() {
-            let near = (1.0 - (i as f64 - at).abs()).clamp(0.0, 1.0);
-            let w = DOT + (PILL - DOT) * near;
-            let base = if sp.filled { pal.ink_meta } else { pal.ink_faint.alpha(0.55) };
-            let r = graphene::Rect::new(x as f32, (mid - DOT / 2.0) as f32, w as f32, DOT as f32);
-            s.push_rounded_clip(&gsk::RoundedRect::from_rect(r, (DOT / 2.0) as f32));
-            s.append_color(&pal.ink_main.mix(base, near).rgba(), &r);
-            s.pop();
-            x += w + GAP;
-        }
-    }
 
     fn room(&self) -> f64 {
         let n = self.app.lights.borrow().count();
@@ -1211,13 +1163,8 @@ impl View {
         let room = 2.0 * self.room();
         match head {
             Head::Idle(media) => {
-                // With the workspaces in the top bar, the cover moves to the empty left wing and the
-                // wave stays on the right, like the iPhone's island.
-                let (left, right) = match (self.bar_spaces(), *media) {
-                    (true, true) => (28.0, 8.0 + crate::bars::W as f64),
-                    (true, false) => (0.0, 0.0),
-                    (false, _) => (dots_width(self.spaces().0.len()), if *media { 28.0 + crate::bars::W as f64 } else { 0.0 }),
-                };
+                // The cover sits in the left wing and the wave on the right, like the iPhone's island.
+                let (left, right): (f64, f64) = if *media { (28.0, 8.0 + crate::bars::W as f64) } else { (0.0, 0.0) };
                 let side = left.max(right);
                 (self.centre() + room + if side > 0.0 { 2.0 * (side - 8.0).max(0.0) } else { 0.0 }, 0.0, self.idle_r())
             }
@@ -1227,13 +1174,6 @@ impl View {
                     Dock::Bar => p.height(),
                 };
                 (self.island_width(summary, body) + room, depth, p.radius())
-            }
-            // During a call the switch peek shows only the dots and the call's waveform, so it is
-            // sized like the idle notch rather than with room for "Desktop N".
-            Head::Peek(Peek::Spaces { .. }) if self.app.call.borrow().is_some() => {
-                let left = dots_width(self.spaces().0.len());
-                let right = 28.0 + crate::bars::W as f64;
-                (self.centre() + room + 2.0 * (left.max(right) - 8.0).max(0.0), 0.0, self.idle_r())
             }
             Head::Peek(p) => (self.centre() + room + 2.0 * p.wing(), 0.0, self.idle_r()),
             Head::Call => {
@@ -1271,6 +1211,17 @@ impl View {
             }
             self.was = std::mem::replace(&mut self.shown, clock);
             self.roll = roll;
+        }
+        // Before sizing the island: a workspace pill in the notch can widen it.
+        {
+            let (list, active) = self.spaces();
+            let always = self.app.prefs.borrow().bar_spaces;
+            let in_notch = self.pill_in_notch();
+            let filled: Vec<bool> = list.iter().map(|s| s.filled).collect();
+            if let Some(st) = &self.strip {
+                st.set_spaces(if in_notch { Vec::new() } else { filled.clone() }, active, always && !in_notch);
+            }
+            self.pill.update(if in_notch { filled } else { Vec::new() }, active, false, now);
         }
         let want = self.target(now);
         let was_peek = matches!(self.want, Head::Peek(_));
@@ -1321,18 +1272,6 @@ impl View {
                 self.capture.set(if lights.camera.is_empty() { ORANGE } else { GREEN });
             }
         }
-        {
-            let (list, active) = self.spaces();
-            if let Some(st) = &self.strip {
-                st.set_spaces(list.iter().map(|s| s.filled).collect(), active, self.app.prefs.borrow().bar_spaces);
-            }
-            if list.len() != self.spots {
-                self.spots = list.len();
-                self.spot.set(active as f64);
-            } else {
-                self.spot.go(active as f64, now, 380, motion::EMPHASIZED_DECEL);
-            }
-        }
         let playing = self.app.media.borrow().playing;
         self.art_scale.go(if playing { 1.0 } else { 0.85 }, now, 400, motion::DEFAULT_SPATIAL);
         if self.head.same(&want) {
@@ -1370,10 +1309,17 @@ impl View {
         if self.glass.target() != glass {
             self.glass.go(glass, now, 360, motion::STANDARD);
         }
-        let tweens = [&self.w, &self.depth, &self.r, &self.fade, &self.sheet, &self.back, &self.meter, &self.art_scale, &self.fill, &self.tune, &self.hush, &self.spot, &self.tab_fade, &self.flip, &self.float, &self.widen, &self.menu, &self.glass];
+        let tweens = [&self.w, &self.depth, &self.r, &self.fade, &self.sheet, &self.back, &self.meter, &self.art_scale, &self.fill, &self.tune, &self.hush, &self.tab_fade, &self.flip, &self.float, &self.widen, &self.menu, &self.glass];
         let moving = tweens.into_iter().chain(self.glow.iter()).chain(self.dots.iter()).any(|t| !t.settled(now));
         let rolling = !motion::reduced() && self.roll.iter().flatten().any(|t| now < t + ROLL);
-        moving || rolling || self.app.palette_moving(now)
+        let showing = self.pill.showing();
+        let pill = self.pill.step(now);
+        if showing != self.pill.showing() && !self.open {
+            // The pill folded away: the island goes back to the clock's width.
+            let (w, _, _) = self.geometry(&self.want.clone(), now);
+            self.w.go(w, now, 450, motion::EMPHASIZED_DECEL);
+        }
+        moving || rolling || pill || self.app.palette_moving(now)
     }
 
     fn call_time(&self, now: i64) -> String {
@@ -1383,8 +1329,7 @@ impl View {
     }
 
     fn place_bars(&self, now: i64) {
-        // During a call the workspace switch peek keeps the call's waveform on the right.
-        let call = matches!(self.head, Head::Call) || (matches!(self.head, Head::Peek(Peek::Spaces { .. })) && self.app.call.borrow().is_some());
+        let call = matches!(self.head, Head::Call);
         let show = !self.open && (matches!(self.head, Head::Idle(true)) || call);
         if show {
             let (_, _, _, r1) = self.wings(&self.head, now);
@@ -1700,9 +1645,6 @@ fn legible(tint: Rgb, pal: &kit::palette::Palette) -> Rgb {
     c
 }
 
-fn dots_width(n: usize) -> f64 {
-    if n == 0 { 0.0 } else { (n - 1) as f64 * (DOT + GAP) + PILL }
-}
 
 #[cfg(test)]
 mod tests {

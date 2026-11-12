@@ -894,7 +894,7 @@ fn menu_bar(body: &gtk::Box, t: &toml::Table) {
     toggle(&bar, "menu", "App menus", "The focused app's name and menus at the top left. The logo, workspaces, status and date always show", "menubar", prefs::get_bool(&t, "menubar", true));
     choice(&bar, "blur_on", "Menu bar backdrop", "Adaptive stays clear over the wallpaper and turns to frosted glass when windows are open", "menubar_look", &[("adaptive", "Adaptive"), ("clear", "Clear"), ("glass", "Glass")], &prefs::get_str(&t, "menubar_look", "adaptive"));
     choice(&bar, "deployed_code", "Menu bar logo", "The mark at the top left", "menubar_logo", &[("distro", "Distribution"), ("digit", "Digit")], &prefs::get_str(t, "menubar_logo", "distro"));
-    choice(&bar, "workspaces", "Workspaces", "A pill beside the logo with the workspaces on this screen", "menubar_spaces", &[("switch", "While switching"), ("always", "Always")], &prefs::get_str(t, "menubar_spaces", "switch"));
+    choice(&bar, "workspaces", "Workspaces", "A pill with the workspaces on this screen: beside the logo, or in the notch in place of the clock while switching", "menubar_spaces", &[("switch", "While switching"), ("always", "Always"), ("notch", "In the notch")], &prefs::get_str(t, "menubar_spaces", "switch"));
     slider(&bar, "height", "Bar height", "Used by the full-width bar", "wide_height", (28.0, 56.0, 1.0), prefs::get_f64(&t, "wide_height", 34.0), 34.0, 0);
     toggle(&bar, "widgets", "Menu bar app icons", "Shows the icons apps like Discord or Steam put in the system tray. Applies after digit restarts", "tray", prefs::get_bool(&t, "tray", true));
 }

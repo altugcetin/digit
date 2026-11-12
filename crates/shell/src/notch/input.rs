@@ -269,11 +269,12 @@ impl Notch {
         true
     }
 
-    /// Scrolling over the notch's own workspace dots steps through them.
+    /// Scrolling over the clock steps through the workspaces when the pill lives in the notch.
     pub(super) fn scroll_spaces_at_pointer(&self, dy: f64) -> bool {
         let over = {
             let v = self.0.borrow();
-            v.pointer.is_some_and(|(x, y)| v.space_at(x, y).is_some())
+            // The pill takes the clock's place, so scrolling over the clock switches workspaces.
+            v.pill_in_notch() && !v.open && v.pointer.is_some_and(|(x, y)| y <= v.header() && (x - CX).abs() <= v.centre() / 2.0)
         };
         if over {
             self.scroll_spaces(dy);
@@ -535,16 +536,6 @@ impl Notch {
                 return;
             }
             _ => {}
-        }
-        let target = {
-            let v = self.0.borrow();
-            v.space_at(x, y)
-        };
-        if let Some(id) = target {
-            glib::spawn_future_local(async move {
-                let _ = gtk::gio::spawn_blocking(move || crate::compositor::focus_space(id)).await;
-            });
-            return;
         }
         let (app, open, action) = {
             let v = self.0.borrow();
