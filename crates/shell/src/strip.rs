@@ -59,13 +59,16 @@ pub struct Spaces {
     always: bool,
     shown: bool,
     open: kit::motion::Tween,
+    /// How many workspace slots the pill is sized for, eased: a workspace joining or leaving the
+    /// row widens or narrows the pill smoothly instead of all at once.
+    span: kit::motion::Tween,
     until: i64,
     ticking: bool,
 }
 
 impl Default for Spaces {
     fn default() -> Self {
-        Self { list: Vec::new(), active: 0, from: 0.0, moved: 0, always: false, shown: false, open: kit::motion::Tween::still(0.0), until: 0, ticking: false }
+        Self { list: Vec::new(), active: 0, from: 0.0, moved: 0, always: false, shown: false, open: kit::motion::Tween::still(0.0), span: kit::motion::Tween::still(0.0), until: 0, ticking: false }
     }
 }
 
@@ -122,6 +125,12 @@ impl Spaces {
             }
             self.shown = want;
         }
+        let n = list.len() as f64;
+        if first || list.is_empty() {
+            self.span.set(n);
+        } else if self.span.target() != n {
+            self.span.go(n, now, 380, kit::motion::STANDARD);
+        }
         self.list = list;
         self.active = active.min(self.list.len().saturating_sub(1));
         true
@@ -134,7 +143,7 @@ impl Spaces {
             self.open.go(0.0, now, 380, kit::motion::STANDARD);
             self.shown = false;
         }
-        (self.shown && !self.always) || !self.open.settled(now) || now - self.moved < MORPH
+        (self.shown && !self.always) || !self.open.settled(now) || !self.span.settled(now) || now - self.moved < MORPH
     }
 
     /// Whether the pill is shown or opening (not folding away).
@@ -147,9 +156,15 @@ impl Spaces {
         self.open.value(now).clamp(0.0, 1.0)
     }
 
-    /// The pill's width when fully open.
+    /// The pill's width when fully open, once any workspace joining or leaving has settled.
     pub fn width(&self) -> f64 {
         if self.list.is_empty() { 0.0 } else { 2.0 * EDGE + (self.list.len() - 1) as f64 * STEP + PILL }
+    }
+
+    /// The pill's width when fully open, as drawn at `now`.
+    pub fn width_at(&self, now: i64) -> f64 {
+        let n = self.span.value(now).max(0.0);
+        if n < 0.001 { 0.0 } else { 2.0 * EDGE + (n - 1.0).max(0.0) * STEP + PILL }
     }
 
     /// Draws the workspace dots inside the pill that starts at `x0`, and the active mark: a bar of
@@ -159,13 +174,17 @@ impl Spaces {
         let at = |i: f64| first + i * STEP;
         let (head, tail) = self.at(now);
         let (lo, hi) = (head.min(tail), head.max(tail));
-        for (i, filled) in self.list.iter().enumerate() {
-            let i = i as f64;
-            if i >= lo - 0.45 && i <= hi + 0.45 {
+        // A dot joining or leaving the row grows in or shrinks away while the pill resizes.
+        let span = self.span.value(now).max(0.0);
+        for k in 0..self.list.len().max(span.ceil() as usize) {
+            let filled = self.list.get(k).copied().unwrap_or(false);
+            let i = k as f64;
+            let grow = smooth(span - i);
+            if grow < 0.01 || i >= lo - 0.45 && i <= hi + 0.45 {
                 continue;
             }
-            let d = if *filled { DOT } else { DOT * 0.8 };
-            let color = if *filled { ink.alpha(0.88) } else { ink.alpha(0.38) };
+            let d = if filled { DOT } else { DOT * 0.8 } * (0.4 + 0.6 * grow);
+            let color = if filled { ink.alpha(0.88 * grow) } else { ink.alpha(0.38 * grow) };
             let c = at(i);
             draw::fill(s, &draw::round(c - d / 2.0, mid - d / 2.0, d, d, d / 2.0), color);
         }
@@ -438,7 +457,7 @@ impl Strip {
         // The workspace pill, its own pill beside the logo: it grows open from the left.
         let (open, row) = {
             let sp = imp.spaces.borrow();
-            (sp.openness(now), sp.width())
+            (sp.openness(now), sp.width_at(now))
         };
         if open > 0.002 && row > 0.0 {
             let pw = (row * open).max(1.0);
