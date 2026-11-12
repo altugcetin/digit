@@ -15,8 +15,8 @@ impl View {
         // fades in, so neither cuts in or out.
         let open = self.pill.openness(now);
         let ease = |x: f64| { let x = x.clamp(0.0, 1.0); x * x * (3.0 - 2.0 * x) };
-        if open > 0.002 && self.pill.width() > 0.0 {
-            let full = self.pill.width();
+        let full = self.pill.width_at(now);
+        if open > 0.002 && full > 0.0 {
             let pw = (full * (0.35 + 0.65 * ease(open))).max(1.0);
             let x = CX - pw / 2.0;
             let lift = (4.0 * (1.0 - ease(open))).round();
