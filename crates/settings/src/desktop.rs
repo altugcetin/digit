@@ -1028,7 +1028,25 @@ fn desktop(body: &gtk::Box, t: &toml::Table) {
     }
     choice(&desk, "battery_full", "Batteries widget", "This computer, headphones and other devices, as rings on the wallpaper", "desktop_battery", &[("off", "Off"), ("top_left", "Top left"), ("top_right", "Top right"), ("bottom_left", "Bottom left"), ("bottom_right", "Bottom right")], &prefs::get_str(&t, "desktop_battery", "off"));
     toggle(&desk, "folder", "Desktop icons", "Show what's in your Desktop folder on the wallpaper", "desktop_icons", prefs::get_bool(&t, "desktop_icons", true));
-    slider(&desk, "rounded_corner", "Rounded screen corners", "Softens the corners of every display. 0 turns it off", "screen_corners", (0.0, 24.0, 1.0), prefs::get_f64(&t, "screen_corners", 0.0), 0.0, 0);
+    let legacy = prefs::get_f64(&t, "screen_corners", 0.0);
+    let on_row = toggle(&desk, "rounded_corner", "Rounded screen corners", "Softens the corners of every display", "screen_round", prefs::get_bool(&t, "screen_round", legacy >= 2.0));
+    let has_toggle = t.contains_key("screen_round");
+    let follow_row = toggle(&desk, "rounded_corner", "Match app roundness", "The screen corners follow Corners in Appearance", "screen_round_follow", prefs::get_bool(&t, "screen_round_follow", has_toggle || legacy < 2.0));
+    let own = slider(&desk, "rounded_corner", "Screen corner radius", "Used when the screen corners don't match the apps", "screen_corners", (4.0, 24.0, 1.0), if legacy >= 4.0 { legacy.min(24.0) } else { 12.0 }, 12.0, 0);
+    // Matching only matters while the corners are on, and the radius only while they don't match.
+    if let (Some(on), Some(follow)) = (find_switch(on_row.upcast_ref()), find_switch(follow_row.upcast_ref())) {
+        let sync = {
+            let (follow_row, own, on, follow) = (follow_row.clone(), own.clone(), on.clone(), follow.clone());
+            move || {
+                follow_row.set_sensitive(on.is_active());
+                own.set_sensitive(on.is_active() && !follow.is_active());
+            }
+        };
+        sync();
+        let again = sync.clone();
+        on.connect_active_notify(move |_| again());
+        follow.connect_active_notify(move |_| sync());
+    }
 }
 
 fn weather(body: &gtk::Box, t: &toml::Table) {

@@ -87,9 +87,35 @@ pub struct Config {
     pub desktop_widget: String,
     pub desktop_icons: bool,
     pub desktop_battery: String,
+    /// Rounded screen corners: on/off, whether they follow the app roundness, and the radius
+    /// used when they don't. Older configs only had the radius, where 0 meant off.
+    pub screen_round: Option<bool>,
+    pub screen_round_follow: Option<bool>,
     pub screen_corners: f64,
     pub tray: bool,
     pub mic_guard: bool,
+}
+
+/// The screen-corner radius at the default Roundness; Corners in Appearance scales it.
+const SCREEN_CORNER: f64 = 12.0;
+
+/// The radius the screen corners are drawn with, in pixels; 0 when they're off.
+fn screen_radius(c: &Config) -> f64 {
+    let legacy = c.screen_corners >= 2.0;
+    if !c.screen_round.unwrap_or(legacy) {
+        return 0.0;
+    }
+    // A radius set before the toggle existed keeps applying until the user picks otherwise.
+    let follow = c.screen_round_follow.unwrap_or(c.screen_round.is_some() || !legacy);
+    let r = if follow {
+        SCREEN_CORNER * c.ui_round.clamp(0.1, 1.8)
+    } else if c.screen_corners >= 4.0 {
+        c.screen_corners
+    } else {
+        // Settings shows the default radius until the slider is first moved.
+        SCREEN_CORNER
+    };
+    r.clamp(4.0, 40.0).round()
 }
 
 impl Default for Config {
@@ -168,6 +194,8 @@ impl Default for Config {
             desktop_widget: "off".into(),
             desktop_icons: true,
             desktop_battery: "off".into(),
+            screen_round: None,
+            screen_round_follow: None,
             screen_corners: 0.0,
             tray: true,
             mic_guard: true,
@@ -220,6 +248,7 @@ pub struct Prefs {
     pub desktop_widget: String,
     pub desktop_icons: bool,
     pub desktop_battery: String,
+    /// The screen-corner radius in pixels, already resolved from on/off and roundness; 0 is off.
     pub screen_corners: f64,
     pub tray: bool,
     pub mic_guard: bool,
@@ -288,7 +317,7 @@ impl From<&Config> for Prefs {
             desktop_widget: c.desktop_widget.clone(),
             desktop_icons: c.desktop_icons,
             desktop_battery: c.desktop_battery.clone(),
-            screen_corners: c.screen_corners,
+            screen_corners: screen_radius(c),
             tray: c.tray,
             mic_guard: c.mic_guard,
             fullscreen_edges: c.fullscreen_edges,
@@ -429,6 +458,20 @@ mod persistence_tests {
         assert_eq!(under_island(0.0, 0.0, true), 4.0);
         assert_eq!(under_island(2.0, 4.0, true), 0.0);
         assert_eq!(under_island(0.0, f64::NAN, false), 0.0);
+    }
+
+    #[test]
+    fn screen_corners_toggle_follow_roundness_or_keep_their_own_radius() {
+        let radius = |text: &str| screen_radius(&toml::from_str::<Config>(text).unwrap());
+        assert_eq!(radius(""), 0.0);
+        assert_eq!(radius("screen_round = true"), 12.0);
+        assert_eq!(radius("screen_round = true\nui_round = 1.6"), 19.0);
+        assert_eq!(radius("screen_round = true\nui_round = 0.15"), 4.0);
+        assert_eq!(radius("screen_round = true\nscreen_round_follow = false"), 12.0);
+        assert_eq!(radius("screen_round = true\nscreen_round_follow = false\nscreen_corners = 18.0"), 18.0);
+        assert_eq!(radius("screen_round = false\nscreen_corners = 18.0"), 0.0);
+        // A radius from before the toggle keeps applying as an override.
+        assert_eq!(radius("screen_corners = 10.0\nui_round = 1.6"), 10.0);
     }
 
     #[test]

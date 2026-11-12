@@ -29,7 +29,9 @@ pub fn apply(app: &App) {
         for (v, h) in [(Edge::Top, Edge::Left), (Edge::Top, Edge::Right), (Edge::Bottom, Edge::Left), (Edge::Bottom, Edge::Right)] {
             let window = gtk::Window::new();
             window.init_layer_shell();
-            window.set_layer(Layer::Overlay);
+            // Top, not Overlay: a fullscreen game or video covers the corners like the rest of
+            // the shell.
+            window.set_layer(Layer::Top);
             window.set_namespace(Some("digit-corner"));
             window.set_keyboard_mode(KeyboardMode::None);
             window.set_exclusive_zone(-1);
