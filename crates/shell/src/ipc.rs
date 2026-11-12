@@ -230,7 +230,7 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
                     "ok".into()
                 }
                 "spaces" => {
-                    crate::spaces::toggle(app, None);
+                    crate::spaces::cycle(app);
                     "ok".into()
                 }
                 "lock" => {

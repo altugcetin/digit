@@ -117,6 +117,8 @@ struct State {
     rise: Tween,
     fade: Tween,
     ticking: bool,
+    /// The workspace Super+Tab moved to last while the panel is open.
+    cursor: Option<u64>,
 }
 
 type Shared = Rc<RefCell<State>>;
@@ -129,14 +131,42 @@ fn get(app: &Rc<App>) -> Shared {
     ONE.with(|one| one.borrow_mut().get_or_insert_with(|| build(app)).clone())
 }
 
-pub fn toggle(app: &Rc<App>, output: Option<String>) {
+/// Super+Tab: the first press opens the panel; each press while it is open goes to the next
+/// workspace that is in use, wrapping around to the first.
+pub fn cycle(app: &Rc<App>) {
     let st = get(app);
-    let open = st.borrow().open;
-    if open {
-        close(&st);
-    } else {
-        show(&st, output.or_else(compositor::focused_output));
+    if !st.borrow().open {
+        show(&st, compositor::focused_output());
+        return;
     }
+    let next = {
+        let mut s = st.borrow_mut();
+        let used: Vec<(u64, u64)> = s.cards.iter().filter_map(|c| match c.target {
+            Target::Id(id) if c.active || !c.windows.is_empty() => Some((c.idx, id)),
+            _ => None,
+        }).collect();
+        // Presses can come faster than the compositor reports the switch, so step from the
+        // card picked last rather than from the one it still calls active.
+        let at = s.cursor.or_else(|| s.cards.iter().find(|c| c.active).map(|c| c.idx));
+        let next = next_used(&used, at);
+        if let Some((idx, _)) = next {
+            s.cursor = Some(idx);
+            for c in s.cards.iter_mut() {
+                c.active = c.idx == idx;
+            }
+        }
+        next
+    };
+    if let Some((_, id)) = next {
+        compositor::focus_space(id);
+        st.borrow().paint.queue_draw();
+    }
+}
+
+/// The workspace after `at` among `used` (idx, id) pairs sorted by idx, wrapping around.
+fn next_used(used: &[(u64, u64)], at: Option<u64>) -> Option<(u64, u64)> {
+    let at = at?;
+    used.iter().copied().find(|&(idx, _)| idx > at).or_else(|| used.first().copied()).filter(|&(idx, _)| idx != at)
 }
 
 pub fn changed(_app: &App) {
@@ -189,6 +219,7 @@ fn build(app: &Rc<App>) -> Shared {
         corner: panel_corner::selected(app, Panel::Workspaces),
         margins: [0; 4],
         open: false,
+        cursor: None,
         inside: false,
         leave: 0,
         scrim: None,
@@ -402,6 +433,7 @@ fn show(st: &Shared, output: Option<String>) {
         }
         s.reposition();
         s.open = true;
+        s.cursor = None;
         s.inside = false;
         s.leave += 1;
         s.hot = None;
@@ -756,6 +788,15 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn super_tab_steps_through_used_workspaces_and_wraps() {
+        let used = [(1, 11), (2, 12), (3, 13), (4, 14)];
+        assert_eq!(next_used(&used, Some(2)), Some((3, 13)));
+        assert_eq!(next_used(&used, Some(4)), Some((1, 11)));
+        assert_eq!(next_used(&[(2, 12)], Some(2)), None);
+        assert_eq!(next_used(&used, None), None);
+    }
 
     fn space(id: u64, idx: u64, output: &str, filled: bool, active: bool) -> compositor::Space {
         compositor::Space { id, idx, output: output.into(), filled, active, focused: active }
