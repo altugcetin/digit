@@ -28,6 +28,8 @@ pub struct Config {
     pub scheme: String,
     pub tint: f64,
     pub surface: String,
+    /// Settings > Compositor > Blur behind windows; frosted shell surfaces need it.
+    pub hypr_blur: bool,
     pub search_url: String,
     pub calendars: Vec<String>,
     pub dock_mode: String,
@@ -136,6 +138,7 @@ impl Default for Config {
             scheme: "content".into(),
             tint: 0.16,
             surface: "black".into(),
+            hypr_blur: false,
             search_url: "https://duckduckgo.com/?q={}".into(),
             calendars: Vec::new(),
             dock_mode: "on".into(),
@@ -222,6 +225,8 @@ pub struct DockPrefs {
 pub struct Prefs {
     pub dock: DockPrefs,
     pub surface: String,
+    /// Blur behind windows, which frosted surfaces need.
+    pub blur: bool,
     pub hover: bool,
     pub corners: [kit::corners::Panel; 4],
     pub icon_theme: Option<String>,
@@ -290,6 +295,7 @@ impl From<&Config> for Prefs {
         Self {
             dock,
             surface: c.surface.clone(),
+            blur: c.hypr_blur,
             hover: c.hover,
             corners: kit::corners::read(&[
                 ("corner_top_left".into(), toml::Value::String(c.corner_top_left.clone())),

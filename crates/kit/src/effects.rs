@@ -25,6 +25,19 @@ pub fn reduced() -> bool {
     })
 }
 
+/// How opaque frosted shell surfaces are drawn; the compositor blurs what shows through.
+pub const FROSTED_ALPHA: f64 = 0.75;
+
+/// Whether the shell's surfaces are frosted glass: chosen under Shell surfaces, and only while
+/// the compositor blurs (Blur behind windows on, effects not reduced). Hyprland only for now: the
+/// shell asks it to blur behind each panel's shape. Otherwise the surfaces stay tinted.
+pub fn frosted(t: &toml::Table, reduced: bool) -> bool {
+    !reduced
+        && t.get("surface").and_then(toml::Value::as_str) == Some("frosted")
+        && crate::prefs::flag(t, "hypr_blur", false)
+        && crate::wm::which() == crate::wm::Wm::Hyprland
+}
+
 /// Drop the short-lived preference cache before rebuilding styles.
 pub fn invalidate() {
     REDUCED.with(|r| r.set((false, i64::MIN)));

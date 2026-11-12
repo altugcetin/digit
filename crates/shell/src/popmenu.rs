@@ -62,6 +62,7 @@ struct Menu {
     app: Rc<App>,
     window: gtk::Window,
     paint: Paint,
+    frost: crate::blur::Frost,
     title: String,
     rows: Vec<Row>,
     hover: Option<usize>,
@@ -154,7 +155,8 @@ impl Menu {
         let cfg = &self.app.cfg;
         let (w, h) = (self.width, self.shown());
         s.push_opacity(fade);
-        draw::fill(s, &draw::round(0.0, 0.0, w, h, 14.0), pal.body.alpha(1.0));
+        self.frost.set((fade > 0.02).then_some((0.0, 0.0, w, h)), 14.0, (w, h));
+        draw::fill(s, &draw::round(0.0, 0.0, w, h, 14.0), crate::app::panel(pal.body));
         let edge = gdk::RGBA::new(1.0, 1.0, 1.0, 0.07);
         s.append_border(&draw::round(0.0, 0.0, w, h, 14.0), &[1.0; 4], &[edge, edge, edge, edge]);
         s.push_rounded_clip(&draw::round(0.0, 0.0, w, h, 14.0));
@@ -255,13 +257,14 @@ fn show_inner(app: &Rc<App>, monitor: Option<gdk::Monitor>, x: f64, y: f64, titl
     let screen_w = monitor.as_ref().map(|m| m.geometry().width() as f64).unwrap_or(1920.0);
     let screen_h = monitor.as_ref().map(|m| m.geometry().height() as f64).unwrap_or(1080.0);
     let limit = (screen_h - y - 16.0).max(160.0);
-    let menu = Rc::new(RefCell::new(Menu { app: app.clone(), window: window.clone(), paint: paint.clone(), title: title.to_string(), rows, hover: None, width, fade, limit, scroll: 0.0 }));
+    let (frosted, frost) = crate::blur::Frost::wrap(&paint);
+    let menu = Rc::new(RefCell::new(Menu { app: app.clone(), window: window.clone(), paint: paint.clone(), frost, title: title.to_string(), rows, hover: None, width, fade, limit, scroll: 0.0 }));
     let h = menu.borrow().shown();
     window.set_margin(Edge::Left, x.clamp(6.0, (screen_w - width - 6.0).max(6.0)) as i32);
     window.set_margin(Edge::Top, y as i32);
     window.set_default_size(width as i32, h as i32);
     paint.set_size_request(width as i32, h as i32);
-    window.set_child(Some(&paint));
+    window.set_child(Some(&frosted));
     let weak = Rc::downgrade(&menu);
     paint.on_draw(move |s| {
         if let Some(m) = weak.upgrade() {
