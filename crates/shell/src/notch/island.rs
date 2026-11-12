@@ -210,14 +210,7 @@ impl View {
                 }
             }
             Head::Call => {
-                let x = self.lead(l0, 22.0);
-                let r = (self.rounded(self.idle_r(), 0.0) - (x - (l0 - 12.0))).clamp(4.0, 11.0);
-                let disc = graphene::Rect::new(x as f32, (mid - 11.0) as f32, 22.0, 22.0);
-                s.push_rounded_clip(&gsk::RoundedRect::from_rect(disc, r as f32));
-                s.append_color(&GREEN.alpha(0.2).rgba(), &disc);
-                s.pop();
-                self.icon(s, "call", 14.0, true, GREEN, x + 11.0, mid);
-                let tx = x + 22.0 + 10.0;
+                let tx = self.badge(s, l0, mid, 22.0, GREEN, "call", 14.0);
                 self.text(s, &self.call_time(now), 15.0, Face::Number(560), GREEN, tx, mid, (l0 + left - tx).max(0.0), start);
             }
             Head::Open => {
@@ -283,7 +276,7 @@ impl View {
                 }
             }
             Head::Peek(Peek::Osd { icon, text, level }) => {
-                self.icon(s, icon, 18.0, false, pal.ink_main, l0 + 9.0, mid);
+                self.icon(s, icon, 18.0, false, pal.ink_main, self.lead(l0, 18.0) + 9.0, mid);
                 match level {
                     Some(_) => {
                         self.text(s, text, 15.0, REST, pal.ink_meta, l0 + 24.0, mid, left - 24.0, start);
@@ -333,7 +326,7 @@ impl View {
                 s.pop();
             }
             Head::Peek(Peek::Device { name, icon, battery, on }) => {
-                self.icon(s, icon, 20.0, true, pal.ink_main, l0 + 11.0, mid);
+                self.icon(s, icon, 20.0, true, pal.ink_main, self.lead(l0, 20.0) + 10.0, mid);
                 self.text(s, name, 14.0, REST, pal.ink_meta, l0 + 28.0, mid, left - 28.0, start);
                 match (battery, on) {
                     (Some(b), true) => {
@@ -361,7 +354,7 @@ impl View {
                 }
             }
             Head::Peek(Peek::Output { name, icon }) => {
-                self.icon(s, icon, 20.0, true, ACTION_BLUE, l0 + 11.0, mid);
+                self.icon(s, icon, 20.0, true, ACTION_BLUE, self.lead(l0, 20.0) + 10.0, mid);
                 self.text(s, name, 14.0, POINT, pal.ink_main, r0 - 60.0, mid, right + 60.0, end);
             }
             Head::Peek(Peek::Privacy { light, who }) => {
@@ -370,18 +363,29 @@ impl View {
                     crate::privacy::Light::Mic => ORANGE,
                     crate::privacy::Light::Screen | crate::privacy::Light::Record => RED,
                 };
-                let disc = graphene::Rect::new(l0 as f32, (mid - 12.0) as f32, 24.0, 24.0);
-                s.push_rounded_clip(&gsk::RoundedRect::from_rect(disc, 12.0));
-                s.append_color(&color.alpha(0.2).rgba(), &disc);
-                s.pop();
-                self.icon(s, light.icon(), 16.0, true, color, l0 + 12.0, mid);
-                self.text(s, light.label(), 15.0, REST, pal.ink_main, l0 + 32.0, mid, left - 32.0, start);
+                let tx = self.badge(s, l0, mid, 22.0, color, light.icon(), 14.0);
+                self.text(s, light.label(), 15.0, REST, pal.ink_main, tx, mid, (l0 + left - tx).max(0.0), start);
                 self.text(s, who, 15.0, POINT, color.mix(pal.ink_main, 0.55), r0, mid, right, end);
             }
             Head::Peek(Peek::Note { text }) => {
                 self.text(s, text, 15.0, POINT, pal.ink_main, l0, mid, left, start);
             }
         }
+    }
+
+    /// A tinted disc with an icon at the island's left edge, as far from it as from the top and
+    /// bottom and rounded to match the island's corner (calls, recording, camera and mic).
+    /// Returns where the text beside it starts.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn badge(&self, s: &gtk::Snapshot, l0: f64, mid: f64, size: f64, color: Rgb, icon: &str, px: f64) -> f64 {
+        let x = self.lead(l0, size);
+        let r = (self.rounded(self.idle_r(), 0.0) - (x - (l0 - 12.0))).clamp(4.0, size / 2.0);
+        let disc = graphene::Rect::new(x as f32, (mid - size / 2.0) as f32, size as f32, size as f32);
+        s.push_rounded_clip(&gsk::RoundedRect::from_rect(disc, r as f32));
+        s.append_color(&color.alpha(0.2).rgba(), &disc);
+        s.pop();
+        self.icon(s, icon, px, true, color, x + size / 2.0, mid);
+        x + size + 10.0
     }
 
     #[allow(clippy::too_many_arguments)]

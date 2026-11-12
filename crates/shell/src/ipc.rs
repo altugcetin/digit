@@ -165,9 +165,10 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
                 "unplugged" => Peek::Device { name: "AirPods Pro".into(), icon: "headphones", battery: None, on: false },
                 "output" => Peek::Output { name: "AirPods Pro".into(), icon: "headphones" },
                 "dnd" => Peek::Mode { icon: "do_not_disturb_on", label: "Do not disturb", on: true },
+                "recording" => Peek::Privacy { light: crate::privacy::Light::Record, who: "Started".into() },
                 "keyboard" => Peek::Osd { icon: "keyboard", text: "Turkish".into(), level: None },
                 "brightness" => Peek::Osd { icon: "light_mode", text: "Brightness".into(), level: Some(0.6) },
-                _ => return "demo battery | gadget | device | unplugged | output | dnd | keyboard | brightness".into(),
+                _ => return "demo battery | gadget | device | unplugged | output | dnd | keyboard | brightness | recording".into(),
             };
             app.request(peek);
             "ok".into()
