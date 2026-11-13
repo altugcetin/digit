@@ -687,6 +687,7 @@ fn shell_look(body: &gtk::Box, t: &toml::Table) {
     look.append(&row);
     let glyphs = kit::style::GLYPHS;
     choice(&look, "category", "Glyph style", "The small symbols across Digit, like the ones in this list", "ui_glyphs", &glyphs, &prefs::get_str(t, "ui_glyphs", "rounded"));
+    choice(&look, "palette", "Glyph backgrounds", "The colored squares behind the symbols in Settings, Files and Store", "ui_tiles", &kit::style::TILES, &prefs::get_str(t, "ui_tiles", "colorful"));
     cursor(&look, t);
 }
 

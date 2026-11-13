@@ -248,11 +248,25 @@ fn reduction_css(effects: bool, motion: bool) -> String {
     css
 }
 
+/// Icon tile colors: Colorful keeps each glyph's own hue, Accent paints them all in the accent,
+/// Plain leaves a faint tile with the glyph in the text color. Doubled class to win over the hues.
+pub const TILES: [(&str, &str); 3] = [("colorful", "Colorful"), ("accent", "Accent"), ("plain", "Plain")];
+
+fn tile_css(choice: &str, i: &Ink) -> String {
+    let (main, accent, on_accent) = (&i.main, &i.accent, &i.on_accent);
+    match choice {
+        "accent" => format!(".tile.tile {{ background: linear-gradient(mix({accent}, #ffffff, 0.14), {accent}); color: {on_accent}; }}"),
+        "plain" => format!(".tile.tile {{ background: alpha({main}, 0.08); color: {main}; box-shadow: none; }}"),
+        _ => String::new(),
+    }
+}
+
 pub fn css() -> String {
     let i = ink();
     let (main, meta, accent, on_accent, risk) = (&i.main, &i.meta, &i.accent, &i.on_accent, &i.risk);
     let font = crate::prefs::text(&crate::prefs::read(), "font", "Readex Pro").replace(['"', '\\', ';', '{', '}'], "");
     let glyphs = glyph_family();
+    let tiles = tile_css(&crate::prefs::text(&crate::prefs::read(), "ui_tiles", "colorful"), &i);
     let lk = look();
     let [base, card, raised, pop, field] = surfaces(&lk, accent);
     let px = |v: f64| format!("{}px", (v * lk.round).round());
@@ -361,6 +375,7 @@ entry.side-search {{ margin: 0 2px 10px 2px; }}
 .tile.yellow {{ background: linear-gradient(#ffe14d, #f5bd00); color: #1c1c1e; }}
 .tile.red {{ background: linear-gradient(#ff6b61, #e8352b); }}
 .tile.gray {{ background: linear-gradient(#a1a1a8, #6e6e75); }}
+{tiles}
 .page {{ padding: 22px 40px 48px 32px; }}
 .title {{ font-size: 28px; font-weight: 650; }}
 .lead {{ color: {meta}; font-size: 14px; margin-bottom: 8px; }}
@@ -449,6 +464,14 @@ scrollbar slider:active {{ background: alpha({main}, 0.5); }}
 #[cfg(test)]
 mod glyph_tests {
     use super::*;
+
+    #[test]
+    fn glyph_backgrounds_keep_hues_or_override_them_all() {
+        let i = Ink { main: "#ffffff".into(), meta: "#999999".into(), accent: "#4fb3ff".into(), on_accent: "#000000".into(), risk: "#ff0000".into() };
+        assert_eq!(tile_css("colorful", &i), "");
+        assert!(tile_css("accent", &i).contains(".tile.tile") && tile_css("accent", &i).contains("#4fb3ff"));
+        assert!(tile_css("plain", &i).contains("box-shadow: none"));
+    }
     #[test]
     fn effects_and_motion_css_are_independent() {
         assert_eq!(reduction_css(false, false), "");
