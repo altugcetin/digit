@@ -43,6 +43,12 @@ struct Files {
     view_btn: gtk::Button,
     side: Rc<side::Side>,
     side_rev: gtk::Revealer,
+    /// The sidebar was closed because the window got narrow, so it opens again when it widens.
+    side_auto: Cell<bool>,
+    /// Likewise for the info panel.
+    info_auto: Cell<bool>,
+    /// A narrow window shows search as this button until it's used.
+    search_btn: gtk::Button,
     info: Rc<info::Info>,
     info_rev: gtk::Revealer,
     jobs: gtk::Box,
@@ -97,6 +103,59 @@ fn other() -> Option<Rc<Pane>> {
         return None;
     }
     columns.get(1 - f.current.get().min(1))?.tab().map(|t| t.pane.clone())
+}
+
+const SIDE_HIDE: f64 = 640.0;
+const SIDE_SHOW: f64 = 720.0;
+const INFO_HIDE: f64 = 820.0;
+const INFO_SHOW: f64 = 900.0;
+const SEARCH_FOLD: f64 = 620.0;
+
+/// Fits the window's content to its width once it's laid out: list columns give way first, then
+/// the sidebar closes, so a narrow window never cuts the view off.
+fn fit_later(f: &Rc<Files>) {
+    let weak = Rc::downgrade(f);
+    glib::idle_add_local_once(move || {
+        if let Some(f) = weak.upgrade() {
+            fit(&f);
+        }
+    });
+}
+
+fn fit(f: &Rc<Files>) {
+    let (w, _) = f.window.default_size();
+    let w = if w > 1 { w as f64 } else { f.window.width() as f64 };
+    if w <= 1.0 {
+        return;
+    }
+    if w < SIDE_HIDE && f.side_rev.reveals_child() {
+        f.side_rev.set_reveal_child(false);
+        f.side_auto.set(true);
+    } else if w >= SIDE_SHOW && f.side_auto.get() {
+        f.side_auto.set(false);
+        f.side_rev.set_reveal_child(true);
+    }
+    if w < INFO_HIDE && f.info_rev.reveals_child() {
+        f.info_rev.set_reveal_child(false);
+        f.info_auto.set(true);
+    } else if w >= INFO_SHOW && f.info_auto.get() {
+        f.info_auto.set(false);
+        f.info_rev.set_reveal_child(true);
+    }
+    // Search folds into a button while the window is narrow, unless it's in use.
+    let used = !f.search.text().is_empty() || f.search.has_focus() || f.search.focus_child().is_some();
+    let fold = w < SEARCH_FOLD && !used;
+    f.search.set_visible(!fold);
+    f.search_btn.set_visible(fold);
+    let side = if f.side_rev.reveals_child() { 208.0 } else { 0.0 };
+    let info = if f.info_rev.reveals_child() { f.info_rev.width().max(260) as f64 } else { 0.0 };
+    let columns = f.columns.borrow();
+    let each = (w - side - info) / columns.len().max(1) as f64;
+    for c in columns.iter() {
+        for t in c.tabs.borrow().iter() {
+            t.pane.fit_columns(each);
+        }
+    }
 }
 
 fn panes() -> Vec<Rc<Pane>> {
@@ -290,7 +349,10 @@ fn sync() {
     f.view_btn.set_child(Some(&kit::ui::sym(if p.view() == View::Grid { "view_list" } else { "grid_view" })));
     crumbs(&f, &p.location());
     f.side.mark(&p.location());
-    f.trash_bar.set_reveal_child(ops::pane_of_trash(&p));
+    let trash = ops::pane_of_trash(&p);
+    // Shown only in Trash: even folded away, its row would keep the window from getting narrow.
+    f.trash_bar.set_visible(trash);
+    f.trash_bar.set_reveal_child(trash);
     if f.info_rev.reveals_child() {
         f.info.show(&p.selected(), &p.location());
     }
@@ -404,6 +466,9 @@ fn complete() {
 pub fn new_tab(file: &gio::File) {
     if let Some(c) = column() {
         add_tab(&c, file);
+    }
+    if let Some(f) = files() {
+        fit_later(&f);
     }
 }
 
@@ -565,6 +630,7 @@ fn toggle_split() {
     let right = f.columns.borrow().get(1).cloned();
     if let Some(right) = right {
         close_column(&right);
+        fit_later(&f);
         return;
     }
     let loc = active().map(|p| p.location()).unwrap_or_else(|| gio::File::for_path(glib::home_dir()));
@@ -577,6 +643,7 @@ fn toggle_split() {
     f.columns.borrow_mut().push(c.clone());
     f.current.set(1);
     add_tab(&c, &loc);
+    fit_later(&f);
 }
 
 /// Ctrl+Tab and Ctrl+Shift+Tab walk the tabs of the side being worked in.
@@ -596,7 +663,9 @@ fn cycle_tab(by: i32) {
 fn toggle_info() {
     let Some(f) = files() else { return };
     let on = !f.info_rev.reveals_child();
+    f.info_auto.set(false);
     f.info_rev.set_reveal_child(on);
+    fit_later(&f);
     let _ = kit::prefs::set("files_info", toml::Value::Boolean(on));
     if on {
         if let Some(p) = active() {
@@ -638,12 +707,16 @@ fn actions(window: &gtk::ApplicationWindow) {
     action(window, "info", toggle_info);
     action(window, "sidebar", || {
         if let Some(f) = files() {
+            f.side_auto.set(false);
             f.side_rev.set_reveal_child(!f.side_rev.reveals_child());
+            fit_later(&f);
         }
     });
     action(window, "location", edit_path);
     action(window, "search", || {
         if let Some(f) = files() {
+            f.search.set_visible(true);
+            f.search_btn.set_visible(false);
             f.search.grab_focus();
         }
     });
@@ -1213,7 +1286,8 @@ fn header(window: &gtk::ApplicationWindow) -> (gtk::Widget, gtk::Box, gtk::Stack
     let search = gtk::SearchEntry::new();
     search.add_css_class("search");
     search.set_placeholder_text(Some("Search"));
-    search.set_width_chars(18);
+    // Narrow by default so a small window still fits; it widens as you type.
+    search.set_width_chars(10);
     // Pane debounces enumeration; observe edits immediately to cancel old IO.
     search.connect_changed(|s| {
         if let Some(p) = active() {
@@ -1371,6 +1445,14 @@ fn build(app: &gtk::Application, start: &gio::File) -> Rc<Files> {
     window.add_css_class("digit-files");
     actions(&window);
     let (head, crumbs, path_stack, path_entry, search, [back, forward, up, view_btn]) = header(&window);
+    // In a narrow window the search field folds into this button.
+    let search_btn = kit::app::control("search", "");
+    search_btn.set_tooltip_text(Some("Search (Ctrl+F)"));
+    search_btn.set_visible(false);
+    search_btn.set_action_name(Some("win.search"));
+    if let Some(bar) = search.parent().and_downcast::<gtk::Box>() {
+        bar.insert_child_after(&search_btn, Some(&search));
+    }
     let side = side::Side::new();
     let side_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     side_box.add_css_class("side");
@@ -1397,7 +1479,9 @@ fn build(app: &gtk::Application, start: &gio::File) -> Rc<Files> {
     info_rev.set_reveal_child(kit::prefs::flag(&kit::prefs::read(), "files_info", false));
     let trash_bar_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     trash_bar_box.add_css_class("trash-bar");
-    trash_bar_box.append(&kit::ui::text("Items in the trash can be restored to where they were.", "sub"));
+    let trash_note = kit::ui::text("Items in the trash can be restored to where they were.", "sub");
+    trash_note.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    trash_bar_box.append(&trash_note);
     let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
     trash_bar_box.append(&spacer);
@@ -1409,6 +1493,7 @@ fn build(app: &gtk::Application, start: &gio::File) -> Rc<Files> {
     trash_bar_box.append(&eb);
     let trash_bar = gtk::Revealer::new();
     trash_bar.set_child(Some(&trash_bar_box));
+    trash_bar.set_visible(false);
     let center = gtk::Box::new(gtk::Orientation::Vertical, 0);
     center.append(&trash_bar);
     center.append(&split);
@@ -1466,6 +1551,9 @@ fn build(app: &gtk::Application, start: &gio::File) -> Rc<Files> {
         view_btn,
         side,
         side_rev,
+        side_auto: Cell::new(false),
+        info_auto: Cell::new(false),
+        search_btn,
         info,
         info_rev,
         jobs,
@@ -1492,7 +1580,24 @@ fn build(app: &gtk::Application, start: &gio::File) -> Rc<Files> {
             FILES.with(|s| *s.borrow_mut() = focused);
         }
     });
+    // An empty search folds back into its button when you leave it in a narrow window.
+    let leave = gtk::EventControllerFocus::new();
+    let weak = Rc::downgrade(&f);
+    leave.connect_leave(move |_| {
+        if let Some(f) = weak.upgrade() {
+            fit_later(&f);
+        }
+    });
+    f.search.add_controller(leave);
+    // Fit the content as the window is resized (or tiled narrow).
+    let weak = Rc::downgrade(&f);
+    window.connect_default_width_notify(move |_| {
+        if let Some(f) = weak.upgrade() {
+            fit_later(&f);
+        }
+    });
     new_tab(start);
+    fit_later(&f);
     apply_sort(&kit::prefs::text(&kit::prefs::read(), "files_sort", "name"));
     window.connect_close_request(|_| {
         look::close();
