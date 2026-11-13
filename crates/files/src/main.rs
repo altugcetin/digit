@@ -183,6 +183,15 @@ pub fn select_later(file: &gio::File) {
     }
 }
 
+/// Renames `file` in place once it shows up in the active pane (a folder just created).
+pub fn rename_later(file: &gio::File) {
+    let Some(p) = active() else { return };
+    let (Some(parent), Some(name)) = (file.parent(), file.basename()) else { return };
+    if parent.equal(&p.location()) && let Some(n) = name.to_str() {
+        p.rename_when_listed(n);
+    }
+}
+
 pub fn go(file: &gio::File) {
     if let Some(p) = active() {
         p.go(file, true);
@@ -991,7 +1000,7 @@ pub fn menu(p: &Rc<Pane>, at: Option<(f64, f64)>, items: bool) {
         m.push(danger("delete_sweep", "Empty Trash", "win.empty-trash"));
         m.push(act("select_all", "Select All", "win.select-all"));
     } else {
-        m.push(act("create_new_folder", "New Folder…", "win.new-folder"));
+        m.push(act("create_new_folder", "New Folder", "win.new-folder"));
         let mut files = vec![act_with("note_add", "Empty File", "win.new-file", "".to_variant())];
         for t in ops::templates() {
             let label = t.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
