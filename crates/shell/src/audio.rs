@@ -335,6 +335,76 @@ impl Link {
     }
 }
 
+/// An output or input device to choose between.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Device {
+    /// The server's name for it, used to make it the default.
+    pub name: String,
+    pub desc: String,
+    pub default: bool,
+    /// A Material Symbols glyph for it: speaker, headphones, mic, a screen.
+    pub glyph: &'static str,
+}
+
+fn glyph_for(input: bool, props: &protocol::Props, desc: &str) -> &'static str {
+    let text = |p: protocol::Prop| String::from_utf8_lossy(props.get(p).unwrap_or_default()).trim_end_matches('\0').to_lowercase();
+    let form = text(protocol::Prop::DeviceFormFactor);
+    let bus = text(protocol::Prop::DeviceBus);
+    let desc = desc.to_lowercase();
+    let worn = matches!(form.as_str(), "headphone" | "headset" | "hands-free") || bus == "bluetooth" || ["headphone", "headset", "buds", "airpods"].iter().any(|w| desc.contains(w));
+    match (input, worn) {
+        (_, true) => "headphones",
+        (true, false) => "mic",
+        (false, false) if ["hdmi", "displayport"].iter().any(|w| desc.contains(w)) => "tv",
+        (false, false) => "speaker",
+    }
+}
+
+impl Link {
+    fn devices(&mut self, input: bool) -> Option<Vec<Device>> {
+        self.send(protocol::Command::GetServerInfo)?;
+        let (_, server) = protocol::read_reply_message::<protocol::ServerInfo>(&mut self.sock, self.version).ok()?;
+        let named = |name: &std::ffi::CStr, desc: &Option<CString>| (name.to_string_lossy().into_owned(), desc.as_ref().map(|d| d.to_string_lossy().into_owned()).unwrap_or_else(|| name.to_string_lossy().into_owned()));
+        let mut out = Vec::new();
+        if input {
+            self.send(protocol::Command::GetSourceInfoList)?;
+            let (_, sources) = protocol::read_reply_message::<protocol::SourceInfoList>(&mut self.sock, self.version).ok()?;
+            let default = server.default_source_name.as_ref().map(|d| d.to_string_lossy().into_owned());
+            // A sink's monitor isn't a microphone.
+            for s in sources.iter().filter(|s| s.monitor_of_sink_index.is_none()) {
+                let (name, desc) = named(&s.name, &s.description);
+                out.push(Device { default: default.as_deref() == Some(name.as_str()), glyph: glyph_for(true, &s.props, &desc), name, desc });
+            }
+        } else {
+            self.send(protocol::Command::GetSinkInfoList)?;
+            let (_, sinks) = protocol::read_reply_message::<protocol::SinkInfoList>(&mut self.sock, self.version).ok()?;
+            let default = server.default_sink_name.as_ref().map(|d| d.to_string_lossy().into_owned());
+            for s in sinks.iter() {
+                let (name, desc) = named(&s.name, &s.description);
+                out.push(Device { default: default.as_deref() == Some(name.as_str()), glyph: glyph_for(false, &s.props, &desc), name, desc });
+            }
+        }
+        Some(out)
+    }
+
+    fn set_default(&mut self, input: bool, name: &str) -> Option<()> {
+        let name = CString::new(name).ok()?;
+        self.send(if input { protocol::Command::SetDefaultSource(name) } else { protocol::Command::SetDefaultSink(name) })?;
+        protocol::read_ack_message(&mut self.sock).ok().map(|_| ())
+    }
+}
+
+/// The output (or input) devices, the default one marked. Blocks; run it off the main thread.
+pub fn devices(input: bool) -> Vec<Device> {
+    Link::open("digit-mixer").and_then(|mut l| l.devices(input)).unwrap_or_default()
+}
+
+/// Makes a device the default output (or input); apps following the default move with it.
+/// Blocks; run it off the main thread.
+pub fn set_default(input: bool, name: &str) -> bool {
+    Link::open("digit-mixer").and_then(|mut l| l.set_default(input, name)).is_some()
+}
+
 /// Reads the output (or input) device and the app streams on it. Blocks; run it off the main thread.
 pub fn mix(input: bool) -> Option<Mix> {
     Link::open("digit-mixer")?.mix(input)

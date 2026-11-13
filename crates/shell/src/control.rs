@@ -17,6 +17,7 @@ use std::rc::{Rc, Weak};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
 mod detail;
+mod sound;
 
 const W: f64 = 380.0;
 use crate::metrics::{FILLET, PANEL_PAD as PAD, PANEL_RADIUS as RADIUS};
@@ -100,6 +101,12 @@ enum Hit {
     Row(usize),
     Close(usize),
     Detail(detail::D),
+    /// The sound details: the chevron, an output or input device, an app's mute and slider.
+    SoundMore,
+    Out(usize),
+    In(usize),
+    AppMute(usize),
+    AppLevel(usize),
 }
 
 #[derive(Clone, Default)]
@@ -112,6 +119,48 @@ struct Net {
 }
 
 const RED: Rgb = Rgb::new(1.0, 0.27, 0.23);
+/// How quickly a wheel glide closes in on its target (as `kit::scroll`), and how long a touchpad
+/// fling coasts.
+const WHEEL_TAU: f64 = 70_000.0;
+const FLING_TAU: f64 = 325_000.0;
+
+/// Scrolling still to travel; each frame takes a share of it, so it eases out.
+#[derive(Default)]
+struct Glide {
+    left: f64,
+    tau: f64,
+    at: i64,
+}
+
+impl Glide {
+    fn push(&mut self, dy: f64, tau: f64, now: i64) {
+        // Turning back drops what was left in the old direction.
+        if self.left * dy < 0.0 {
+            self.left = 0.0;
+        }
+        if self.left == 0.0 {
+            self.at = now;
+        }
+        self.left += dy;
+        self.tau = tau;
+    }
+
+    /// The part to move by at `now`.
+    fn take(&mut self, now: i64) -> f64 {
+        let dt = (now - self.at).max(0) as f64;
+        self.at = now;
+        let mut part = self.left * (1.0 - (-dt / self.tau.max(1.0)).exp());
+        if (self.left - part).abs() < 0.5 {
+            part = self.left;
+        }
+        self.left -= part;
+        part
+    }
+
+    fn stop(&mut self) {
+        self.left = 0.0;
+    }
+}
 const CELL: f64 = 96.0;
 const PER_ROW: usize = 4;
 
@@ -140,12 +189,16 @@ struct State {
     fade: Tween,
     height: Tween,
     scroll: f64,
+    /// Scrolling still to travel and how fast it closes in, as in the apps (`kit::scroll`): a
+    /// wheel notch adds a step that glides in; a touchpad fling coasts out more slowly.
+    glide: Glide,
     hover: Option<Hit>,
     dragging: bool,
     hits: Vec<(Hit, f64, f64, f64, f64)>,
     slider: (f64, f64),
     region: (i32, i32, i32, i32),
     frost: crate::blur::Frost,
+    sound: sound::Sound,
     ticking: bool,
     polling: bool,
     scrim: Option<gtk::Window>,
@@ -167,6 +220,14 @@ pub fn show_on(app: &Rc<App>, output: Option<String>) {
     });
     if !control.0.borrow().open {
         control.open_on(output);
+    }
+}
+
+/// Opens Control Center with its sound details shown (`digit msg control sound`).
+pub fn show_sound(app: &Rc<App>) {
+    show_on(app, compositor::focused_output());
+    if let Some(c) = app.control.borrow().clone() && !c.0.borrow().sound.open {
+        c.toggle_sound();
     }
 }
 
@@ -277,12 +338,14 @@ impl Control {
             fade: Tween::still(0.0),
             height: Tween::still(0.0),
             scroll: 0.0,
+            glide: Glide::default(),
             hover: None,
             dragging: false,
             hits: Vec::new(),
             slider: (0.0, 0.0),
             region: (0, 0, 0, 0),
             frost,
+            sound: sound::Sound::default(),
             ticking: false,
             polling: false,
             scrim: None,
@@ -322,9 +385,13 @@ impl Control {
         drag.connect_drag_begin(move |_, x, y| {
             if let Some(s) = weak.upgrade() {
                 let me = Control(s);
-                if me.hit(x, y) == Some(Hit::Slider) {
-                    me.0.borrow_mut().dragging = true;
-                    me.slide(x);
+                match me.hit(x, y) {
+                    Some(Hit::Slider) => {
+                        me.0.borrow_mut().dragging = true;
+                        me.slide(x);
+                    }
+                    Some(Hit::AppLevel(i)) => me.grab_app(i, x),
+                    _ => {}
                 }
             }
         });
@@ -334,6 +401,8 @@ impl Control {
                 let me = Control(s);
                 if me.0.borrow().dragging {
                     me.slide(x + dx);
+                } else if me.sliding_app() {
+                    me.slide_app(x + dx);
                 }
             }
         });
@@ -343,6 +412,10 @@ impl Control {
             let me = Control(s);
             let was = std::mem::replace(&mut me.0.borrow_mut().dragging, false);
             if was {
+                return;
+            }
+            if me.sliding_app() {
+                me.drop_app();
                 return;
             }
             if dx.abs() > 6.0 || dy.abs() > 6.0 {
@@ -411,16 +484,37 @@ impl Control {
             });
         });
         canvas.add_controller(away);
-        let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+        let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL | gtk::EventControllerScrollFlags::KINETIC);
         let weak = Rc::downgrade(&self.0);
-        wheel.connect_scroll(move |_, _, dy| {
+        wheel.connect_scroll(move |c, _, dy| {
             if let Some(s) = weak.upgrade() {
-                let mut st = s.borrow_mut();
-                let limit = (st.content() - st.max_h).max(0.0);
-                st.scroll = (st.scroll + dy * 48.0).clamp(0.0, limit);
-                st.canvas.queue_draw();
+                let smooth = kit::scroll::enabled();
+                {
+                    let mut st = s.borrow_mut();
+                    let now = glib::monotonic_time();
+                    if c.unit() == gdk::ScrollUnit::Wheel && smooth {
+                        // A notch adds GTK's own wheel step to what is still to travel.
+                        let step = st.max_h.powf(2.0 / 3.0);
+                        st.glide.push(dy * step, WHEEL_TAU, now);
+                    } else {
+                        // Touchpads (or no smooth scrolling): follow the fingers exactly.
+                        let step = if c.unit() == gdk::ScrollUnit::Wheel { st.max_h.powf(2.0 / 3.0) } else { 1.0 };
+                        st.glide.stop();
+                        st.scroll_by(dy * step);
+                    }
+                }
+                Control(s).kick();
             }
             glib::Propagation::Stop
+        });
+        let weak = Rc::downgrade(&self.0);
+        wheel.connect_decelerate(move |_, _, vy| {
+            // Fingers lifted mid-swipe: coast on with the swipe's speed, slowing down.
+            let Some(s) = weak.upgrade() else { return };
+            if kit::scroll::enabled() {
+                s.borrow_mut().glide.push(vy * FLING_TAU / 1e6, FLING_TAU, glib::monotonic_time());
+                Control(s).kick();
+            }
         });
         canvas.add_controller(wheel);
     }
@@ -460,9 +554,12 @@ impl Control {
             s.reposition();
             s.open = true;
             s.scroll = 0.0;
+            s.glide.stop();
             s.expand = None;
             s.pass = None;
             s.reveal.set(0.0);
+            s.sound.open = false;
+            s.sound.reveal.set(0.0);
             let now = glib::monotonic_time();
             s.rise.go(1.0, now, 420, motion::Curve::new(0.16, 1.0, 0.3, 1.0));
             s.fade.after(1.0, now, 60, 220, motion::STANDARD);
@@ -480,6 +577,8 @@ impl Control {
         let window = self.0.borrow().window.clone();
         window.present();
         audio::ask(Ask::Read);
+        // Read the sound devices and apps now, so the sound details open without a hitch.
+        self.refresh_sound();
         self.poll();
         self.refresh();
         self.sample();
@@ -595,6 +694,7 @@ impl Control {
         }
         let limit = (s.content() - s.max_h).max(0.0);
         s.scroll = s.scroll.min(limit);
+
     }
 
     fn hit(&self, x: f64, y: f64) -> Option<Hit> {
@@ -686,6 +786,7 @@ impl Control {
                 self.changed();
             }
             Some(Hit::Detail(d)) => self.act(d),
+            Some(h @ (Hit::SoundMore | Hit::Out(_) | Hit::In(_) | Hit::AppMute(_) | Hit::AppLevel(_))) => self.sound_act(h),
             Some(Hit::Close(i)) => self.forget(i, false),
             Some(Hit::Row(i)) => self.forget(i, true),
             Some(Hit::Slider) | None => {
@@ -778,6 +879,12 @@ impl State {
         self.hits.clear();
     }
 
+    /// Scrolls by `dy`, within the content.
+    fn scroll_by(&mut self, dy: f64) {
+        let limit = (self.content() - self.max_h).max(0.0);
+        self.scroll = (self.scroll + dy).clamp(0.0, limit);
+    }
+
     fn surface_size(&self) -> (f64, f64) {
         let (w, h) = (self.canvas.width(), self.canvas.height());
         (if w > 1 { w as f64 } else { W + FILLET }, if h > 1 { h as f64 } else { self.max_h + FILLET })
@@ -817,7 +924,8 @@ impl State {
         let batteries = if cells == 0 { 0.0 } else { HEAD + cells.div_ceil(PER_ROW) as f64 * CELL + 6.0 };
         let system = HEAD + CELL + 6.0;
         let weather = if self.app.weather.borrow().is_some() { 58.0 } else { 0.0 };
-        PAD + weather + tiles + detail + 14.0 + batteries + system + SOUND + 16.0 + HEAD + list + PAD
+        let sound = self.sound_height() * self.sound.reveal.target();
+        PAD + weather + tiles + detail + 14.0 + batteries + system + SOUND + sound + 16.0 + HEAD + list + PAD
     }
 
     fn step(&mut self, now: i64) -> bool {
@@ -839,7 +947,16 @@ impl State {
         // The blur follows the panel through its slide, from its first visible frame to its last.
         let shown = self.fade.value(now) > 0.02;
         self.frost.set_corners(shown.then_some((p.x, p.y, p.w, p.h)), panel_corner::radii(self.corner, RADIUS * self.app.round()), self.surface_size());
-        let moving = [&self.rise, &self.fade, &self.height, &self.reveal].iter().any(|t| !t.settled(now)) || self.app.palette_moving(now);
+        if self.glide.left != 0.0 {
+            let part = self.glide.take(now);
+            let before = self.scroll;
+            self.scroll_by(part);
+            // Ran into the top or the bottom: nothing left to travel.
+            if (self.scroll - before).abs() < 0.01 && part.abs() >= 0.01 {
+                self.glide.stop();
+            }
+        }
+        let moving = [&self.rise, &self.fade, &self.height, &self.reveal, &self.sound.reveal].iter().any(|t| !t.settled(now)) || self.glide.left != 0.0 || self.app.palette_moving(now);
         if !moving && !self.open && self.window.is_visible() {
             let window = self.window.clone();
             glib::idle_add_local_once(move || window.set_visible(false));
@@ -922,7 +1039,8 @@ impl State {
         let left = right - W;
         let x0 = left + PAD;
         let inner = W - 2.0 * PAD;
-        let mut y = bottom - h + PAD - self.scroll;
+        // Whole pixels, so text stays crisp while it scrolls.
+        let mut y = bottom - h + PAD - self.scroll.round();
         let mut hits: Vec<(Hit, f64, f64, f64, f64)> = Vec::new();
         let weather = self.app.weather.borrow().clone();
         if let Some(wx) = weather {
@@ -1013,7 +1131,7 @@ impl State {
         draw::icon(s, &canvas, &cfg, speaker, 20.0, true, if muted { pal.ink_meta } else { pal.ink_main }, x0 + 18.0, mid);
         hits.push((Hit::Mute, x0, mid - 18.0 + shift, 36.0, 36.0));
         let sx = x0 + 50.0;
-        let sw = inner - 50.0 - 48.0;
+        let sw = inner - 50.0 - 48.0 - 30.0;
         let shown = level.clamp(0.0, 1.0);
         let track = rounded(sx, mid - 3.0, sw, 6.0, 3.0);
         fill(s, &track, pal.ink_main.alpha(0.15));
@@ -1024,7 +1142,10 @@ impl State {
         draw::text(s, &canvas, &cfg, &format!("{}%", (level * 100.0).round()), 13.0, Face::Number(500), pal.ink_meta, sx + sw + 8.0, mid, 40.0, pango::Alignment::Right);
         hits.push((Hit::Slider, sx - 10.0, mid - 14.0 + shift, sw + 20.0, 28.0));
         self.slider = (sx, sw);
-        y += SOUND + 16.0;
+        self.draw_sound_more(s, x0 + inner - 15.0, mid, shift, &mut hits);
+        y += SOUND;
+        y += self.draw_sound(s, now, x0, y, inner, shift, &mut hits);
+        y += 16.0;
         let history = self.app.history.borrow().clone();
         draw::text(s, &canvas, &cfg, "Notifications", 14.0, Face::Text(600), pal.ink_main, x0, y + HEAD / 2.0, 200.0, pango::Alignment::Left);
         if !history.is_empty() {

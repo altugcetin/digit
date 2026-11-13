@@ -71,7 +71,7 @@ async fn focused_output() -> Option<String> {
     gio::spawn_blocking(kit::wm::focused_output).await.ok().flatten()
 }
 
-const HELP: &str = "open | close | toggle | tray | phone | note <words> | dnd [on|off|toggle|status] | night [on|off|toggle|status] | awake [on|off|toggle|status] | volume [up|down|mute|<0-150>] | mic | brightness up|down | screenshot | pick | lock [preview] | session | control | spaces | clipboard | settings | launcher [text] | menu <logo|app|window|date|N|traymenu N> | dock show|hide|toggle | trash-fly <pid> <x> <y> <size> [icon...] | layout <name> | wallpaper <image> | demo <peek> | gamebar [toggle|open|close|status] | record [panel|start|stop|toggle|pause|replay [on|off|toggle]|replay-save [seconds]|stream [on|off|toggle]|settings|status] | status | key <action>";
+const HELP: &str = "open | close | toggle | tray | phone | note <words> | dnd [on|off|toggle|status] | night [on|off|toggle|status] | awake [on|off|toggle|status] | volume [up|down|mute|<0-150>] | mic | brightness up|down | screenshot | pick | lock [preview] | session | control [sound] | spaces | clipboard | settings | launcher [text] | menu <logo|app|window|date|N|traymenu N> | dock show|hide|toggle | trash-fly <pid> <x> <y> <size> [icon...] | layout <name> | wallpaper <image> | demo <peek> | gamebar [toggle|open|close|status] | record [panel|start|stop|toggle|pause|replay [on|off|toggle]|replay-save [seconds]|stream [on|off|toggle]|settings|status] | status | key <action>";
 
 async fn handle(app: &Rc<App>, words: &[String]) -> String {
     let verb = words.first().map(String::as_str).unwrap_or("");
@@ -333,6 +333,10 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
             Ok(_) => "ok".into(),
             Err(_) => "digit-snap is missing".into(),
         },
+        "control" if words.get(1).map(String::as_str) == Some("sound") => {
+            crate::control::show_sound(app);
+            "ok".into()
+        }
         "control" | "spaces" | "session" | "clipboard" | "settings" => Box::pin(handle(app, &["key".to_string(), verb.to_string()])).await,
         "renderer" => crate::gpu::describe().to_string(),
         "status" => {
