@@ -143,6 +143,25 @@ fn card(list: &gtk::Box, rules: &Rules, i: usize) -> gtk::Box {
     switch("picture_in_picture", "Float", "Opens floating, above the tiled windows", rule.float, |r, on| r.float = on);
     switch("fullscreen", "Open maximized", "", rule.maximize, |r, on| r.maximize = on);
     switch("fit_screen", "Open fullscreen", "", rule.fullscreen, |r, on| r.fullscreen = on);
+    switch("visibility_off", "Hide from screen sharing", "Shows blank in screen shares and recordings", rule.no_share, |r, on| r.no_share = on);
+    switch("do_not_touch", "Open without focus", "Keeps typing in the window you're using", rule.no_focus, |r, on| r.no_focus = on);
+    // niri's workspaces have no numbers to open on.
+    if kit::setup::kind() != Some(kit::setup::Kind::Niri) {
+        let (row, end) = ui::row(Some("workspaces"), "Open on workspace", "Without switching to it");
+        let labels: Vec<String> = std::iter::once("Where it opens".to_string()).chain((1..=10).map(|n| n.to_string())).collect();
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let pick = kit::ui::dropdown(&labels, rule.workspace.min(10));
+        pick.set_valign(gtk::Align::Center);
+        let rules = rules.clone();
+        pick.connect_selected_notify(move |p| {
+            if let Some(r) = rules.borrow_mut().get_mut(i) {
+                r.workspace = p.selected();
+            }
+            store(&rules);
+        });
+        end.append(&pick);
+        card.append(&row);
+    }
 
     let (row, end) = ui::row(Some("opacity"), "Opacity", "See-through windows show the blur behind them when it's on");
     let labels: Vec<&str> = OPACITY.iter().map(|o| o.1).collect();

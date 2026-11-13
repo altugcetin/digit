@@ -13,18 +13,25 @@ pub struct Rule {
     pub fullscreen: bool,
     /// 1.0 leaves the window opaque.
     pub opacity: f64,
+    /// Left out of screen sharing and recordings (it shows as blank there).
+    pub no_share: bool,
+    /// Opens without taking the keyboard focus from the window in use.
+    pub no_focus: bool,
+    /// Opens on this workspace, without switching to it; 0 for wherever it opens. Hyprland only:
+    /// niri's workspaces have no numbers to open on.
+    pub workspace: u32,
 }
 
 impl Default for Rule {
     fn default() -> Self {
-        Self { app: String::new(), title: String::new(), float: false, maximize: false, fullscreen: false, opacity: 1.0 }
+        Self { app: String::new(), title: String::new(), float: false, maximize: false, fullscreen: false, opacity: 1.0, no_share: false, no_focus: false, workspace: 0 }
     }
 }
 
 impl Rule {
     /// A rule matching nothing or doing nothing isn't written.
     pub fn active(&self) -> bool {
-        (!self.app.trim().is_empty() || !self.title.trim().is_empty()) && (self.float || self.maximize || self.fullscreen || self.opacity < 0.995)
+        (!self.app.trim().is_empty() || !self.title.trim().is_empty()) && (self.float || self.maximize || self.fullscreen || self.opacity < 0.995 || self.no_share || self.no_focus || self.workspace > 0)
     }
 }
 
@@ -37,7 +44,8 @@ pub fn read(t: &toml::Table) -> Vec<Rule> {
             let text = |k: &str| r.get(k).and_then(toml::Value::as_str).unwrap_or_default().to_string();
             let flag = |k: &str| r.get(k).and_then(toml::Value::as_bool).unwrap_or(false);
             let opacity = r.get("opacity").and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))).unwrap_or(1.0);
-            Rule { app: text("app"), title: text("title"), float: flag("float"), maximize: flag("maximize"), fullscreen: flag("fullscreen"), opacity: opacity.clamp(0.1, 1.0) }
+            let workspace = r.get("workspace").and_then(toml::Value::as_integer).unwrap_or(0).clamp(0, 99) as u32;
+            Rule { app: text("app"), title: text("title"), float: flag("float"), maximize: flag("maximize"), fullscreen: flag("fullscreen"), opacity: opacity.clamp(0.1, 1.0), no_share: flag("no_share"), no_focus: flag("no_focus"), workspace }
         })
         .collect()
 }
@@ -55,6 +63,9 @@ pub fn value(rules: &[Rule]) -> toml::Value {
                 t.insert("maximize".into(), toml::Value::Boolean(r.maximize));
                 t.insert("fullscreen".into(), toml::Value::Boolean(r.fullscreen));
                 t.insert("opacity".into(), toml::Value::Float((r.opacity * 100.0).round() / 100.0));
+                t.insert("no_share".into(), toml::Value::Boolean(r.no_share));
+                t.insert("no_focus".into(), toml::Value::Boolean(r.no_focus));
+                t.insert("workspace".into(), toml::Value::Integer(r.workspace.into()));
                 toml::Value::Table(t)
             })
             .collect(),
@@ -105,6 +116,15 @@ pub fn lua(rules: &[Rule]) -> String {
         if r.opacity < 0.995 {
             effects.push(format!("opacity = {:.2}", r.opacity));
         }
+        if r.no_share {
+            effects.push("no_screen_share = true".to_string());
+        }
+        if r.no_focus {
+            effects.push("no_initial_focus = true".to_string());
+        }
+        if r.workspace > 0 {
+            effects.push(format!("workspace = \"{} silent\"", r.workspace));
+        }
         out.push_str(&format!("hl.window_rule({{ name = \"digit-user-{}\", match = {{ {} }}, {} }})\n", i + 1, matches.join(", "), effects.join(", ")));
     }
     if !out.is_empty() {
@@ -139,6 +159,12 @@ pub fn kdl(rules: &[Rule]) -> String {
         }
         if r.opacity < 0.995 {
             out.push_str(&format!("    opacity {:.2}\n", r.opacity));
+        }
+        if r.no_share {
+            out.push_str("    block-out-from \"screencast\"\n");
+        }
+        if r.no_focus {
+            out.push_str("    open-focused false\n");
         }
         out.push_str("}\n");
     }
@@ -177,6 +203,18 @@ mod tests {
         assert!(text.contains(r#"class = "^org\\.mozilla\\.firefox$""#), "{text}");
         assert!(text.contains(r#"title = "Picture\\-in\\-Picture""#), "{text}");
         assert!(text.contains("float = true") && text.contains("opacity = 0.90"));
+    }
+
+    #[test]
+    fn privacy_focus_and_workspace_are_written_where_supported() {
+        let rule = Rule { app: "org.telegram.desktop".into(), no_share: true, no_focus: true, workspace: 4, ..Rule::default() };
+        assert!(rule.active());
+        let lua = lua(std::slice::from_ref(&rule));
+        assert!(lua.contains("no_screen_share = true") && lua.contains("no_initial_focus = true") && lua.contains(r#"workspace = "4 silent""#), "{lua}");
+        let kdl = kdl(&[rule]);
+        assert!(kdl.contains(r#"block-out-from "screencast""#) && kdl.contains("open-focused false"), "{kdl}");
+        // niri has no numbered workspaces to open on.
+        assert!(!kdl.contains("workspace"), "{kdl}");
     }
 
     #[test]
