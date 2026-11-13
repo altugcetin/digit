@@ -1068,6 +1068,7 @@ fn weather(body: &gtk::Box, t: &toml::Table) {
 fn search(body: &gtk::Box, t: &toml::Table) {
     let find = section(body, "Search");
     toggle(&find, "text_select_move_forward_character", "Smooth caret", "The caret in Spotlight glides as you type and blinks softly, like VS Code", "smooth_caret", prefs::get_bool(&t, "smooth_caret", true));
+    toggle(&find, "deployed_code", "Minecraft instances", "PrismLauncher's instances show up as you type their name; pl and a space lists them all", "spotlight_prism", prefs::get_bool(&t, "spotlight_prism", false));
     let enabled = toggle(&find, "manage_search", "Search inside apps", "Spotlight asks apps that offer results, such as Files, Firefox tabs and Characters", "search_apps", prefs::get_bool(&t, "search_apps", true));
     let listed = kit::search::listed();
     let off = kit::search::off_list(&t);

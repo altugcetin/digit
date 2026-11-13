@@ -55,6 +55,7 @@ mod menubar;
 mod popmenu;
 mod power;
 mod privacy;
+mod prism;
 mod providers;
 mod quit;
 mod session;

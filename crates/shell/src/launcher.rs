@@ -67,6 +67,7 @@ enum Kind {
     Found(u16),
     Scope,
     Settings,
+    Prism,
 }
 
 impl Kind {
@@ -82,6 +83,7 @@ impl Kind {
             Kind::Found(_) => "Results",
             Kind::Scope => "Search in apps",
             Kind::Settings => "Settings",
+            Kind::Prism => "Minecraft",
         }
     }
 }
@@ -114,13 +116,26 @@ const PAGES: [(&str, &str, &str, &str, &str); 18] = [
     ("dock", "Dock", "Settings", "dock_to_bottom", "dock icons magnification autohide badges"),
     ("notch", "Notch and menu bar", "Settings", "toolbar", "notch island bar menubar menu tray call panels hot corner"),
     ("desktop", "Desktop", "Settings", "wallpaper", "desktop clock widget weather city screen corners"),
-    ("spotlight", "Spotlight", "Settings", "search", "spotlight search launcher caret clipboard history"),
+    ("spotlight", "Spotlight", "Settings", "search", "spotlight search launcher caret clipboard history minecraft prism"),
     ("compositor", "Windows", "Settings", "select_window", "windows compositor hyprland niri setup gaps layout tiling floating placement mouse touchpad animations"),
     ("keyboard", "Keyboard shortcuts", "Settings", "keyboard", "keyboard shortcuts keybinds hotkeys keys"),
     ("power", "Lock and power", "Settings", "power_settings_new", "lock power idle sleep suspend screen off"),
     ("screenshots", "Screenshots", "Settings", "screenshot_region", "screenshot screenshots capture print folder format"),
     ("recording", "Recording", "Settings", "radio_button_checked", "record recording video screen capture replay stream gpu"),
 ];
+
+/// An instance's name as typed: folder-style names use _ and - between words.
+fn prism_key(name: &str) -> String {
+    fold(&name.replace(['_', '-'], " "))
+}
+
+/// A PrismLauncher instance as a result that starts it.
+fn prism_item(ins: &crate::prism::Instance, score: i32) -> Option<Item> {
+    let argv = crate::prism::launch(&ins.id)?;
+    let look = ins.icon.as_ref().map(|p| Look::Icon(gio::FileIcon::new(&gio::File::for_path(p)).upcast())).unwrap_or(Look::Symbol("deployed_code"));
+    let detail = if ins.group.is_empty() { "Minecraft instance".to_string() } else { ins.group.clone() };
+    Some(Item { kind: Kind::Prism, act: Act::Spawn(argv), title: ins.name.clone(), detail, look, score })
+}
 
 /// A page or row in digit Settings, from the index Settings writes for Spotlight.
 #[derive(Clone, serde::Deserialize)]
@@ -322,6 +337,9 @@ struct State {
     scopes: Vec<providers::Scope>,
     files_focus: bool,
     files_folder: Option<String>,
+    /// PrismLauncher's instances, read as Spotlight opens while Settings has `/pl` on.
+    prism: Vec<crate::prism::Instance>,
+    prism_on: bool,
     opening: u64,
     settings: Vec<Setting>,
     found: Vec<providers::Found>,
@@ -547,6 +565,8 @@ impl Launcher {
             scopes: Vec::new(),
             files_focus: false,
             files_folder: None,
+            prism: Vec::new(),
+            prism_on: false,
             opening: 0,
             settings: Vec::new(),
             found: Vec::new(),
@@ -742,13 +762,16 @@ impl Launcher {
         // lookup below runs on a worker; panel focus must not change its target.
         let focused = app.running.borrow().iter().find(|w| w.focused).map(|w| (w.id, w.app_id.clone()));
         let snapshot = focused.clone();
+        let prism = kit::prefs::flag(&kit::prefs::read(), "spotlight_prism", false);
+        self.0.borrow_mut().prism_on = prism;
         let pending = gio::spawn_blocking(move || {
+            let instances = if prism { crate::prism::instances() } else { Vec::new() };
             let windows = compositor::windows();
             let focused = match snapshot {
                 Some((id, app_id)) => Some((app_id, windows.iter().find(|w| w.id == id).map(|w| w.title.clone()))),
                 None => windows.iter().find(|w| w.focused).map(|w| (w.app_id.clone(), Some(w.title.clone()))),
             };
-            (compositor::focused_output(), windows, focused)
+            (compositor::focused_output(), windows, focused, instances)
         });
         let table = kit::prefs::read();
         let found_in = providers::discover(&app, &table);
@@ -795,7 +818,7 @@ impl Launcher {
         let weak = Rc::downgrade(&self.0);
         let opening = self.0.borrow().opening;
         glib::spawn_future_local(async move {
-            let Ok((output, windows, focused)) = pending.await else { return };
+            let Ok((output, windows, focused, instances)) = pending.await else { return };
             let Some(state) = weak.upgrade() else { return };
             {
                 let mut s = state.borrow_mut();
@@ -803,6 +826,7 @@ impl Launcher {
                 s.files_focus = focused.as_ref().is_some_and(|(id, _)| id.eq_ignore_ascii_case("dev.digit.Files"));
                 s.files_folder = focused.and_then(|(_, title)| title).filter(|t| !t.is_empty());
                 s.windows = windows;
+                s.prism = instances;
                 if let Some(display) = gdk::Display::default() {
                     let monitors: Vec<gdk::Monitor> = display.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect();
                     let monitor = monitors.iter().find(|m| output.as_deref().is_some_and(|o| m.connector().as_deref() == Some(o))).or(monitors.first());
@@ -1063,6 +1087,13 @@ impl Launcher {
         if run {
             query = raw[1..].trim().to_string();
         }
+        // "pl …" lists PrismLauncher's instances, like the "set …" keyword lists settings; off
+        // unless Settings has it on.
+        let pl = raw.trim_start().strip_prefix("pl ").filter(|_| mode == Mode::All && !run && self.0.borrow().prism_on).map(|rest| rest.trim().to_string());
+        let prism = pl.is_some();
+        if let Some(rest) = pl {
+            query = rest;
+        }
         let q = fold(&query);
         let mut clips = Vec::new();
         let mut colors = Vec::new();
@@ -1070,7 +1101,20 @@ impl Launcher {
         let mut s = self.0.borrow_mut();
         let apps = s.app.apps.list();
         let mut items: Vec<Item> = Vec::new();
-        if run {
+        if prism {
+            for (rank, ins) in s.prism.iter().enumerate() {
+                if !q.is_empty() && score(&q, &prism_key(&ins.name)).is_none() {
+                    continue;
+                }
+                if let Some(item) = prism_item(ins, 3000 - rank as i32) {
+                    items.push(item);
+                }
+            }
+            if items.is_empty() {
+                let title = if s.prism.is_empty() { "No instances found".to_string() } else { format!("No instances match “{query}”") };
+                items.push(Item { kind: Kind::Prism, act: Act::Spawn(crate::prism::open().unwrap_or_default()), title, detail: "Open Prism Launcher".into(), look: Look::Symbol("deployed_code"), score: 0 });
+            }
+        } else if run {
             if !query.is_empty() {
                 items.push(Item { kind: Kind::Run, act: Act::Run(query.clone()), title: query.clone(), detail: "Run".into(), look: Look::Symbol("terminal"), score: 2000 });
             }
@@ -1109,6 +1153,17 @@ impl Launcher {
                 for (i, hit) in hits {
                     let e = &apps[i];
                     items.push(Item { kind: Kind::App, act: Act::App(i), title: e.name.clone(), detail: e.detail.clone(), look: look(e), score: hit });
+                }
+            }
+            // With PrismLauncher on in Settings, instances matching what's typed show among the
+            // apps too, not only after "pl".
+            if mode == Mode::All && s.prism_on && !q.is_empty() {
+                let mut hits: Vec<(usize, i32)> = s.prism.iter().enumerate().filter_map(|(i, ins)| score(&q, &prism_key(&ins.name)).map(|h| (i, h))).collect();
+                hits.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                for (i, hit) in hits.into_iter().take(5) {
+                    if let Some(item) = prism_item(&s.prism[i], hit) {
+                        items.push(item);
+                    }
                 }
             }
             if mode == Mode::Calc || (mode == Mode::All && calc::looks_like_math(&query)) {
