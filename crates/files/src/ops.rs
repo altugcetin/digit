@@ -1052,21 +1052,13 @@ pub fn templates() -> Vec<PathBuf> {
     out
 }
 
+/// Makes "New File.txt" (or a copy of a template, numbered if taken) and renames it in place,
+/// with the name before the extension selected.
 pub fn new_file(dest: gio::File, template: Option<PathBuf>) {
     let wanted = template.as_ref().and_then(|t| t.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "New File.txt".into());
     glib::spawn_future_local(async move {
         let initial = name(&unique_off_thread(&dest, wanted).await);
-        ask_new_file(dest, template, &initial);
-    });
-}
-
-fn ask_new_file(dest: gio::File, template: Option<PathBuf>, initial: &str) {
-    ask_name("New File", initial, "Create", true, None, move |n, _| {
-        let f = dest.child(&n);
-        if f.query_exists(None::<&gio::Cancellable>) {
-            crate::toast(&format!("“{n}” already exists"));
-            return false;
-        }
+        let f = dest.child(&initial);
         let made = match &template {
             Some(t) => gio::File::for_path(t).copy(&f, gio::FileCopyFlags::NONE, None::<&gio::Cancellable>, None).map(|_| ()),
             None => f.create(gio::FileCreateFlags::NONE, None::<&gio::Cancellable>).map(|_| ()),
@@ -1074,13 +1066,9 @@ fn ask_new_file(dest: gio::File, template: Option<PathBuf>, initial: &str) {
         match made {
             Ok(()) => {
                 push_undo(Undo::Created(vec![f.clone()]));
-                crate::select_later(&f);
-                true
+                crate::rename_later(&f);
             }
-            Err(e) => {
-                crate::toast(&e.message().to_string());
-                false
-            }
+            Err(e) => crate::toast(&e.message().to_string()),
         }
     });
 }
@@ -1089,13 +1077,9 @@ fn has(bin: &str) -> bool {
     glib::find_program_in_path(bin).is_some()
 }
 
-pub fn compress(files: Vec<gio::File>) {
-    let Some(dir) = files.first().and_then(|f| f.parent()) else { return };
-    let (Some(cwd), true) = (dir.path(), files.iter().all(|f| f.parent().is_some_and(|p| p.equal(&dir)) && f.is_native())) else {
-        crate::toast("Compressing works on local files in one folder");
-        return;
-    };
-    let mut formats: Vec<(&str, &str)> = Vec::new();
+/// The archive formats a tool is installed for: (extension, tool).
+pub fn archive_formats() -> Vec<(&'static str, &'static str)> {
+    let mut formats = Vec::new();
     if has("zip") {
         formats.push((".zip", "zip"));
     }
@@ -1105,41 +1089,49 @@ pub fn compress(files: Vec<gio::File>) {
     if has("7z") {
         formats.push((".7z", "7z"));
     }
-    if formats.is_empty() {
+    formats
+}
+
+/// Compresses `files` into one archive of format `ext` (the first available if empty), or each
+/// into its own. A single new archive is then renamed in place, like Finder's Compress.
+pub fn compress(files: Vec<gio::File>, ext: &str, each: bool) {
+    let Some(dir) = files.first().and_then(|f| f.parent()) else { return };
+    let (Some(cwd), true) = (dir.path(), files.iter().all(|f| f.parent().is_some_and(|p| p.equal(&dir)) && f.is_native())) else {
+        crate::toast("Compressing works on local files in one folder");
+        return;
+    };
+    let formats = archive_formats();
+    let Some(&(ext, tool)) = formats.iter().find(|f| f.0 == ext).or(formats.first()) else {
         crate::toast("No archive tool found (zip, tar or 7z)");
         return;
-    }
-    let base = if files.len() == 1 { split_ext(&name(&files[0])).0 } else { "Archive".to_string() };
-    let labels: Vec<&str> = formats.iter().map(|f| f.0).collect();
-    let pick = kit::ui::dropdown(&labels, 0);
+    };
     let names: Vec<String> = files.iter().map(name).collect();
-    let extra = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    extra.append(&pick);
-    let each = gtk::CheckButton::with_label("Each item in its own archive");
-    if names.len() > 1 {
-        extra.append(&each);
-    }
-    let p2 = pick.clone();
-    ask_name("Compress", &base, "Create", false, Some(extra.upcast()), move |stem, _| {
-        let (ext, tool) = formats[p2.selected() as usize];
-        let groups: Vec<(String, Vec<String>)> = if each.is_active() {
-            names.iter().map(|n| (split_ext(n).0, vec![n.clone()])).collect()
-        } else {
-            vec![(stem, names.clone())]
+    let groups: Vec<(String, Vec<String>)> = if each && names.len() > 1 {
+        names.iter().map(|n| (split_ext(n).0, vec![n.clone()])).collect()
+    } else {
+        let stem = if names.len() == 1 { split_ext(&names[0]).0 } else { "Archive".to_string() };
+        vec![(stem, names.clone())]
+    };
+    let single = groups.len() == 1;
+    for (stem, members) in groups {
+        let out = unique(&dir, &format!("{stem}{ext}"));
+        let Some(outp) = out.path() else { continue };
+        let mut argv: Vec<String> = match tool {
+            "zip" => vec!["zip".into(), "-r".into(), "-q".into(), "-y".into(), outp.to_string_lossy().into_owned(), "--".into()],
+            "7z" => vec!["7z".into(), "a".into(), "-bd".into(), "-y".into(), outp.to_string_lossy().into_owned(), "--".into()],
+            _ => vec!["tar".into(), "-c".into(), "-a".into(), "-f".into(), outp.to_string_lossy().into_owned(), "--".into()],
         };
-        for (stem, members) in groups {
-            let out = unique(&dir, &format!("{stem}{ext}"));
-            let Some(outp) = out.path() else { continue };
-            let mut argv: Vec<String> = match tool {
-                "zip" => vec!["zip".into(), "-r".into(), "-q".into(), "-y".into(), outp.to_string_lossy().into_owned(), "--".into()],
-                "7z" => vec!["7z".into(), "a".into(), "-bd".into(), "-y".into(), outp.to_string_lossy().into_owned(), "--".into()],
-                _ => vec!["tar".into(), "-c".into(), "-a".into(), "-f".into(), outp.to_string_lossy().into_owned(), "--".into()],
-            };
-            argv.extend(members);
+        argv.extend(members);
+        if single {
+            run_then("Compressing", Plan::Run(argv, cwd.clone(), Some(outp)), move || {
+                if out.query_exists(None::<&gio::Cancellable>) {
+                    crate::rename_later(&out);
+                }
+            });
+        } else {
             run("Compressing", Plan::Run(argv, cwd.clone(), Some(outp)));
         }
-        true
-    });
+    }
 }
 
 pub fn archive(info: &gio::FileInfo) -> bool {

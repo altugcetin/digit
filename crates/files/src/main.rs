@@ -763,11 +763,16 @@ fn actions(window: &gtk::ApplicationWindow) {
             ops::new_folder(p.location());
         }
     });
-    action(window, "compress", || {
-        if let Some(p) = active() {
-            ops::compress(p.selected_files());
-        }
-    });
+    for (name, each) in [("compress", false), ("compress-each", true)] {
+        let a = gio::SimpleAction::new(name, Some(glib::VariantTy::STRING));
+        a.connect_activate(move |_, v| {
+            let ext = v.and_then(|v| v.get::<String>()).unwrap_or_default();
+            if let Some(p) = active() {
+                ops::compress(p.selected_files(), &ext, each);
+            }
+        });
+        window.add_action(&a);
+    }
     action(window, "extract", || {
         if let Some(p) = active() {
             ops::extract(p.selected().iter().filter(|i| ops::archive(i)).filter_map(pane::file_of).collect());
@@ -971,9 +976,18 @@ pub fn menu(p: &Rc<Pane>, at: Option<(f64, f64)>, items: bool) {
                 m.push(act("drive_file_move", "Move to Other Pane", "win.move-other"));
             }
             m.push(Item::Sep);
-            m.push(act("edit", if picked.len() > 1 { "Rename Items…" } else { "Rename…" }, "win.rename"));
+            m.push(act("edit", if picked.len() > 1 { "Rename Items…" } else { "Rename" }, "win.rename"));
             m.push(act("library_add", "Duplicate", "win.duplicate"));
-            m.push(act("folder_zip", "Compress…", "win.compress"));
+            // Pick the format here; the archive is made at once and named in place.
+            let formats = ops::archive_formats();
+            if !formats.is_empty() {
+                let mut items: Vec<Item> = formats.iter().map(|(ext, _)| act_with("folder_zip", &format!("To {ext}"), "win.compress", ext.to_variant())).collect();
+                if picked.len() > 1 {
+                    items.push(Item::Sep);
+                    items.extend(formats.iter().map(|(ext, _)| act_with("folder_zip", &format!("Each to {ext}"), "win.compress-each", ext.to_variant())));
+                }
+                m.push(sub("folder_zip", "Compress", items));
+            }
             let conv = tools::targets(&picked);
             if !conv.is_empty() {
                 let items = conv.into_iter().map(|(label, ext)| act_with("transform", label, "win.convert", ext.to_variant())).collect();
