@@ -1421,6 +1421,22 @@ impl Pane {
         }
     }
 
+    /// Shows the list columns that fit in `width`: Kind gives way first, then Modified, then
+    /// Size, so a narrow window keeps the names readable instead of cutting the view off.
+    pub fn fit_columns(&self, width: f64) {
+        for (i, c) in self.columns.borrow().iter().enumerate() {
+            let room = match i {
+                1 => 380.0,
+                2 => 540.0,
+                3 => 720.0,
+                _ => 0.0,
+            };
+            if c.is_visible() != (width >= room) {
+                c.set_visible(width >= room);
+            }
+        }
+    }
+
     pub fn sort_by(&self, column: usize, descending: bool) {
         if let Some(c) = self.columns.borrow().get(column) {
             self.list.sort_by_column(Some(c), if descending { gtk::SortType::Descending } else { gtk::SortType::Ascending });
