@@ -488,7 +488,8 @@ fn generate() -> Result<bool, String> {
     let binds = shortcuts();
     changed |= write_if_changed(&d.join("init.lua"), INIT).map_err(e)?;
     changed |= write_if_changed(&d.join("digit-autostart.lua"), &autostart()).map_err(e)?;
-    changed |= write_if_changed(&d.join("digit-rules.lua"), RULES).map_err(e)?;
+    let rules = format!("{RULES}{}", crate::winrules::lua(&crate::winrules::read(&crate::prefs::read())));
+    changed |= write_if_changed(&d.join("digit-rules.lua"), &rules).map_err(e)?;
     changed |= write_if_changed(&d.join("digit-keybinds.lua"), &render_keybinds(&binds)).map_err(e)?;
     changed |= write_if_changed(&d.join("digit-base.lua"), &base()).map_err(e)?;
     changed |= write_if_changed(&d.join("digit-decorations.lua"), &decorations()).map_err(e)?;

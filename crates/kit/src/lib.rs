@@ -36,6 +36,7 @@ pub mod ui;
 pub mod niri;
 pub mod nm;
 pub mod wm;
+pub mod winrules;
 pub mod terminal;
 pub mod theme;
 

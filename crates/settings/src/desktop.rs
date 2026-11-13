@@ -32,7 +32,7 @@ pub(crate) fn save_many(values: &[(&str, toml::Value)]) -> bool {
     }
     // Compositor settings (and the accent, which colors niri's window border) go straight into
     // digit's part of the compositor config.
-    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "spaces_always" | "surface" | "ui_accent" | "border_color" | "reduce_motion" | "reduced_effects" | "terminal" | "theme_qt" | "nvidia_env" | "cursor_theme" | "cursor_size")) {
+    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "spaces_always" | "surface" | "window_rules" | "ui_accent" | "border_color" | "reduce_motion" | "reduced_effects" | "terminal" | "theme_qt" | "nvidia_env" | "cursor_theme" | "cursor_size")) {
         apply_compositor();
     }
     if values.iter().any(|(key, _)| matches!(*key, "button_maximize" | "button_close")) {

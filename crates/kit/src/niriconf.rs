@@ -446,7 +446,8 @@ fn generate() -> Result<bool, String> {
         Err(error) => return Err(e(error)),
     };
     changed |= write_if_changed(&outputs_path, &primary(&crate::prefs::read(), &outputs)).map_err(e)?;
-    changed |= write_if_changed(&d.join("digit-rules.kdl"), RULES).map_err(e)?;
+    let rules = format!("{RULES}{}", crate::winrules::kdl(&crate::winrules::read(&crate::prefs::read())));
+    changed |= write_if_changed(&d.join("digit-rules.kdl"), &rules).map_err(e)?;
     changed |= write_if_changed(&d.join("digit-keybinds.kdl"), &render_keybinds(&binds)).map_err(e)?;
     changed |= write_if_changed(&d.join("digit-autostart.kdl"), &fill(AUTOSTART, &[("digit", &kdl_str(&bin().join("digit").display().to_string()))])).map_err(e)?;
     Ok(changed)
