@@ -19,7 +19,7 @@ thread_local! {
 }
 
 /// The "smooth_scroll" preference, re-read at most every two seconds so toggling it applies live.
-fn enabled() -> bool {
+pub fn enabled() -> bool {
     let now = glib::monotonic_time();
     let on = ENABLED.with(|e| {
         let (on, at) = e.get();
