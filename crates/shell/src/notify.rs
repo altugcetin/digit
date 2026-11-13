@@ -31,7 +31,6 @@ enum IconSource {
     Named(String),
     Loaded(gdk::Texture),
     File(String),
-    Pixels { width: i32, height: i32, stride: i32, alpha: bool, data: Vec<u8> },
 }
 
 #[derive(Default)]
@@ -186,17 +185,36 @@ fn pixels(value: &OwnedValue, px: i32) -> Option<IconSource> {
     let channels = channels as usize;
     pixel_layout(width, height, stride, channels, array.len())?;
     let (w, h) = crate::images::fit(width, height, px)?;
-    let mut data = Vec::with_capacity(w as usize * h as usize * channels);
-    for y in 0..h as usize {
-        let row = y * height as usize / h as usize * stride as usize;
-        for x in 0..w as usize {
-            let at = row + x * width as usize / w as usize * channels;
-            for c in 0..channels {
-                data.push(array.get::<u8>(at + c).ok()??);
+    let src: Vec<u8> = (0..array.len()).map(|i| array.get::<u8>(i).ok().flatten()).collect::<Option<_>>()?;
+    let data = shrink(&src, (width as usize, height as usize, stride as usize), channels, (w as usize, h as usize));
+    // Made here, off the main thread, so the notch only draws it.
+    let format = if alpha { gdk::MemoryFormat::R8g8b8a8 } else { gdk::MemoryFormat::R8g8b8 };
+    let texture = gdk::MemoryTexture::new(w, h, format, &glib::Bytes::from_owned(data), w as usize * channels);
+    Some(IconSource::Loaded(texture.upcast()))
+}
+
+/// Scales an image down by averaging each output pixel's whole source area, so a big avatar
+/// keeps smooth edges at icon size instead of the jagged look of picking single pixels.
+fn shrink(src: &[u8], (sw, sh, stride): (usize, usize, usize), channels: usize, (w, h): (usize, usize)) -> Vec<u8> {
+    let mut out = Vec::with_capacity(w * h * channels);
+    for y in 0..h {
+        let (y0, y1) = (y * sh / h, ((y + 1) * sh / h).max(y * sh / h + 1).min(sh));
+        for x in 0..w {
+            let (x0, x1) = (x * sw / w, ((x + 1) * sw / w).max(x * sw / w + 1).min(sw));
+            let mut sum = [0u32; 4];
+            for row in y0..y1 {
+                for col in x0..x1 {
+                    let at = row * stride + col * channels;
+                    for c in 0..channels {
+                        sum[c] += u32::from(src[at + c]);
+                    }
+                }
             }
+            let n = ((y1 - y0) * (x1 - x0)) as u32;
+            out.extend(sum[..channels].iter().map(|v| (v / n.max(1)) as u8));
         }
     }
-    Some(IconSource::Pixels { width: w, height: h, stride: w * channels as i32, alpha, data })
+    out
 }
 
 fn pixel_layout(w: i32, h: i32, stride: i32, channels: usize, len: usize) -> Option<usize> {
@@ -254,6 +272,24 @@ async fn load_files(mut look: Look, px: i32) -> Look {
     }
 }
 
+/// A theme icon as a texture decoded off the main thread at `px`. Symbolic icons stay as they
+/// are (they're recolored as they're drawn), and anything slow or unreadable keeps the original.
+async fn bake(p: Option<gdk::Paintable>, px: i32) -> Option<gdk::Paintable> {
+    use futures_util::future::{Either, select};
+    let p = p?;
+    let Some(path) = p.downcast_ref::<gtk::IconPaintable>().filter(|i| !i.is_symbolic()).and_then(|i| i.file()).and_then(|f| f.path()) else { return Some(p) };
+    let job = gio::spawn_blocking(move || {
+        let bytes = std::fs::read(&path).ok().filter(|b| (b.len() as u64) <= FILE_MAX)?;
+        crate::images::decode(&bytes, px)
+    });
+    let timeout = glib::timeout_future(Duration::from_millis(300));
+    futures_util::pin_mut!(job, timeout);
+    match select(job, timeout).await {
+        Either::Left((Ok(Some(t)), _)) => Some(t.upcast()),
+        _ => Some(p),
+    }
+}
+
 fn paint(theme: &gtk::IconTheme, source: &IconSource, require_known_name: bool) -> Option<gdk::Paintable> {
     paint_at(theme, source, require_known_name, ICON_PX)
 }
@@ -271,11 +307,6 @@ fn paint_at(theme: &gtk::IconTheme, source: &IconSource, require_known_name: boo
         }
         IconSource::Loaded(t) => Some(t.clone().upcast()),
         IconSource::File(_) => None,
-        IconSource::Pixels { width, height, stride, alpha, data } => {
-            let format = if *alpha { gdk::MemoryFormat::R8g8b8a8 } else { gdk::MemoryFormat::R8g8b8 };
-            let bytes = glib::Bytes::from(data.as_slice());
-            Some(gdk::MemoryTexture::new(*width, *height, format, &bytes, *stride as usize).upcast())
-        }
     }
 }
 
@@ -284,7 +315,6 @@ fn paint_at(theme: &gtk::IconTheme, source: &IconSource, require_known_name: boo
 fn icon_like(source: &IconSource) -> bool {
     let (w, h) = match source {
         IconSource::Named(_) => return true,
-        IconSource::Pixels { width, height, .. } => (*width, *height),
         IconSource::Loaded(t) => (t.width(), t.height()),
         IconSource::File(_) => return false,
     };
@@ -482,6 +512,10 @@ pub fn start(app: &Rc<App>) {
                     let icon = resolve(&app, &source, &look);
                     let face = avatar(&look);
                     let badge = if face.is_some() { logo(&app, &source, &look) } else { icon.clone() };
+                    // Theme icons read and rasterize their file the first time they're drawn,
+                    // which would land in the frame the notch opens; do it here, off the thread.
+                    let scale = crate::images::scale();
+                    let (icon, badge, face) = (bake(icon, 48 * scale).await, bake(badge, 48 * scale).await, bake(face, 96 * scale).await);
                     let name = app.apps.display_name(look.desktop_entry.as_deref().unwrap_or(&source));
                     let name = if name.is_empty() { app.apps.display_name(&source) } else { name };
                     if !transient {
@@ -555,9 +589,17 @@ mod tests {
         let pixels = vec![127u8; 800 * 400 * 4];
         let st = zbus::zvariant::Structure::from((800i32, 400i32, 3200i32, true, 8i32, 4i32, pixels));
         let value = OwnedValue::try_from(Value::from(st)).unwrap();
-        let Some(IconSource::Pixels { width, height, stride, data, .. }) = super::pixels(&value, 96) else { panic!("pixel hint rejected") };
-        assert_eq!((width, height, stride, data.len()), (96, 48, 384, 96 * 48 * 4));
-        assert!(data.iter().all(|b| *b == 127));
+        let Some(IconSource::Loaded(t)) = super::pixels(&value, 96) else { panic!("pixel hint rejected") };
+        assert_eq!((t.width(), t.height()), (96, 48));
+    }
+
+    #[test]
+    fn shrinking_averages_each_area_instead_of_picking_one_pixel() {
+        // A 4x2 one-channel-like RGB image of black and white columns shrinks to grey.
+        let row = [0u8, 0, 0, 255, 255, 255, 0, 0, 0, 255, 255, 255];
+        let src: Vec<u8> = row.iter().chain(row.iter()).copied().collect();
+        let out = super::shrink(&src, (4, 2, 12), 3, (2, 1));
+        assert_eq!(out, vec![127, 127, 127, 127, 127, 127]);
     }
 
     #[test]
