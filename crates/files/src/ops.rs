@@ -1027,26 +1027,17 @@ pub fn rename(info: &gio::FileInfo, new: &str) -> bool {
     }
 }
 
+/// Makes "New Folder" (numbered if taken) and renames it in place, like Finder.
 pub fn new_folder(dest: gio::File) {
     glib::spawn_future_local(async move {
         let initial = name(&unique_off_thread(&dest, "New Folder".into()).await);
-        ask_new_folder(dest, &initial);
-    });
-}
-
-fn ask_new_folder(dest: gio::File, initial: &str) {
-    ask_name("New Folder", initial, "Create", false, None, move |n, _| {
-        let f = dest.child(&n);
+        let f = dest.child(&initial);
         match f.make_directory(None::<&gio::Cancellable>) {
             Ok(()) => {
                 push_undo(Undo::Created(vec![f.clone()]));
-                crate::select_later(&f);
-                true
+                crate::rename_later(&f);
             }
-            Err(e) => {
-                crate::toast(&e.message().to_string());
-                false
-            }
+            Err(e) => crate::toast(&e.message().to_string()),
         }
     });
 }

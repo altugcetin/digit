@@ -54,6 +54,8 @@ pub struct Pane {
     search_cache: RefCell<Option<search::Cache>>,
     pub cut: Rc<RefCell<Vec<String>>>,
     pending: RefCell<Option<String>>,
+    /// A just-created item to rename in place as soon as it shows up in the view.
+    rename_new: RefCell<Option<String>>,
     dragging: RefCell<Vec<gio::FileInfo>>,
 }
 
@@ -360,6 +362,7 @@ impl Pane {
             search_cache: RefCell::new(None),
             cut: Rc::new(RefCell::new(Vec::new())),
             pending: RefCell::new(None),
+            rename_new: RefCell::new(None),
             dragging: RefCell::new(Vec::new()),
         });
         let columns = p.build_columns();
@@ -990,6 +993,9 @@ impl Pane {
             if let Some(p) = me.upgrade() {
                 p.sync_empty();
                 p.sync_status();
+                if p.rename_new.borrow().is_some() {
+                    p.try_rename_new();
+                }
             }
         });
         // Incremental filtering/sorting can settle after DirectoryList finishes.
@@ -1170,6 +1176,29 @@ impl Pane {
             View::Grid => self.grid.scroll_to(pos, flags, None),
             View::List => self.list.scroll_to(pos, None::<&gtk::ColumnViewColumn>, flags, None),
         }
+    }
+
+    /// Selects the item called `name` and starts renaming it in place, once the directory
+    /// monitor has listed it (a folder just made by New Folder).
+    pub fn rename_when_listed(self: &Rc<Self>, name: &str) {
+        *self.rename_new.borrow_mut() = Some(name.to_string());
+        self.try_rename_new();
+    }
+
+    fn try_rename_new(self: &Rc<Self>) {
+        let Some(name) = self.rename_new.borrow().clone() else { return };
+        let n = self.sorted.n_items();
+        let Some(pos) = (0..n).find(|i| self.sorted.item(*i).and_downcast::<gio::FileInfo>().is_some_and(|f| f.name().to_str() == Some(name.as_str()))) else { return };
+        self.rename_new.borrow_mut().take();
+        self.reveal(pos);
+        let Some(info) = self.sorted.item(pos).and_downcast::<gio::FileInfo>() else { return };
+        // After the view has made and focused the new row, so the editor can sit over its name.
+        let me = self.weak();
+        glib::idle_add_local_once(move || {
+            if let Some(p) = me.upgrade() {
+                p.start_rename(info);
+            }
+        });
     }
 
     pub fn select_name(&self, name: &str) {
