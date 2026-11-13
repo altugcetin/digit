@@ -25,7 +25,7 @@ pub struct Pane {
     editor: gtk::Entry,
     renaming: RefCell<Option<gio::FileInfo>>,
     rename_label: RefCell<Option<glib::WeakRef<gtk::Widget>>>,
-    pub dir: gtk::DirectoryList,
+    pub dir: Rc<crate::listing::Listing>,
     filter: gtk::CustomFilter,
     filtered: gtk::FilterListModel,
     pub sorted: gtk::SortListModel,
@@ -259,8 +259,7 @@ fn drag_geometry(sizes: &[(f64, f64)], grab: (f64, f64), badge: Option<(f64, f64
 
 impl Pane {
     pub fn new(start: &gio::File) -> Rc<Pane> {
-        let dir = gtk::DirectoryList::new(Some(ATTRS), Some(start));
-        dir.set_monitored(true);
+        let dir = crate::listing::Listing::new(ATTRS, start);
         let query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
         let hidden = Rc::new(Cell::new(kit::prefs::flag(&kit::prefs::read(), "files_hidden", false)));
         let (q, h) = (query.clone(), hidden.clone());
@@ -272,7 +271,7 @@ impl Pane {
             let q = q.borrow();
             q.is_empty() || search::matches(&info.display_name(), &q)
         });
-        let filtered = gtk::FilterListModel::new(Some(dir.clone()), Some(filter.clone()));
+        let filtered = gtk::FilterListModel::new(Some(dir.model().clone()), Some(filter.clone()));
         filtered.set_incremental(true);
         let folders = sorter(|a, b| order(!is_dir(a), !is_dir(b)));
         let multi = gtk::MultiSorter::new();
@@ -980,9 +979,9 @@ impl Pane {
             }
         });
         let me = self.weak();
-        self.dir.connect_loading_notify(move |d| {
+        self.dir.connect_loading_notify(move || {
             if let Some(p) = me.upgrade() {
-                if !d.is_loading() {
+                if !p.dir.is_loading() {
                     p.settled();
                 }
                 p.sync_empty();
@@ -1270,7 +1269,7 @@ impl Pane {
         }
         self.stop_hunt();
         self.query.borrow_mut().clear();
-        self.filtered.set_model(Some(&self.dir));
+        self.filtered.set_model(Some(self.dir.model()));
         self.search_cache.borrow_mut().take();
         self.found.remove_all();
         self.filter.changed(gtk::FilterChange::LessStrict);
@@ -1313,7 +1312,6 @@ impl Pane {
 
     pub fn refresh(self: &Rc<Self>) {
         let f = self.location();
-        self.dir.set_file(None::<&gio::File>);
         self.dir.set_file(Some(&f));
         self.stop_hunt();
         self.search_cache.borrow_mut().take();
@@ -1473,7 +1471,7 @@ impl Pane {
         self.stop_hunt();
         *self.query.borrow_mut() = q.clone();
         if !recursive {
-            self.filtered.set_model(Some(&self.dir));
+            self.filtered.set_model(Some(self.dir.model()));
             self.filter.changed(gtk::FilterChange::Different);
             self.sync_status();
             return;

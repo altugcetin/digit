@@ -1,6 +1,7 @@
 mod art;
 mod audio;
 mod info;
+mod listing;
 mod look;
 mod ops;
 mod pane;
