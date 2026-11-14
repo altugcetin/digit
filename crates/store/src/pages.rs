@@ -63,8 +63,8 @@ fn icon(app: &App, px: i32) -> gtk::Image {
 
 fn action(s: &Rc<Store>, id: &str) -> gtk::Button {
     let (label, kind) = s.action(id);
+    // Flatpak jobs queue, so the button always does something: get, update, open or cancel.
     let b = ui::button(label, kind);
-    b.set_sensitive(label != "Working…" && s.busy.borrow().as_ref().is_none_or(|b| b == id));
     let id = id.to_string();
     b.connect_clicked(move |_| {
         if let Some(s) = store() {
@@ -114,6 +114,15 @@ fn flow(per_line: u32) -> gtk::FlowBox {
     f.set_column_spacing(12);
     f.set_row_spacing(12);
     f
+}
+
+/// Adds `w` to a grid. The grid's own cell takes no focus: what is in it does, and draws its
+/// focus ring in its own shape, where the cell's would be a box around a pill or a card.
+fn put(flow: &gtk::FlowBox, w: &impl IsA<gtk::Widget>) {
+    flow.insert(w, -1);
+    if let Some(cell) = w.parent() {
+        cell.set_focusable(false);
+    }
 }
 
 fn job_tile(i: usize, job: &crate::Job) -> gtk::Widget {
@@ -194,7 +203,7 @@ fn banner_card(s: &Rc<Store>, app: &App, eyebrow: &str) -> gtk::Widget {
     col.set_valign(gtk::Align::Center);
     col.set_halign(gtk::Align::Start);
     col.set_margin_start(40);
-    col.set_size_request(400, -1);
+    col.set_margin_end(24);
     let ic = icon(app, 72);
     ic.set_halign(gtk::Align::Start);
     col.append(&ic);
@@ -216,6 +225,8 @@ fn banner_card(s: &Rc<Store>, app: &App, eyebrow: &str) -> gtk::Widget {
         pic.set_margin_end(40);
         pic.add_css_class("lifted");
         card.add_overlay(&pic);
+        // The screenshot would cover the words on a narrow window.
+        s.on_width(&pic, |pic, w| pic.set_visible(w >= 1000.0));
     }
     clickable(&card, &app.id);
     card.upcast()
@@ -349,7 +360,7 @@ fn tabbed(s: &Rc<Store>, cat: &crate::catalog::Catalog) -> gtk::Widget {
         let grid = flow(2);
         grid.set_homogeneous(true);
         for a in apps {
-            grid.insert(&lockup(s, a), -1);
+            put(&grid, &lockup(s, a));
         }
         stack.add_named(&grid, Some(key));
         let b = ui::button(label, "tab");
@@ -405,6 +416,7 @@ fn story(s: &Rc<Store>, app: &App) -> gtk::Widget {
     match app.shots.first() {
         Some(url) => {
             let pic = shot(url, 560, 280);
+            pic.set_size_request(-1, 280);
             pic.remove_css_class("shot");
             card.set_child(Some(&pic));
         }
@@ -421,7 +433,9 @@ fn story(s: &Rc<Store>, app: &App) -> gtk::Widget {
     let col = gtk::Box::new(gtk::Orientation::Vertical, 2);
     col.set_hexpand(true);
     col.set_valign(gtk::Align::Center);
-    col.append(&ui::text(&app.name, "name light"));
+    let name = ui::text(&app.name, "name light");
+    name.set_ellipsize(pango::EllipsizeMode::End);
+    col.append(&name);
     let sum = ui::text(&app.summary, "sub light");
     sum.set_ellipsize(pango::EllipsizeMode::End);
     col.append(&sum);
@@ -491,7 +505,7 @@ fn discover(s: &Rc<Store>) -> gtk::Widget {
     chips.set_homogeneous(false);
     chips.set_margin_top(14);
     for (i, j) in s.editorial.jobs.iter().enumerate() {
-        chips.insert(&chip(i, j), -1);
+        put(&chips, &chip(i, j));
     }
     b.append(&ui::heading("What do you want to do?"));
     b.append(&chips);
@@ -503,13 +517,15 @@ fn discover(s: &Rc<Store>) -> gtk::Widget {
         row.append(&spotlight(s, pool[day % pool.len()]));
     }
     row.append(&tabbed(s, &cat));
+    // Side by side when there is room, one above the other when there isn't.
+    s.on_width(&row, |row, w| row.set_orientation(if w < 960.0 { gtk::Orientation::Vertical } else { gtk::Orientation::Horizontal }));
     b.append(&row);
     let picks: Vec<&App> = s.editorial.picks.iter().filter_map(|id| cat.get(id)).collect();
     if !picks.is_empty() {
         b.append(&ui::heading("Editor's picks"));
         let grid = flow(2);
         for a in picks {
-            grid.insert(&story(s, a), -1);
+            put(&grid, &story(s, a));
         }
         b.append(&grid);
     }
@@ -577,7 +593,7 @@ fn job(s: &Rc<Store>, i: usize) -> gtk::Widget {
         b.append(&ui::heading("More to try"));
         let grid = flow(2);
         for app in more {
-            grid.insert(&lockup(s, app), -1);
+            put(&grid, &lockup(s, app));
         }
         let c = ui::card();
         c.append(&grid);
@@ -594,7 +610,7 @@ fn search(s: &Rc<Store>, q: &str) -> gtk::Widget {
     let mut any_job = false;
     for (i, j) in s.editorial.jobs.iter().enumerate() {
         if folded.len() > 1 && (kit::fuzzy::fold(&j.name).contains(&folded) || j.words.iter().any(|w| w.starts_with(&folded) || folded.contains(w.as_str()))) {
-            jobs.insert(&job_tile(i, j), -1);
+            put(&jobs, &job_tile(i, j));
             any_job = true;
         }
     }
@@ -688,6 +704,13 @@ fn search_aur(s: &Rc<Store>, query: &str, section: &gtk::Box, otherwise_empty: b
                 reveal.set_transition_type(gtk::RevealerTransitionType::SlideDown);
                 reveal.set_transition_duration(200);
                 reveal.set_child(Some(&card));
+                // Closed, it takes no room, not even the width of its rows.
+                reveal.set_visible(false);
+                reveal.connect_child_revealed_notify(|r| {
+                    if !r.reveals_child() && !r.is_child_revealed() {
+                        r.set_visible(false);
+                    }
+                });
 
                 let button = ui::button("Show other AUR packages", "");
                 button.set_halign(gtk::Align::Start);
@@ -701,6 +724,9 @@ fn search_aur(s: &Rc<Store>, query: &str, section: &gtk::Box, otherwise_empty: b
                 let panel = reveal.clone();
                 button.connect_clicked(move |button| {
                     let open = !panel.reveals_child();
+                    if open {
+                        panel.set_visible(true);
+                    }
                     panel.set_reveal_child(open);
                     arrow.set_label(if open { "expand_less" } else { "expand_more" });
                     let text = if open { "Hide other AUR packages" } else { "Show other AUR packages" };
@@ -785,6 +811,7 @@ fn system_row(s: &Rc<Store>, pkg: &kit::pk::Pkg, installed: bool, rec: Option<&c
         row.prepend(&artwork);
     } else {
         let tile = ui::tile("inventory_2");
+        tile.add_css_class("app");
         tile.set_valign(gtk::Align::Center);
         row.prepend(&tile);
     }
@@ -893,6 +920,7 @@ pub(crate) fn package_row(s: &Rc<Store>, p: &crate::arch::Package, title: Option
         Some(image) => row.append(&image),
         None => {
             let t = ui::tile(kind.glyph());
+            t.add_css_class("app");
             t.set_valign(gtk::Align::Center);
             row.append(&t);
         }
@@ -911,12 +939,20 @@ pub(crate) fn package_row(s: &Rc<Store>, p: &crate::arch::Package, title: Option
     let sub = ui::text(&p.desc, "sub");
     sub.set_ellipsize(pango::EllipsizeMode::End);
     col.append(&sub);
-    let tags = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    // Badges wrap onto another line rather than holding the row wide.
+    let tags = gtk::FlowBox::new();
+    tags.set_selection_mode(gtk::SelectionMode::None);
+    tags.set_column_spacing(6);
+    tags.set_row_spacing(4);
+    tags.set_max_children_per_line(8);
+    tags.set_halign(gtk::Align::Start);
+    tags.set_can_target(false);
+    tags.set_can_focus(false);
     tags.append(&ui::badge(kind.label(), if matches!(kind, crate::arch::Kind::Application | crate::arch::Kind::Cli) { "accent" } else { "" }));
     for also in p.also.iter().filter(|_| p.confidence >= crate::arch::Confidence::Medium) {
         tags.append(&ui::badge(also.label(), ""));
     }
-    tags.append(&ui::badge(&format!("Arch · {}", p.repo), ""));
+    tags.append(&ui::badge(&if p.repo == "local" { "Local".to_string() } else { format!("Arch · {}", p.repo) }, ""));
     let installed = s.arch_installed.borrow().get(&p.name).cloned();
     if let Some(v) = &installed {
         tags.append(&ui::badge(&format!("Installed {v}"), "good"));
@@ -1028,7 +1064,7 @@ fn app_page(s: &Rc<Store>, id: &str) -> gtk::Widget {
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     buttons.set_margin_top(10);
     buttons.append(&action(s, &app.id));
-    if s.installed.borrow().contains_key(&app.id) && s.busy.borrow().is_none() {
+    if s.installed.borrow().contains_key(&app.id) && s.task(&app.id).is_none() {
         let rm = ui::button("Remove", "danger");
         let id = app.id.clone();
         rm.connect_clicked(move |_| {
@@ -1104,7 +1140,7 @@ fn app_page(s: &Rc<Store>, id: &str) -> gtk::Widget {
 }
 
 fn yours(s: &Rc<Store>) -> gtk::Widget {
-    let (scroll, b) = ui::page("Yours", "Apps you got from Flatpak. Apps installed for you need no password.");
+    let (scroll, b) = ui::page("Yours", "Apps you got from Flatpak and your system's packages. Flatpak apps installed for you need no password.");
     let cat = s.catalog.borrow().clone();
     let installed = s.installed.borrow().clone();
     let updates = s.updates.borrow().clone();
@@ -1131,5 +1167,19 @@ fn yours(s: &Rc<Store>) -> gtk::Widget {
         card.append(&lockup(s, &entry(id)));
     }
     b.append(&card);
+    // System packages that are apps, as Settings > Apps lists them; libraries and tools stay out.
+    if let Some(arch) = s.arch.borrow().clone() {
+        let installed = s.arch_installed.borrow();
+        let mut apps: Vec<&crate::arch::Package> = arch.packages.iter().filter(|p| installed.contains_key(&p.name) && p.shown() == crate::arch::Kind::Application).collect();
+        apps.sort_by_key(|p| if p.title.is_empty() { p.name.to_lowercase() } else { p.title.to_lowercase() });
+        if !apps.is_empty() {
+            b.append(&ui::heading(&format!("System apps · {}", apps.len())));
+            let card = ui::card();
+            for p in apps {
+                card.append(&package_row(s, p, None));
+            }
+            b.append(&card);
+        }
+    }
     scroll.upcast()
 }

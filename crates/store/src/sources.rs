@@ -109,7 +109,7 @@ pub fn page(s: &Rc<Store>) -> gtk::Widget {
     }
     let (swrap, scard) = section("Installing apps");
     let (row, end) = ui::row(Some("person"), "Install apps for", "Just you needs no password; everyone shares one copy and asks for your password");
-    let pick = kit::ui::dropdown(&["Just me", "Everyone on this computer"], 0);
+    let pick = kit::ui::dropdown(&["Just me", "Everyone"], 0);
     pick.set_selected(if scope_system() { 1 } else { 0 });
     pick.connect_selected_notify(|p| {
         let _ = kit::prefs::set("store_scope", toml::Value::String(if p.selected() == 1 { "system".into() } else { "user".into() }));
@@ -177,8 +177,15 @@ fn aur_section() -> gtk::Box {
 
 pub fn aur_row(s: &Store, pkg: &aur::Package) -> gtk::Widget {
     let (row, end) = ui::row(Some("inventory_2"), &pkg.name, pkg.description.as_deref().unwrap_or(""));
-    end.append(&ui::badge("AUR", ""));
-    end.append(&ui::badge(&pkg.version, ""));
+    let source = ui::badge("AUR", "");
+    let version = ui::badge(&pkg.version, "");
+    end.append(&source);
+    end.append(&version);
+    // A narrow window keeps the name and the actions; the badges make way.
+    s.on_width(&version, move |version, w| {
+        version.set_visible(w >= 760.0);
+        source.set_visible(w >= 760.0);
+    });
     let installed = s.arch_installed.borrow().contains_key(&pkg.name);
     if installed {
         end.append(&ui::badge("Installed", "good"));
