@@ -234,6 +234,9 @@ pub struct Prefs {
     /// Extra space the shell reserves under the floating island when the compositor's own gap is
     /// smaller than the Tight preset's, so None and Tight leave windows the same distance below it.
     pub under: f64,
+    /// The compositor's space between the screen edge and windows: Hyprland's outer gap, niri's
+    /// single gap (twice the inner one).
+    pub edge_gap: f64,
     pub menubar: bool,
     pub menubar_look: String,
     pub bar_spaces: bool,
@@ -306,6 +309,7 @@ impl From<&Config> for Prefs {
             icon_theme: c.icon_theme.clone(),
             style: c.notch_style.clone(),
             under: under_island(c.hypr_gaps_in, c.hypr_gaps_out, kit::wm::which() == kit::wm::Wm::Niri),
+            edge_gap: edge_gap(c.hypr_gaps_in, c.hypr_gaps_out, kit::wm::which() == kit::wm::Wm::Niri),
             menubar: c.menubar,
             menubar_look: c.menubar_look.clone(),
             bar_spaces: c.menubar_spaces == "always",
@@ -400,6 +404,12 @@ pub const UNDER_ISLAND: f64 = 4.0;
 pub fn under_island(gaps_in: f64, gaps_out: f64, niri: bool) -> f64 {
     let gap = if niri { gaps_in * 2.0 } else { gaps_out };
     if gap.is_finite() { (UNDER_ISLAND - gap.max(0.0)).max(0.0) } else { 0.0 }
+}
+
+/// How far the compositor keeps windows from the screen edge.
+pub fn edge_gap(gaps_in: f64, gaps_out: f64, niri: bool) -> f64 {
+    let gap = if niri { gaps_in * 2.0 } else { gaps_out };
+    if gap.is_finite() { gap.max(0.0) } else { 0.0 }
 }
 
 pub fn dir() -> PathBuf {

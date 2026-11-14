@@ -17,6 +17,9 @@ const MORPH: i64 = 520_000;
 const HOLD: i64 = 1_500_000;
 const NUM: f64 = 14.5;
 const ICON: f64 = 18.5;
+/// The tallest a bar pill gets; on a lower bar it shrinks to keep `MIN_GAP` above and below.
+const PILL_TALL: f64 = 28.0;
+const MIN_GAP: f64 = 4.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Zone {
@@ -345,14 +348,18 @@ impl Strip {
         let look = imp.follow.borrow().as_ref().and_then(|f| f(now)).unwrap_or(Look { slab: imp.keep.get(), radius: 14.0, ..Look::default() });
         let (t, slab, radius, lift, menu) = (look.widen, look.slab, look.radius, look.lift, look.menu);
         imp.lift.set(lift);
-        let mid = lift * (1.0 - t) + h / 2.0;
         if (t <= 0.002 && menu <= 0.002) || w <= imp.keep.get() + 1.0 {
             imp.zones.borrow_mut().clear();
             return;
         }
         let zero = graphene::Size::zero();
         let band = h + 2.0 * lift * (1.0 - t);
-        let full = gtk::gsk::RoundedRect::new(graphene::Rect::new(0.0, 0.0, w as f32, band as f32), zero, zero, zero, zero);
+        // Over a clear bar the pills sit midway between the screen's top edge and the windows
+        // below; a glass band or the bar's own slab draws an edge, and they center in that.
+        let room = if app.wide() { band } else { (app.reserve() as f64 + app.prefs.borrow().edge_gap).clamp(band, band + 16.0) };
+        let space = band + (room - band) * (1.0 - look.glass) * (1.0 - t);
+        let mid = space / 2.0;
+        let full = gtk::gsk::RoundedRect::new(graphene::Rect::new(0.0, 0.0, w as f32, space.max(band) as f32), zero, zero, zero, zero);
         let bar = menu * (1.0 - t);
         let glass = bar * look.glass;
         let clear = bar * (1.0 - look.glass);
@@ -424,11 +431,17 @@ impl Strip {
         let cfg = &app.cfg;
         let hot = imp.hot.get();
         let held = imp.held.get();
+        // Every pill keeps the same space from the bar's edges, above, below and at the sides,
+        // whether the bar is the notch's or the island's.
+        // Where a click still lands on a pill: down to the pill's lower edge at least.
+        let reach = space.max(band);
+        let ph = (space - 2.0 * MIN_GAP).min(PILL_TALL);
+        let gap = ((space - ph) / 2.0).round();
         let pill = |s: &gtk::Snapshot, zone: Zone, x: f64, width: f64| {
             if held == Some(zone) {
-                draw::fill(s, &draw::round(x, mid - 14.0, width, 28.0, 14.0), ink_main.alpha(0.22));
+                draw::fill(s, &draw::round(x, mid - ph / 2.0, width, ph, ph / 2.0), ink_main.alpha(0.22));
             } else if hot == Some(zone) {
-                draw::fill(s, &draw::round(x, mid - 14.0, width, 28.0, 14.0), ink_main.alpha(0.14));
+                draw::fill(s, &draw::round(x, mid - ph / 2.0, width, ph, ph / 2.0), ink_main.alpha(0.14));
             }
         };
         let mut zones = Vec::with_capacity(4);
@@ -437,7 +450,7 @@ impl Strip {
         if imp.logo.borrow().as_ref().is_none_or(|(k, _)| *k != scale) {
             *imp.logo.borrow_mut() = Some((scale, kit::distro::logo(logo_px, scale, true)));
         }
-        let mut x = 10.0;
+        let mut x = gap;
         pill(s, Zone::Logo, x, 36.0);
         let logo = imp.logo.borrow().as_ref().and_then(|(_, l)| l.clone());
         let digit = crate::menubar::logo(s, &app, x + 18.0 - logo_px as f64 / 2.0, mid - logo_px as f64 / 2.0, logo_px as f64);
@@ -452,7 +465,7 @@ impl Strip {
                 None => draw::icon(s, self, cfg, "deployed_code", 20.0, true, ink_main, x + 18.0, mid),
             }
         }
-        zones.push((Zone::Logo, (x, 0.0, 36.0, band)));
+        zones.push((Zone::Logo, (x, 0.0, 36.0, reach)));
         x += 42.0;
         // The workspace pill, its own pill beside the logo: it grows open from the left.
         let (open, row) = {
@@ -461,7 +474,7 @@ impl Strip {
         };
         if open > 0.002 && row > 0.0 {
             let pw = (row * open).max(1.0);
-            let shape = draw::round(x, mid - 14.0, pw, 28.0, 14.0_f64.min(pw / 2.0));
+            let shape = draw::round(x, mid - ph / 2.0, pw, ph, (ph / 2.0).min(pw / 2.0));
             pill(s, Zone::Spaces, x, pw);
             s.push_rounded_clip(&shape);
             s.push_opacity(open);
@@ -469,7 +482,7 @@ impl Strip {
             s.pop();
             s.pop();
             if open > 0.5 {
-                zones.push((Zone::Spaces, (x, 0.0, pw, band)));
+                zones.push((Zone::Spaces, (x, 0.0, pw, reach)));
             }
             x += pw + 6.0 * open;
         }
@@ -490,7 +503,7 @@ impl Strip {
                     draw::paintable(s, &p, x + 12.0, mid - 10.0, 20.0);
                 }
                 draw::text(s, self, cfg, &name, TEXT, Face::Text(650), ink_main, x + 40.0, mid, text_w + 1.0, pango::Alignment::Left);
-                zones.push((Zone::App, (x, 0.0, width, band)));
+                zones.push((Zone::App, (x, 0.0, width, reach)));
                 x += width + 2.0;
                 let ww = draw::width(self, cfg, "Window", TEXT, Face::Text(450)).ceil() + 24.0;
                 if imp.titles.borrow().0 != id {
@@ -505,25 +518,25 @@ impl Strip {
                     let zone = Zone::Menu(i as u8);
                     pill(s, zone, x, tw);
                     draw::text(s, self, cfg, title, TEXT, Face::Text(450), ink_main, x + 12.0, mid, tw - 23.0, pango::Alignment::Left);
-                    zones.push((zone, (x, 0.0, tw, band)));
+                    zones.push((zone, (x, 0.0, tw, reach)));
                     x += tw;
                 }
                 if x + ww < edge {
                     pill(s, Zone::Win, x, ww);
                     draw::text(s, self, cfg, "Window", TEXT, Face::Text(450), ink_main, x + 12.0, mid, ww - 23.0, pango::Alignment::Left);
-                    zones.push((Zone::Win, (x, 0.0, ww, band)));
+                    zones.push((Zone::Win, (x, 0.0, ww, reach)));
                 }
             }
         }
         let date = app.date.borrow().clone();
         let date_w = draw::width(self, cfg, &date, TEXT, Face::Text(500)).ceil();
-        let mut r = w - 10.0;
+        let mut r = w - gap;
         if !date.is_empty() {
             let width = date_w + 24.0;
             r -= width;
             pill(s, Zone::Date, r, width);
             draw::text(s, self, cfg, &date, TEXT, Face::Text(500), ink_meta, r + 12.0, mid, date_w + 1.0, pango::Alignment::Left);
-            zones.push((Zone::Date, (r, 0.0, width, band)));
+            zones.push((Zone::Date, (r, 0.0, width, reach)));
             r -= 4.0;
         }
         let fresh = imp.battery_at.get().is_none_or(|t| now - t > 30_000_000);
@@ -559,7 +572,7 @@ impl Strip {
                 }
                 gx += gw + 6.0;
             }
-            zones.push((Zone::Status, (r, 0.0, total, band)));
+            zones.push((Zone::Status, (r, 0.0, total, reach)));
             let tray: Vec<(Option<gtk::gdk::Paintable>, String)> = app.sni.borrow().iter().map(|i| (i.icon.clone(), if i.id.is_empty() { i.title.clone() } else { i.id.clone() })).collect();
             r -= 4.0;
             for (i, (icon, name)) in tray.iter().enumerate().rev() {
@@ -573,7 +586,7 @@ impl Strip {
                     Some(p) => draw::paintable(s, p, r + 6.0, mid - 9.0, 18.0),
                     None => draw::monogram(s, self, cfg, name, r + 6.0, mid - 9.0, 18.0, ink_main.alpha(0.2), ink_main),
                 }
-                zones.push((zone, (r, 0.0, 30.0, band)));
+                zones.push((zone, (r, 0.0, 30.0, reach)));
             }
         }
         if halo > 0.02 {
