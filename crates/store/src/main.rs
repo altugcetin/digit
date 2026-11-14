@@ -795,9 +795,8 @@ fn main() -> glib::ExitCode {
         install_files();
         return glib::ExitCode::SUCCESS;
     }
-    let renderer = kit::effects::renderer("DIGIT_STORE_RENDERER");
+    kit::effects::select("DIGIT_STORE_RENDERER");
     unsafe {
-        std::env::set_var("GSK_RENDERER", renderer);
         libc::mallopt(libc::M_MMAP_THRESHOLD, 256 * 1024);
         libc::mallopt(libc::M_ARENA_MAX, 2);
     }

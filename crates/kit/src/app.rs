@@ -129,12 +129,11 @@ pub fn trim_later(ms: u64) {
 }
 
 pub fn lean(env: &str) {
-    let renderer = crate::effects::renderer(env);
+    crate::effects::select(env);
     unsafe extern "C" {
         fn mallopt(param: i32, value: i32) -> i32;
     }
     unsafe {
-        std::env::set_var("GSK_RENDERER", renderer);
         mallopt(-3, 256 * 1024);
         mallopt(-8, 2);
     }

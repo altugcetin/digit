@@ -665,9 +665,8 @@ fn main() -> glib::ExitCode {
             }
         };
     }
-    let renderer = kit::effects::renderer("DIGIT_SETTINGS_RENDERER");
+    kit::effects::select("DIGIT_SETTINGS_RENDERER");
     unsafe {
-        std::env::set_var("GSK_RENDERER", renderer);
         libc::mallopt(libc::M_MMAP_THRESHOLD, 256 * 1024);
         libc::mallopt(libc::M_ARENA_MAX, 2);
     }
