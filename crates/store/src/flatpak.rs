@@ -86,11 +86,26 @@ pub enum Job {
     Update(bool),
 }
 
-pub async fn run(id: &str, job: Job, progress: impl Fn(Option<f64>)) -> Result<(), String> {
+/// What a cancelled job reports.
+pub const CANCELLED: &str = "Cancelled";
+
+/// Runs `job` for app `id`, reporting progress. Cancelling `cancel` stops flatpak the way Ctrl+C
+/// would, so it cleans up after itself.
+pub async fn run(id: &str, job: Job, progress: impl Fn(Option<f64>), cancel: &gio::Cancellable) -> Result<(), String> {
     if !valid(id) {
         return Err("Refused: not a valid application id".into());
     }
     let scope = |system: bool| if system { "--system" } else { "--user" };
+    // Distributions like Arch set Flathub up for the whole system only, so an install for the
+    // user alone would find no "flathub" there. Add it for the user too; that needs no password.
+    if cancel.is_cancelled() {
+        return Err(CANCELLED.into());
+    }
+    if let Job::Install(false, ref remote) = job
+        && remote == "flathub"
+    {
+        let _ = output(&["remote-add", "--user", "--if-not-exists", "flathub", "https://dl.flathub.org/repo/flathub.flatpakrepo"]).await;
+    }
     let args: Vec<&str> = match job {
         Job::Install(system, ref remote) => {
             if remote.is_empty() || !remote.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
@@ -104,6 +119,15 @@ pub async fn run(id: &str, job: Job, progress: impl Fn(Option<f64>)) -> Result<(
     let mut argv: Vec<&std::ffi::OsStr> = vec!["flatpak".as_ref()];
     argv.extend(args.iter().map(|a| std::ffi::OsStr::new(*a)));
     let p = gio::Subprocess::newv(&argv, gio::SubprocessFlags::STDOUT_PIPE | gio::SubprocessFlags::STDERR_MERGE).map_err(|e| e.to_string())?;
+    let stop = cancel.connect_cancelled_local({
+        let p = p.clone();
+        move |_| {
+            p.send_signal(libc::SIGINT);
+            // Still there after a while: it won't stop by itself.
+            let p = p.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_secs(4), move || p.force_exit());
+        }
+    });
     let stream = p.stdout_pipe().ok_or("no output")?;
     let mut tail = String::new();
     loop {
@@ -133,6 +157,12 @@ pub async fn run(id: &str, job: Job, progress: impl Fn(Option<f64>)) -> Result<(
         }
     }
     p.wait_future().await.map_err(|e| e.to_string())?;
+    if let Some(stop) = stop {
+        cancel.disconnect_cancelled(stop);
+    }
+    if cancel.is_cancelled() {
+        return Err(CANCELLED.into());
+    }
     if p.is_successful() {
         Ok(())
     } else {

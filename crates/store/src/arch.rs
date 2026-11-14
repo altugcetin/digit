@@ -470,7 +470,7 @@ pub fn load() -> Option<Index> {
         return None;
     }
     let detailed = dbs.iter().any(|(_, p)| p.extension().is_some_and(|e| e == "files"));
-    let mut stamp = String::from("v3");
+    let mut stamp = String::from("v4");
     for (_, p) in &dbs {
         stamp.push_str(&format!("|{}:{}", p.display(), stamp_of(p)));
     }
@@ -508,6 +508,22 @@ pub fn load() -> Option<Index> {
             packages.push(Package { name: r.name, version: r.version, desc: r.desc, repo: repo.clone(), url: r.url, kind, also, confidence, title, icon: comp.map(|c| c.icon.clone()).unwrap_or_default(), stock: comp.map(|c| c.stock.clone()).unwrap_or_default() });
         });
         let _ = child.wait();
+    }
+    // Installed from elsewhere (the AUR, a local build): in no repository, but still on the
+    // computer, so Yours can list it and search can find it.
+    for entry in std::fs::read_dir(LOCAL).into_iter().flatten().flatten() {
+        let Ok(text) = std::fs::read_to_string(entry.path().join("desc")) else { continue };
+        records(BufReader::new(text.as_bytes()), |r| {
+            if !seen.insert(r.name.clone()) {
+                return;
+            }
+            let comp = components.get(&r.name);
+            let (files, shown) = local.get(&r.name).map(|(f, s)| (Some(f.clone()), *s)).unwrap_or((None, None));
+            let signals = Signals { name: r.name.clone(), desc: r.desc.clone(), depends: r.depends, appstream: comp.map(|c| c.kind.clone()), files, entries_shown: shown };
+            let (kind, also, confidence) = classify(&signals);
+            let title = comp.map(|c| c.name.clone()).filter(|t| !t.eq_ignore_ascii_case(&r.name)).unwrap_or_default();
+            packages.push(Package { name: r.name, version: r.version, desc: r.desc, repo: "local".into(), url: r.url, kind, also, confidence, title, icon: comp.map(|c| c.icon.clone()).unwrap_or_default(), stock: comp.map(|c| c.stock.clone()).unwrap_or_default() });
+        });
     }
     if let Some(dir) = cache_file().parent() {
         let _ = std::fs::create_dir_all(dir);

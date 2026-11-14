@@ -278,6 +278,8 @@ pub fn css() -> String {
         })
         .collect();
     let (r_card, r_row, r_ctl, r_pop, r_dialog, r_hero) = (px(20.0), px(15.0), px(12.0), px(18.0), px(26.0), px(26.0));
+    // Glyph tiles round with Roundness too, like the rows and cards around them.
+    let (r_tile, r_tile_small) = (px(8.0), px(7.0));
     let roles = crate::theme::load().and_then(|t| t.shell_roles()).unwrap_or_default();
     let faint = crate::palette::Palette::new(roles, card_color(&lk.surface, Rgb::hex(accent).unwrap_or(roles.primary))).ink_faint.rgba().to_string();
     let row_y = if lk.dense { "7px" } else { "11px" };
@@ -362,9 +364,9 @@ entry.side-search {{ margin: 0 2px 10px 2px; }}
 .card .row {{ transition: background-color 700ms cubic-bezier(0.2, 0, 0, 1); }}
 
 .sym {{ font-family: "{glyphs}"; font-size: 20px; font-weight: 400; }}
-.tile {{ color: #ffffff; border-radius: 8px; min-width: 28px; min-height: 28px; font-size: 18px; box-shadow: inset 0 1px alpha(#ffffff, 0.18); }}
-.tile.big {{ border-radius: 12px; min-width: 42px; min-height: 42px; font-size: 26px; }}
-.tile.small {{ border-radius: 7px; min-width: 24px; min-height: 24px; font-size: 16px; }}
+.tile {{ color: #ffffff; border-radius: {r_tile}; min-width: 28px; min-height: 28px; font-size: 18px; box-shadow: inset 0 1px alpha(#ffffff, 0.18); }}
+.tile.big {{ border-radius: {r_ctl}; min-width: 42px; min-height: 42px; font-size: 26px; }}
+.tile.small {{ border-radius: {r_tile_small}; min-width: 24px; min-height: 24px; font-size: 16px; }}
 .tile.blue {{ background: linear-gradient(#4aa3ff, #0a72f5); }}
 .tile.green {{ background: linear-gradient(#4fdc78, #1fb04f); }}
 .tile.purple {{ background: linear-gradient(#cf7bf5, #a23fe0); }}
