@@ -100,6 +100,49 @@ fn resolve_renderer(env: &str) -> String {
     }
 }
 
+/// Picks the renderer for a digit program (see [`renderer`]) and sets it up. Call it first thing
+/// in `main`, before GTK starts or any thread does.
+///
+/// On NVIDIA, GTK's OpenGL renderer opens the driver through its GLES API, which loses glyphs:
+/// text and icon fonts go missing on surfaces that redraw rarely, like the desktop clock and the
+/// battery widget (GTK issue 6216). Desktop OpenGL draws them correctly, so GLES is turned off
+/// there.
+pub fn select(env: &str) -> String {
+    let r = renderer(env);
+    let gles_off = matches!(r.as_str(), "gl" | "ngl") && drivers() == ["nvidia"];
+    // SAFETY: called at startup, before GTK or any other thread reads the environment.
+    unsafe {
+        std::env::set_var("GSK_RENDERER", &r);
+        if gles_off {
+            std::env::set_var("GDK_DISABLE", without_gles(std::env::var("GDK_DISABLE").ok().as_deref()));
+        }
+    }
+    r
+}
+
+/// `GDK_DISABLE`'s value with GLES added to what it turns off.
+fn without_gles(current: Option<&str>) -> String {
+    match current.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(c) if c.split(',').any(|f| f.trim() == "gles-api") => c.to_string(),
+        Some(c) => format!("{c},gles-api"),
+        None => "gles-api".into(),
+    }
+}
+
+/// The kernel drivers of the display GPUs.
+pub fn drivers() -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else { return Vec::new() };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.file_name().to_str().and_then(|n| n.strip_prefix("card")).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())))
+        .filter_map(|e| std::fs::read_link(e.path().join("device/driver")).ok())
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +167,14 @@ mod tests {
         assert!(software_in(true, true, None, false));
         assert!(software_in(true, false, Some("cairo"), false));
         assert!(software_in(true, false, None, true));
+    }
+
+    #[test]
+    fn gles_is_added_to_what_gdk_turns_off() {
+        assert_eq!(without_gles(None), "gles-api");
+        assert_eq!(without_gles(Some("")), "gles-api");
+        assert_eq!(without_gles(Some("vulkan")), "vulkan,gles-api");
+        assert_eq!(without_gles(Some("gles-api,vulkan")), "gles-api,vulkan");
     }
 
     #[test]
