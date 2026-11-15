@@ -2,6 +2,58 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+fn roots() -> Vec<PathBuf> {
+    let mut roots = vec![
+        gtk::glib::user_data_dir().join("icons"),
+        gtk::glib::home_dir().join(".icons"),
+    ];
+    roots.extend(gtk::glib::system_data_dirs().into_iter().map(|p| p.join("icons")));
+    roots
+}
+
+/// One of a theme's cursors (the first of `names` it has), as an image about `size` pixels
+/// tall, for a preview. Reads the XCursor file directly.
+pub fn image(theme: &str, names: &[&str], size: u32) -> Option<gtk::gdk::Texture> {
+    if theme.is_empty() || theme.contains('/') || theme.starts_with('.') {
+        return None;
+    }
+    let file = roots().into_iter().flat_map(|r| names.iter().map(move |n| r.join(theme).join("cursors").join(n))).find(|p| p.is_file())?;
+    let bytes = std::fs::read(file).ok()?;
+    let (width, height, pixels) = xcursor(&bytes, size)?;
+    let bytes = gtk::glib::Bytes::from_owned(pixels);
+    // XCursor pixels are premultiplied ARGB words, little endian: B, G, R, A in memory.
+    use gtk::prelude::Cast;
+    Some(gtk::gdk::MemoryTexture::new(width as i32, height as i32, gtk::gdk::MemoryFormat::B8g8r8a8Premultiplied, &bytes, width as usize * 4).upcast())
+}
+
+/// The image of the nominal size closest to `size` in an XCursor file: width, height, pixels.
+fn xcursor(b: &[u8], size: u32) -> Option<(u32, u32, Vec<u8>)> {
+    let word = |at: usize| b.get(at..at + 4).map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]));
+    if b.get(0..4)? != b"Xcur" {
+        return None;
+    }
+    let count = word(12)?.min(1024) as usize;
+    let mut best: Option<(u32, usize)> = None;
+    for i in 0..count {
+        let entry = 16 + i * 12;
+        if word(entry)? != 0xfffd_0002 {
+            continue;
+        }
+        let (nominal, at) = (word(entry + 4)?, word(entry + 8)? as usize);
+        if best.is_none_or(|(n, _)| nominal.abs_diff(size) < n.abs_diff(size)) {
+            best = Some((nominal, at));
+        }
+    }
+    let (_, at) = best?;
+    let (width, height) = (word(at + 16)?, word(at + 20)?);
+    if width == 0 || height == 0 || width > 512 || height > 512 {
+        return None;
+    }
+    let start = at + 36;
+    let pixels = b.get(start..start + (width * height * 4) as usize)?.to_vec();
+    Some((width, height, pixels))
+}
+
 /// Installed cursor themes as (directory id, display name), sorted by id.
 pub fn themes() -> Vec<(String, String)> {
     let mut roots = vec![

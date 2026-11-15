@@ -338,20 +338,35 @@ fn restore_page(page: &gtk::Widget, value: f64, focus: Option<Vec<usize>>) {
         Some(widget.downgrade())
     });
     let viewport = scroll.child().and_downcast::<gtk::Viewport>().map(|v| v.downgrade());
-    let restored = std::cell::Cell::new(false);
-    // A new adjustment has no range until layout. Restore during its first usable
-    // range change, before painting, so set_value cannot be clamped to zero.
+    let focused = std::rc::Rc::new(std::cell::Cell::new(false));
+    let settled = std::rc::Rc::new(std::cell::Cell::new(false));
+    // A new adjustment has no range until layout, and pictures that wrap keep changing the
+    // page's height for a few frames. Put the place back on each change, before painting so
+    // set_value can't be clamped to zero, until the page settles or the user scrolls.
+    let until = glib::monotonic_time() + 600_000;
+    let ours = std::rc::Rc::new(std::cell::Cell::new(false));
+    {
+        let (settled, ours) = (settled.clone(), ours.clone());
+        let restored = focused.clone();
+        scroll.vadjustment().connect_value_changed(move |adj| {
+            if restored.get() && !ours.get() && (adj.value() - value).abs() > 1.0 {
+                // Scrolled since the place was put back: leave it there.
+                settled.set(true);
+            }
+        });
+    }
     scroll.vadjustment().connect_changed(move |adj| {
-        if restored.get() || adj.page_size() <= 0.0 || adj.upper() - adj.page_size() < value { return; }
-        restored.set(true);
-        if let Some(target) = target.as_ref().and_then(|w| w.upgrade()) {
+        if settled.get() || glib::monotonic_time() > until || adj.page_size() <= 0.0 || adj.upper() - adj.page_size() < value { return; }
+        if !focused.replace(true) && let Some(target) = target.as_ref().and_then(|w| w.upgrade()) {
             let viewport = viewport.as_ref().and_then(|v| v.upgrade());
             let follow = viewport.as_ref().is_some_and(|v| v.is_scroll_to_focus());
             if let Some(v) = &viewport { v.set_scroll_to_focus(false); }
             target.grab_focus();
             if let Some(v) = &viewport { v.set_scroll_to_focus(follow); }
         }
+        ours.set(true);
         adj.set_value(value);
+        ours.set(false);
     });
 }
 
@@ -361,6 +376,11 @@ pub(crate) fn reload(name: &str) {
         let Some(stack) = s.borrow().as_ref().map(|s| s.stack.clone()) else { return };
         let Some(old) = stack.child_by_name(name) else { return };
         let visible = stack.visible_child_name().is_some_and(|v| v == name);
+        // The page in view keeps its place: its rows follow the masters where they are.
+        if visible && REDUCTIONS.contains(&name) {
+            desktop::refresh_controlled();
+            return;
+        }
         let value = old.downcast_ref::<gtk::ScrolledWindow>().map_or(0.0, |s| s.vadjustment().value());
         let focus = if visible { focus_path(&old) } else { None };
         stack.remove(&old);
@@ -373,8 +393,11 @@ pub(crate) fn reload(name: &str) {
     });
 }
 
+/// The pages with rows that Reduce motion or Reduce effects turn off.
+const REDUCTIONS: [&str; 4] = ["appearance", "spotlight", "compositor", "notch"];
+
 pub(crate) fn reload_reductions() {
-    for name in ["appearance", "spotlight", "compositor", "notch"] {
+    for name in REDUCTIONS {
         reload(name);
     }
 }
@@ -398,7 +421,7 @@ fn watch(window: &gtk::ApplicationWindow) {
                 // Pages made of settings show the new values; the others don't read config.toml.
                 let visible = SHELL.with(|s| s.borrow().as_ref().map(|s| s.current.borrow().clone())).unwrap_or_default();
                 reload_reductions();
-                if !["appearance", "spotlight", "compositor", "notch"].contains(&visible.as_str()) && !desktop::sections(&visible).is_empty() && visible != "displays" {
+                if !REDUCTIONS.contains(&visible.as_str()) && !desktop::sections(&visible).is_empty() && visible != "displays" {
                     reload(&visible);
                 }
             }

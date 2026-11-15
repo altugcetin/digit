@@ -102,10 +102,49 @@ fn controlled_in(key: &str, motion: bool, effects: bool) -> Option<&'static str>
     }
 }
 
-pub(crate) fn controlled_row(row: &gtk::Box, detail: Option<&str>) {
-    if detail.is_some() {
-        row.add_css_class("controlled");
-        row.set_sensitive(false);
+thread_local! {
+    /// Rows that Reduce motion or Reduce effects can turn off: the row, its setting and its own
+    /// subtitle, so they can follow a change in place instead of the page being rebuilt.
+    static CONTROLLED: std::cell::RefCell<Vec<(glib::WeakRef<gtk::Box>, &'static str, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Marks `row` (with subtitle `sub`) as turned off while a reduction master owns `key`, and keeps
+/// it following later changes.
+pub(crate) fn controlled_row(row: &gtk::Box, key: &'static str, sub: &str) {
+    if controlled_in(key, true, true).is_none() { return; }
+    CONTROLLED.with(|c| {
+        let mut c = c.borrow_mut();
+        c.retain(|(w, _, _)| w.upgrade().is_some());
+        c.push((row.downgrade(), key, sub.to_string()));
+    });
+    show_controlled(row, key, sub);
+}
+
+fn show_controlled(row: &gtk::Box, key: &str, sub: &str) {
+    let detail = controlled(key);
+    if detail.is_some() { row.add_css_class("controlled") } else { row.remove_css_class("controlled") }
+    row.set_sensitive(detail.is_none());
+    if let Some(label) = sub_label(row.upcast_ref()) {
+        label.set_text(detail.unwrap_or(sub));
+        label.set_visible(!label.text().is_empty());
+    }
+}
+
+fn sub_label(w: &gtk::Widget) -> Option<gtk::Label> {
+    if let Some(l) = w.downcast_ref::<gtk::Label>().filter(|l| l.has_css_class("sub")) { return Some(l.clone()); }
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        if let Some(l) = sub_label(&c) { return Some(l); }
+        child = c.next_sibling();
+    }
+    None
+}
+
+/// Brings every row a reduction master owns up to date where it is, keeping the page's place.
+pub(crate) fn refresh_controlled() {
+    let rows: Vec<_> = CONTROLLED.with(|c| c.borrow().iter().filter_map(|(w, k, s)| w.upgrade().map(|w| (w, *k, s.clone()))).collect());
+    for (row, key, sub) in rows {
+        show_controlled(&row, key, &sub);
     }
 }
 
@@ -151,7 +190,7 @@ pub(crate) fn choice(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &
         }
     } else { current };
     let (row, end) = ui::row(Some(icon), title, detail.unwrap_or(sub));
-    controlled_row(&row, detail);
+    controlled_row(&row, key, sub);
     let labels: Vec<&str> = options.iter().map(|o| o.1).collect();
     let at = options.iter().position(|o| o.0 == current).unwrap_or(0);
     let values: Rc<Vec<String>> = Rc::new(options.iter().map(|o| o.0.to_string()).collect());
@@ -371,7 +410,7 @@ fn advanced_rows(card: &gtk::Box) -> gtk::Box {
 pub(crate) fn toggle(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, on: bool) -> gtk::Box {
     let detail = controlled(key);
     let (row, end) = ui::row(Some(icon), title, detail.unwrap_or(sub));
-    controlled_row(&row, detail);
+    controlled_row(&row, key, sub);
     let on = on && detail.is_none();
     let sw = gtk::Switch::new();
     sw.set_valign(gtk::Align::Center);
@@ -690,67 +729,161 @@ fn shell_look(body: &gtk::Box, t: &toml::Table) {
     }).collect();
     let values: Vec<&'static str> = surfaces.iter().map(|s| s.0).collect();
     tiles(&look, "dark_mode", "Shell surfaces", sub, items, at, move |i| save("surface", toml::Value::String(values[i].into())));
-    let (row, end) = ui::row(Some("palette"), "Color scheme", "Colors generated from your wallpaper");
-    let current = kit::theme::load().map(|t| t.scheme).unwrap_or_else(|| prefs::get_str(&t, "scheme", "content"));
-    let schemes: Vec<&str> = kit::theme::SCHEMES.to_vec();
-    let pick = kit::ui::dropdown(&schemes, 0);
-    let selected = schemes.iter().position(|s| *s == current).unwrap_or(0) as u32;
-    pick.set_selected(selected);
-    let accepted = Rc::new(Cell::new(selected));
+    scheme_choice(&look, t);
+    icon_theme_choice(&look, t);
+    choice(&look, "palette", "Glyph backgrounds", "The colored squares behind the symbols in Settings, Files and Store", "ui_tiles", &kit::style::TILES, &prefs::get_str(t, "ui_tiles", "colorful"));
+    cursor(&look, t);
+}
+
+/// A dropdown row with a small preview of the choice to its left, following the selection.
+/// `pick` applies a choice and says whether it took; one that didn't puts the last one back.
+fn previewed(card: &gtk::Box, icon: &str, title: &str, sub: &str, labels: &[&str], at: usize, preview: impl Fn(usize) -> gtk::Widget + 'static, pick: impl Fn(usize, &gtk::DropDown) -> bool + 'static) -> (gtk::Box, gtk::DropDown) {
+    let (row, end) = ui::row(Some(icon), title, sub);
+    let slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    slot.set_valign(gtk::Align::Center);
+    slot.set_margin_end(6);
+    slot.append(&preview(at));
+    let pick_box = kit::ui::dropdown(labels, at as u32);
+    let accepted = Rc::new(Cell::new(at as u32));
     let restoring = Rc::new(Cell::new(false));
-    pick.connect_selected_notify(move |p| {
-        if restoring.get() { return; }
-        let Some(name) = kit::theme::SCHEMES.get(p.selected() as usize) else { return };
-        let selected = p.selected();
-        p.set_sensitive(false);
+    {
+        let (accepted, restoring, slot) = (accepted.clone(), restoring.clone(), slot.downgrade());
+        pick_box.connect_selected_notify(move |p| {
+            if restoring.get() { return; }
+            let i = p.selected();
+            if pick(i as usize, p) {
+                accepted.set(i);
+            } else {
+                restoring.set(true);
+                p.set_selected(accepted.get());
+                restoring.set(false);
+            }
+            if let Some(slot) = slot.upgrade() {
+                while let Some(c) = slot.first_child() { slot.remove(&c); }
+                slot.append(&preview(p.selected() as usize));
+            }
+        });
+    }
+    end.append(&slot);
+    end.append(&pick_box);
+    card.append(&row);
+    (row, pick_box)
+}
+
+/// A scheme's look: three dots in its primary, secondary and tertiary colors on its surface.
+fn scheme_swatch(colors: [(f64, f64, f64); 4]) -> gtk::Widget {
+    let a = gtk::DrawingArea::new();
+    a.set_content_width(58);
+    a.set_content_height(24);
+    a.set_draw_func(move |_, cr, w, h| {
+        let (w, h) = (w as f64, h as f64);
+        let [surface, x, y, z] = colors;
+        cr.set_source_rgb(surface.0, surface.1, surface.2);
+        kit::paint::rounded(cr, 0.0, 0.0, w, h, h / 2.0);
+        let _ = cr.fill();
+        for (i, c) in [x, y, z].iter().enumerate() {
+            cr.set_source_rgb(c.0, c.1, c.2);
+            cr.arc(h / 2.0 + i as f64 * (w - h) / 2.0, h / 2.0, h / 2.0 - 4.0, 0.0, std::f64::consts::TAU);
+            let _ = cr.fill();
+        }
+    });
+    a.upcast()
+}
+
+/// Color schemes, made from the wallpaper. While one is being made the choice waits; if it
+/// can't be made, the last one comes back.
+fn scheme_choice(card: &gtk::Box, t: &toml::Table) {
+    let theme = kit::theme::load();
+    let current = theme.as_ref().map(|t| t.scheme.clone()).unwrap_or_else(|| prefs::get_str(t, "scheme", "content"));
+    let source = theme.map(|t| t.source).unwrap_or_else(|| "#6750a4".into());
+    let at = kit::theme::SCHEMES.iter().position(|s| *s == current).unwrap_or(0);
+    let colors: Vec<[(f64, f64, f64); 4]> = kit::theme::SCHEMES.iter().map(|s| kit::theme::preview(&source, s).map(|c| c.map(|c| (c.r, c.g, c.b))).unwrap_or([(0.15, 0.15, 0.17), (0.6, 0.5, 0.9), (0.6, 0.6, 0.7), (0.8, 0.6, 0.6)])).collect();
+    let accepted = Rc::new(Cell::new(at as u32));
+    let undoing = Rc::new(Cell::new(false));
+    let (accepted2, undoing2) = (accepted.clone(), undoing.clone());
+    previewed(card, "palette", "Color scheme", "Colors generated from your wallpaper", &kit::theme::SCHEMES, at, move |i| scheme_swatch(colors[i]), move |i, p| {
+        if undoing2.get() { return true; }
+        let Some(name) = kit::theme::SCHEMES.get(i) else { return false };
         let argv: [&std::ffi::OsStr; 4] = ["digit".as_ref(), "theme".as_ref(), "--scheme".as_ref(), name.as_ref()];
-        let process = gio::Subprocess::newv(&argv, gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE);
-        let (pick, accepted, restoring) = (p.clone(), accepted.clone(), restoring.clone());
+        let process = match gio::Subprocess::newv(&argv, gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE) {
+            Ok(p) => p,
+            Err(e) => {
+                ui::fail(&format!("Could not apply the color scheme: {e}"));
+                return false;
+            }
+        };
+        p.set_sensitive(false);
+        let (pick, accepted, undoing) = (p.clone(), accepted2.clone(), undoing2.clone());
         glib::spawn_future_local(async move {
-            let result = match process { Ok(p) => p.wait_check_future().await, Err(e) => Err(e) };
-            match result {
-                Ok(()) => { accepted.set(selected); ui::done(&format!("Color scheme: {name}")); }
+            match process.wait_check_future().await {
+                Ok(()) => {
+                    accepted.set(i as u32);
+                    ui::done(&format!("Color scheme: {name}"));
+                }
                 Err(e) => {
-                    restoring.set(true);
-                    pick.set_selected(accepted.get());
-                    restoring.set(false);
                     ui::fail(&format!("Could not apply the color scheme: {e}"));
+                    undoing.set(true);
+                    pick.set_selected(accepted.get());
+                    undoing.set(false);
                 }
             }
             pick.set_sensitive(true);
         });
+        true
     });
-    end.append(&pick);
-    look.append(&row);
+}
+
+/// Icon themes, with a few of the chosen one's icons beside the choice.
+fn icon_theme_choice(card: &gtk::Box, t: &toml::Table) {
     let themes = icon_themes();
-    let (row, end) = ui::row(Some("interests"), "Icon theme", "Apps, the dock, the switcher and Spotlight");
-    let mut labels: Vec<String> = vec!["System default".into()];
-    labels.extend(themes.iter().cloned());
-    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let pick = kit::ui::dropdown(&refs, 0);
     let chosen = t.get("icon_theme").and_then(|v| v.as_str()).map(str::to_string);
-    pick.set_selected(chosen.as_ref().and_then(|c| themes.iter().position(|n| n == c)).map_or(0, |i| i + 1) as u32);
-    let accepted = Cell::new(pick.selected());
-    let restoring = Cell::new(false);
-    pick.connect_selected_notify(move |p| {
-        if restoring.get() { return; }
-        let i = p.selected() as usize;
+    let mut names: Vec<String> = vec!["System default".into()];
+    names.extend(themes.iter().cloned());
+    let labels: Vec<&str> = names.iter().map(String::as_str).collect();
+    let at = chosen.as_ref().and_then(|c| themes.iter().position(|n| n == c)).map_or(0, |i| i + 1);
+    let shown = names.clone();
+    previewed(card, "interests", "Icon theme", "Apps, the dock, the switcher and Spotlight", &labels, at, move |i| icon_preview(if i == 0 { "Adwaita" } else { &shown[i] }), move |i, _| {
         let r = if i == 0 { prefs::unset("icon_theme") } else { themes.get(i - 1).map_or(Ok(()), |n| prefs::set("icon_theme", toml::Value::String(n.clone()))) };
-        if let Err(e) = r {
-            ui::fail(&e);
-            restoring.set(true);
-            p.set_selected(accepted.get());
-            restoring.set(false);
-        } else {
-            accepted.set(p.selected());
+        match r {
+            Ok(()) => true,
+            Err(e) => {
+                ui::fail(&e);
+                false
+            }
         }
     });
-    end.append(&pick);
-    look.append(&row);
-    let glyphs = kit::style::GLYPHS;
-    choice(&look, "category", "Glyph style", "The small symbols across Digit, like the ones in this list", "ui_glyphs", &glyphs, &prefs::get_str(t, "ui_glyphs", "rounded"));
-    choice(&look, "palette", "Glyph backgrounds", "The colored squares behind the symbols in Settings, Files and Store", "ui_tiles", &kit::style::TILES, &prefs::get_str(t, "ui_tiles", "colorful"));
-    cursor(&look, t);
+}
+
+/// A folder, the home folder, a terminal and the trash from `theme`.
+fn icon_preview(theme: &str) -> gtk::Widget {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let Some(display) = gtk::gdk::Display::default() else { return row.upcast() };
+    let active = gtk::IconTheme::for_display(&display);
+    let it = gtk::IconTheme::new();
+    it.set_search_path(&active.search_path().iter().map(|p| p.as_path()).collect::<Vec<_>>());
+    it.set_resource_path(&active.resource_path().iter().map(|p| p.as_str()).collect::<Vec<_>>());
+    it.set_theme_name(Some(theme));
+    for name in ["folder", "user-home", "utilities-terminal", "user-trash"] {
+        let icon = it.lookup_icon(name, &[], 22, 1, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty());
+        let image = gtk::Image::from_paintable(Some(&icon));
+        image.set_pixel_size(22);
+        row.append(&image);
+    }
+    row.upcast()
+}
+
+/// A cursor theme's arrow, hand and text cursors.
+fn cursor_preview(theme: &str) -> gtk::Widget {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    for names in [&["left_ptr", "default", "arrow"][..], &["hand2", "pointer", "pointing_hand"][..], &["xterm", "text", "ibeam"][..]] {
+        if let Some(texture) = kit::cursors::image(theme, names, 24) {
+            let picture = gtk::Picture::for_paintable(&texture);
+            picture.set_size_request(22, 22);
+            picture.set_content_fit(gtk::ContentFit::Contain);
+            row.append(&picture);
+        }
+    }
+    row.upcast()
 }
 
 /// The pointer's theme and size: "" leaves the system's theme alone.
@@ -759,9 +892,15 @@ fn cursor(card: &gtk::Box, t: &toml::Table) {
     let (current, size) = kit::cursors::current(t);
     let themes = kit::cursors::themes();
     if !themes.is_empty() {
-        let mut options: Vec<(&str, &str)> = vec![("", "System default")];
-        options.extend(themes.iter().map(|(id, name)| (id.as_str(), name.as_str())));
-        choice(card, "arrow_selector_tool", "Cursor", "", "cursor_theme", &options, &current);
+        let mut options: Vec<(String, String)> = vec![(String::new(), "System default".into())];
+        options.extend(themes.iter().cloned());
+        // The default theme's own cursors stand for "System default".
+        let system = gtk::Settings::default().and_then(|s| s.gtk_cursor_theme_name()).map(|n| n.to_string()).unwrap_or_else(|| "Adwaita".into());
+        let labels: Vec<&str> = options.iter().map(|o| o.1.as_str()).collect();
+        let at = options.iter().position(|(id, _)| *id == current).unwrap_or(0);
+        let ids: Vec<String> = options.iter().map(|(id, _)| id.clone()).collect();
+        let shown: Vec<String> = ids.iter().map(|id| if id.is_empty() { system.clone() } else { id.clone() }).collect();
+        previewed(card, "arrow_selector_tool", "Cursor", "", &labels, at, move |i| cursor_preview(&shown[i]), move |i, _| save("cursor_theme", toml::Value::String(ids[i].clone())));
     }
     let labels: Vec<&str> = SIZES.iter().map(|s| s.1).collect();
     let (row, end) = ui::row(Some("open_with"), "Cursor size", "");
@@ -896,28 +1035,13 @@ fn roundness(body: &gtk::Box, t: &toml::Table) {
 fn dock(body: &gtk::Box, t: &toml::Table) {
     let dock = section(body, "Dock");
     let shows = keys("dock").map(|k| format!("{k} shows or hides it at any time")).unwrap_or_default();
-    const MODES: [(&str, &str); 4] = [("on", "Always"), ("autohide", "Auto-hide"), ("smart", "Beside windows"), ("off", "Off")];
-    let mode = prefs::get_str(&t, "dock_mode", "on");
-    let at = MODES.iter().position(|m| m.0 == mode).unwrap_or(0);
-    let items = MODES.iter().map(|(v, name)| (*name, kit::pictures::dock_visibility(v).upcast())).collect();
-    let shows = if shows.is_empty() { "Beside windows hides it while a window is open".to_string() } else { format!("{shows}. Beside windows hides it while a window is open") };
+    let visibility = choice(&dock, "dock_to_bottom", "Visibility", &shows, "dock_mode", &[("on", "Always shown"), ("autohide", "Auto-hide"), ("smart", "Hide when windows are open"), ("off", "Off")], &prefs::get_str(&t, "dock_mode", "on"));
+    // With the dock off, the rest has nothing to change.
     let rest = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    let visibility = {
-        let rest = rest.downgrade();
-        tiles(&dock, "dock_to_bottom", "Visibility", &shows, items, at, move |i| {
-            let ok = save("dock_mode", toml::Value::String(MODES[i].0.into()));
-            if ok && let Some(rest) = rest.upgrade() { rest.set_sensitive(MODES[i].0 != "off"); }
-            ok
-        })
-    };
-    let _ = visibility;
-    rest.set_sensitive(mode != "off");
+    visibility.enable_when(&rest, |v| v != "off");
     dock.append(&rest);
     let dock = rest;
-    const SIDES: [(&str, &str); 3] = [("bottom", "Bottom"), ("left", "Left"), ("right", "Right")];
-    let side = prefs::get_str(&t, "dock_side", "bottom");
-    let items = SIDES.iter().map(|(v, name)| (*name, kit::pictures::dock_side(v).upcast())).collect();
-    tiles(&dock, "side_navigation", "Position", "", items, SIDES.iter().position(|s| s.0 == side).unwrap_or(0), |i| save("dock_side", toml::Value::String(SIDES[i].0.into())));
+    choice(&dock, "side_navigation", "Position", "", "dock_side", &[("bottom", "Bottom"), ("left", "Left"), ("right", "Right")], &prefs::get_str(&t, "dock_side", "bottom"));
     slider(&dock, "photo_size_select_small", "Icon size", "", "dock_size", (32.0, 80.0, 2.0), prefs::get_f64(&t, "dock_size", 50.0), 50.0, 0);
     slider(&dock, "zoom_in", "Magnification", "1.0 turns it off", "dock_magnify", (1.0, 2.0, 0.05), prefs::get_f64(&t, "dock_magnify", 1.5), 1.5, 2);
     toggle(&dock, "apps", "Show running apps", "Apps that are open but not kept in the dock", "dock_running", prefs::get_bool(&t, "dock_running", true));
@@ -1089,7 +1213,7 @@ fn menu_bar(body: &gtk::Box, t: &toml::Table) {
     let look = if detail.is_some() { "clear".to_string() } else { prefs::get_str(&t, "menubar_look", "adaptive") };
     let items = LOOKS.iter().map(|(v, name)| (*name, kit::pictures::menubar_look(v).upcast())).collect();
     let backdrop = tiles(&bar, "blur_on", "Menu bar backdrop", detail.unwrap_or("Adaptive stays clear over the wallpaper and turns to glass when windows are open"), items, LOOKS.iter().position(|l| l.0 == look).unwrap_or(0), |i| save("menubar_look", toml::Value::String(LOOKS[i].0.into())));
-    controlled_row(&backdrop, detail);
+    controlled_row(&backdrop, "menubar_look", "Adaptive stays clear over the wallpaper and turns to glass when windows are open");
     choice(&bar, "deployed_code", "Menu bar logo", "The mark at the top left", "menubar_logo", &[("distro", "Distribution"), ("digit", "Digit")], &prefs::get_str(t, "menubar_logo", "distro"));
     slider(&bar, "height", "Bar height", "Used by the full-width bar", "wide_height", (28.0, 56.0, 1.0), prefs::get_f64(&t, "wide_height", 34.0), 34.0, 0);
     toggle(&bar, "widgets", "Menu bar app icons", "Shows the icons apps like Discord or Steam put in the system tray. Applies after digit restarts", "tray", prefs::get_bool(&t, "tray", true));
@@ -1153,9 +1277,31 @@ fn screen_edges(body: &gtk::Box, t: &toml::Table) {
 
 fn power(body: &gtk::Box, t: &toml::Table) {
     let power = section(body, "Lock and power");
-    slider(&power, "lock_clock", "Lock after idle", "Minutes without input before the screen locks. 0 never locks on its own", "idle_lock", (0.0, 60.0, 1.0), prefs::get_f64(&t, "idle_lock", 0.0), 0.0, 0);
-    slider(&power, "monitor", "Turn off displays", "Minutes without input. The screen dims softly for a few seconds first; any input cancels", "idle_off", (0.0, 60.0, 1.0), prefs::get_f64(&t, "idle_off", 10.0), 10.0, 0);
-    slider(&power, "bedtime", "Sleep after idle", "Minutes without input before the computer sleeps. 0 never sleeps on its own", "idle_sleep", (0.0, 180.0, 5.0), prefs::get_f64(&t, "idle_sleep", 0.0), 0.0, 0);
+    let timeline = gtk::DrawingArea::new();
+    timeline.set_content_height(72);
+    timeline.set_hexpand(true);
+    let holder = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    holder.add_css_class("corners");
+    holder.append(&timeline);
+    power.append(&holder);
+    let rows = [
+        slider(&power, "lock_clock", "Lock after idle", "Minutes without input before the screen locks. 0 never locks on its own", "idle_lock", (0.0, 60.0, 1.0), prefs::get_f64(&t, "idle_lock", 0.0), 0.0, 0),
+        slider(&power, "monitor", "Turn off displays", "Minutes without input. The screen dims softly for a few seconds first; any input cancels", "idle_off", (0.0, 60.0, 1.0), prefs::get_f64(&t, "idle_off", 10.0), 10.0, 0),
+        slider(&power, "bedtime", "Sleep after idle", "Minutes without input before the computer sleeps. 0 never sleeps on its own", "idle_sleep", (0.0, 180.0, 5.0), prefs::get_f64(&t, "idle_sleep", 0.0), 0.0, 0),
+    ];
+    // What happens as the computer sits idle, on one line, following the sliders as they move.
+    let scales: Vec<gtk::Scale> = rows.iter().filter_map(|r| find_scale(r.upcast_ref())).collect();
+    if scales.len() == 3 {
+        let read = {
+            let scales = scales.clone();
+            move || [scales[0].value(), scales[1].value(), scales[2].value()]
+        };
+        timeline.set_draw_func(move |a, cr, w, h| draw_idle(a, cr, w as f64, h as f64, read()));
+        for sc in &scales {
+            let a = timeline.downgrade();
+            sc.connect_value_changed(move |_| if let Some(a) = a.upgrade() { a.queue_draw(); });
+        }
+    }
     toggle(&power, "lock", "Lock before sleep", "The lock screen is ready before the computer suspends, so waking needs your password", "lock_on_sleep", prefs::get_bool(&t, "lock_on_sleep", true));
     let mut said = Vec::new();
     if let Some(k) = keys("lock") {
@@ -1173,6 +1319,63 @@ fn power(body: &gtk::Box, t: &toml::Table) {
     });
     end.append(&look);
     power.append(&row);
+}
+
+fn find_scale(w: &gtk::Widget) -> Option<gtk::Scale> {
+    if let Some(s) = w.downcast_ref::<gtk::Scale>() { return Some(s.clone()); }
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        if let Some(s) = find_scale(&c) { return Some(s); }
+        child = c.next_sibling();
+    }
+    None
+}
+
+/// The idle timeline: a line from now on, with the screen locking, turning off and the
+/// computer sleeping marked where they happen. 0 minutes means never, so it isn't marked.
+fn draw_idle(a: &gtk::DrawingArea, cr: &gtk::cairo::Context, w: f64, h: f64, [lock, off, sleep]: [f64; 3]) {
+    let ink = a.color();
+    let (r, g, b) = (ink.red() as f64, ink.green() as f64, ink.blue() as f64);
+    #[allow(deprecated)]
+    let accent = a.style_context().lookup_color("accent_bg_color").map_or((0.55, 0.72, 0.95), |c| (c.red() as f64, c.green() as f64, c.blue() as f64));
+    let events: Vec<(f64, &str, &str)> = [(lock, "lock", "Lock"), (off, "monitor", "Screen off"), (sleep, "bedtime", "Sleep")].into_iter().filter(|e| e.0 > 0.0).collect();
+    let span = events.iter().map(|e| e.0).fold(30.0_f64, f64::max) * 1.1;
+    let (x0, x1, y) = (14.0, w - 14.0, h * 0.5);
+    let at = |m: f64| x0 + (x1 - x0) * (m / span);
+    cr.set_source_rgba(r, g, b, 0.14);
+    kit::paint::rounded(cr, x0, y - 2.0, x1 - x0, 4.0, 2.0);
+    let _ = cr.fill();
+    // Awake until the first thing happens.
+    if let Some(first) = events.iter().map(|e| e.0).reduce(f64::min) {
+        cr.set_source_rgb(accent.0, accent.1, accent.2);
+        kit::paint::rounded(cr, x0, y - 2.0, at(first) - x0, 4.0, 2.0);
+        let _ = cr.fill();
+    }
+    let label = |text: &str, x: f64, ty: f64, alpha: f64, size: f64| {
+        let l = kit::paint::layout(cr, text, &format!("Readex Pro {size}"));
+        let (_, ext) = l.pixel_extents();
+        let tx = (x - ext.width() as f64 / 2.0).clamp(0.0, w - ext.width() as f64);
+        cr.move_to(tx, ty);
+        cr.set_source_rgba(r, g, b, alpha);
+        kit::paint::show(cr, &l);
+    };
+    label("Now", x0, y + 13.0, 0.55, 10.0);
+    if events.is_empty() {
+        label("Nothing happens on its own", (x0 + x1) / 2.0, y + 13.0, 0.55, 10.0);
+    }
+    for (k, (m, icon, name)) in events.iter().enumerate() {
+        let x = at(*m);
+        cr.set_source_rgb(accent.0, accent.1, accent.2);
+        cr.arc(x, y, 9.0, 0.0, std::f64::consts::TAU);
+        let _ = cr.fill();
+        let l = kit::paint::layout(cr, icon, &format!("{} 12", kit::style::glyph_family()));
+        let (ink_ext, _) = l.pixel_extents();
+        cr.move_to(x - ink_ext.width() as f64 / 2.0 - ink_ext.x() as f64, y - ink_ext.height() as f64 / 2.0 - ink_ext.y() as f64);
+        cr.set_source_rgb(0.05, 0.05, 0.06);
+        kit::paint::show(cr, &l);
+        // Alternating below and above the line, so close ones don't run into each other.
+        label(&format!("{name} · {} min", *m as i64), x, if k % 2 == 0 { y + 13.0 } else { y - 27.0 }, 0.85, 10.0);
+    }
 }
 
 pub fn night_light(body: &gtk::Box, t: &toml::Table) {
@@ -1222,93 +1425,93 @@ fn desktop(body: &gtk::Box, t: &toml::Table) {
     field(&desk, "location_on", "Weather city", "Shown in Control Center and on the desktop clock. The city name goes to open-meteo.com over HTTPS; leave empty to keep weather off", "weather_city", &prefs::get_str(t, "weather_city", ""), "Istanbul", |_| true);
     choice(&desk, "device_thermostat", "Units", "", "weather_unit", &[("celsius", "°C"), ("fahrenheit", "°F")], &prefs::get_str(t, "weather_unit", "celsius"));
     if gtk::gdk::Display::default().is_some_and(|d| d.monitors().n_items() > 1) {
-        choice(&desk, "wallpaper", "Wallpaper on several screens", "Change it from the wallpaper picker", "wallpaper_layout", &[("same", "Same on each"), ("span", "Span across"), ("separate", "One per screen")], &prefs::get_str(t, "wallpaper_layout", "same"));
+        const LAYOUTS: [(&str, &str); 3] = [("same", "Same on each"), ("span", "Span across"), ("separate", "One per screen")];
+        let current = prefs::get_str(t, "wallpaper_layout", "same");
+        let items = LAYOUTS.iter().map(|(v, name)| (*name, kit::pictures::wallpapers(v).upcast())).collect();
+        tiles(&desk, "wallpaper", "Wallpaper on several screens", "Change it from the wallpaper picker", items, LAYOUTS.iter().position(|l| l.0 == current).unwrap_or(0), |i| save("wallpaper_layout", toml::Value::String(LAYOUTS[i].0.into())));
     }
     toggle(&desk, "folder", "Desktop icons", "Show what's in your Desktop folder on the wallpaper", "desktop_icons", prefs::get_bool(t, "desktop_icons", true));
 }
 
-/// A spot a desktop widget can take on the mini screen, as fractions of the screen.
-struct Spot {
-    value: &'static str,
+type Rect = (f64, f64, f64, f64);
+
+/// The places on the wallpaper a widget can take, as fractions of the screen.
+const SPOTS: [(&str, &str, Rect); 5] = [
+    ("top_left", "Top left", (0.04, 0.13, 0.29, 0.22)),
+    ("top_center", "Top center", (0.355, 0.20, 0.29, 0.22)),
+    ("top_right", "Top right", (0.67, 0.13, 0.29, 0.22)),
+    ("bottom_left", "Bottom left", (0.04, 0.69, 0.29, 0.22)),
+    ("bottom_right", "Bottom right", (0.67, 0.69, 0.29, 0.22)),
+];
+
+/// A widget on the wallpaper. To add one, add it here: its setting, the spots it can take
+/// (with the value its setting stores for each) and how it looks on the small screen.
+struct DeskWidget {
+    id: &'static str,
     name: &'static str,
-    rect: (f64, f64, f64, f64),
+    key: &'static str,
+    places: &'static [(&'static str, &'static str)],
+    draw: fn(&gtk::cairo::Context, Rect, f64),
 }
 
-const CLOCK_SPOTS: [Spot; 2] = [
-    Spot { value: "left", name: "Top left", rect: (0.04, 0.12, 0.29, 0.24) },
-    Spot { value: "center", name: "Center", rect: (0.355, 0.20, 0.29, 0.24) },
+const WIDGETS: [DeskWidget; 2] = [
+    DeskWidget { id: "clock", name: "Clock", key: "desktop_widget", places: &[("top_left", "left"), ("top_center", "center")], draw: draw_clock },
+    DeskWidget {
+        id: "batteries",
+        name: "Batteries",
+        key: "desktop_battery",
+        places: &[("top_left", "top_left"), ("top_right", "top_right"), ("bottom_left", "bottom_left"), ("bottom_right", "bottom_right")],
+        draw: draw_batteries,
+    },
 ];
 
-const BATTERY_SPOTS: [Spot; 4] = [
-    Spot { value: "top_left", name: "Top left", rect: (0.03, 0.08, 0.30, 0.20) },
-    Spot { value: "top_right", name: "Top right", rect: (0.67, 0.08, 0.30, 0.20) },
-    Spot { value: "bottom_left", name: "Bottom left", rect: (0.03, 0.72, 0.30, 0.20) },
-    Spot { value: "bottom_right", name: "Bottom right", rect: (0.67, 0.72, 0.30, 0.20) },
-];
-
-/// Where a widget sits now; the batteries make way under a top-left clock, as on the desktop.
-fn spot_rect(spots: &[Spot], value: &str, clock: &str) -> Option<(f64, f64, f64, f64)> {
-    let r = spots.iter().find(|s| s.value == value)?.rect;
-    Some(if value == "top_left" && clock == "left" { (r.0, 0.40, r.2, r.3) } else { r })
+/// Where each widget is now (its spot, or None when it's off), from the settings.
+fn placed(t: &toml::Table) -> Vec<Option<&'static str>> {
+    WIDGETS.iter().map(|w| {
+        let value = prefs::get_str(t, w.key, "off");
+        w.places.iter().find(|(_, v)| *v == value).map(|(spot, _)| *spot)
+    }).collect()
 }
 
-/// The desktop clock and the batteries on one small screen: pick which to place, then click a
-/// spot for it. Clicking the spot in use takes it off.
+/// The desktop widgets on one small screen: click a spot to choose what sits there.
 fn desk_widgets(card: &gtk::Box, t: &toml::Table) {
-    let state = Rc::new(std::cell::RefCell::new((prefs::get_str(t, "desktop_widget", "off"), prefs::get_str(t, "desktop_battery", "off"))));
-    // Which widget clicks place: the clock first.
-    let placing = Rc::new(Cell::new(true));
+    let (row, _) = ui::row(Some("dashboard_customize"), "Desktop widgets", "Click a spot on the screen to choose what sits there");
+    card.append(&row);
+    let state = Rc::new(std::cell::RefCell::new(placed(t)));
     let hover: Rc<Cell<Option<usize>>> = Rc::default();
-    let (row, end) = ui::row(Some("dashboard_customize"), "Desktop widgets", "Pick one, then click a spot on the screen. Click its spot again to take it off");
     let area = gtk::DrawingArea::new();
+    area.add_css_class("desk-map");
+    area.set_overflow(gtk::Overflow::Hidden);
+    area.set_content_width(360);
+    area.set_content_height(203);
+    area.set_size_request(360, 203);
+    area.set_cursor_from_name(Some("pointer"));
     let caption = gtk::Label::new(None);
     caption.add_css_class("corner-name");
     let say = {
         let (st, caption) = (state.clone(), caption.downgrade());
         move || {
-            let (clock, battery) = st.borrow().clone();
-            if let Some(c) = caption.upgrade() {
-                c.set_text(&format!("{}   ·   {}", desk_label(&CLOCK_SPOTS, true, &clock), desk_label(&BATTERY_SPOTS, false, &battery)));
-            }
+            let st = st.borrow();
+            let parts: Vec<String> = WIDGETS.iter().zip(st.iter()).map(|(w, at)| {
+                format!("{}: {}", w.name, at.and_then(|a| SPOTS.iter().find(|s| s.0 == a)).map_or("Off", |s| s.1))
+            }).collect();
+            if let Some(c) = caption.upgrade() { c.set_text(&parts.join("   ·   ")); }
         }
     };
     say();
-    let seg = {
-        let (placing, a) = (placing.clone(), area.downgrade());
-        ui::segmented(&["Clock", "Batteries"], 0, move |i| {
-            placing.set(i == 0);
-            if let Some(a) = a.upgrade() { a.queue_draw(); }
-            true
-        })
-    };
-    end.append(&seg);
-    card.append(&row);
-    area.add_css_class("corner-tile");
-    area.add_css_class("desk-map");
-    area.set_overflow(gtk::Overflow::Hidden);
-    area.set_content_width(320);
-    area.set_content_height(180);
-    area.set_size_request(320, 180);
-    area.set_halign(gtk::Align::Start);
-    area.set_cursor_from_name(Some("pointer"));
     {
-        let (st, pl, hv) = (state.clone(), placing.clone(), hover.clone());
-        area.set_draw_func(move |_, cr, w, h| {
-            let (clock, battery) = st.borrow().clone();
-            draw_desk_map(cr, w as f64, h as f64, pl.get(), &clock, &battery, hv.get());
-        });
+        let (st, hv) = (state.clone(), hover.clone());
+        area.set_draw_func(move |_, cr, w, h| draw_desk_map(cr, w as f64, h as f64, &st.borrow(), hv.get()));
     }
-    let spot_at = |placing: bool, clock: &str, x: f64, y: f64, w: f64, h: f64| {
-        let spots: &[Spot] = if placing { &CLOCK_SPOTS } else { &BATTERY_SPOTS };
-        spots.iter().position(|s| spot_rect(spots, s.value, clock).is_some_and(|r| x >= r.0 * w && x <= (r.0 + r.2) * w && y >= r.1 * h && y <= (r.1 + r.3) * h))
+    let spot_at = |x: f64, y: f64, w: f64, h: f64| {
+        SPOTS.iter().position(|(id, _, r)| WIDGETS.iter().any(|wd| wd.places.iter().any(|p| p.0 == *id)) && x >= r.0 * w && x <= (r.0 + r.2) * w && y >= r.1 * h && y <= (r.1 + r.3) * h)
     };
     let motion = gtk::EventControllerMotion::new();
     {
-        let (a, st, pl, hv) = (area.downgrade(), state.clone(), placing.clone(), hover.clone());
+        let (a, hv) = (area.downgrade(), hover.clone());
         motion.connect_motion(move |_, x, y| {
             let Some(a) = a.upgrade() else { return };
-            let clock = st.borrow().0.clone();
-            let now = spot_at(pl.get(), &clock, x, y, a.width() as f64, a.height() as f64);
+            let now = spot_at(x, y, a.width() as f64, a.height() as f64);
             if hv.replace(now) != now { a.queue_draw(); }
         });
         let (a, hv) = (area.downgrade(), hover.clone());
@@ -1318,108 +1521,149 @@ fn desk_widgets(card: &gtk::Box, t: &toml::Table) {
         });
     }
     area.add_controller(motion);
+    // What a spot holds is picked from a menu at the spot.
+    let spot = Rc::new(Cell::new(0usize));
+    let put = gio::SimpleAction::new_stateful("put", Some(glib::VariantTy::STRING), &"none".to_variant());
+    {
+        let (st, spot, a) = (state.clone(), spot.clone(), area.downgrade());
+        let say = say.clone();
+        put.connect_activate(move |action, param| {
+            let Some(choice) = param.and_then(|p| p.get::<String>()) else { return };
+            let here = SPOTS[spot.get()].0;
+            let mut next = st.borrow().clone();
+            for (i, w) in WIDGETS.iter().enumerate() {
+                if w.id == choice {
+                    next[i] = Some(here);
+                } else if next[i] == Some(here) {
+                    // One widget to a spot: whatever was here makes way.
+                    next[i] = None;
+                }
+            }
+            let values: Vec<(&str, toml::Value)> = WIDGETS.iter().zip(next.iter()).map(|(w, at)| {
+                let value = at.and_then(|a| w.places.iter().find(|p| p.0 == a)).map_or("off", |p| p.1);
+                (w.key, toml::Value::String(value.into()))
+            }).collect();
+            if !save_many(&values) { return; }
+            *st.borrow_mut() = next;
+            action.set_state(&choice.to_variant());
+            say();
+            if let Some(a) = a.upgrade() { a.queue_draw(); }
+        });
+    }
+    let group = gio::SimpleActionGroup::new();
+    group.add_action(&put);
+    area.insert_action_group("desk", Some(&group));
     let click = gtk::GestureClick::new();
     {
-        let (a, st, pl) = (area.downgrade(), state.clone(), placing.clone());
+        let (a, st) = (area.downgrade(), state.clone());
         click.connect_released(move |_, _, x, y| {
             let Some(a) = a.upgrade() else { return };
-            let (clock, battery) = st.borrow().clone();
-            let clock_on = pl.get();
-            let Some(i) = spot_at(clock_on, &clock, x, y, a.width() as f64, a.height() as f64) else { return };
-            let chosen = if clock_on { CLOCK_SPOTS[i].value } else { BATTERY_SPOTS[i].value };
-            let current = if clock_on { &clock } else { &battery };
-            let next = if current == chosen { "off" } else { chosen };
-            if !save(if clock_on { "desktop_widget" } else { "desktop_battery" }, toml::Value::String(next.into())) { return; }
-            {
-                let mut s = st.borrow_mut();
-                if clock_on { s.0 = next.into() } else { s.1 = next.into() }
+            let (w, h) = (a.width() as f64, a.height() as f64);
+            let Some(i) = spot_at(x, y, w, h) else { return };
+            spot.set(i);
+            let (id, _, r) = SPOTS[i];
+            let here = WIDGETS.iter().zip(st.borrow().iter()).find(|(_, at)| **at == Some(id)).map_or("none", |(wd, _)| wd.id);
+            put.set_state(&here.to_variant());
+            let menu = gio::Menu::new();
+            for wd in WIDGETS.iter().filter(|wd| wd.places.iter().any(|p| p.0 == id)) {
+                menu.append(Some(wd.name), Some(&format!("desk.put::{}", wd.id)));
             }
-            say();
-            a.queue_draw();
+            menu.append(Some("Nothing"), Some("desk.put::none"));
+            let pop = gtk::PopoverMenu::from_model(Some(&menu));
+            pop.set_parent(&a);
+            pop.set_has_arrow(false);
+            pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new((r.0 * w) as i32, (r.1 * h) as i32, (r.2 * w) as i32, (r.3 * h) as i32)));
+            pop.connect_closed(|p| {
+                let p = p.clone();
+                glib::idle_add_local_once(move || p.unparent());
+            });
+            pop.popup();
         });
     }
     area.add_controller(click);
     let block = gtk::Box::new(gtk::Orientation::Vertical, 8);
     block.add_css_class("corners");
-    block.set_halign(gtk::Align::Start);
+    block.set_halign(gtk::Align::Center);
     block.append(&area);
-    caption.set_halign(gtk::Align::Start);
+    caption.set_halign(gtk::Align::Center);
     block.append(&caption);
     card.append(&block);
 }
 
-fn desk_label(spots: &[Spot], clock: bool, value: &str) -> String {
-    let what = if clock { "Clock" } else { "Batteries" };
-    format!("{what}: {}", spots.iter().find(|s| s.value == value).map_or("Off", |s| s.name))
+fn draw_clock(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
+    let l = kit::paint::layout(cr, "12:30", &format!("Readex Pro Light {}", (rh * 0.46).round()));
+    let (_, ext) = l.pixel_extents();
+    let tx = x + (rw - ext.width() as f64) / 2.0;
+    cr.move_to(tx - ext.x() as f64, y + rh * 0.1 - ext.y() as f64);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.95 * alpha);
+    kit::paint::show(cr, &l);
+    let line = rw * 0.42;
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.7 * alpha);
+    kit::paint::rounded(cr, x + (rw - line) / 2.0, y + rh * 0.1 + ext.height() as f64 + rh * 0.08, line, rh * 0.07, rh * 0.035);
+    let _ = cr.fill();
 }
 
-/// The small screen: the wallpaper, the notch, both widgets where they are, and the spots the
-/// widget being placed can take.
-fn draw_desk_map(cr: &gtk::cairo::Context, w: f64, h: f64, placing_clock: bool, clock: &str, battery: &str, hover: Option<usize>) {
+fn draw_batteries(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
+    cr.set_source_rgba(0.0, 0.0, 0.0, 0.30 * alpha);
+    kit::paint::rounded(cr, x, y, rw, rh, rh * 0.22);
+    let _ = cr.fill();
+    let rad = rh * 0.26;
+    cr.set_line_width(rh * 0.09);
+    for (i, level) in [0.8, 0.55, 0.3].iter().enumerate() {
+        let (cx, cy) = (x + rw * (0.2 + 0.3 * i as f64), y + rh / 2.0);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.25 * alpha);
+        cr.arc(cx, cy, rad, 0.0, std::f64::consts::TAU);
+        let _ = cr.stroke();
+        cr.set_source_rgba(0.19, 0.82, 0.35, alpha);
+        let start = -std::f64::consts::FRAC_PI_2;
+        cr.arc(cx, cy, rad, start, start + std::f64::consts::TAU * level);
+        let _ = cr.stroke();
+    }
+}
+
+/// The small screen: the wallpaper, the notch, every widget in its spot and the empty spots,
+/// dashed with a plus.
+fn draw_desk_map(cr: &gtk::cairo::Context, w: f64, h: f64, placed: &[Option<&'static str>], hover: Option<usize>) {
     let g = gtk::cairo::LinearGradient::new(0.0, 0.0, w, h);
     g.add_color_stop_rgb(0.0, 0.34, 0.43, 0.62);
     g.add_color_stop_rgb(1.0, 0.86, 0.55, 0.42);
     cr.rectangle(0.0, 0.0, w, h);
     let _ = cr.set_source(&g);
     let _ = cr.fill();
-    // The notch, scaled like the screen.
     let nw = w * 0.25;
     cr.set_source_rgb(0.0, 0.0, 0.0);
     kit::paint::rounded(cr, (w - nw) / 2.0, -h * 0.06, nw, h * 0.125, h * 0.045);
     let _ = cr.fill();
-    let px = |r: (f64, f64, f64, f64)| (r.0 * w, r.1 * h, r.2 * w, r.3 * h);
-    let draw_clock = |r: (f64, f64, f64, f64), alpha: f64| {
-        let (x, y, rw, rh) = px(r);
-        let centered = r.0 > 0.2;
-        let l = kit::paint::layout(cr, "12:30", &format!("Readex Pro Light {}", (rh * 0.48).round()));
-        let (_, ext) = l.pixel_extents();
-        let tx = if centered { x + (rw - ext.width() as f64) / 2.0 } else { x + rw * 0.04 };
-        cr.move_to(tx - ext.x() as f64, y + rh * 0.08 - ext.y() as f64);
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.95 * alpha);
-        kit::paint::show(cr, &l);
-        let line = rw * 0.42;
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.7 * alpha);
-        kit::paint::rounded(cr, if centered { x + (rw - line) / 2.0 } else { tx }, y + rh * 0.08 + ext.height() as f64 + rh * 0.08, line, rh * 0.07, rh * 0.035);
-        let _ = cr.fill();
-    };
-    let draw_battery = |r: (f64, f64, f64, f64), alpha: f64| {
-        let (x, y, rw, rh) = px(r);
-        cr.set_source_rgba(0.0, 0.0, 0.0, 0.30 * alpha);
-        kit::paint::rounded(cr, x, y, rw, rh, rh * 0.22);
-        let _ = cr.fill();
-        let rad = rh * 0.26;
-        cr.set_line_width(rh * 0.09);
-        for (i, level) in [0.8, 0.55, 0.3].iter().enumerate() {
-            let (cx, cy) = (x + rw * (0.2 + 0.3 * i as f64), y + rh / 2.0);
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.25 * alpha);
-            cr.arc(cx, cy, rad, 0.0, std::f64::consts::TAU);
-            let _ = cr.stroke();
-            cr.set_source_rgba(0.19, 0.82, 0.35, alpha);
-            let start = -std::f64::consts::FRAC_PI_2;
-            cr.arc(cx, cy, rad, start, start + std::f64::consts::TAU * level);
-            let _ = cr.stroke();
-        }
-    };
-    // Both widgets where they are; the one not being placed stays in the background.
-    if let Some(r) = spot_rect(&CLOCK_SPOTS, clock, clock) { draw_clock(r, if placing_clock { 1.0 } else { 0.45 }); }
-    if let Some(r) = spot_rect(&BATTERY_SPOTS, battery, clock) { draw_battery(r, if placing_clock { 0.45 } else { 1.0 }); }
-    let (spots, current): (&[Spot], &str) = if placing_clock { (&CLOCK_SPOTS, clock) } else { (&BATTERY_SPOTS, battery) };
-    for (i, spot) in spots.iter().enumerate() {
-        if spot.value == current { continue; }
-        let Some(r) = spot_rect(spots, spot.value, clock) else { continue };
-        let (x, y, rw, rh) = px(r);
+    for (i, (id, _, r)) in SPOTS.iter().enumerate() {
+        if !WIDGETS.iter().any(|wd| wd.places.iter().any(|p| p.0 == *id)) { continue; }
+        let rect = (r.0 * w, r.1 * h, r.2 * w, r.3 * h);
         let hot = hover == Some(i);
+        // Two widgets can share a spot from older settings: the second sits under the first.
+        let here: Vec<&DeskWidget> = WIDGETS.iter().zip(placed.iter()).filter(|(_, at)| **at == Some(*id)).map(|(wd, _)| wd).collect();
         if hot {
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.18);
-            kit::paint::rounded(cr, x, y, rw, rh, rh * 0.22);
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.16);
+            kit::paint::rounded(cr, rect.0, rect.1, rect.2, rect.3, rect.3 * 0.22);
             let _ = cr.fill();
         }
-        cr.set_source_rgba(1.0, 1.0, 1.0, if hot { 0.95 } else { 0.65 });
-        cr.set_line_width(1.0);
-        cr.set_dash(&[3.0, 3.0], 0.0);
-        kit::paint::rounded(cr, x + 0.5, y + 0.5, rw - 1.0, rh - 1.0, rh * 0.22);
-        let _ = cr.stroke();
-        cr.set_dash(&[], 0.0);
+        if here.is_empty() {
+            cr.set_source_rgba(1.0, 1.0, 1.0, if hot { 0.95 } else { 0.6 });
+            cr.set_line_width(1.0);
+            cr.set_dash(&[3.0, 3.0], 0.0);
+            kit::paint::rounded(cr, rect.0 + 0.5, rect.1 + 0.5, rect.2 - 1.0, rect.3 - 1.0, rect.3 * 0.22);
+            let _ = cr.stroke();
+            cr.set_dash(&[], 0.0);
+            let (cx, cy, arm) = (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0, rect.3 * 0.16);
+            cr.set_line_width(1.4);
+            cr.move_to(cx - arm, cy);
+            cr.line_to(cx + arm, cy);
+            cr.move_to(cx, cy - arm);
+            cr.line_to(cx, cy + arm);
+            let _ = cr.stroke();
+        }
+        for (k, wd) in here.iter().enumerate() {
+            let dy = k as f64 * (rect.3 + h * 0.03);
+            (wd.draw)(cr, (rect.0, rect.1 + dy, rect.2, rect.3), 1.0);
+        }
     }
 }
 
