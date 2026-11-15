@@ -1358,6 +1358,12 @@ list.places row.head, list.places row.head:hover {{ background: transparent; }}
 list.places row:selected {{ background: alpha({main}, 0.12); color: {main}; }}
 .side-head {{ font-size: 12px; font-weight: 600; color: alpha({meta}, 0.75); margin: 12px 4px 2px 4px; }}
 .place-icon {{ font-size: 18px; color: {accent}; }}
+.usage levelbar trough {{ min-height: 3px; border-radius: 2px; background: alpha({main}, 0.12); border: none; box-shadow: none; padding: 0; }}
+.usage levelbar block {{ min-height: 3px; border-radius: 2px; border: none; }}
+.usage levelbar block.filled {{ background: alpha({main}, 0.55); }}
+.usage levelbar block.nearly-full {{ background: {risk}; }}
+.usage levelbar block.empty {{ background: transparent; }}
+.usage-free {{ font-size: 11px; color: {meta}; }}
 list.places row button.ctl {{ min-width: 24px; min-height: 24px; }}
 .pane {{ background: mix(@d_base, @d_card, 0.35); border-radius: 16px; margin: 0 8px 8px 0; }}
 gridview.grid, columnview.list, columnview.list listview {{ background: transparent; color: {main}; }}

@@ -112,7 +112,11 @@ enum Kind {
     App,
     Recent,
     Trash,
+    /// The Apps button at the start, which opens the app grid.
+    Apps,
 }
+
+const APPS: &str = "digit:apps";
 
 const RECENT: &str = "digit:recent";
 const TRASH: &str = "digit:trash";
@@ -153,6 +157,7 @@ struct State {
     /// Whether the Trash and Recent files stacks are shown, and whether the trash holds anything.
     trash: bool,
     recent: bool,
+    apps: bool,
     /// Slide a hidden dock in while something flies to the Trash; `trash_shown` marks that it did.
     trash_reveal: bool,
     trash_shown: bool,
@@ -456,6 +461,7 @@ pub fn apply(app: &Rc<App>) {
         s.badges = prefs.badges;
         s.trash = prefs.trash;
         s.recent = prefs.recent;
+        s.apps = prefs.apps;
         s.trash_reveal = prefs.trash_reveal;
         s.style = crate::art::Style::parse(&prefs.icons);
         s.icons.clear();
@@ -672,6 +678,7 @@ fn build(app: &Rc<App>, geo: Geo, monitor: Option<&gdk::Monitor>, output: String
         badges: true,
         trash: false,
         recent: false,
+        apps: false,
         trash_reveal: true,
         trash_shown: false,
         trash_full: false,
@@ -891,6 +898,9 @@ fn rebuild(st: &Shared) {
     for it in items.iter_mut() {
         it.badge = badges.get(&it.name).copied().unwrap_or(0);
     }
+    if s.apps {
+        items.insert(0, Item { kind: Kind::Apps, key: APPS.into(), name: "Apps".into(), entry: None, pinned: false, windows: Vec::new(), badge: 0 });
+    }
     for (on, kind, key, name) in [(s.recent, Kind::Recent, RECENT, "Recent Files"), (s.trash, Kind::Trash, TRASH, "Trash")] {
         if on {
             items.push(Item { kind, key: key.into(), name: name.into(), entry: None, pinned: false, windows: Vec::new(), badge: 0 });
@@ -907,6 +917,7 @@ fn rebuild(st: &Shared) {
             Kind::App => it.entry.and_then(|i| list.get(i)?.icon.clone()),
             Kind::Recent => Some(gio::ThemedIcon::from_names(&["folder-recent", "document-open-recent", "folder"]).upcast()),
             Kind::Trash => Some(gio::ThemedIcon::from_names(if full { &["user-trash-full", "user-trash"][..] } else { &["user-trash"][..] }).upcast()),
+            Kind::Apps => None,
         };
         (it.key.clone(), icon)
     }).collect();
@@ -993,6 +1004,13 @@ fn paint_art(st: &Shared) {
     let accent = app.palette.get().accent;
     let mut art = HashMap::new();
     for (key, name, icon) in wanted {
+        if key == APPS {
+            // Drawn by digit: a tile of colored squares, like Launchpad's.
+            if let Some(t) = kit::folder::grid_texture((px * paint.scale_factor().max(1) as f64).round() as i32) {
+                art.insert(key, t);
+            }
+            continue;
+        }
         if let Some(t) = crate::art::texture(&paint, &key, icon.as_ref(), &name, px, style, accent, &app.cfg.font) {
             art.insert(key, t);
         }
@@ -1142,7 +1160,10 @@ fn drag_to(st: &Shared, x: f64, y: f64) {
             let first = l.first().map_or(0.0, |f| f.0);
             Some(if p.0 < first { 0 } else { l.len().saturating_sub(1) })
         });
-        let mut order: Vec<String> = s.items.iter().map(|i| i.key.clone()).collect();
+        // The Apps button stays first: places count from after it.
+        let lead = s.items.iter().take_while(|i| i.kind == Kind::Apps).count();
+        let target = target.map(|t| t.saturating_sub(lead));
+        let mut order: Vec<String> = s.items.iter().filter(|i| i.kind != Kind::Apps).map(|i| i.key.clone()).collect();
         match (target, order.iter().position(|k| *k == key)) {
             (Some(t), Some(c)) if t != c => {
                 let k = order.remove(c);
@@ -1209,6 +1230,7 @@ fn activate(st: &Shared, i: usize) {
     match kind {
         Kind::Trash => return kit::trash::open(),
         Kind::Recent => return stack::open(st, i),
+        Kind::Apps => return crate::appgrid::toggle(&app),
         Kind::App => {}
     }
     if windows.is_empty() {
@@ -1365,8 +1387,9 @@ impl State {
 
     /// Where separators go: after the kept apps, and before the stacks.
     fn separators(&self) -> Vec<usize> {
-        let apps = self.items.iter().position(|i| i.kind != Kind::App).unwrap_or(self.items.len());
-        let pinned = self.items.iter().filter(|i| i.pinned).count();
+        let lead = self.items.iter().take_while(|i| i.kind == Kind::Apps).count();
+        let apps = lead + self.items[lead..].iter().position(|i| i.kind != Kind::App).unwrap_or(self.items.len() - lead);
+        let pinned = lead + self.items.iter().filter(|i| i.pinned).count();
         let mut out = Vec::new();
         if pinned > 0 && pinned < apps {
             out.push(pinned);
@@ -1623,7 +1646,7 @@ fn open_menu(st: &Shared, i: usize) {
                 rows.push(("Show Recent Files".into(), Act::Stack, false));
                 rows.push(("Open in Files".into(), Act::OpenRecent, false));
             }
-            Kind::App => {}
+            Kind::App | Kind::Apps => {}
         }
         let mut ids = item.windows.clone();
         ids.sort_by_key(|w| w.id);
