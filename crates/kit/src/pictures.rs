@@ -587,33 +587,68 @@ fn arrow(cr: &Cr, x0: f64, y0: f64, x1: f64, y1: f64) {
 }
 
 /// How Hyprland opens windows: "popin" grows them from smaller, "slide" brings them in from
-/// below.
+/// below, "none" shows them at once.
 pub fn window_motion(kind: &'static str) -> gtk::DrawingArea {
     tile(move |cr| {
         let (x, y, w, h) = (40.0, 14.0, 56.0, 40.0);
-        if kind == "slide" {
-            pane(cr, x, y + 14.0, w, h, 0.10);
-            pane(cr, x, y, w, h, 0.32);
-            arrow(cr, x + w + 12.0, y + h + 4.0, x + w + 12.0, y + 10.0);
-        } else {
-            pane(cr, x + 10.0, y + 8.0, w - 20.0, h - 16.0, 0.12);
-            pane(cr, x, y, w, h, 0.32);
-            arrow(cr, x + 14.0, y + 12.0, x + 3.0, y + 3.0);
-            arrow(cr, x + w - 14.0, y + h - 12.0, x + w - 3.0, y + h - 3.0);
+        match kind {
+            "slide" => {
+                pane(cr, x, y + 14.0, w, h, 0.10);
+                pane(cr, x, y, w, h, 0.32);
+                arrow(cr, x + w + 12.0, y + h + 4.0, x + w + 12.0, y + 10.0);
+            }
+            "none" => still(cr),
+            _ => {
+                pane(cr, x + 10.0, y + 8.0, w - 20.0, h - 16.0, 0.12);
+                pane(cr, x, y, w, h, 0.32);
+                arrow(cr, x + 14.0, y + 12.0, x + 3.0, y + 3.0);
+                arrow(cr, x + w - 14.0, y + h - 12.0, x + w - 3.0, y + h - 3.0);
+            }
         }
     })
 }
 
-/// How Hyprland switches workspaces: "vertical" slides them up, "horizontal" sideways.
+/// No motion: a single window, where it ends up.
+fn still(cr: &Cr) {
+    pane(cr, 40.0, 16.0, 56.0, 40.0, 0.32);
+}
+
+/// A pane whose opacity goes from `from` to `to` along the way it moves, as it fades.
+fn fading(cr: &Cr, (x, y, w, h): (f64, f64, f64, f64), across: bool, from: f64, to: f64) {
+    let g = if across { gtk::cairo::LinearGradient::new(x, 0.0, x + w, 0.0) } else { gtk::cairo::LinearGradient::new(0.0, y + h, 0.0, y) };
+    g.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, from);
+    g.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, to);
+    rounded(cr, x, y, w, h, 4.0);
+    let _ = cr.set_source(&g);
+    let _ = cr.fill();
+}
+
+/// How Hyprland switches workspaces: "vertical" slides them up, "horizontal" sideways, the
+/// "_fade" ones fade them while they slide, and "none" swaps them at once.
 pub fn workspace_motion(kind: &'static str) -> gtk::DrawingArea {
     tile(move |cr| {
-        if kind == "horizontal" {
-            pane(cr, 10.0, 16.0, 50.0, 40.0, 0.32);
-            pane(cr, 76.0, 16.0, 50.0, 40.0, 0.14);
+        let fade = kind.ends_with("_fade");
+        if kind == "none" {
+            still(cr);
+        } else if kind.starts_with("horizontal") {
+            let (from, to) = ((10.0, 16.0, 50.0, 40.0), (76.0, 16.0, 50.0, 40.0));
+            if fade {
+                fading(cr, from, true, 0.32, 0.06);
+                fading(cr, to, true, 0.04, 0.22);
+            } else {
+                pane(cr, from.0, from.1, from.2, from.3, 0.32);
+                pane(cr, to.0, to.1, to.2, to.3, 0.14);
+            }
             arrow(cr, 62.0, 36.0, 74.0, 36.0);
         } else {
-            pane(cr, 43.0, 4.0, 50.0, 28.0, 0.32);
-            pane(cr, 43.0, 40.0, 50.0, 28.0, 0.14);
+            let (from, to) = ((43.0, 40.0, 50.0, 28.0), (43.0, 4.0, 50.0, 28.0));
+            if fade {
+                fading(cr, to, false, 0.06, 0.32);
+                fading(cr, from, false, 0.22, 0.04);
+            } else {
+                pane(cr, to.0, to.1, to.2, to.3, 0.32);
+                pane(cr, from.0, from.1, from.2, from.3, 0.14);
+            }
             arrow(cr, 100.0, 40.0, 100.0, 30.0);
         }
     })

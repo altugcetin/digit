@@ -79,12 +79,12 @@ pub fn build() -> gtk::Widget {
         body.append(&ui::heading("Animations"));
         let motion = ui::card();
         let detail = controlled("hypr_window_anim");
-        const OPENS: [(&str, &str); 2] = [("popin", "Pop in"), ("slide", "Slide")];
+        const OPENS: [(&str, &str); 3] = [("popin", "Pop in"), ("slide", "Slide"), ("none", "None")];
         let current = s("hypr_window_anim", "popin");
         let items = OPENS.iter().map(|(v, name)| (*name, kit::pictures::window_motion(v).upcast())).collect();
         let row = tiles(&motion, "open_in_full", "Windows open and close", detail.unwrap_or(""), items, OPENS.iter().position(|o| o.0 == current).unwrap_or(0), |i| save("hypr_window_anim", toml::Value::String(OPENS[i].0.into())));
         crate::desktop::controlled_row(&row, "hypr_window_anim", "");
-        const SWITCHES: [(&str, &str); 2] = [("vertical", "Vertical"), ("horizontal", "Horizontal")];
+        const SWITCHES: [(&str, &str); 5] = [("vertical", "Vertical"), ("vertical_fade", "Vertical fade"), ("horizontal", "Horizontal"), ("horizontal_fade", "Horizontal fade"), ("none", "None")];
         let current = s("hypr_workspace_anim", "vertical");
         let items = SWITCHES.iter().map(|(v, name)| (*name, kit::pictures::workspace_motion(v).upcast())).collect();
         let row = tiles(&motion, "view_carousel", "Switching workspaces", detail.unwrap_or(""), items, SWITCHES.iter().position(|o| o.0 == current).unwrap_or(0), |i| save("hypr_workspace_anim", toml::Value::String(SWITCHES[i].0.into())));

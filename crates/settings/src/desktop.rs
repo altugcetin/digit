@@ -29,10 +29,12 @@ pub(crate) fn save_many(values: &[(&str, toml::Value)]) -> bool {
         kit::effects::invalidate();
         // Rebuild after the switch callback finishes; cached child pages must also be dropped.
         glib::idle_add_local_once(crate::reload_reductions);
+    } else if values.iter().any(|(key, _)| *key == "compositor_motion") {
+        glib::idle_add_local_once(refresh_controlled);
     }
     // Compositor settings (and the accent, which colors niri's window border) go straight into
     // digit's part of the compositor config.
-    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "spaces_always" | "surface" | "window_rules" | "ui_accent" | "border_color" | "reduce_motion" | "reduced_effects" | "terminal" | "theme_qt" | "nvidia_env" | "cursor_theme" | "cursor_size")) {
+    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "spaces_always" | "surface" | "window_rules" | "ui_accent" | "border_color" | "reduce_motion" | "reduced_effects" | "compositor_motion" | "terminal" | "theme_qt" | "nvidia_env" | "cursor_theme" | "cursor_size")) {
         apply_compositor();
     }
     if values.iter().any(|(key, _)| matches!(*key, "button_maximize" | "button_close")) {
@@ -91,12 +93,15 @@ pub(crate) fn accent(card: &gtk::Box, t: &toml::Table) {
 
 /// One row state for all controls owned by a reduction master.
 pub(crate) fn controlled(key: &str) -> Option<&'static str> {
-    controlled_in(key, kit::motion::reduced(), kit::effects::reduced())
+    let still = !prefs::get_bool(&prefs::read(), "compositor_motion", true);
+    controlled_in(key, kit::motion::reduced(), kit::effects::reduced(), still)
 }
 
-fn controlled_in(key: &str, motion: bool, effects: bool) -> Option<&'static str> {
+/// `still`: Compositor animations is off, which stops the compositor's animations on its own.
+fn controlled_in(key: &str, motion: bool, effects: bool, still: bool) -> Option<&'static str> {
     match key {
-        "smooth_scroll" | "smooth_caret" | "intro" | "hypr_window_anim" | "hypr_workspace_anim" | "niri_motion" if motion => Some("Off while Reduce motion is on"),
+        "smooth_scroll" | "smooth_caret" | "intro" | "compositor_motion" | "hypr_window_anim" | "hypr_workspace_anim" | "niri_motion" if motion => Some("Off while Reduce motion is on"),
+        "hypr_window_anim" | "hypr_workspace_anim" | "niri_motion" if still => Some("Off while Compositor animations is off"),
         "hypr_blur" | "hypr_shadow" | "menubar_look" if effects => Some("Off while Reduce effects is on"),
         _ => None,
     }
@@ -111,7 +116,7 @@ thread_local! {
 /// Marks `row` (with subtitle `sub`) as turned off while a reduction master owns `key`, and keeps
 /// it following later changes.
 pub(crate) fn controlled_row(row: &gtk::Box, key: &'static str, sub: &str) {
-    if controlled_in(key, true, true).is_none() { return; }
+    if controlled_in(key, true, true, true).is_none() { return; }
     CONTROLLED.with(|c| {
         let mut c = c.borrow_mut();
         c.retain(|(w, _, _)| w.upgrade().is_some());
@@ -1005,6 +1010,7 @@ fn effects(body: &gtk::Box, t: &toml::Table) {
     // The motion Reduce motion turns off, one by one.
     for row in [
         toggle(&look, "swipe_vertical", "Smooth scrolling", "Mouse wheel steps glide instead of jumping. Touchpads always scroll smoothly", "smooth_scroll", prefs::get_bool(&t, "smooth_scroll", true)),
+        toggle(&look, "animation", "Compositor animations", "Windows opening and closing, and switching workspaces", "compositor_motion", prefs::get_bool(&t, "compositor_motion", true)),
         toggle(&look, "text_select_move_forward_character", "Smooth caret", "The caret in Spotlight glides as you type and blinks softly", "smooth_caret", prefs::get_bool(&t, "smooth_caret", true)),
         toggle(&look, "auto_awesome", "Startup animation", "Greet each start of the shell with a short full-screen animation", "intro", prefs::get_bool(&t, "intro", true)),
     ] {
@@ -2054,13 +2060,24 @@ mod reduction_tests {
 
     #[test]
     fn each_child_is_controlled_only_by_its_own_master() {
-        for (key, motion) in [("smooth_scroll", true), ("smooth_caret", true), ("intro", true), ("hypr_window_anim", true), ("hypr_workspace_anim", true), ("niri_motion", true), ("hypr_shadow", false), ("hypr_blur", false), ("menubar_look", false)] {
-            assert_eq!(controlled_in(key, false, false), None);
-            assert_eq!(controlled_in(key, !motion, motion), None);
-            assert_eq!(controlled_in(key, motion, !motion), Some(if motion { "Off while Reduce motion is on" } else { "Off while Reduce effects is on" }));
+        for (key, motion) in [("smooth_scroll", true), ("smooth_caret", true), ("intro", true), ("compositor_motion", true), ("hypr_window_anim", true), ("hypr_workspace_anim", true), ("niri_motion", true), ("hypr_shadow", false), ("hypr_blur", false), ("menubar_look", false)] {
+            assert_eq!(controlled_in(key, false, false, false), None);
+            assert_eq!(controlled_in(key, !motion, motion, false), None);
+            assert_eq!(controlled_in(key, motion, !motion, false), Some(if motion { "Off while Reduce motion is on" } else { "Off while Reduce effects is on" }));
         }
         for key in ["reduce_motion", "reduced_effects", "renderer"] {
-            assert_eq!(controlled_in(key, true, true), None);
+            assert_eq!(controlled_in(key, true, true, true), None);
+        }
+    }
+
+    #[test]
+    fn compositor_animations_off_greys_only_the_compositor_animations() {
+        for key in ["hypr_window_anim", "hypr_workspace_anim", "niri_motion"] {
+            assert_eq!(controlled_in(key, false, false, true), Some("Off while Compositor animations is off"));
+            assert_eq!(controlled_in(key, true, false, true), Some("Off while Reduce motion is on"));
+        }
+        for key in ["smooth_scroll", "smooth_caret", "intro", "compositor_motion", "hypr_blur"] {
+            assert_eq!(controlled_in(key, false, false, true), None);
         }
     }
 }
