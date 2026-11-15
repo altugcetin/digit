@@ -163,12 +163,13 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
                 "gadget" => Peek::Battery { level: 10, device: Some(("G305".into(), "mouse")) },
                 "device" => Peek::Device { name: "AirPods Pro".into(), icon: "headphones", battery: Some(80), on: true },
                 "unplugged" => Peek::Device { name: "AirPods Pro".into(), icon: "headphones", battery: None, on: false },
-                "output" => Peek::Output { name: "AirPods Pro".into(), icon: "headphones" },
+                // An optional name tries long ones: demo output GA104 High Definition Audio Controller
+                "output" => Peek::Output { name: Some(words[2..].join(" ")).filter(|n| !n.is_empty()).unwrap_or_else(|| "AirPods Pro".into()).chars().take(64).collect(), icon: "headphones" },
                 "dnd" => Peek::Mode { icon: "do_not_disturb_on", label: "Do not disturb", on: true },
                 "recording" => Peek::Privacy { light: crate::privacy::Light::Record, who: "Started".into() },
                 "keyboard" => Peek::Osd { icon: "keyboard", text: "Turkish".into(), level: None },
                 "brightness" => Peek::Osd { icon: "light_mode", text: "Brightness".into(), level: Some(0.6) },
-                _ => return "demo battery | gadget | device | unplugged | output | dnd | keyboard | brightness | recording".into(),
+                _ => return "demo battery | gadget | device | unplugged | output [name] | dnd | keyboard | brightness | recording".into(),
             };
             app.request(peek);
             "ok".into()
