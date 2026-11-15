@@ -1134,7 +1134,7 @@ impl Launcher {
                 }
             }
             if matches!(mode, Mode::All | Mode::Apps) && (!q.is_empty() || mode == Mode::Apps) {
-                let mut hits: Vec<_> = apps.iter().enumerate().filter_map(|(i, e)| {
+                let mut hits: Vec<_> = apps.iter().enumerate().filter(|(_, e)| !s.app.hidden(&e.id)).filter_map(|(i, e)| {
                     let hit = e.keys.iter().filter_map(|(k, bias)| score(&q, k).map(|v| v + bias)).max()?;
                     let bonus = if q.is_empty() { 0 } else { s.app.apps.boost(&e.id) };
                     Some((i, hit + bonus))

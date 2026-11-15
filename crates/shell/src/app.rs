@@ -507,6 +507,12 @@ impl App {
         if follow { self.round() } else { own.clamp(0.1, 1.8) }
     }
 
+    /// Whether app `id` is kept out of the app grid and Spotlight (see `kit::hidden`).
+    pub fn hidden(&self, id: &str) -> bool {
+        let p = self.prefs.borrow();
+        kit::hidden::hidden(id, &p.apps_hidden, &p.apps_shown)
+    }
+
     /// Game Bar is an app surface, so use the Apps accent and card color.
     pub fn gamebar_palette(&self, mut palette: Palette) -> Palette {
         let prefs = self.prefs.borrow();

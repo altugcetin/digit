@@ -1,4 +1,5 @@
 pub mod app_themes;
+pub mod hidden;
 pub mod qt_colors;
 pub mod appearance;
 pub mod cursors;

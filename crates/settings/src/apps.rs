@@ -1,4 +1,4 @@
-use crate::{flatpak, guard, pk, ui};
+use crate::{flatpak, guard, pk, prefs, ui};
 use gtk::{gio, glib, prelude::*};
 use std::rc::Rc;
 
@@ -47,8 +47,19 @@ fn collect(flatpaks: &[flatpak::App]) -> Vec<Entry> {
     out
 }
 
+thread_local! {
+    /// An app to remove once the list is in, asked for by the app grid ("firefox.desktop").
+    static PENDING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Removes app `id` (its desktop file's name) as its Uninstall button would, once the Apps
+/// page has listed it.
+pub fn request_uninstall(id: &str) {
+    PENDING.with(|p| *p.borrow_mut() = Some(id.to_string()));
+}
+
 pub fn build() -> gtk::Widget {
-    let (scroll, body) = ui::page("Apps", "Choose which apps open your links and files, and remove apps you no longer need. Protected system components can't be removed.");
+    let (scroll, body) = ui::page("Apps", "Choose which apps open your links and files, which appear in the app grid and Spotlight, and remove apps you no longer need. Protected system components can't be removed.");
     crate::defaults::section(&body);
     body.append(&ui::heading("Installed apps"));
     let search = gtk::SearchEntry::new();
@@ -104,6 +115,7 @@ fn load(list: Rc<gtk::Box>, search: gtk::SearchEntry) {
                 },
                 kind,
             ));
+            let id = std::path::Path::new(&e.path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             if !matches!(e.source, Source::Local) {
                 let b = ui::button("Uninstall", "danger");
                 end.append(&b);
@@ -111,7 +123,20 @@ fn load(list: Rc<gtk::Box>, search: gtk::SearchEntry) {
                 let l = list.clone();
                 let s = search.clone();
                 b.connect_clicked(move |b| uninstall(b, entry.clone(), l.clone(), s.clone()));
+                if PENDING.with(|p| p.borrow().as_deref() == Some(id.as_str())) {
+                    PENDING.with(|p| p.borrow_mut().take());
+                    let b = b.clone();
+                    glib::idle_add_local_once(move || b.emit_clicked());
+                }
             }
+            // Shown in the app grid and Spotlight; tools that come with other software start off.
+            let t = prefs::read();
+            let shown = !kit::hidden::hidden(&id, &kit::hidden::list(&t, "apps_hidden"), &kit::hidden::list(&t, "apps_shown"));
+            let sw = gtk::Switch::new();
+            sw.set_valign(gtk::Align::Center);
+            sw.set_tooltip_text(Some("Show in the app grid and Spotlight"));
+            ui::bind_switch(&sw, shown, move |on| crate::desktop::save_many(&kit::hidden::change(&prefs::read(), &id, !on)));
+            end.append(&sw);
             list.append(&row);
         }
         filter(&list, &search.text());
