@@ -163,13 +163,6 @@ pub fn slab(snapshot: &gtk::Snapshot, corner: Corner, rect: Rect, radius: f64, f
     snapshot.restore();
 }
 
-/// Corner radii (top-left, top-right, bottom-right, bottom-left) of a panel in `corner`: square
-/// where it meets the screen corner, `radius` elsewhere.
-pub fn radii(corner: Corner, radius: f64) -> [f64; 4] {
-    let at = |c: Corner| if corner == c { 0.0 } else { radius };
-    [at(Corner::TopLeft), at(Corner::TopRight), at(Corner::BottomRight), at(Corner::BottomLeft)]
-}
-
 /// A newly mapped Overlay panel can be above the persistent screen-corner masks.
 /// Redraw the mask at its attached physical corner, outside the animated slab.
 pub fn screen_mask(snapshot: &gtk::Snapshot, app: &App, corner: Corner, surface: (f64, f64), margins: [i32; 4]) {

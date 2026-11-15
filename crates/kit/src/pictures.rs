@@ -406,30 +406,16 @@ fn dock_on(cr: &Cr, side: &str, (r, g, b): (f64, f64, f64), alpha: f64) {
     }
 }
 
-/// A shell surface: the notch, the dock and a panel in that fill. Frosted shows the sky through,
-/// softened.
-pub fn shell_surface(fill: (f64, f64, f64), frosted: bool) -> gtk::DrawingArea {
+/// A shell surface: the notch, the dock and a panel in that fill.
+pub fn shell_surface(fill: (f64, f64, f64)) -> gtk::DrawingArea {
     tile(move |cr| {
         pane(cr, 8.0, 15.0, 62.0, 38.0, 0.16);
-        let alpha = if frosted { 0.42 } else { 1.0 };
-        notch_shape(cr, TW, NOTCH_W, BAND, fill, alpha);
+        notch_shape(cr, TW, NOTCH_W, BAND, fill, 1.0);
         // Control Center in its corner, over the windows.
         let (px, py, pw, ph) = (TW - 6.0 - 40.0, 14.0, 40.0, 42.0);
-        if frosted {
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.10);
-            rounded(cr, px, py, pw, ph, 6.0);
-            let _ = cr.fill();
-        }
-        cr.set_source_rgba(fill.0, fill.1, fill.2, alpha);
+        cr.set_source_rgb(fill.0, fill.1, fill.2);
         rounded(cr, px, py, pw, ph, 6.0);
         let _ = cr.fill();
-        if frosted {
-            // Glass catches the light along its edge.
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.35);
-            cr.set_line_width(0.6);
-            rounded(cr, px + 0.3, py + 0.3, pw - 0.6, ph - 0.6, 6.0);
-            let _ = cr.stroke();
-        }
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.24);
         rounded(cr, px + 4.0, py + 4.0, 15.0, 9.0, 3.0);
         let _ = cr.fill();
@@ -439,7 +425,7 @@ pub fn shell_surface(fill: (f64, f64, f64), frosted: bool) -> gtk::DrawingArea {
         let _ = cr.fill();
         rounded(cr, px + 4.0, py + 25.0, pw - 8.0, 4.0, 2.0);
         let _ = cr.fill();
-        dock_on(cr, "bottom", fill, alpha.max(0.7));
+        dock_on(cr, "bottom", fill, 1.0);
     })
 }
 

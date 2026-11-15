@@ -219,8 +219,7 @@ struct View {
     effect: Option<(blur::Effect, wayland_client::backend::ObjectId)>,
     pal: std::cell::Cell<kit::palette::Palette>,
     frost: Vec<(i32, i32, i32, i32)>,
-    /// With GTK 4.23.3 and newer, which owns the surface's blur: panes under the island's body
-    /// and the menu bar's band.
+    /// With GTK 4.23.3 and newer, which owns the surface's blur: a pane under the menu bar's band.
     panes: blur::Frost,
     ticking: bool,
     /// Fraction of the track under the pointer while the progress bar is being dragged.
@@ -303,12 +302,12 @@ impl Notch {
                 let root = gtk::Overlay::new();
                 root.set_child(Some(st));
                 root.add_overlay(&layer);
-                let (frosted, panes) = blur::Frost::wrap_n(&root, 2);
+                let (frosted, panes) = blur::Frost::wrap(&root);
                 window.set_child(Some(&frosted));
                 panes
             }
             None => {
-                let (frosted, panes) = blur::Frost::wrap_n(&layer, 2);
+                let (frosted, panes) = blur::Frost::wrap(&layer);
                 window.set_child(Some(&frosted));
                 panes
             }
@@ -1470,8 +1469,7 @@ impl View {
     fn update_frost(&mut self, now: i64) {
         // Reduced effects draw the menu bar and panels solid, without the compositor's blur.
         if kit::effects::reduced() {
-            self.panes.place(0, None, [0.0; 4], (0.0, 0.0));
-            self.panes.place(1, None, [0.0; 4], (0.0, 0.0));
+            self.panes.place(None, (0.0, 0.0));
             if let (Some((effect, _)), Some(blur)) = (self.effect.take(), self.app.blur.as_ref()) {
                 blur.detach(effect);
                 self.frost.clear();
@@ -1480,15 +1478,10 @@ impl View {
         }
         let band = self.glass.value(now) > 0.02 || self.glass.target() > 0.5;
         let Some(blur) = self.app.blur.as_ref() else {
-            // GTK owns the blur: lay the panes under the body and the band.
-            let screen = self.app.dock() == Dock::Screen;
+            // GTK owns the blur: lay the pane under the band.
             let bounds = (self.window.width() as f64, self.window.height() as f64);
-            let f = self.float.value(now).clamp(0.0, 1.0);
-            let (w, r) = (self.w.value(now), self.r.value(now));
-            let body = (screen && self.frosted()).then_some((CX - w / 2.0 + self.off() as f64, self.body_lift(now), w, self.header() + self.depth.value(now).max(0.0)));
-            self.panes.set_nth(0, body, [r * f, r * f, r, r], bounds);
-            let bar = (screen && band && self.span > WIDTH as i32).then_some((0.0, 0.0, self.span as f64, self.band(now)));
-            self.panes.place(1, bar, [0.0; 4], bounds);
+            let bar = (self.app.dock() == Dock::Screen && band && self.span > WIDTH as i32).then_some((0.0, 0.0, self.span as f64, self.band(now)));
+            self.panes.place(bar, bounds);
             return;
         };
         if self.app.dock() != Dock::Screen || (!self.frosted() && !band && self.frost.is_empty()) {
