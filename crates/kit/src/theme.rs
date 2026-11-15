@@ -137,6 +137,19 @@ fn scheme(name: &str, source: Hct) -> DynamicScheme {
     }
 }
 
+/// A scheme's look for a preview, from the wallpaper's source color: its surface, then its
+/// primary, secondary and tertiary colors.
+pub fn preview(source: &str, name: &str) -> Option<[Rgb; 4]> {
+    let c = Rgb::hex(source)?;
+    let argb = Argb::new((c.r * 255.0).round() as u8, (c.g * 255.0).round() as u8, (c.b * 255.0).round() as u8);
+    let dynamic = scheme(name, Hct::new(argb));
+    let get = |role: Role| {
+        let v = dynamic.get_rgb(role());
+        Rgb::new(v.red as f64 / 255.0, v.green as f64 / 255.0, v.blue as f64 / 255.0)
+    };
+    Some([get(M::surface_container_high), get(M::primary), get(M::secondary), get(M::tertiary)])
+}
+
 fn hex(c: Argb) -> String {
     format!("#{:02x}{:02x}{:02x}", c.red, c.green, c.blue)
 }

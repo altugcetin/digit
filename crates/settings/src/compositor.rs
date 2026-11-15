@@ -48,7 +48,10 @@ pub fn build() -> gtk::Widget {
     }
     slider(&win, "border_style", "Border width", "", "hypr_border", (0.0, 6.0, 1.0), f("hypr_border", 2.0), 2.0, 0);
     if niri {
-        choice(&win, "highlight", "Mark the focused window", "", "niri_highlight", &[("border", "Border"), ("ring", "Ring"), ("none", "Nothing")], &s("niri_highlight", "border"));
+        const MARKS: [(&str, &str); 3] = [("border", "Border"), ("ring", "Ring"), ("none", "Nothing")];
+        let current = s("niri_highlight", "border");
+        let items = MARKS.iter().map(|(v, name)| (*name, kit::pictures::focus_mark(v).upcast())).collect();
+        tiles(&win, "highlight", "Mark the focused window", "", items, MARKS.iter().position(|m| m.0 == current).unwrap_or(0), |i| save("niri_highlight", toml::Value::String(MARKS[i].0.into())));
     }
     choice(&win, "palette", "Border color", "The focused window's border", "border_color", &[("accent", "Accent"), ("default", "Grey")], &s("border_color", "accent"));
     body.append(&win);
@@ -75,8 +78,17 @@ pub fn build() -> gtk::Widget {
     if !niri {
         body.append(&ui::heading("Animations"));
         let motion = ui::card();
-        choice(&motion, "open_in_full", "Windows open and close", "", "hypr_window_anim", &[("popin", "Pop in"), ("slide", "Slide")], &s("hypr_window_anim", "popin"));
-        choice(&motion, "view_carousel", "Switching workspaces", "", "hypr_workspace_anim", &[("vertical", "Vertical"), ("horizontal", "Horizontal")], &s("hypr_workspace_anim", "vertical"));
+        let detail = controlled("hypr_window_anim");
+        const OPENS: [(&str, &str); 2] = [("popin", "Pop in"), ("slide", "Slide")];
+        let current = s("hypr_window_anim", "popin");
+        let items = OPENS.iter().map(|(v, name)| (*name, kit::pictures::window_motion(v).upcast())).collect();
+        let row = tiles(&motion, "open_in_full", "Windows open and close", detail.unwrap_or(""), items, OPENS.iter().position(|o| o.0 == current).unwrap_or(0), |i| save("hypr_window_anim", toml::Value::String(OPENS[i].0.into())));
+        crate::desktop::controlled_row(&row, "hypr_window_anim", "");
+        const SWITCHES: [(&str, &str); 2] = [("vertical", "Vertical"), ("horizontal", "Horizontal")];
+        let current = s("hypr_workspace_anim", "vertical");
+        let items = SWITCHES.iter().map(|(v, name)| (*name, kit::pictures::workspace_motion(v).upcast())).collect();
+        let row = tiles(&motion, "view_carousel", "Switching workspaces", detail.unwrap_or(""), items, SWITCHES.iter().position(|o| o.0 == current).unwrap_or(0), |i| save("hypr_workspace_anim", toml::Value::String(SWITCHES[i].0.into())));
+        crate::desktop::controlled_row(&row, "hypr_workspace_anim", "");
         body.append(&motion);
     }
 
@@ -91,7 +103,7 @@ pub fn build() -> gtk::Widget {
             if i != 0 { values.push(("hypr_shadow_size", toml::Value::String(SHADOWS[i].0.into()))); }
             save_many(&values)
         });
-        crate::desktop::controlled_row(&row, detail);
+        crate::desktop::controlled_row(&row, "hypr_shadow", "");
     }
     {
         let detail = controlled("hypr_blur");
@@ -102,7 +114,7 @@ pub fn build() -> gtk::Widget {
             if i != 0 { values.push(("hypr_blur_strength", toml::Value::String(BLURS[i].0.into()))); }
             save_many(&values)
         });
-        crate::desktop::controlled_row(&row, detail);
+        crate::desktop::controlled_row(&row, "hypr_blur", "Frosts what's behind see-through windows; costs some GPU time");
     }
     body.append(&fx);
 

@@ -406,69 +406,6 @@ fn dock_on(cr: &Cr, side: &str, (r, g, b): (f64, f64, f64), alpha: f64) {
     }
 }
 
-/// Where the hidden dock would be: its outline, dashed.
-fn ghost_dock(cr: &Cr) {
-    let (long, short) = (dock_long(), DOCK_ICON + 2.0 * DOCK_PAD);
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.8);
-    cr.set_line_width(0.8);
-    cr.set_dash(&[2.0, 1.6], 0.0);
-    rounded(cr, (TW - long) / 2.0 + 0.4, TH - 4.0 - short + 0.4, long - 0.8, short - 0.8, 3.5);
-    let _ = cr.stroke();
-    cr.set_dash(&[], 0.0);
-}
-
-/// A mouse pointer with its tip at (x, y).
-fn pointer(cr: &Cr, x: f64, y: f64) {
-    cr.move_to(x, y);
-    cr.line_to(x, y + 8.0);
-    cr.line_to(x + 2.2, y + 6.0);
-    cr.line_to(x + 4.0, y + 9.2);
-    cr.line_to(x + 5.2, y + 8.5);
-    cr.line_to(x + 3.5, y + 5.4);
-    cr.line_to(x + 6.2, y + 5.4);
-    cr.close_path();
-    cr.set_source_rgb(1.0, 1.0, 1.0);
-    let _ = cr.fill_preserve();
-    cr.set_source_rgba(0.0, 0.0, 0.0, 0.7);
-    cr.set_line_width(0.7);
-    let _ = cr.stroke();
-}
-
-const DARK: (f64, f64, f64) = (0.06, 0.06, 0.07);
-
-/// The dock's visibility: "on" always shows, "autohide" waits for the pointer at the edge,
-/// "smart" steps aside while a window is open, "off" has none.
-pub fn dock_visibility(mode: &'static str) -> gtk::DrawingArea {
-    tile(move |cr| {
-        top(cr, "island");
-        match mode {
-            "smart" => {
-                pane(cr, 8.0, 14.0, TW - 16.0, TH - 18.0, 0.30);
-                ghost_dock(cr);
-            }
-            "autohide" => {
-                pane(cr, 10.0, 15.0, 70.0, 34.0, 0.16);
-                ghost_dock(cr);
-                pointer(cr, TW / 2.0 + 14.0, TH - 10.0);
-            }
-            "off" => pane(cr, 10.0, 15.0, 70.0, 34.0, 0.16),
-            _ => {
-                pane(cr, 10.0, 15.0, 70.0, 34.0, 0.16);
-                dock_on(cr, "bottom", DARK, 1.0);
-            }
-        }
-    })
-}
-
-/// The dock along the bottom, left or right edge.
-pub fn dock_side(side: &'static str) -> gtk::DrawingArea {
-    tile(move |cr| {
-        top(cr, "island");
-        pane(cr, 40.0, 16.0, 56.0, 34.0, 0.16);
-        dock_on(cr, side, DARK, 1.0);
-    })
-}
-
 /// A shell surface: the notch, the dock and a panel in that fill. Frosted shows the sky through,
 /// softened.
 pub fn shell_surface(fill: (f64, f64, f64), frosted: bool) -> gtk::DrawingArea {
@@ -569,4 +506,151 @@ pub fn menubar_spaces(mode: &'static str) -> gtk::DrawingArea {
             menu_items(cr, cw, 13.0 + 17.0 + 3.0, 1.0);
         }
     })
+}
+
+/// A tile drawn on the app surface (the tile's own background) rather than the sky, for the
+/// choices that change the apps' insides. The drawing gets the widget for its colors.
+fn surface_tile(draw: impl Fn(&gtk::DrawingArea, &Cr) + 'static) -> gtk::DrawingArea {
+    let a = gtk::DrawingArea::new();
+    a.set_content_width(TW as i32);
+    a.set_content_height(TH as i32);
+    a.add_css_class("accent-tile");
+    a.set_draw_func(move |a, cr, w, h| {
+        let (w, h) = (w as f64, h as f64);
+        let k = (w / TW).min(h / TH);
+        cr.translate((w - TW * k) / 2.0, (h - TH * k) / 2.0);
+        cr.scale(k, k);
+        draw(a, cr);
+    });
+    a
+}
+
+/// A named color of the app's style, or `fallback`.
+fn named(a: &gtk::DrawingArea, name: &str, fallback: (f64, f64, f64)) -> (f64, f64, f64) {
+    #[allow(deprecated)]
+    a.style_context().lookup_color(name).map_or(fallback, |c| (c.red() as f64, c.green() as f64, c.blue() as f64))
+}
+
+/// Two screens side by side with the wallpaper "same" on each, "span" across, or a different
+/// one on each ("separate").
+pub fn wallpapers(layout: &'static str) -> gtk::DrawingArea {
+    surface_tile(move |_, cr| {
+        let (w, h, gap, top) = (54.0, 34.0, 6.0, 15.0);
+        let left = (TW - 2.0 * w - gap) / 2.0;
+        let paint = |x: f64, from: (f64, f64, f64), to: (f64, f64, f64), x0: f64, x1: f64| {
+            let g = gtk::cairo::LinearGradient::new(x0, top, x1, top + h);
+            g.add_color_stop_rgb(0.0, from.0, from.1, from.2);
+            g.add_color_stop_rgb(1.0, to.0, to.1, to.2);
+            rounded(cr, x, top, w, h, 4.0);
+            let _ = cr.set_source(&g);
+            let _ = cr.fill();
+        };
+        let (sky_a, sky_b) = ((0.34, 0.43, 0.62), (0.86, 0.55, 0.42));
+        let right = left + w + gap;
+        match layout {
+            "span" => {
+                paint(left, sky_a, sky_b, left, right + w);
+                paint(right, sky_a, sky_b, left, right + w);
+            }
+            "separate" => {
+                paint(left, sky_a, sky_b, left, left + w);
+                paint(right, (0.20, 0.55, 0.45), (0.85, 0.80, 0.45), right, right + w);
+            }
+            _ => {
+                paint(left, sky_a, sky_b, left, left + w);
+                paint(right, sky_a, sky_b, right, right + w);
+            }
+        }
+        // Their stands.
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.25);
+        for x in [left, right] {
+            rounded(cr, x + w / 2.0 - 7.0, top + h + 4.0, 14.0, 3.0, 1.5);
+            let _ = cr.fill();
+        }
+    })
+}
+
+/// An arrow from (x0, y0) to (x1, y1), with a head at the end.
+fn arrow(cr: &Cr, x0: f64, y0: f64, x1: f64, y1: f64) {
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
+    cr.set_line_width(1.6);
+    cr.set_line_cap(gtk::cairo::LineCap::Round);
+    cr.move_to(x0, y0);
+    cr.line_to(x1, y1);
+    let angle = (y1 - y0).atan2(x1 - x0);
+    for side in [-1.0, 1.0] {
+        let a = angle + PI - side * 0.55;
+        cr.move_to(x1, y1);
+        cr.line_to(x1 + 4.5 * a.cos(), y1 + 4.5 * a.sin());
+    }
+    let _ = cr.stroke();
+}
+
+/// How Hyprland opens windows: "popin" grows them from smaller, "slide" brings them in from
+/// below.
+pub fn window_motion(kind: &'static str) -> gtk::DrawingArea {
+    tile(move |cr| {
+        let (x, y, w, h) = (40.0, 14.0, 56.0, 40.0);
+        if kind == "slide" {
+            pane(cr, x, y + 14.0, w, h, 0.10);
+            pane(cr, x, y, w, h, 0.32);
+            arrow(cr, x + w + 12.0, y + h + 4.0, x + w + 12.0, y + 10.0);
+        } else {
+            pane(cr, x + 10.0, y + 8.0, w - 20.0, h - 16.0, 0.12);
+            pane(cr, x, y, w, h, 0.32);
+            arrow(cr, x + 14.0, y + 12.0, x + 3.0, y + 3.0);
+            arrow(cr, x + w - 14.0, y + h - 12.0, x + w - 3.0, y + h - 3.0);
+        }
+    })
+}
+
+/// How Hyprland switches workspaces: "vertical" slides them up, "horizontal" sideways.
+pub fn workspace_motion(kind: &'static str) -> gtk::DrawingArea {
+    tile(move |cr| {
+        if kind == "horizontal" {
+            pane(cr, 10.0, 16.0, 50.0, 40.0, 0.32);
+            pane(cr, 76.0, 16.0, 50.0, 40.0, 0.14);
+            arrow(cr, 62.0, 36.0, 74.0, 36.0);
+        } else {
+            pane(cr, 43.0, 4.0, 50.0, 28.0, 0.32);
+            pane(cr, 43.0, 40.0, 50.0, 28.0, 0.14);
+            arrow(cr, 100.0, 40.0, 100.0, 30.0);
+        }
+    })
+}
+
+/// How niri marks the focused window: a "border" on its edge, a "ring" around it, or "none".
+pub fn focus_mark(kind: &'static str) -> gtk::DrawingArea {
+    let a = tile(|_| {});
+    a.set_draw_func(move |a, cr, w, h| {
+        let (w, h) = (w as f64, h as f64);
+        let g = gtk::cairo::LinearGradient::new(0.0, 0.0, w, h);
+        g.add_color_stop_rgb(0.0, 0.34, 0.43, 0.62);
+        g.add_color_stop_rgb(1.0, 0.86, 0.55, 0.42);
+        cr.rectangle(0.0, 0.0, w, h);
+        let _ = cr.set_source(&g);
+        let _ = cr.fill();
+        let k = (w / TW).min(h / TH);
+        cr.translate((w - TW * k) / 2.0, (h - TH * k) / 2.0);
+        cr.scale(k, k);
+        let accent = named(a, "accent_bg_color", (0.55, 0.72, 0.95));
+        pane(cr, 10.0, 14.0, 52.0, 44.0, 0.16);
+        let (x, y, ww, hh) = (72.0, 14.0, 54.0, 44.0);
+        pane(cr, x, y, ww, hh, 0.32);
+        cr.set_source_rgb(accent.0, accent.1, accent.2);
+        match kind {
+            "ring" => {
+                cr.set_line_width(2.0);
+                rounded(cr, x - 3.0, y - 3.0, ww + 6.0, hh + 6.0, 6.5);
+                let _ = cr.stroke();
+            }
+            "none" => {}
+            _ => {
+                cr.set_line_width(2.0);
+                rounded(cr, x + 1.0, y + 1.0, ww - 2.0, hh - 2.0, 3.5);
+                let _ = cr.stroke();
+            }
+        }
+    });
+    a
 }
