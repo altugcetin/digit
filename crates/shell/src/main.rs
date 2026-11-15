@@ -109,8 +109,9 @@ fn main() {
 /// pty. Apps we launch inherit them, and Rust apps (LACT, …) panic on their first log line,
 /// so once the terminal hangs up both go to ~/.cache/digit/shell.log instead.
 fn outlive_terminal() {
-    for fd in [1, 2] {
-        if unsafe { libc::isatty(fd) } != 1 {
+    use std::io::IsTerminal;
+    for (fd, tty) in [(1, std::io::stdout().is_terminal()), (2, std::io::stderr().is_terminal())] {
+        if !tty {
             continue;
         }
         glib_unix::unix_fd_add_local(fd, glib::IOCondition::HUP | glib::IOCondition::ERR, move |fd, _| {
@@ -283,10 +284,10 @@ mod libc_signal {
 /// Scale or mode changes keep the monitor but change its logical size; the notch, bar and
 /// wallpaper are sized when built, so that monitor's surfaces are rebuilt.
 fn watch_monitor(app: &Rc<App>, monitor: &gdk::Monitor) {
-    if unsafe { monitor.data::<bool>("digit-watched") }.is_some() {
+    if kit::tag::has(monitor, "digit-watched") {
         return;
     }
-    unsafe { monitor.set_data("digit-watched", true) };
+    kit::tag::set(monitor, "digit-watched", true);
     let pending = Rc::new(std::cell::Cell::new(0u32));
     for prop in ["geometry", "scale-factor", "scale"] {
         let (weak, pending) = (Rc::downgrade(app), pending.clone());

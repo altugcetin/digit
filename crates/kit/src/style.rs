@@ -186,17 +186,17 @@ fn live_at(display: &gtk::gdk::Display, build: fn() -> String, changed: fn(), pr
     use gtk::{gio, glib, prelude::*};
     use std::{cell::RefCell, rc::Rc};
     let key = if priority == gtk::STYLE_PROVIDER_PRIORITY_APPLICATION { "digit-style-monitors" } else { "digit-glyph-monitors" };
-    if unsafe { display.data::<Vec<gio::FileMonitor>>(key).is_some() } {
+    if crate::tag::has(display, key) {
         return;
     }
-    unsafe { display.set_data(key, Vec::<gio::FileMonitor>::new()) };
+    crate::tag::set(display, key, Vec::<gio::FileMonitor>::new());
     let provider = gtk::CssProvider::new();
     gtk::style_context_add_provider_for_display(display, &provider, priority);
     // One display-wide override, above app CSS and the user's gtk.css.
-    let overrides = unsafe { display.data::<gtk::CssProvider>("digit-style-overrides").map(|p| p.as_ref().clone()) }.unwrap_or_else(|| {
+    let overrides = crate::tag::get::<gtk::CssProvider>(display, "digit-style-overrides").unwrap_or_else(|| {
         let p = gtk::CssProvider::new();
         gtk::style_context_add_provider_for_display(display, &p, gtk::STYLE_PROVIDER_PRIORITY_USER + 1);
-        unsafe { display.set_data("digit-style-overrides", p.clone()) };
+        crate::tag::set(display, "digit-style-overrides", p.clone());
         p
     });
     let loaded = Rc::new(RefCell::new(String::new()));
@@ -254,7 +254,7 @@ fn live_at(display: &gtk::gdk::Display, build: fn() -> String, changed: fn(), pr
         });
         monitors.push(m);
     }
-    unsafe { display.set_data(key, monitors) };
+    crate::tag::set(display, key, monitors);
 }
 
 fn reduction_css(effects: bool, motion: bool) -> String {

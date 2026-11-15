@@ -45,7 +45,8 @@ fn target(app: &App, key: &str) -> Target {
 
 fn mine(pid: u32) -> bool {
     let me = std::process::id();
-    pid > 1 && pid != me && std::fs::metadata(format!("/proc/{pid}")).is_ok_and(|m| m.uid() == unsafe { libc::getuid() })
+    let uid = |path: String| std::fs::metadata(path).map(|m| m.uid()).ok();
+    pid > 1 && pid != me && uid(format!("/proc/{pid}")).is_some_and(|u| Some(u) == uid("/proc/self".into()))
 }
 
 fn exe_of(pid: u32) -> Option<String> {

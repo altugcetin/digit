@@ -34,6 +34,7 @@ pub mod search;
 pub mod send;
 pub mod shape;
 pub mod style;
+pub mod tag;
 pub mod ui;
 pub mod niri;
 pub mod nm;

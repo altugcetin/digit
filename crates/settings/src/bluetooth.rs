@@ -75,7 +75,7 @@ pub fn build() -> gtk::Widget {
             });
         }
     });
-    unsafe { scroll.set_data("digit-bluetooth", page.clone()) };
+    kit::tag::set(&scroll, "digit-bluetooth", page.clone());
     agent();
     watch(Rc::downgrade(&page));
     refresh(&page);

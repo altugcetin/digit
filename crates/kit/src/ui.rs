@@ -259,16 +259,14 @@ pub fn step_aside(w: &gtk::Window) {
     }
     w.set_layer(Layer::Bottom);
     w.set_keyboard_mode(KeyboardMode::OnDemand);
-    unsafe {
-        if w.data::<bool>("digit-aside").is_none() {
-            w.connect_is_active_notify(|w| {
-                if w.is_active() && w.layer() == Layer::Bottom {
-                    w.set_layer(Layer::Overlay);
-                    w.set_keyboard_mode(KeyboardMode::Exclusive);
-                }
-            });
-            w.set_data("digit-aside", true);
-        }
+    if !crate::tag::has(w, "digit-aside") {
+        w.connect_is_active_notify(|w| {
+            if w.is_active() && w.layer() == Layer::Bottom {
+                w.set_layer(Layer::Overlay);
+                w.set_keyboard_mode(KeyboardMode::Exclusive);
+            }
+        });
+        crate::tag::set(w, "digit-aside", true);
     }
 }
 

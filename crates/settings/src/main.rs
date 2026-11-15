@@ -172,14 +172,14 @@ pub(crate) fn page_widget(name: &str) -> Option<gtk::Widget> {
 pub(crate) fn clear_search() {
     let find = SHELL.with(|s| s.borrow().as_ref().map(|s| s.find.clone()));
     if let Some(f) = find {
-        unsafe { f.set_data("digit-quiet", true) };
+        kit::tag::set(&f, "digit-quiet", true);
         f.set_text("");
-        unsafe { f.steal_data::<bool>("digit-quiet") };
+        kit::tag::clear(&f, "digit-quiet");
     }
 }
 
 fn searched(entry: &gtk::SearchEntry) {
-    if unsafe { entry.data::<bool>("digit-quiet") }.is_some() {
+    if kit::tag::has(entry, "digit-quiet") {
         return;
     }
     let Some((stack, list, current)) = SHELL.with(|s| s.borrow().as_ref().map(|s| (s.stack.clone(), s.list.clone(), s.current.borrow().clone()))) else { return };
@@ -428,7 +428,7 @@ fn watch(window: &gtk::ApplicationWindow) {
             }
         });
     });
-    unsafe { window.set_data("digit-watch", monitor) };
+    kit::tag::set(window, "digit-watch", monitor);
 }
 
 fn window(app: &gtk::Application) -> gtk::ApplicationWindow {
