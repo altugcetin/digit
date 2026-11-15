@@ -1185,6 +1185,12 @@ impl View {
                 };
                 (self.island_width(summary, body) + room, depth, p.radius())
             }
+            // The device's name sits in the right wing, which grows to hold it (up to a point; past
+            // that it ends in "…"), so it never runs into the clock.
+            Head::Peek(Peek::Output { name, .. }) => {
+                let wing = (self.text_width(name, 14.0, POINT) + 28.0).clamp(Peek::Output { name: String::new(), icon: "" }.wing(), 260.0);
+                (self.centre() + room + 2.0 * wing, 0.0, self.idle_r())
+            }
             Head::Peek(p) => (self.centre() + room + 2.0 * p.wing(), 0.0, self.idle_r()),
             Head::Call => {
                 // Size for the widest digits of the current length, so the island holds still

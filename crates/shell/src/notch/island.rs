@@ -355,7 +355,7 @@ impl View {
             }
             Head::Peek(Peek::Output { name, icon }) => {
                 self.icon(s, icon, 20.0, true, ACTION_BLUE, self.lead(l0, 20.0) + 10.0, mid);
-                self.text(s, name, 14.0, POINT, pal.ink_main, r0 - 60.0, mid, right + 60.0, end);
+                self.text(s, name, 14.0, POINT, pal.ink_main, r0, mid, right, end);
             }
             Head::Peek(Peek::Privacy { light, who }) => {
                 let color = match light {
