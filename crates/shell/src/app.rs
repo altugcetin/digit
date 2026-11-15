@@ -263,7 +263,7 @@ impl App {
     pub fn new(cfg: Config, blur: Option<blur::Blur>) -> Rc<Self> {
         let frosted = blur.as_ref().is_some_and(|b| b.able()) && !kit::effects::reduced();
         let prefs = crate::config::Prefs::from(&cfg);
-        let body = Self::body_for(&cfg, &cfg.surface, Roles::default(), frosted, prefs.wide(&cfg));
+        let body = Self::body_for(&cfg, &cfg.surface, &cfg.ui_accent, Roles::default(), frosted, prefs.wide(&cfg));
         let app = Rc::new(Self {
             blur,
             palette: Cell::new(Palette::new(Roles::default(), body)),
@@ -320,18 +320,17 @@ impl App {
         app
     }
 
-    fn tinted(cfg: &Config, roles: Roles) -> Rgb {
-        roles.surface_high.mix(roles.accent_container, 1.0 - cfg.tint.clamp(0.0, 1.0))
-    }
-
-    fn surface(cfg: &Config, surface: &str, roles: Roles) -> Rgb {
+    /// Shell surfaces in the apps' colors: Black, Graphite or Tinted with the apps' accent (the
+    /// wallpaper's unless one is picked under Accent).
+    fn surface(surface: &str, ui_accent: &str, roles: Roles) -> Rgb {
+        let accent = kit::style::custom_accent(ui_accent).map_or(roles.primary, |(a, _)| a);
         // "frosted" is what older configs chose; it reads as tinted.
-        if matches!(surface, "tinted" | "frosted") { Self::tinted(cfg, roles) } else { Rgb::new(0.0, 0.0, 0.0) }
+        kit::style::base_color(if surface == "frosted" { "tinted" } else { surface }, accent)
     }
 
-    fn body_for(cfg: &Config, surface: &str, roles: Roles, frosted: bool, wide: bool) -> Rgb {
+    fn body_for(cfg: &Config, surface: &str, ui_accent: &str, roles: Roles, frosted: bool, wide: bool) -> Rgb {
         if wide {
-            return Self::surface(cfg, surface, roles);
+            return Self::surface(surface, ui_accent, roles);
         }
         match cfg.dock {
             Dock::Bar => cfg
@@ -339,19 +338,19 @@ impl App {
                 .as_deref()
                 .and_then(Rgb::hex)
                 .unwrap_or_else(|| roles.surface_high.mix(roles.surface, 0.47)),
-            Dock::Screen if frosted => Self::surface(cfg, surface, roles).alpha(1.0 - cfg.glass.clamp(0.0, 0.6)),
-            Dock::Screen => Self::surface(cfg, surface, roles),
+            Dock::Screen if frosted => Self::surface(surface, ui_accent, roles).alpha(1.0 - cfg.glass.clamp(0.0, 0.6)),
+            Dock::Screen => Self::surface(surface, ui_accent, roles),
         }
     }
 
     pub fn set_roles(&self, roles: Roles) {
         let frosted = self.blur.as_ref().is_some_and(|b| b.able()) && !kit::effects::reduced();
         self.roles.set(roles);
-        let (surface, wide) = {
+        let (surface, ui_accent, wide) = {
             let p = self.prefs.borrow();
-            (p.surface.clone(), p.wide(&self.cfg))
+            (p.surface.clone(), p.ui_accent.clone(), p.wide(&self.cfg))
         };
-        let next = Palette::new(roles, Self::body_for(&self.cfg, &surface, roles, frosted, wide));
+        let next = Palette::new(roles, Self::body_for(&self.cfg, &surface, &ui_accent, roles, frosted, wide));
         let now = Self::now();
         let shown = if self.notches.borrow().is_empty() { next } else { self.palette_at(now) };
         self.palette_from.set(shown);
@@ -626,7 +625,8 @@ impl App {
             }
         }
         let restyle = before.style != next.style || before.under != next.under || before.menubar != next.menubar || before.bar_spaces != next.bar_spaces || before.notch_spaces != next.notch_spaces || (next.wide(&self.cfg) && before.wide_height != next.wide_height);
-        if before.surface != next.surface || restyle || effects_changed {
+        // A Tinted shell takes the apps' accent, so a new accent recolors it too.
+        if before.surface != next.surface || before.ui_accent != next.ui_accent || restyle || effects_changed {
             self.set_roles(self.roles.get());
         }
         // Roundness changes reshape the notch at once (restyle retargets its corner radius) and

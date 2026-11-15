@@ -712,14 +712,20 @@ fn section(body: &gtk::Box, title: &str) -> gtk::Box {
 
 fn shell_look(body: &gtk::Box, t: &toml::Table) {
     let look = section(body, "Shell");
-    const SURFACES: [(&str, &str); 2] = [("black", "Pure black"), ("tinted", "Tinted")];
+    const SURFACES: [(&str, &str); 3] = [("black", "Black"), ("graphite", "Graphite"), ("tinted", "Tinted")];
     // "frosted", from older configs, reads as tinted.
-    let current = prefs::get_str(t, "surface", "black");
-    let at = if matches!(current.as_str(), "tinted" | "frosted") { 1 } else { 0 };
-    // Tinted is the wallpaper's color as the shell mixes it.
-    let tint = kit::theme::load().and_then(|th| th.shell_roles()).map(|r| r.surface_high.mix(r.accent_container, 0.84)).map_or((0.16, 0.15, 0.2), |c| (c.r, c.g, c.b));
-    let items = vec![(SURFACES[0].1, kit::pictures::shell_surface((0.0, 0.0, 0.0)).upcast()), (SURFACES[1].1, kit::pictures::shell_surface(tint).upcast())];
-    tiles(&look, "dark_mode", "Shell surfaces", "Notch, dock, menus and panels", items, at, |i| save("surface", toml::Value::String(SURFACES[i].0.into())));
+    let current = match prefs::get_str(t, "surface", "black").as_str() {
+        "frosted" => "tinted".to_string(),
+        s => s.to_string(),
+    };
+    let at = SURFACES.iter().position(|s| s.0 == current).unwrap_or(0);
+    // The same colors as App surfaces, Tinted with the apps' accent.
+    let accent = kit::palette::Rgb::hex(&kit::style::ink().accent).unwrap_or(kit::palette::Rgb::new(0.82, 0.74, 1.0));
+    let items = SURFACES.iter().map(|(value, name)| {
+        let c = kit::style::base_color(value, accent);
+        (*name, kit::pictures::shell_surface((c.r, c.g, c.b)).upcast())
+    }).collect();
+    tiles(&look, "dark_mode", "Shell surfaces", "Notch, dock, menus and panels, in the same colors as App surfaces", items, at, |i| save("surface", toml::Value::String(SURFACES[i].0.into())));
     scheme_choice(&look, t);
     icon_theme_choice(&look, t);
     choice(&look, "palette", "Glyph backgrounds", "The colored squares behind the symbols in Settings, Files and Store", "ui_tiles", &kit::style::TILES, &prefs::get_str(t, "ui_tiles", "colorful"));

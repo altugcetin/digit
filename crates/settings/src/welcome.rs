@@ -194,7 +194,7 @@ fn step(index: usize, t: &toml::Table) -> gtk::Widget {
             surfaces(&card, "layers", "App surfaces", "", &prefs::get_str(t, "ui_surface", "black"));
             accent(&card, t);
             corners(&card, "rounded_corner", "Corners", "", "ui_round", prefs::get_f64(t, "ui_round", 1.0));
-            choice(&card, "dark_mode", "Notch and dock", "", "surface", &[("black", "Pure black"), ("tinted", "Tinted")], &prefs::get_str(t, "surface", "black"));
+            choice(&card, "dark_mode", "Notch and dock", "", "surface", &[("black", "Black"), ("graphite", "Graphite"), ("tinted", "Tinted")], &prefs::get_str(t, "surface", "black"));
             page.append(&card);
         }
         3 => {

@@ -132,12 +132,28 @@ pub fn card_color(surface: &str, accent: Rgb) -> Rgb {
     if surface == "tinted" { accent.mix(base, CARD_TINT) } else { base }
 }
 
+/// Behind everything in a Graphite window, and what Graphite shell surfaces are.
+const GRAPHITE_BASE: &str = "#121214";
+/// The near-black a Tinted window's background mixes the accent into, by `BASE_TINT`.
+const TINTED_BASE: &str = "#050505";
+const BASE_TINT: f64 = 0.05;
+
+/// A window's background in each app surface. The shell's surfaces (notch, dock, menus and
+/// panels) are these too, so Black, Graphite and Tinted look the same in the shell and the apps.
+pub fn base_color(surface: &str, accent: Rgb) -> Rgb {
+    match surface {
+        "graphite" => Rgb::hex(GRAPHITE_BASE).expect("valid base color"),
+        "tinted" => accent.mix(Rgb::hex(TINTED_BASE).expect("valid base color"), BASE_TINT),
+        _ => Rgb::new(0.0, 0.0, 0.0),
+    }
+}
+
 pub fn surfaces(look: &Look, accent: &str) -> [String; 5] {
     let card = card_base(&look.surface);
     match look.surface.as_str() {
-        "graphite" => ["#121214".into(), card.into(), "#25252a".into(), "#1f1f24".into(), "#202025".into()],
+        "graphite" => [GRAPHITE_BASE.into(), card.into(), "#25252a".into(), "#1f1f24".into(), "#202025".into()],
         "tinted" => [
-            format!("mix(#050505, {accent}, 0.05)"),
+            format!("mix({TINTED_BASE}, {accent}, {BASE_TINT})"),
             format!("mix({card}, {accent}, {CARD_TINT})"),
             format!("mix(#161616, {accent}, 0.12)"),
             format!("mix(#121212, {accent}, 0.09)"),
@@ -506,5 +522,26 @@ mod glyph_tests {
         }
         assert_eq!(glyph_family_in("outlined", |_| true), "Material Symbols Outlined");
         assert_eq!(glyph_family_in("sharp", |_| true), "Material Symbols Sharp");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_surfaces_take_the_app_window_colors() {
+        let accent = Rgb::hex("#ff0000").unwrap();
+        assert_eq!(base_color("black", accent), Rgb::new(0.0, 0.0, 0.0));
+        assert_eq!(base_color("graphite", accent), Rgb::hex("#121214").unwrap());
+        // The app CSS writes the same as mix(base, accent, tint).
+        let tinted = base_color("tinted", accent);
+        let base = Rgb::hex(TINTED_BASE).unwrap();
+        assert!((tinted.r - (base.r * (1.0 - BASE_TINT) + BASE_TINT)).abs() < 1e-9);
+        assert!((tinted.g - base.g * (1.0 - BASE_TINT)).abs() < 1e-9);
+        let look = Look { round: 1.0, surface: "graphite".into(), accent: None, dense: false };
+        assert_eq!(surfaces(&look, "#ff0000")[0], GRAPHITE_BASE);
+        let look = Look { surface: "tinted".into(), ..look };
+        assert_eq!(surfaces(&look, "#ff0000")[0], format!("mix({TINTED_BASE}, #ff0000, {BASE_TINT})"));
     }
 }
