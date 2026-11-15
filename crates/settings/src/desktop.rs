@@ -854,15 +854,30 @@ fn icon_theme_choice(card: &gtk::Box, t: &toml::Table) {
     });
 }
 
+thread_local! {
+    /// Icon themes made for previews, one per name: each new one reads its theme into memory.
+    static THEMES: std::cell::RefCell<std::collections::HashMap<String, gtk::IconTheme>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The icon theme `name`, made once and kept for later previews.
+fn named_theme(name: &str) -> Option<gtk::IconTheme> {
+    let display = gtk::gdk::Display::default()?;
+    Some(THEMES.with(|t| {
+        t.borrow_mut().entry(name.to_string()).or_insert_with(|| {
+            let active = gtk::IconTheme::for_display(&display);
+            let it = gtk::IconTheme::new();
+            it.set_search_path(&active.search_path().iter().map(|p| p.as_path()).collect::<Vec<_>>());
+            it.set_resource_path(&active.resource_path().iter().map(|p| p.as_str()).collect::<Vec<_>>());
+            it.set_theme_name(Some(name));
+            it
+        }).clone()
+    }))
+}
+
 /// A folder, the home folder, a terminal and the trash from `theme`.
 fn icon_preview(theme: &str) -> gtk::Widget {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    let Some(display) = gtk::gdk::Display::default() else { return row.upcast() };
-    let active = gtk::IconTheme::for_display(&display);
-    let it = gtk::IconTheme::new();
-    it.set_search_path(&active.search_path().iter().map(|p| p.as_path()).collect::<Vec<_>>());
-    it.set_resource_path(&active.resource_path().iter().map(|p| p.as_str()).collect::<Vec<_>>());
-    it.set_theme_name(Some(theme));
+    let Some(it) = named_theme(theme) else { return row.upcast() };
     for name in ["folder", "user-home", "utilities-terminal", "user-trash"] {
         let icon = it.lookup_icon(name, &[], 22, 1, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty());
         let image = gtk::Image::from_paintable(Some(&icon));
@@ -1100,16 +1115,7 @@ fn dock_icons(style: &'static str, apps: &[(String, gio::Icon)]) -> gtk::Widget 
     let Some(display) = gtk::gdk::Display::default() else { return row.upcast() };
     let parsed = kit::art::Style::parse(style);
     // Styled icons start from the apps' original artwork, as the dock does.
-    let theme = if parsed == kit::art::Style::Native {
-        gtk::IconTheme::for_display(&display)
-    } else {
-        let active = gtk::IconTheme::for_display(&display);
-        let t = gtk::IconTheme::new();
-        t.set_search_path(&active.search_path().iter().map(|p| p.as_path()).collect::<Vec<_>>());
-        t.set_resource_path(&active.resource_path().iter().map(|p| p.as_str()).collect::<Vec<_>>());
-        t.set_theme_name(Some("Adwaita"));
-        t
-    };
+    let theme = if parsed == kit::art::Style::Native { gtk::IconTheme::for_display(&display) } else { named_theme("Adwaita").unwrap_or_else(|| gtk::IconTheme::for_display(&display)) };
     let accent = kit::palette::Rgb::hex(&kit::style::ink().accent).unwrap_or(kit::palette::Rgb::new(0.55, 0.72, 0.95));
     for (id, icon) in apps {
         let paintable = theme.lookup_by_gicon(icon, PX, 1, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty());

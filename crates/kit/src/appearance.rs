@@ -17,14 +17,21 @@ pub fn apply_gtk() {
     };
     let prefs = crate::prefs::read();
     crate::app::refresh_controls(&prefs);
-    settings.set_gtk_icon_theme_name(Some(&icon_theme(&prefs)));
+    // Only when they change: setting a theme again, even the same one, makes GTK drop and
+    // reload every icon and cursor it holds.
+    let icons = icon_theme(&prefs);
+    if settings.gtk_icon_theme_name().as_deref() != Some(icons.as_str()) {
+        settings.set_gtk_icon_theme_name(Some(&icons));
+    }
     let (theme, size) = crate::cursors::current(&prefs);
     if theme.is_empty() {
         settings.reset_property("gtk-cursor-theme-name");
-    } else {
+    } else if settings.gtk_cursor_theme_name().as_deref() != Some(theme.as_str()) {
         settings.set_gtk_cursor_theme_name(Some(&theme));
     }
-    settings.set_gtk_cursor_theme_size(size as i32);
+    if settings.gtk_cursor_theme_size() != size as i32 {
+        settings.set_gtk_cursor_theme_size(size as i32);
+    }
 }
 
 /// Whether a window button shows: only Close does until the user turns the others on.
