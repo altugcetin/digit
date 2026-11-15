@@ -156,11 +156,6 @@ struct State {
     art_pending: bool,
     /// When the search last changed.
     searched: i64,
-    /// The drawn caret: where it is (in the search text) and when it last moved.
-    caret: Tween,
-    caret_moved: i64,
-    caret_paint: Paint,
-    caret_blink: Option<glib::SourceId>,
     art: HashMap<String, gdk::Texture>,
     /// What the icons in `art` were drawn for (style, theme, size), to redraw them when it changes.
     art_key: String,
@@ -171,6 +166,12 @@ struct State {
     moving: bool,
     search: gtk::Text,
     press: Option<(f64, f64, Hit)>,
+    /// The dock as seen when the grid opened: how far it reaches in at the bottom, and its apps'
+    /// icon centres, which apps found by the search fly in from.
+    dock_room: f64,
+    dock_apps: HashMap<String, (f64, f64)>,
+    /// An app being dragged out of the dock over the grid, and where.
+    ghost: Option<(String, (f64, f64))>,
     scroll: f64,
     turned: i64,
     ticking: bool,
@@ -268,9 +269,12 @@ pub fn toggle(app: &Rc<App>) {
 
 fn show(app: &Rc<App>) {
     let st = ONE.with(|one| one.borrow_mut().get_or_insert_with(|| build(app)).clone());
+    // Apps in the dock or hidden (see `kit::hidden`) stay out of the arrangement; the dock's
+    // still turn up in the search.
+    let docked = crate::dock::pinned();
     let installed: Vec<String> = {
         let list = app.apps.list();
-        let mut v: Vec<(String, String)> = list.iter().map(|e| (e.name.to_lowercase(), e.id.clone())).collect();
+        let mut v: Vec<(String, String)> = list.iter().filter(|e| !app.hidden(&e.id) && !docked.contains(&e.id)).map(|e| (e.name.to_lowercase(), e.id.clone())).collect();
         v.sort();
         v.into_iter().map(|(_, id)| id).collect()
     };
@@ -296,9 +300,15 @@ fn show(app: &Rc<App>) {
         s.window.set_keyboard_mode(KeyboardMode::Exclusive);
         s.window.set_visible(true);
         s.window.present();
+        let size = s.size;
+        let seen = crate::dock::seen(size);
+        s.dock_room = seen.as_ref().filter(|(side, _, _)| *side == "bottom").map_or(0.0, |(_, reach, _)| *reach);
+        s.dock_apps = seen.map(|(_, _, apps)| apps.into_iter().collect()).unwrap_or_default();
+        s.ghost = None;
         s.search.grab_focus();
     }
-    update_caret(&st);
+    // The dock comes up over the grid, to drag apps between them.
+    crate::dock::lift(true);
     save(&st.borrow().slots);
     kick(&st);
 }
@@ -315,13 +325,15 @@ fn close(st: &Shared) {
     s.fade.go(0.0, now, if motion::reduced() { 140 } else { 300 }, motion::STANDARD);
     s.window.set_keyboard_mode(KeyboardMode::None);
     drop(s);
+    crate::dock::lift(false);
     kick(st);
 }
 
 fn build(app: &Rc<App>) -> Shared {
     let window = gtk::Window::new();
     window.init_layer_shell();
-    window.set_layer(Layer::Overlay);
+    // A layer under the dock's, which rises over it while the grid is open (see `dock::lift`).
+    window.set_layer(Layer::Top);
     window.set_namespace(Some("digit-appgrid"));
     window.set_exclusive_zone(-1);
     for e in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
@@ -344,25 +356,13 @@ fn build(app: &Rc<App>) -> Shared {
     search.set_margin_top(SEARCH_Y as i32);
     search.set_margin_start(24);
     search.set_size_request((SEARCH_W - 56.0) as i32, SEARCH_H as i32);
-    let smooth = motion::enabled(app.prefs.borrow().smooth_caret);
     let css = gtk::CssProvider::new();
-    // With the smooth caret on (as in Spotlight), GTK's caret hides and the grid draws one that glides.
-    css.load_from_string(&format!(
-        "text.appgrid-search {{ background: none; color: rgba(255,255,255,0.95); caret-color: {}; font-size: 14px; }} text.appgrid-search placeholder {{ color: rgba(255,255,255,0.55); }} text.appgrid-search selection {{ background: rgba(255,255,255,0.3); }}",
-        if smooth { "transparent" } else { "white" }
-    ));
+    css.load_from_string("text.appgrid-search { background: none; color: rgba(255,255,255,0.95); caret-color: white; font-size: 14px; } text.appgrid-search placeholder { color: rgba(255,255,255,0.55); } text.appgrid-search selection { background: rgba(255,255,255,0.3); }");
     #[allow(deprecated)]
     search.style_context().add_provider(&css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
-    // The drawn caret, on a small surface of its own so its blinking redraws only that.
-    let caret_paint = Paint::new(SEARCH_W as i32, SEARCH_H as i32);
-    caret_paint.set_halign(gtk::Align::Center);
-    caret_paint.set_valign(gtk::Align::Start);
-    caret_paint.set_margin_top(SEARCH_Y as i32);
-    caret_paint.set_can_target(false);
     let layers = gtk::Overlay::new();
     layers.set_child(Some(&paint));
     layers.add_overlay(&search);
-    layers.add_overlay(&caret_paint);
     window.set_child(Some(&layers));
     let st = Rc::new(RefCell::new(State {
         app: app.clone(),
@@ -382,10 +382,6 @@ fn build(app: &Rc<App>) -> Shared {
         names: HashMap::new(),
         art_pending: false,
         searched: 0,
-        caret: Tween::still(0.0),
-        caret_moved: 0,
-        caret_paint: caret_paint.clone(),
-        caret_blink: None,
         art: HashMap::new(),
         art_key: String::new(),
         wanted: false,
@@ -393,6 +389,9 @@ fn build(app: &Rc<App>) -> Shared {
         moving: false,
         search: search.clone(),
         press: None,
+        dock_room: 0.0,
+        dock_apps: HashMap::new(),
+        ghost: None,
         scroll: 0.0,
         turned: 0,
         ticking: false,
@@ -405,22 +404,6 @@ fn build(app: &Rc<App>) -> Shared {
                 st.draw(s);
             }
             fill_art(&st);
-        }
-    });
-    let weak = Rc::downgrade(&st);
-    caret_paint.on_draw(move |snap| {
-        if let Some(st) = weak.upgrade()
-            && let Ok(s) = st.try_borrow()
-        {
-            s.draw_caret(snap);
-        }
-    });
-    let weak = Rc::downgrade(&st);
-    search.connect_notify_local(None, move |_, p| {
-        if matches!(p.name(), "cursor-position" | "selection-bound")
-            && let Some(st) = weak.upgrade()
-        {
-            update_caret(&st);
         }
     });
     let keys = gtk::EventControllerKey::new();
@@ -446,7 +429,6 @@ fn build(app: &Rc<App>) -> Shared {
         s.page.set(0.0);
         drop(s);
         kick(&st);
-        update_caret(&st);
     });
     let drag = gtk::GestureDrag::new();
     let weak = Rc::downgrade(&st);
@@ -469,6 +451,16 @@ fn build(app: &Rc<App>) -> Shared {
         released(&st, x + dx, y + dy, dx.hypot(dy) < 8.0);
     });
     paint.add_controller(drag);
+    // A right click on an app or a folder offers what can be done with it.
+    let menu = gtk::GestureClick::new();
+    menu.set_button(3);
+    let weak = Rc::downgrade(&st);
+    menu.connect_pressed(move |_, _, x, y| {
+        if let Some(st) = weak.upgrade() {
+            context_menu(&st, x, y);
+        }
+    });
+    paint.add_controller(menu);
     let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
     let weak = Rc::downgrade(&st);
     scroll.connect_scroll(move |c, dx, dy| {
@@ -503,6 +495,7 @@ fn visible(s: &State) -> std::borrow::Cow<'_, [Slot]> {
     let list = s.app.apps.list();
     let mut hits: Vec<(i32, String)> = list
         .iter()
+        .filter(|e| !s.app.hidden(&e.id))
         .filter_map(|e| {
             let name = e.name.to_lowercase();
             let score = if name.starts_with(&q) {
@@ -523,7 +516,7 @@ fn visible(s: &State) -> std::borrow::Cow<'_, [Slot]> {
 
 impl State {
     fn grid(&self) -> Grid {
-        grid(self.size.0, self.size.1)
+        grid(self.size.0, self.size.1 - self.dock_room)
     }
 
     fn pages(&self) -> usize {
@@ -571,7 +564,7 @@ impl State {
             return Hit::Search;
         }
         let pages = self.pages();
-        let dots_y = self.size.1 - DOTS;
+        let dots_y = self.size.1 - self.dock_room - DOTS;
         if (y - dots_y).abs() < 12.0 && pages > 1 {
             let x0 = self.size.0 / 2.0 - (pages - 1) as f64 * 9.0;
             if let Some(p) = (0..pages).find(|p| (x - (x0 + *p as f64 * 18.0)).abs() < 9.0) {
@@ -624,7 +617,15 @@ impl State {
             if !self.shown.contains_key(key) && now - self.searched < 400_000 && !motion::reduced() {
                 self.born.insert(key.clone(), now);
             }
-            let at = self.shown.entry(key.clone()).or_insert(*to);
+            // An app the search found in the dock flies out of it.
+            let from_dock = (!self.query.trim().is_empty()).then(|| self.dock_apps.get(key)).flatten().map(|c| {
+                let icon = grid(self.size.0, self.size.1 - self.dock_room).icon;
+                (c.0 - icon / 2.0, c.1 - icon / 2.0)
+            });
+            if from_dock.is_some() {
+                self.born.remove(key);
+            }
+            let at = self.shown.entry(key.clone()).or_insert(from_dock.unwrap_or(*to));
             at.0 += (to.0 - at.0) * k;
             at.1 += (to.1 - at.1) * k;
             if (to.0 - at.0).abs() > 0.5 || (to.1 - at.1).abs() > 0.5 {
@@ -732,7 +733,7 @@ impl State {
             for p in 0..pages {
                 let near = 1.0 - (page - p as f64).abs().min(1.0);
                 let r = 3.5;
-                draw::fill(s, &draw::round(x0 + p as f64 * 18.0 - r, h - DOTS - r, 2.0 * r, 2.0 * r, r), white.alpha(0.35 + 0.55 * near));
+                draw::fill(s, &draw::round(x0 + p as f64 * 18.0 - r, h - self.dock_room - DOTS - r, 2.0 * r, 2.0 * r, r), white.alpha(0.35 + 0.55 * near));
             }
         }
         // The open folder: its name over a panel of its apps, growing out of the grid.
@@ -765,8 +766,15 @@ impl State {
             s.pop();
             s.restore();
         }
-        // What's being dragged, a little larger, under the pointer.
-        if let Some(d) = &self.drag {
+        // An app dragged out of the dock, under the pointer.
+        if let Some((id, at)) = &self.ghost {
+            let size = g.icon * 1.1;
+            s.push_shadow(&[gsk::Shadow::new(gdk::RGBA::new(0.0, 0.0, 0.0, 0.35), 0.0, 6.0, 14.0)]);
+            self.icon_of(s, id, at.0 - size / 2.0, at.1 - size / 2.0, size);
+            s.pop();
+        }
+        // What's being dragged, a little larger, under the pointer (the dock draws it over itself).
+        if let Some(d) = self.drag.as_ref().filter(|d| !crate::dock::over(d.at, self.size)) {
             let size = g.icon * 1.1;
             let (x, y) = (d.at.0 - size / 2.0, d.at.1 - size / 2.0);
             s.push_shadow(&[gsk::Shadow::new(gdk::RGBA::new(0.0, 0.0, 0.0, 0.35), 0.0, 6.0, 14.0)]);
@@ -790,21 +798,6 @@ impl State {
         self.moving = moving;
     }
 
-    /// The smooth caret, solid while it moves and softly blinking at rest, in the search field.
-    fn draw_caret(&self, snap: &gtk::Snapshot) {
-        // No caret over a selection, as GTK's own.
-        if !self.open || !motion::enabled(self.app.prefs.borrow().smooth_caret) || !self.search.has_focus() || self.search.selection_bounds().is_some() {
-            return;
-        }
-        let now = glib::monotonic_time();
-        let Some(origin) = self.search.compute_point(&self.caret_paint, &graphene::Point::new(0.0, 0.0)) else { return };
-        let rest = (now - self.caret_moved) as f64 / 1e6 - 0.5;
-        let blink = if rest <= 0.0 { 1.0 } else { 0.55 + 0.45 * (rest * std::f64::consts::TAU / 1.1).cos() };
-        let a = blink * self.fade.value(now).clamp(0.0, 1.0);
-        let x = origin.x() as f64 + self.caret.value(now);
-        draw::fill(snap, &draw::round(x, (SEARCH_H - 18.0) / 2.0, 2.0, 18.0, 1.0), Rgb::new(1.0, 1.0, 1.0).alpha(a));
-    }
-
     /// While dragging: after a moment over a cell the others make way there; held over the
     /// middle of another app instead, it opens to take this one (see `released`).
     fn drag_step(&mut self, now: i64) {
@@ -813,6 +806,10 @@ impl State {
         }
         let Some(d) = self.drag.as_ref() else { return };
         let (x, y) = d.at;
+        // Over the dock it's going there: the grid stays as it is.
+        if crate::dock::over(d.at, self.size) {
+            return;
+        }
         let key = d.slot.key();
         let is_app = matches!(d.slot, Slot::App(_)) && d.from_folder.is_none();
         let g = self.grid();
@@ -862,35 +859,6 @@ impl State {
             _ => {}
         }
     }
-}
-
-/// Glides the caret to the cursor, and keeps it blinking while the grid is open.
-fn update_caret(st: &Shared) {
-    let Ok(mut s) = st.try_borrow_mut() else { return };
-    let now = glib::monotonic_time();
-    // Where GTK puts its own cursor, in the field: right even when long text scrolls.
-    let at = s.search.position().max(0) as usize;
-    let (strong, _) = s.search.compute_cursor_extents(at);
-    let x = strong.x() as f64;
-    if (s.caret.target() - x).abs() > 0.1 {
-        s.caret.go(x, now, if motion::reduced() { 1 } else { 120 }, motion::Curve::new(0.2, 0.0, 0.0, 1.0));
-        s.caret_moved = now;
-    }
-    s.caret_paint.queue_draw();
-    if s.caret_blink.is_some() {
-        return;
-    }
-    let weak = Rc::downgrade(st);
-    s.caret_blink = Some(glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
-        let Some(st) = weak.upgrade() else { return glib::ControlFlow::Break };
-        let Ok(mut s) = st.try_borrow_mut() else { return glib::ControlFlow::Continue };
-        if !s.open {
-            s.caret_blink = None;
-            return glib::ControlFlow::Break;
-        }
-        s.caret_paint.queue_draw();
-        glib::ControlFlow::Continue
-    }));
 }
 
 /// Pushes an opacity node for `a`, unless it is fully opaque (an opacity node draws everything
@@ -1092,6 +1060,17 @@ fn moved(st: &Shared, x: f64, y: f64) {
     if let Some(d) = s.drag.as_mut() {
         d.at = (x, y);
     }
+    // Over the dock, the dock shows it where it would land, drawn over the grid.
+    let hand = match s.drag.as_ref() {
+        Some(Drag { slot: Slot::App(id), .. }) if crate::dock::over((x, y), s.size) => Some((id.clone(), s.size)),
+        _ => None,
+    };
+    drop(s);
+    match &hand {
+        Some((id, screen)) => crate::dock::incoming(Some((id, (x, y), *screen))),
+        None => crate::dock::incoming(None),
+    }
+    let mut s = st.borrow_mut();
     if s.folder.is_some() {
         return;
     }
@@ -1121,6 +1100,35 @@ fn released(st: &Shared, x: f64, y: f64, click: bool) {
         let mut s = st.borrow_mut();
         let d = s.drag.take();
         let now = glib::monotonic_time();
+        // Let go over the dock: it's kept there, and leaves the grid.
+        if let Some(Drag { slot: Slot::App(id), from_folder, at, .. }) = d.as_ref().filter(|d| crate::dock::over(d.at, s.size)) {
+            let (id, at, size) = (id.clone(), *at, s.size);
+            match from_folder {
+                Some(f) => {
+                    let f = *f;
+                    if let Some(Slot::Folder { apps, .. }) = s.slots.get_mut(f) {
+                        apps.retain(|a| *a != id);
+                    }
+                    // A folder left with one app is that app again.
+                    if let Some(Slot::Folder { apps, .. }) = s.slots.get(f)
+                        && apps.len() == 1
+                    {
+                        let only = apps[0].clone();
+                        s.slots[f] = Slot::App(only);
+                    }
+                }
+                None => s.slots.retain(|slot| *slot != Slot::App(id.clone())),
+            }
+            s.folder = None;
+            s.moving = true;
+            drop(s);
+            if !crate::dock::keep_incoming() {
+                crate::dock::pin_at(&id, at, size);
+            }
+            save(&st.borrow().slots);
+            kick(st);
+            return;
+        }
         if let Some(d) = d {
             let key = d.slot.key();
             // It settles into its place from where it was let go.
@@ -1292,6 +1300,191 @@ fn press_key(st: &Shared, key: gdk::Key) -> bool {
         _ => return folder && text.is_some(),
     }
     true
+}
+
+/// Whether app `id` can be removed from the system: a system package or a Flatpak, which
+/// Settings knows how to take out (with its checks).
+fn removable(app: &App, id: &str) -> bool {
+    let list = app.apps.list();
+    let Some(path) = list.iter().find(|e| e.id == id).and_then(|e| e.info.downcast_ref::<gio_unix::DesktopAppInfo>().and_then(|d| d.filename())) else { return false };
+    let path = path.to_string_lossy();
+    path.contains("/flatpak/exports/share/applications/") || path.starts_with("/usr/share/applications/")
+}
+
+fn context_menu(st: &Shared, x: f64, y: f64) {
+    use crate::popmenu::Row;
+    let (hit, app, in_folder) = {
+        let s = st.borrow();
+        (s.hit(x, y), s.app.clone(), s.folder.is_some())
+    };
+    let Hit::Item(i) = hit else { return };
+    let slot = {
+        let s = st.borrow();
+        if in_folder { s.folder_apps().get(i).cloned().map(Slot::App) } else { visible(&s).get(i).cloned() }
+    };
+    let weak = Rc::downgrade(st);
+    let with = move |f: fn(&Shared, &str), arg: String| {
+        let weak = weak.clone();
+        move || {
+            if let Some(st) = weak.upgrade() {
+                f(&st, &arg);
+            }
+        }
+    };
+    let rows = match slot {
+        Some(Slot::App(id)) => {
+            let docked = crate::dock::pinned().contains(&id);
+            let mut rows = vec![
+                Row::item("Open", with(launch, id.clone())).glyph("open_in_new"),
+                if docked { Row::item("Remove from Dock", with(|_, id| crate::dock::unpin(id), id.clone())).glyph("keep_off") } else { Row::item("Keep in Dock", with(keep_in_dock, id.clone())).glyph("keep") },
+                Row::item("Hide", with(hide, id.clone())).glyph("visibility_off").hint("Settings › Apps shows it again"),
+            ];
+            if removable(&app, &id) {
+                rows.push(Row::Sep);
+                rows.push(Row::item("Uninstall…", with(uninstall, id.clone())).glyph("delete").danger());
+            }
+            rows
+        }
+        Some(Slot::Folder { .. }) => {
+            let index = i.to_string();
+            vec![
+                Row::item("Rename", with(rename_folder, index.clone())).glyph("edit"),
+                Row::item("Ungroup", with(ungroup, index)).glyph("folder_off"),
+            ]
+        }
+        None => return,
+    };
+    crate::popmenu::show(&app, crate::batterywidget::monitor(), x, y, "", rows);
+}
+
+fn keep_in_dock(st: &Shared, id: &str) {
+    crate::dock::pin(id);
+    let mut s = st.borrow_mut();
+    // Kept in the dock, it leaves the grid (the search still finds it).
+    for slot in s.slots.iter_mut() {
+        if let Slot::Folder { apps, .. } = slot {
+            apps.retain(|a| a != id);
+        }
+    }
+    s.slots.retain(|slot| *slot != Slot::App(id.to_string()));
+    let slots = std::mem::take(&mut s.slots);
+    s.slots = slots.into_iter().map(|slot| match slot {
+        Slot::Folder { apps, .. } if apps.len() == 1 => Slot::App(apps[0].clone()),
+        other => other,
+    }).collect();
+    s.moving = true;
+    drop(s);
+    save(&st.borrow().slots);
+    kick(st);
+}
+
+fn hide(st: &Shared, id: &str) {
+    if let Err(e) = kit::prefs::set_many(&kit::hidden::change(&kit::prefs::read(), id, true)) {
+        eprintln!("digit: {e}");
+        return;
+    }
+    keep_out(st, id);
+}
+
+/// Takes app `id` out of the grid, its folders included.
+fn keep_out(st: &Shared, id: &str) {
+    let mut s = st.borrow_mut();
+    let slots = std::mem::take(&mut s.slots);
+    s.slots = slots
+        .into_iter()
+        .filter_map(|slot| match slot {
+            Slot::App(a) if a == id => None,
+            Slot::Folder { name, apps } => {
+                let apps: Vec<String> = apps.into_iter().filter(|a| a != id).collect();
+                match apps.len() {
+                    0 => None,
+                    1 => Some(Slot::App(apps[0].clone())),
+                    _ => Some(Slot::Folder { name, apps }),
+                }
+            }
+            other => Some(other),
+        })
+        .collect();
+    s.moving = true;
+    drop(s);
+    save(&st.borrow().slots);
+    kick(st);
+}
+
+fn uninstall(st: &Shared, id: &str) {
+    let _ = crate::child::spawn(&["digit-settings".as_ref(), format!("uninstall:{id}").as_ref()], gtk::gio::SubprocessFlags::NONE);
+    close(st);
+}
+
+fn rename_folder(st: &Shared, index: &str) {
+    let Ok(i) = index.parse::<usize>() else { return };
+    open_folder(st, i);
+    if let Some(f) = st.borrow_mut().folder.as_mut() {
+        f.renaming = true;
+    }
+    kick(st);
+}
+
+fn ungroup(st: &Shared, index: &str) {
+    let Ok(i) = index.parse::<usize>() else { return };
+    let mut s = st.borrow_mut();
+    if let Some(Slot::Folder { apps, .. }) = s.slots.get(i).cloned() {
+        s.slots.splice(i..=i, apps.into_iter().map(Slot::App));
+        s.moving = true;
+    }
+    drop(s);
+    save(&st.borrow().slots);
+    kick(st);
+}
+
+/// An app being dragged out of the dock (`Some`: its id, and where it is on a screen of a given
+/// size), drawn over the open grid; `None` once it's let go or back over the dock.
+pub type Place = Box<dyn Fn((f64, f64)) -> (f64, f64)>;
+
+pub fn ghost(item: Option<(String, Place)>) {
+    let Some(st) = ONE.with(|one| one.borrow().clone()) else { return };
+    let Ok(mut s) = st.try_borrow_mut() else { return };
+    if !s.open {
+        return;
+    }
+    let size = s.size;
+    s.ghost = item.map(|(id, at)| (id, at(size)));
+    s.paint.queue_draw();
+}
+
+/// An app dragged out of the dock was let go over the grid: it goes in where it was let go.
+/// Returns whether the grid was open to take it. `at` gives the point on a screen of a size.
+pub fn take_from_dock(id: &str, at: impl Fn((f64, f64)) -> (f64, f64)) -> bool {
+    let Some(st) = ONE.with(|one| one.borrow().clone()) else { return false };
+    let Ok(mut s) = st.try_borrow_mut() else { return false };
+    if !s.open || s.app.hidden(id) {
+        s.ghost = None;
+        return false;
+    }
+    s.ghost = None;
+    let (x, y) = at(s.size);
+    let g = s.grid();
+    let page = s.current_page();
+    let index = g.cell_at(x, y).map_or(s.slots.len(), |c| (page * g.per_page() + c).min(s.slots.len()));
+    s.slots.retain(|slot| *slot != Slot::App(id.to_string()));
+    let index = index.min(s.slots.len());
+    s.slots.insert(index, Slot::App(id.to_string()));
+    // It settles into its place from where it was let go.
+    let offset = s.page.value(glib::monotonic_time()) * s.size.0;
+    s.shown.insert(id.to_string(), (x - g.icon / 2.0 + offset, y - g.icon / 2.0));
+    s.moving = true;
+    let slots = s.slots.clone();
+    drop(s);
+    save(&slots);
+    kick(&st);
+    true
+}
+
+/// Closes the grid if it's open, as launching from the dock does.
+pub fn close_if_open() {
+    if let Some(st) = ONE.with(|one| one.borrow().clone()) {
+        close(&st);
+    }
 }
 
 #[cfg(test)]

@@ -158,6 +158,14 @@ struct State {
     trash: bool,
     recent: bool,
     apps: bool,
+    /// Raised over the app grid while it's open, and kept shown: the layer it had before.
+    lifted: Option<Layer>,
+    /// When a drag of an app last ended, so the release that ended it doesn't also count as a
+    /// click on whatever is under it.
+    dragged: i64,
+    /// An app dragged in from the app grid, held in place among the kept apps until it's let go
+    /// (see `incoming`).
+    incoming: Option<String>,
     /// Slide a hidden dock in while something flies to the Trash; `trash_shown` marks that it did.
     trash_reveal: bool,
     trash_shown: bool,
@@ -255,6 +263,176 @@ pub fn room(output: &str) -> [i32; 3] {
         Side::Right => [0, s.reserved, 0],
         Side::Bottom => [0, 0, s.reserved],
     }
+}
+
+/// A point in the dock's own terms (along its edge, and out from it) on a screen `screen` big.
+fn to_screen(side: Side, (a, c): (f64, f64), screen: (f64, f64)) -> (f64, f64) {
+    match side {
+        Side::Bottom => (a, screen.1 - c),
+        Side::Left => (c, a),
+        Side::Right => (screen.0 - c, a),
+    }
+}
+
+fn from_screen(side: Side, (x, y): (f64, f64), screen: (f64, f64)) -> (f64, f64) {
+    match side {
+        Side::Bottom => (x, screen.1 - y),
+        Side::Left => (y, x),
+        Side::Right => (y, screen.0 - x),
+    }
+}
+
+/// The dock as the app grid sees it on a screen `screen` big: its side ("bottom", "left" or
+/// "right"), how far in from that edge it reaches, and its apps' ids and icon centres.
+pub fn seen(screen: (f64, f64)) -> Option<(&'static str, f64, Vec<(String, (f64, f64))>)> {
+    let st = current()?;
+    let s = st.try_borrow().ok()?;
+    let now = glib::monotonic_time();
+    let c = LIFT + s.geo.body() / 2.0;
+    let apps = s.items.iter().zip(s.layout(now)).filter(|(i, _)| i.kind == Kind::App).map(|(i, (a, size))| (i.key.clone(), to_screen(s.geo.side, (a + size / 2.0, c), screen))).collect();
+    let side = match s.geo.side {
+        Side::Bottom => "bottom",
+        Side::Left => "left",
+        Side::Right => "right",
+    };
+    Some((side, s.geo.reach(), apps))
+}
+
+/// The apps kept in the dock.
+pub fn pinned() -> Vec<String> {
+    current().and_then(|st| st.try_borrow().ok().map(|s| s.pins.clone())).unwrap_or_default()
+}
+
+/// Whether a point on a screen `screen` big is over the dock.
+pub fn over(at: (f64, f64), screen: (f64, f64)) -> bool {
+    let Some(st) = current() else { return false };
+    let Ok(s) = st.try_borrow() else { return false };
+    from_screen(s.geo.side, at, screen).1 <= s.geo.reach()
+}
+
+/// Keeps app `id` in the dock, among the kept apps where the screen point `at` falls.
+pub fn pin_at(id: &str, at: (f64, f64), screen: (f64, f64)) {
+    let Some(st) = current() else { return };
+    {
+        let mut s = st.borrow_mut();
+        if s.pins.iter().any(|p| p == id) {
+            return;
+        }
+        let a = from_screen(s.geo.side, at, screen).0;
+        let now = glib::monotonic_time();
+        let before = s.items.iter().zip(s.layout(now)).filter(|(i, (x, size))| i.pinned && x + size / 2.0 < a).count();
+        let k = before.min(s.pins.len());
+        s.pins.insert(k, id.to_string());
+        save_pins(&s.pins);
+    }
+    rebuild(&st);
+    settle(&st);
+}
+
+/// Keeps app `id` in the dock, after the other kept apps.
+pub fn pin(id: &str) {
+    let Some(st) = current() else { return };
+    {
+        let mut s = st.borrow_mut();
+        if s.pins.iter().any(|p| p == id) {
+            return;
+        }
+        s.pins.push(id.to_string());
+        save_pins(&s.pins);
+    }
+    rebuild(&st);
+    settle(&st);
+}
+
+/// Lets app `id` go from the dock.
+pub fn unpin(id: &str) {
+    let Some(st) = current() else { return };
+    {
+        let mut s = st.borrow_mut();
+        s.pins.retain(|p| p != id);
+        save_pins(&s.pins);
+    }
+    rebuild(&st);
+    settle(&st);
+}
+
+/// A point, or a size, on a screen.
+pub type Point = (f64, f64);
+
+/// An app dragged from the app grid over the dock (`Some`: its id, and where it is on a screen
+/// `screen` big): the dock makes room for it where it would land and draws it under the pointer,
+/// as it does its own while they're dragged. `None` once it leaves the dock: the room closes.
+pub fn incoming(app: Option<(&str, Point, Point)>) {
+    let Some(st) = current() else { return };
+    let changed = {
+        let Ok(mut s) = st.try_borrow_mut() else { return };
+        match app {
+            Some((id, at, screen)) => {
+                if s.incoming.as_deref() != Some(id) && s.pins.iter().any(|p| p == id) {
+                    return;
+                }
+                let p = from_screen(s.geo.side, at, screen);
+                let now = glib::monotonic_time();
+                let before = s.items.iter().zip(s.layout(now)).filter(|(i, (x, size))| i.pinned && i.key != id && x + size / 2.0 < p.0).count();
+                let had = s.pins.iter().position(|k| k == id);
+                s.drag = Some(Drag { key: id.to_string(), origin: p, at: p, moving: true });
+                if had == Some(before) {
+                    false
+                } else {
+                    s.pins.retain(|k| k != id);
+                    let k = before.min(s.pins.len());
+                    s.pins.insert(k, id.to_string());
+                    s.incoming = Some(id.to_string());
+                    true
+                }
+            }
+            None => match s.incoming.take() {
+                Some(id) => {
+                    s.pins.retain(|k| *k != id);
+                    s.drag = None;
+                    true
+                }
+                None => false,
+            },
+        }
+    };
+    if changed {
+        rebuild(&st);
+    }
+    settle(&st);
+}
+
+/// The app dragged in from the app grid was let go over the dock: it stays where it was shown.
+/// Returns whether one was there to keep.
+pub fn keep_incoming() -> bool {
+    let Some(st) = current() else { return false };
+    {
+        let mut s = st.borrow_mut();
+        if s.incoming.take().is_none() {
+            return false;
+        }
+        s.drag = None;
+        s.dragged = glib::monotonic_time();
+        save_pins(&s.pins);
+    }
+    rebuild(&st);
+    settle(&st);
+    true
+}
+
+/// Shows the dock over the app grid while it's open (`on`), so apps can be dragged between them.
+pub fn lift(on: bool) {
+    let Some(st) = current() else { return };
+    {
+        let mut s = st.borrow_mut();
+        if on && s.lifted.is_none() {
+            s.lifted = Some(s.window.layer());
+            s.window.set_layer(Layer::Overlay);
+        } else if !on && let Some(layer) = s.lifted.take() {
+            s.window.set_layer(layer);
+        }
+    }
+    settle(&st);
 }
 
 pub fn primary_changed(app: &Rc<App>) {
@@ -679,6 +857,9 @@ fn build(app: &Rc<App>, geo: Geo, monitor: Option<&gdk::Monitor>, output: String
         trash: false,
         recent: false,
         apps: false,
+        lifted: None,
+        dragged: 0,
+        incoming: None,
         trash_reveal: true,
         trash_shown: false,
         trash_full: false,
@@ -757,8 +938,12 @@ fn wire(st: &Shared) {
         let Some(st) = weak.upgrade() else { return };
         let at = {
             let s = st.borrow();
-            let (a, _) = s.local(x, y);
-            s.index_at(a, glib::monotonic_time())
+            let now = glib::monotonic_time();
+            let p = s.local(x, y);
+            // The release that ends a drag isn't a click, nor is one away from the dock (an app
+            // let go over the app grid).
+            let dragging = s.drag.as_ref().is_some_and(|d| d.moving) || now - s.dragged < 300_000;
+            if dragging || !s.over_body(p, now) { None } else { s.index_at(p.0, now) }
         };
         let button = g.current_button();
         if button != 3 {
@@ -1019,7 +1204,7 @@ fn paint_art(st: &Shared) {
 }
 
 fn wants(s: &State) -> bool {
-    if s.reveal || s.menu || s.drag.is_some() {
+    if s.reveal || s.menu || s.drag.is_some() || s.lifted.is_some() {
         return true;
     }
     match s.mode {
@@ -1143,6 +1328,12 @@ fn drag_to(st: &Shared, x: f64, y: f64) {
     let reorder = {
         let mut s = st.borrow_mut();
         let p = s.local(x, y);
+        // Out over the open app grid, it draws the app under the pointer.
+        if let Some(d) = s.drag.as_ref().filter(|d| d.moving) {
+            let side = s.geo.side;
+            let out = p.1 > s.geo.reach() + 24.0;
+            crate::appgrid::ghost(out.then(|| (d.key.clone(), Box::new(move |screen| to_screen(side, p, screen)) as crate::appgrid::Place)));
+        }
         let Some(d) = s.drag.as_mut() else { return };
         d.at = p;
         if !d.moving {
@@ -1202,11 +1393,15 @@ fn drop_drag(st: &Shared) {
         if !d.moving {
             return;
         }
+        s.dragged = glib::monotonic_time();
         let far = d.at.1 > s.geo.reach() + 24.0;
         let name = s.items.iter().find(|i| i.key == d.key).map(|i| i.name.clone()).unwrap_or_default();
+        // Over the open app grid, the app goes into it where it's let go, quietly.
+        let side = s.geo.side;
+        let into_grid = far && crate::appgrid::take_from_dock(&d.key, |screen| to_screen(side, d.at, screen));
         let note = if far && s.pins.contains(&d.key) {
             s.pins.retain(|k| *k != d.key);
-            Some(format!("{name} removed from Dock"))
+            (!into_grid).then(|| format!("{name} removed from Dock"))
         } else {
             None
         };
@@ -1231,7 +1426,8 @@ fn activate(st: &Shared, i: usize) {
         Kind::Trash => return kit::trash::open(),
         Kind::Recent => return stack::open(st, i),
         Kind::Apps => return crate::appgrid::toggle(&app),
-        Kind::App => {}
+        // Opening an app from the dock closes the app grid over it, as macOS does.
+        Kind::App => crate::appgrid::close_if_open(),
     }
     if windows.is_empty() {
         let list = app.apps.list();

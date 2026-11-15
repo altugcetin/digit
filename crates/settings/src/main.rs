@@ -622,6 +622,12 @@ fn present(app: &gtk::Application, page: Option<&str>) {
                 find.set_position(-1);
             }
         }
+        // "uninstall:firefox.desktop", from the app grid's menu, removes that app as the Apps
+        // page's button does, with its checks and confirmation.
+        None if page.is_some_and(|p| p.starts_with("uninstall:")) => {
+            apps::request_uninstall(page.and_then(|p| p.strip_prefix("uninstall:")).unwrap_or_default());
+            show("apps");
+        }
         None => show(page.unwrap_or("overview")),
     }
     window.present();
