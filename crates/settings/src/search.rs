@@ -28,7 +28,8 @@ fn page_words(page: &str) -> &'static str {
         "updates" => "upgrade update security packages patch",
         "drivers" => "nvidia amd intel gpu firmware graphics",
         "overview" => "about system hardware memory disk processor version",
-        "keyboard" => "shortcuts keybinds hotkeys keys",
+        "keyboard" => "shortcuts keybinds hotkeys keys typing layout repeat caps",
+        "mouse" => "pointer trackpad touchpad scroll natural tap click gesture swipe speed",
         "recording" => "record video screen capture replay stream gpu",
         "compositor" => "hyprland niri compositor gaps layout tiling",
         _ => "",
@@ -45,6 +46,7 @@ fn source(page: &str) -> Option<gtk::Widget> {
     match page {
         "compositor" => Some(crate::compositor::build()),
         "keyboard" => Some(crate::keyboard::build()),
+        "mouse" => Some(crate::compositor::mouse_page()),
         _ if !desktop::sections(page).is_empty() => {
             let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
             let t = prefs::read();

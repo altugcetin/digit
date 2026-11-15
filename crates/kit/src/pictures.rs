@@ -42,11 +42,10 @@ fn area(width: i32, height: i32, draw: impl Fn(&Cr, f64, f64) + 'static) -> gtk:
 
 /// The notch styles: "island" hugs the top edge, "dynamic" floats, "bar" spans the edge.
 pub fn notch(style: &'static str) -> gtk::DrawingArea {
-    area(188, 112, move |cr, w, h| {
-        sky(cr, w, h);
-        window(cr, 18.0, 30.0, w * 0.52, h - 46.0, 0.16);
-        window(cr, w * 0.52 + 26.0, 30.0, w - (w * 0.52 + 26.0) - 18.0, h - 46.0, 0.16);
-        draw_notch(cr, w, style);
+    tile(move |cr| {
+        pane(cr, 8.0, 15.0, 66.0, 48.0, 0.16);
+        pane(cr, 80.0, 15.0, 48.0, 48.0, 0.16);
+        top(cr, style);
     })
 }
 
@@ -251,4 +250,323 @@ pub fn rgb(hex: &str) -> (f64, f64, f64) {
         (Some(r), Some(g), Some(b)) => (r, g, b),
         _ => (0.82, 0.74, 1.0),
     }
+}
+
+
+// Tile pictures: one sketch language for every choice that is shown as a picture. Each is drawn
+// on a 136×72 canvas (the tiles' size), scaled evenly to whatever size it gets; the tile clips
+// the corners, so they round with the rest of the app.
+
+const TW: f64 = 136.0;
+
+/// A window on a tile.
+fn pane(cr: &Cr, x: f64, y: f64, w: f64, h: f64, alpha: f64) {
+    cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
+    rounded(cr, x, y, w, h, 4.0);
+    let _ = cr.fill();
+}
+const TH: f64 = 72.0;
+
+/// A tile picture: the sky fills the whole area, the sketch sits on the 136×72 canvas, centered.
+fn tile(draw: impl Fn(&Cr) + 'static) -> gtk::DrawingArea {
+    zoomed(1.0, move |cr, _| draw(cr))
+}
+
+/// Like `tile`, closer in by `zoom` on the top of the screen: the sketch gets a canvas
+/// `zoom` times smaller (its width is passed in) and is drawn that much larger.
+fn zoomed(zoom: f64, draw: impl Fn(&Cr, f64) + 'static) -> gtk::DrawingArea {
+    let a = gtk::DrawingArea::new();
+    a.set_content_width(TW as i32);
+    a.set_content_height(TH as i32);
+    a.set_draw_func(move |_, cr, w, h| {
+        let (w, h) = (w as f64, h as f64);
+        let g = gtk::cairo::LinearGradient::new(0.0, 0.0, w, h);
+        g.add_color_stop_rgb(0.0, 0.34, 0.43, 0.62);
+        g.add_color_stop_rgb(1.0, 0.86, 0.55, 0.42);
+        cr.rectangle(0.0, 0.0, w, h);
+        let _ = cr.set_source(&g);
+        let _ = cr.fill();
+        let k = (w / TW).min(h / TH);
+        cr.translate((w - TW * k) / 2.0, (h - TH * k) / 2.0);
+        cr.scale(k * zoom, k * zoom);
+        draw(cr, TW / zoom);
+    });
+    a
+}
+
+const NOTCH_W: f64 = 34.0;
+const BAND: f64 = 9.0;
+
+/// The top of the screen: the notch ("island"), the floating island ("dynamic") or a full bar.
+fn top(cr: &Cr, style: &str) {
+    top_in(cr, TW, style)
+}
+
+fn top_in(cr: &Cr, cw: f64, style: &str) {
+    cr.set_source_rgb(0.0, 0.0, 0.0);
+    match style {
+        "dynamic" => {
+            rounded(cr, (cw - NOTCH_W) / 2.0, 2.5, NOTCH_W, 8.0, 4.0);
+            let _ = cr.fill();
+        }
+        "bar" => {
+            cr.rectangle(0.0, 0.0, cw, BAND);
+            let _ = cr.fill();
+            menu_items(cr, cw, 0.0, 1.0);
+        }
+        _ => notch_shape(cr, cw, NOTCH_W, BAND, (0.0, 0.0, 0.0), 1.0),
+    }
+}
+
+/// The notch hanging from the top edge, with concave fillets where it meets it.
+fn notch_shape(cr: &Cr, cw: f64, width: f64, depth: f64, (r, g, b): (f64, f64, f64), alpha: f64) {
+    let (cx, half, rad, f) = (cw / 2.0, width / 2.0, 3.5, 2.5);
+    cr.new_sub_path();
+    cr.move_to(cx - half - f, 0.0);
+    cr.arc(cx - half - f, f, f, -FRAC_PI_2, 0.0);
+    cr.line_to(cx - half, depth - rad);
+    cr.arc_negative(cx - half + rad, depth - rad, rad, PI, FRAC_PI_2);
+    cr.line_to(cx + half - rad, depth);
+    cr.arc_negative(cx + half - rad, depth - rad, rad, FRAC_PI_2, 0.0);
+    cr.line_to(cx + half, f);
+    cr.arc(cx + half + f, f, f, PI, 1.5 * PI);
+    cr.close_path();
+    cr.set_source_rgba(r, g, b, alpha);
+    let _ = cr.fill();
+}
+
+/// The menu bar's logo and menus at the left (after `from`, past anything already there) and
+/// the date at the right, with whatever fits clear of a notch in the middle.
+fn menu_items(cr: &Cr, cw: f64, from: f64, alpha: f64) {
+    let y = BAND / 2.0;
+    let clear = cw / 2.0 - NOTCH_W / 2.0 - 3.0;
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.9 * alpha);
+    rounded(cr, 6.0, y - 2.0, 4.0, 4.0, 1.2);
+    let _ = cr.fill();
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.75 * alpha);
+    let mut x = from.max(14.0);
+    for width in [9.0, 6.0, 8.0] {
+        if x + width > clear {
+            break;
+        }
+        rounded(cr, x, y - 1.0, width, 2.0, 1.0);
+        let _ = cr.fill();
+        x += width + 3.0;
+    }
+    rounded(cr, cw - 6.0 - 13.0, y - 1.0, 13.0, 2.0, 1.0);
+    let _ = cr.fill();
+}
+
+/// The shade a clear bar puts over the wallpaper, from `x` for `width`.
+fn shade(cr: &Cr, x: f64, width: f64) {
+    let g = gtk::cairo::LinearGradient::new(0.0, 0.0, 0.0, BAND + 7.0);
+    g.add_color_stop_rgba(0.0, 0.0, 0.0, 0.0, 0.40);
+    g.add_color_stop_rgba(1.0, 0.0, 0.0, 0.0, 0.0);
+    cr.rectangle(x, 0.0, width, BAND + 7.0);
+    let _ = cr.set_source(&g);
+    let _ = cr.fill();
+}
+
+/// A glass bar band from `x` for `width`.
+fn glass(cr: &Cr, x: f64, width: f64) {
+    cr.set_source_rgba(0.10, 0.10, 0.13, 0.78);
+    cr.rectangle(x, 0.0, width, BAND);
+    let _ = cr.fill();
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.16);
+    cr.rectangle(x, BAND - 0.6, width, 0.6);
+    let _ = cr.fill();
+}
+
+const ICON_COLORS: [(f64, f64, f64); 5] = [(0.29, 0.64, 1.0), (0.31, 0.86, 0.47), (1.0, 0.70, 0.25), (0.81, 0.48, 0.96), (1.0, 0.42, 0.53)];
+const DOCK_ICON: f64 = 5.0;
+const DOCK_PAD: f64 = 2.0;
+
+fn dock_long() -> f64 {
+    5.0 * DOCK_ICON + 6.0 * DOCK_PAD
+}
+
+/// The dock along `side`, in `body` color.
+fn dock_on(cr: &Cr, side: &str, (r, g, b): (f64, f64, f64), alpha: f64) {
+    let (long, short) = (dock_long(), DOCK_ICON + 2.0 * DOCK_PAD);
+    let (x, y, across) = match side {
+        "left" => (4.0, (TH - long) / 2.0 + 3.0, false),
+        "right" => (TW - 4.0 - short, (TH - long) / 2.0 + 3.0, false),
+        _ => ((TW - long) / 2.0, TH - 4.0 - short, true),
+    };
+    let (dw, dh) = if across { (long, short) } else { (short, long) };
+    cr.set_source_rgba(r, g, b, 0.82 * alpha);
+    rounded(cr, x, y, dw, dh, 3.5);
+    let _ = cr.fill();
+    for (i, (cr_, cg, cb)) in ICON_COLORS.iter().enumerate() {
+        let step = DOCK_PAD + i as f64 * (DOCK_ICON + DOCK_PAD);
+        let (ix, iy) = if across { (x + step, y + DOCK_PAD) } else { (x + DOCK_PAD, y + step) };
+        cr.set_source_rgba(*cr_, *cg, *cb, alpha);
+        rounded(cr, ix, iy, DOCK_ICON, DOCK_ICON, 1.6);
+        let _ = cr.fill();
+    }
+}
+
+/// Where the hidden dock would be: its outline, dashed.
+fn ghost_dock(cr: &Cr) {
+    let (long, short) = (dock_long(), DOCK_ICON + 2.0 * DOCK_PAD);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.8);
+    cr.set_line_width(0.8);
+    cr.set_dash(&[2.0, 1.6], 0.0);
+    rounded(cr, (TW - long) / 2.0 + 0.4, TH - 4.0 - short + 0.4, long - 0.8, short - 0.8, 3.5);
+    let _ = cr.stroke();
+    cr.set_dash(&[], 0.0);
+}
+
+/// A mouse pointer with its tip at (x, y).
+fn pointer(cr: &Cr, x: f64, y: f64) {
+    cr.move_to(x, y);
+    cr.line_to(x, y + 8.0);
+    cr.line_to(x + 2.2, y + 6.0);
+    cr.line_to(x + 4.0, y + 9.2);
+    cr.line_to(x + 5.2, y + 8.5);
+    cr.line_to(x + 3.5, y + 5.4);
+    cr.line_to(x + 6.2, y + 5.4);
+    cr.close_path();
+    cr.set_source_rgb(1.0, 1.0, 1.0);
+    let _ = cr.fill_preserve();
+    cr.set_source_rgba(0.0, 0.0, 0.0, 0.7);
+    cr.set_line_width(0.7);
+    let _ = cr.stroke();
+}
+
+const DARK: (f64, f64, f64) = (0.06, 0.06, 0.07);
+
+/// The dock's visibility: "on" always shows, "autohide" waits for the pointer at the edge,
+/// "smart" steps aside while a window is open, "off" has none.
+pub fn dock_visibility(mode: &'static str) -> gtk::DrawingArea {
+    tile(move |cr| {
+        top(cr, "island");
+        match mode {
+            "smart" => {
+                pane(cr, 8.0, 14.0, TW - 16.0, TH - 18.0, 0.30);
+                ghost_dock(cr);
+            }
+            "autohide" => {
+                pane(cr, 10.0, 15.0, 70.0, 34.0, 0.16);
+                ghost_dock(cr);
+                pointer(cr, TW / 2.0 + 14.0, TH - 10.0);
+            }
+            "off" => pane(cr, 10.0, 15.0, 70.0, 34.0, 0.16),
+            _ => {
+                pane(cr, 10.0, 15.0, 70.0, 34.0, 0.16);
+                dock_on(cr, "bottom", DARK, 1.0);
+            }
+        }
+    })
+}
+
+/// The dock along the bottom, left or right edge.
+pub fn dock_side(side: &'static str) -> gtk::DrawingArea {
+    tile(move |cr| {
+        top(cr, "island");
+        pane(cr, 40.0, 16.0, 56.0, 34.0, 0.16);
+        dock_on(cr, side, DARK, 1.0);
+    })
+}
+
+/// A shell surface: the notch, the dock and a panel in that fill. Frosted shows the sky through,
+/// softened.
+pub fn shell_surface(fill: (f64, f64, f64), frosted: bool) -> gtk::DrawingArea {
+    tile(move |cr| {
+        pane(cr, 8.0, 15.0, 62.0, 38.0, 0.16);
+        let alpha = if frosted { 0.42 } else { 1.0 };
+        notch_shape(cr, TW, NOTCH_W, BAND, fill, alpha);
+        // Control Center in its corner, over the windows.
+        let (px, py, pw, ph) = (TW - 6.0 - 40.0, 14.0, 40.0, 42.0);
+        if frosted {
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.10);
+            rounded(cr, px, py, pw, ph, 6.0);
+            let _ = cr.fill();
+        }
+        cr.set_source_rgba(fill.0, fill.1, fill.2, alpha);
+        rounded(cr, px, py, pw, ph, 6.0);
+        let _ = cr.fill();
+        if frosted {
+            // Glass catches the light along its edge.
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.35);
+            cr.set_line_width(0.6);
+            rounded(cr, px + 0.3, py + 0.3, pw - 0.6, ph - 0.6, 6.0);
+            let _ = cr.stroke();
+        }
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.24);
+        rounded(cr, px + 4.0, py + 4.0, 15.0, 9.0, 3.0);
+        let _ = cr.fill();
+        rounded(cr, px + 21.0, py + 4.0, 15.0, 9.0, 3.0);
+        let _ = cr.fill();
+        rounded(cr, px + 4.0, py + 17.0, pw - 8.0, 4.0, 2.0);
+        let _ = cr.fill();
+        rounded(cr, px + 4.0, py + 25.0, pw - 8.0, 4.0, 2.0);
+        let _ = cr.fill();
+        dock_on(cr, "bottom", fill, alpha.max(0.7));
+    })
+}
+
+/// The menu bar's backdrop: "clear" shades the top, "glass" is a band, "adaptive" is half of
+/// each: clear over the wallpaper, glass once windows open.
+pub fn menubar_look(look: &'static str) -> gtk::DrawingArea {
+    zoomed(ZOOM, move |cr, cw| {
+        match look {
+            "glass" => {
+                glass(cr, 0.0, cw);
+            }
+            "adaptive" => {
+                shade(cr, 0.0, cw / 2.0);
+                glass(cr, cw / 2.0, cw / 2.0);
+            }
+            _ => shade(cr, 0.0, cw),
+        }
+        notch_shape(cr, cw, NOTCH_W, BAND, (0.0, 0.0, 0.0), 1.0);
+        menu_items(cr, cw, 0.0, 1.0);
+    })
+}
+
+/// How far the menu bar pictures look in on the top of the screen.
+const ZOOM: f64 = 1.45;
+
+/// The workspace pill: three dots, the current one long.
+fn spaces_pill(cr: &Cr, x: f64, cy: f64, solid: bool) {
+    let (w, h) = (17.0, 6.0);
+    if solid {
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.24);
+        rounded(cr, x, cy - h / 2.0, w, h, h / 2.0);
+        let _ = cr.fill();
+    } else {
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.8);
+        cr.set_line_width(0.7);
+        cr.set_dash(&[1.6, 1.2], 0.0);
+        rounded(cr, x + 0.35, cy - h / 2.0 + 0.35, w - 0.7, h - 0.7, h / 2.0);
+        let _ = cr.stroke();
+        cr.set_dash(&[], 0.0);
+    }
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+    rounded(cr, x + 2.0, cy - 1.0, 6.0, 2.0, 1.0);
+    let _ = cr.fill();
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.5);
+    for dx in [10.5, 13.5] {
+        cr.arc(x + dx, cy, 1.0, 0.0, TAU);
+        let _ = cr.fill();
+    }
+}
+
+/// Where the workspace pill shows: "switch" beside the logo while switching (drawn as an
+/// outline), "always" there all the time, "notch" in the notch in place of the clock.
+pub fn menubar_spaces(mode: &'static str) -> gtk::DrawingArea {
+    zoomed(ZOOM, move |cr, cw| {
+        shade(cr, 0.0, cw);
+        let y = BAND / 2.0;
+        if mode == "notch" {
+            notch_shape(cr, cw, NOTCH_W, BAND + 1.0, (0.0, 0.0, 0.0), 1.0);
+            spaces_pill(cr, (cw - 17.0) / 2.0, y, true);
+            menu_items(cr, cw, 0.0, 1.0);
+        } else {
+            notch_shape(cr, cw, NOTCH_W, BAND, (0.0, 0.0, 0.0), 1.0);
+            spaces_pill(cr, 13.0, y, mode == "always");
+            menu_items(cr, cw, 13.0 + 17.0 + 3.0, 1.0);
+        }
+    })
 }

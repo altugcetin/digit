@@ -981,7 +981,7 @@ fn paint_art(st: &Shared) {
     let accent = app.palette.get().accent;
     let mut art = HashMap::new();
     for (key, name, icon) in wanted {
-        if let Some(t) = crate::art::texture(&paint, &key, icon.as_ref(), &name, px, style, accent, &app.cfg) {
+        if let Some(t) = crate::art::texture(&paint, &key, icon.as_ref(), &name, px, style, accent, &app.cfg.font) {
             art.insert(key, t);
         }
     }

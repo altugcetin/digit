@@ -99,7 +99,10 @@ fn styles(t: &toml::Table) -> gtk::Widget {
     let mut first: Option<gtk::ToggleButton> = None;
     for (key, name, sub) in [("island", "Notch", "Hugs the top edge"), ("dynamic", "Dynamic Island", "A floating pill"), ("bar", "Bar", "Spans the whole edge")] {
         let card = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        card.append(&kit::pictures::notch(key));
+        let picture = kit::pictures::notch(key);
+        picture.set_content_width(188);
+        picture.set_content_height(100);
+        card.append(&picture);
         let n = ui::text(name, "name");
         n.set_xalign(0.5);
         card.append(&n);

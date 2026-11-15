@@ -20,6 +20,7 @@ pub mod keybinds;
 pub mod motion;
 pub mod optional;
 pub mod paint;
+pub mod art;
 pub mod palette;
 pub mod pictures;
 pub mod pixel;

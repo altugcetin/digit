@@ -2,12 +2,12 @@ use crate::desktop::{choice, controlled, field, save, save_many, slider, tiles, 
 use crate::{prefs, ui};
 use gtk::prelude::*;
 
-fn show_nvidia_variables(driver_loaded: bool, enabled: bool) -> bool {
+pub(crate) fn show_nvidia_variables(driver_loaded: bool, enabled: bool) -> bool {
     driver_loaded || enabled
 }
 
 pub fn build() -> gtk::Widget {
-    let (scroll, body) = ui::page("Windows", "Keyboard, mouse and window settings for your Digit session. Changes apply right away.");
+    let (scroll, body) = ui::page("Windows", "How windows open, tile, move and look in your Digit session. Changes apply right away.");
     crate::desktop::session(&body, &prefs::read());
     let Some(kind) = kit::setup::kind() else {
         let card = ui::card();
@@ -24,35 +24,6 @@ pub fn build() -> gtk::Widget {
     let s = |k: &str, d: &str| prefs::get_str(&t, k, d);
     let f = |k: &str, d: f64| prefs::get_f64(&t, k, d);
     let b = |k: &str, d: bool| prefs::get_bool(&t, k, d);
-
-    body.append(&ui::heading("Keyboard"));
-    let kb = ui::card();
-    field(&kb, "keyboard", "Layouts", "Comma-separated, first is the default: us, tr, de…", "hypr_kb_layout", &s("hypr_kb_layout", "us"), "us", layouts);
-    field(&kb, "tune", "Variants", "One per layout, or empty: intl, f, dvorak…", "hypr_kb_variant", &s("hypr_kb_variant", ""), "", variants);
-    choice(&kb, "swap_horiz", "Switch layouts with", &kit::keybinds::shown("notch").map(|k| format!("{k} also opens the notch")).unwrap_or_default(), "hypr_layout_switch", &[("none", "Nothing"), ("alt_shift", "Alt+Shift"), ("ctrl_shift", "Ctrl+Shift"), ("win_space", "Super+Space"), ("caps", "Caps Lock")], &s("hypr_layout_switch", "none"));
-    choice(&kb, "keyboard_capslock", "Caps Lock", "", "hypr_caps", &[("normal", "Caps Lock"), ("escape", "Escape"), ("ctrl", "Ctrl"), ("swapescape", "Swap with Escape")], &s("hypr_caps", "normal"));
-    slider(&kb, "timer", "Repeat delay", "Milliseconds before a held key repeats", "hypr_repeat_delay", (150.0, 800.0, 10.0), f("hypr_repeat_delay", 300.0), 300.0, 0);
-    slider(&kb, "speed", "Repeat rate", "Repeats per second", "hypr_repeat_rate", (10.0, 60.0, 1.0), f("hypr_repeat_rate", 30.0), 30.0, 0);
-    body.append(&kb);
-
-    body.append(&ui::heading("Mouse and touchpad"));
-    let mouse = ui::card();
-    slider(&mouse, "mouse", "Pointer speed", "0 keeps the device's own speed", "hypr_sensitivity", (-1.0, 1.0, 0.05), f("hypr_sensitivity", 0.0), 0.0, 2);
-    choice(&mouse, "trending_up", "Acceleration", "", "hypr_accel", &[("adaptive", "Adaptive"), ("flat", "Flat")], &s("hypr_accel", "adaptive"));
-    toggle(&mouse, "swap_vert", "Natural scrolling for mice", "Content follows the wheel, like a touchpad", "hypr_mouse_natural", b("hypr_mouse_natural", false));
-    toggle(&mouse, "touch_app", "Natural scrolling for touchpads", "", "hypr_touch_natural", b("hypr_touch_natural", true));
-    toggle(&mouse, "ads_click", "Tap to click", "A light tap on the touchpad clicks", "hypr_tap", b("hypr_tap", true));
-    // niri swipes between workspaces on its own.
-    if !niri {
-        toggle(&mouse, "swipe", "Swipe between workspaces", "Three fingers sideways on the touchpad", "hypr_gesture", b("hypr_gesture", true));
-    }
-    if niri {
-        toggle(&mouse, "keyboard_hide", "Ignore the touchpad while typing", "", "niri_dwt", b("niri_dwt", true));
-        choice(&mouse, "swap_vert", "Touchpad scroll speed", "", "niri_scroll", &[("slow", "Slow"), ("normal", "Normal"), ("fast", "Fast")], &s("niri_scroll", "normal"));
-        choice(&mouse, "arrow_selector_tool", "Pointer size", "", "niri_cursor_size", &[("small", "Small"), ("medium", "Medium"), ("large", "Large")], &s("niri_cursor_size", "small"));
-        toggle(&mouse, "visibility_off", "Hide the pointer while typing", "", "niri_hide_cursor", b("niri_hide_cursor", false));
-    }
-    body.append(&mouse);
 
     body.append(&ui::heading("Windows"));
     let win = ui::card();
@@ -135,12 +106,65 @@ pub fn build() -> gtk::Widget {
     }
     body.append(&fx);
 
-    if show_nvidia_variables(kit::hyprconf::nvidia(), b("nvidia_env", false)) {
-        body.append(&ui::heading("Graphics"));
-        let gfx = ui::card();
-        toggle(&gfx, "developer_board", "NVIDIA variables", "For hardware video and older apps. Takes effect at the next login", "nvidia_env", b("nvidia_env", false));
-        body.append(&gfx);
+    scroll.upcast()
+}
+
+/// Keyboard typing: layouts, Caps Lock and key repeat. The top of the Keyboard page.
+pub fn typing(body: &gtk::Box) {
+    let t = prefs::read();
+    let s = |k: &str, d: &str| prefs::get_str(&t, k, d);
+    let f = |k: &str, d: f64| prefs::get_f64(&t, k, d);
+    body.append(&ui::heading("Typing"));
+    let kb = ui::card();
+    field(&kb, "keyboard", "Layouts", "Comma-separated, first is the default: us, tr, de…", "hypr_kb_layout", &s("hypr_kb_layout", "us"), "us", layouts);
+    field(&kb, "tune", "Variants", "One per layout, or empty: intl, f, dvorak…", "hypr_kb_variant", &s("hypr_kb_variant", ""), "", variants);
+    choice(&kb, "swap_horiz", "Switch layouts with", &kit::keybinds::shown("notch").map(|k| format!("{k} also opens the notch")).unwrap_or_default(), "hypr_layout_switch", &[("none", "Nothing"), ("alt_shift", "Alt+Shift"), ("ctrl_shift", "Ctrl+Shift"), ("win_space", "Super+Space"), ("caps", "Caps Lock")], &s("hypr_layout_switch", "none"));
+    choice(&kb, "keyboard_capslock", "Caps Lock", "", "hypr_caps", &[("normal", "Caps Lock"), ("escape", "Escape"), ("ctrl", "Ctrl"), ("swapescape", "Swap with Escape")], &s("hypr_caps", "normal"));
+    slider(&kb, "timer", "Repeat delay", "Milliseconds before a held key repeats", "hypr_repeat_delay", (150.0, 800.0, 10.0), f("hypr_repeat_delay", 300.0), 300.0, 0);
+    slider(&kb, "speed", "Repeat rate", "Repeats per second", "hypr_repeat_rate", (10.0, 60.0, 1.0), f("hypr_repeat_rate", 30.0), 30.0, 0);
+    body.append(&kb);
+}
+
+/// Settings > Mouse and touchpad.
+pub fn mouse_page() -> gtk::Widget {
+    let (scroll, body) = ui::page("Mouse and touchpad", "Pointer speed, scrolling and touchpad gestures. Changes apply right away.");
+    let Some(kind) = kit::setup::kind() else {
+        let card = ui::card();
+        let (row, _) = ui::row(Some("warning"), "digit can't change this compositor's settings", "These settings are written to Hyprland's or niri's config. Set them in your compositor's own config instead");
+        card.append(&row);
+        body.append(&card);
+        return scroll.upcast();
+    };
+    if !kit::setup::installed() {
+        crate::desktop::session_notice(&body, kind);
+        return scroll.upcast();
     }
+    let niri = kind == kit::setup::Kind::Niri;
+    let t = prefs::read();
+    let s = |k: &str, d: &str| prefs::get_str(&t, k, d);
+    let f = |k: &str, d: f64| prefs::get_f64(&t, k, d);
+    let b = |k: &str, d: bool| prefs::get_bool(&t, k, d);
+    body.append(&ui::heading("Pointer"));
+    let pointer = ui::card();
+    slider(&pointer, "mouse", "Pointer speed", "0 keeps the device's own speed", "hypr_sensitivity", (-1.0, 1.0, 0.05), f("hypr_sensitivity", 0.0), 0.0, 2);
+    choice(&pointer, "trending_up", "Acceleration", "", "hypr_accel", &[("adaptive", "Adaptive"), ("flat", "Flat")], &s("hypr_accel", "adaptive"));
+    toggle(&pointer, "swap_vert", "Natural scrolling for mice", "Content follows the wheel, like a touchpad", "hypr_mouse_natural", b("hypr_mouse_natural", false));
+    if niri {
+        toggle(&pointer, "visibility_off", "Hide the pointer while typing", "", "niri_hide_cursor", b("niri_hide_cursor", false));
+    }
+    body.append(&pointer);
+    body.append(&ui::heading("Touchpad"));
+    let pad = ui::card();
+    toggle(&pad, "touch_app", "Natural scrolling", "Content follows your fingers", "hypr_touch_natural", b("hypr_touch_natural", true));
+    toggle(&pad, "ads_click", "Tap to click", "A light tap on the touchpad clicks", "hypr_tap", b("hypr_tap", true));
+    // niri swipes between workspaces on its own.
+    if !niri {
+        toggle(&pad, "swipe", "Swipe between workspaces", "Three fingers sideways on the touchpad", "hypr_gesture", b("hypr_gesture", true));
+    } else {
+        toggle(&pad, "keyboard_hide", "Ignore the touchpad while typing", "", "niri_dwt", b("niri_dwt", true));
+        choice(&pad, "swap_vert", "Scroll speed", "", "niri_scroll", &[("slow", "Slow"), ("normal", "Normal"), ("fast", "Fast")], &s("niri_scroll", "normal"));
+    }
+    body.append(&pad);
     scroll.upcast()
 }
 
