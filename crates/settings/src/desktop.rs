@@ -34,7 +34,7 @@ pub(crate) fn save_many(values: &[(&str, toml::Value)]) -> bool {
     }
     // Compositor settings (and the accent, which colors niri's window border) go straight into
     // digit's part of the compositor config.
-    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "spaces_always" | "surface" | "window_rules" | "ui_accent" | "border_color" | "reduce_motion" | "reduced_effects" | "compositor_motion" | "terminal" | "theme_qt" | "nvidia_env" | "cursor_theme" | "cursor_size")) {
+    if values.iter().any(|(key, _)| key.starts_with("hypr_") || key.starts_with("niri_") || matches!(*key, "spaces_always" | "window_rules" | "ui_accent" | "border_color" | "reduce_motion" | "reduced_effects" | "compositor_motion" | "terminal" | "theme_qt" | "nvidia_env" | "cursor_theme" | "cursor_size")) {
         apply_compositor();
     }
     if values.iter().any(|(key, _)| matches!(*key, "button_maximize" | "button_close")) {
@@ -712,28 +712,14 @@ fn section(body: &gtk::Box, title: &str) -> gtk::Box {
 
 fn shell_look(body: &gtk::Box, t: &toml::Table) {
     let look = section(body, "Shell");
-    // Frosted glass needs the compositor's blur, so it is offered only while that is on.
-    let glass = kit::effects::frosted(&{ let mut g = t.clone(); g.insert("surface".into(), toml::Value::String("frosted".into())); g }, kit::effects::reduced());
-    let mut surfaces: Vec<(&'static str, &str)> = vec![("black", "Pure black"), ("tinted", "Tinted")];
-    if glass {
-        surfaces.push(("frosted", "Frosted glass"));
-    }
-    let current = prefs::get_str(&t, "surface", "black");
-    let shown = if current == "frosted" && !glass { "tinted".to_string() } else { current };
-    let sub = if glass { "Notch, dock, menus and panels" } else { "Notch, dock, menus and panels. Turn on Blur behind windows for Frosted glass" };
+    const SURFACES: [(&str, &str); 2] = [("black", "Pure black"), ("tinted", "Tinted")];
+    // "frosted", from older configs, reads as tinted.
+    let current = prefs::get_str(t, "surface", "black");
+    let at = if matches!(current.as_str(), "tinted" | "frosted") { 1 } else { 0 };
     // Tinted is the wallpaper's color as the shell mixes it.
     let tint = kit::theme::load().and_then(|th| th.shell_roles()).map(|r| r.surface_high.mix(r.accent_container, 0.84)).map_or((0.16, 0.15, 0.2), |c| (c.r, c.g, c.b));
-    let at = surfaces.iter().position(|s| s.0 == shown).unwrap_or(0);
-    let items = surfaces.iter().map(|(value, name)| {
-        let picture = match *value {
-            "tinted" => kit::pictures::shell_surface(tint, false),
-            "frosted" => kit::pictures::shell_surface(tint, true),
-            _ => kit::pictures::shell_surface((0.0, 0.0, 0.0), false),
-        };
-        (*name, picture.upcast())
-    }).collect();
-    let values: Vec<&'static str> = surfaces.iter().map(|s| s.0).collect();
-    tiles(&look, "dark_mode", "Shell surfaces", sub, items, at, move |i| save("surface", toml::Value::String(values[i].into())));
+    let items = vec![(SURFACES[0].1, kit::pictures::shell_surface((0.0, 0.0, 0.0)).upcast()), (SURFACES[1].1, kit::pictures::shell_surface(tint).upcast())];
+    tiles(&look, "dark_mode", "Shell surfaces", "Notch, dock, menus and panels", items, at, |i| save("surface", toml::Value::String(SURFACES[i].0.into())));
     scheme_choice(&look, t);
     icon_theme_choice(&look, t);
     choice(&look, "palette", "Glyph backgrounds", "The colored squares behind the symbols in Settings, Files and Store", "ui_tiles", &kit::style::TILES, &prefs::get_str(t, "ui_tiles", "colorful"));

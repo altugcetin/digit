@@ -145,7 +145,6 @@ struct State {
     window: gtk::Window,
     keep: gtk::Window,
     paint: Paint,
-    frost: crate::blur::Frost,
     geo: Geo,
     mode: Mode,
     output: String,
@@ -645,14 +644,12 @@ fn build(app: &Rc<App>, geo: Geo, monitor: Option<&gdk::Monitor>, output: String
         p.set_vexpand(true);
         p
     };
-    let (frosted, frost) = crate::blur::Frost::wrap(&paint);
-    window.set_child(Some(&frosted));
+    window.set_child(Some(&paint));
     let st = Rc::new(RefCell::new(State {
         app: app.clone(),
         window: window.clone(),
         keep,
         paint: paint.clone(),
-        frost,
         geo,
         mode: Mode::On,
         output,
@@ -1442,7 +1439,6 @@ impl State {
         let shown = self.shown.value(now).clamp(0.0, 1.0);
         if shown < 0.005 {
             s.append_color(&gdk::RGBA::new(0.0, 0.0, 0.0, 0.004), &graphene::Rect::new(0.0, 0.0, 1.0, 1.0));
-            self.frost.set(None, 0.0, (0.0, 0.0));
             return;
         }
         let pal = self.app.palette_at(now);
@@ -1450,9 +1446,7 @@ impl State {
         let off = -((1.0 - shown) * (LIFT + g.body() + 36.0)).round();
         let layout = self.layout(now);
         let (b0, blen) = self.body_span(now);
-        let bounds = (self.paint.width() as f64, self.paint.height() as f64);
-        self.frost.set(Some(self.map(b0, LIFT + off, blen, g.body())), g.radius(), bounds);
-        self.fill(s, b0, LIFT + off, blen, g.body(), g.radius(), crate::app::panel(pal.body));
+        self.fill(s, b0, LIFT + off, blen, g.body(), g.radius(), pal.body.alpha(1.0));
         for k in self.separators() {
             let a = (layout[k].0 - g.gap() - 0.5).round();
             let (x, y, w, h) = self.map(a, LIFT + off + g.pad() + 4.0, 1.0, g.base - 8.0);
@@ -1573,7 +1567,6 @@ struct Menu {
     window: gtk::Window,
     scrim: gtk::Window,
     paint: Paint,
-    frost: crate::blur::Frost,
     title: String,
     key: String,
     rows: Vec<(String, Act, bool)>,
@@ -1658,12 +1651,11 @@ fn open_menu(st: &Shared, i: usize) {
     window.set_margin(start, margin_main as i32);
     window.set_default_size(MENU_W as i32, h as i32);
     let paint = Paint::new(MENU_W as i32, h as i32);
-    let (frosted, frost) = crate::blur::Frost::wrap(&paint);
-    window.set_child(Some(&frosted));
+    window.set_child(Some(&paint));
     let mut fade = Tween::still(0.0);
     fade.go(1.0, glib::monotonic_time(), 160, motion::STANDARD);
     let scrim = crate::paint::scrim(monitor.as_ref(), close_menu);
-    let menu = Rc::new(RefCell::new(Menu { dock: Rc::downgrade(st), window: window.clone(), scrim, paint: paint.clone(), frost, title, key, rows, hover: None, fade }));
+    let menu = Rc::new(RefCell::new(Menu { dock: Rc::downgrade(st), window: window.clone(), scrim, paint: paint.clone(), title, key, rows, hover: None, fade }));
     let weak = Rc::downgrade(&menu);
     paint.on_draw(move |s| {
         if let Some(m) = weak.upgrade() {
@@ -1800,8 +1792,7 @@ impl Menu {
         let cfg = &dock.app.cfg;
         let (w, h) = (MENU_W, 18.0 + 30.0 + self.rows.len() as f64 * ROW);
         s.push_opacity(fade);
-        self.frost.set((fade > 0.02).then_some((0.0, 0.0, w, h)), 18.0, (w, h));
-        draw::fill(s, &draw::round(0.0, 0.0, w, h, 18.0), crate::app::panel(pal.body));
+        draw::fill(s, &draw::round(0.0, 0.0, w, h, 18.0), pal.body.alpha(1.0));
         draw::text(s, &self.paint, cfg, &self.title, 13.0, Face::Text(600), pal.ink_meta, 16.0, 9.0 + 15.0, w - 32.0, pango::Alignment::Left);
         for (i, (label, _, danger)) in self.rows.iter().enumerate() {
             let y = 9.0 + 30.0 + i as f64 * ROW;

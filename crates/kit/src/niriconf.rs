@@ -364,9 +364,6 @@ fn compositor_with(t: &toml::Table, motion: bool, reduced: bool) -> String {
             _ => (3, 3),
         };
         out.push_str(&format!("blur {{\n    passes {passes}\n    offset {offset}\n}}\n\nwindow-rule {{\n    background-effect {{\n        blur true\n    }}\n}}\n"));
-        // Frosted shell panels ask for blur themselves; blur what's behind them, windows too,
-        // rather than niri's default for layers of showing only the wallpaper through.
-        out.push_str("\nlayer-rule {\n    match namespace=\"^digit-\"\n    background-effect {\n        xray false\n    }\n}\n");
     }
     out
 }
@@ -507,7 +504,7 @@ mod tests {
             assert!(reduced.contains(animations));
             assert!(normal.contains("shadow {\n        on"));
             assert!(reduced.contains("shadow {\n        off"));
-            assert!(normal.contains("blur true") && normal.contains("xray false"));
+            assert!(normal.contains("blur true"));
             assert!(!reduced.contains("blur true"));
         }
     }

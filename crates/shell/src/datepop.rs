@@ -30,7 +30,6 @@ struct Pop {
     app: Rc<App>,
     window: gtk::Window,
     paint: Paint,
-    frost: crate::blur::Frost,
     year: i32,
     month: i32,
     pick: i64,
@@ -193,7 +192,6 @@ impl Pop {
         let fade = self.fade.value(now).clamp(0.0, 1.0);
         let slide = self.slide.value(now);
         if fade < 0.003 && slide < 0.003 {
-            self.frost.set(None, 0.0, (self.reach, 0.0));
             return;
         }
         let pal = self.app.palette_at(now);
@@ -204,11 +202,6 @@ impl Pop {
         // One motion for every layout: the panel slides in from the screen's right edge.
         s.translate(&graphene::Point::new(((1.0 - slide) * self.reach).round() as f32, 0.0));
         let radius = RADIUS * self.app.round();
-        // Frosted glass follows the panel as it slides.
-        let top = if self.floating { 0.0 } else { FILLET };
-        let corners = if self.floating { [radius; 4] } else if self.bar { [0.0, 0.0, 0.0, radius] } else { [radius, 0.0, 0.0, radius] };
-        let (sw, sh) = (self.reach, surface(self.agenda, self.floating).1);
-        self.frost.set_corners((slide > 0.01).then_some(((1.0 - slide) * self.reach, top, W, h)), corners, (sw, sh));
         if self.bar {
             // Flat against the top bar, a cove into the screen edge under the right side.
             let (b, f, r) = ((FILLET + h) as f32, FILLET as f32, radius as f32);
@@ -221,11 +214,11 @@ impl Pop {
             cove.line_to(w, b + c);
             cove.svg_arc_to(c, c, 0.0, false, false, w - c, b);
             cove.close();
-            draw::slab(s, &(body, Some(cove.to_path())), crate::app::panel(pal.body));
+            draw::slab(s, &(body, Some(cove.to_path())), pal.body.alpha(1.0));
         } else if self.floating {
             let r = graphene::Size::new(radius as f32, radius as f32);
             s.push_rounded_clip(&gtk::gsk::RoundedRect::new(graphene::Rect::new(0.0, 0.0, W as f32, h as f32), r, r, r, r));
-            s.append_color(&crate::app::panel(pal.body).rgba(), &graphene::Rect::new(0.0, 0.0, W as f32, h as f32));
+            s.append_color(&pal.body.alpha(1.0).rgba(), &graphene::Rect::new(0.0, 0.0, W as f32, h as f32));
             s.pop();
         } else {
             s.save();
@@ -234,7 +227,7 @@ impl Pop {
             s.translate(&graphene::Point::new(sw as f32, 0.0));
             s.rotate(90.0);
             if let Some(p) = kit::shape::docked_parts(sh / 2.0, 0.0, h, W, radius, FILLET) {
-                draw::slab(s, &p, crate::app::panel(pal.body));
+                draw::slab(s, &p, pal.body.alpha(1.0));
             }
             s.restore();
         }
@@ -372,12 +365,10 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, right: f64, y: f64) {
             sw = (screen - left).max(W);
         }
     }
-    let (frosted, frost) = crate::blur::Frost::wrap(&paint);
     let pop = Rc::new(RefCell::new(Pop {
         app: app.clone(),
         window: window.clone(),
         paint: paint.clone(),
-        frost,
         year: now.year(),
         month: now.month(),
         pick: now.to_unix(),
@@ -393,7 +384,7 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, right: f64, y: f64) {
     }));
     window.set_default_size(sw as i32, sh as i32);
     paint.set_size_request(sw as i32, sh as i32);
-    window.set_child(Some(&frosted));
+    window.set_child(Some(&paint));
     let weak = Rc::downgrade(&pop);
     paint.on_draw(move |s| {
         if let Some(p) = weak.upgrade() {

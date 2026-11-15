@@ -197,7 +197,6 @@ struct State {
     hits: Vec<(Hit, f64, f64, f64, f64)>,
     slider: (f64, f64),
     region: (i32, i32, i32, i32),
-    frost: crate::blur::Frost,
     sound: sound::Sound,
     ticking: bool,
     polling: bool,
@@ -311,8 +310,7 @@ impl Control {
         window.set_keyboard_mode(KeyboardMode::None);
         window.add_css_class("digit");
         let canvas: Canvas = glib::Object::new();
-        let (frosted, frost) = crate::blur::Frost::wrap(&canvas);
-        window.set_child(Some(&frosted));
+        window.set_child(Some(&canvas));
         let state = Rc::new(RefCell::new(State {
             app: app.clone(),
             window,
@@ -344,7 +342,6 @@ impl Control {
             hits: Vec::new(),
             slider: (0.0, 0.0),
             region: (0, 0, 0, 0),
-            frost,
             sound: sound::Sound::default(),
             ticking: false,
             polling: false,
@@ -942,11 +939,6 @@ impl State {
             surface.set_input_region(Some(&cairo::Region::create_rectangle(&r)));
             self.region = rect;
         }
-        // Frosted glass: blur behind the panel as drawn.
-        let p = self.placement(now);
-        // The blur follows the panel through its slide, from its first visible frame to its last.
-        let shown = self.fade.value(now) > 0.02;
-        self.frost.set_corners(shown.then_some((p.x, p.y, p.w, p.h)), panel_corner::radii(self.corner, RADIUS * self.app.round()), self.surface_size());
         if self.glide.left != 0.0 {
             let part = self.glide.take(now);
             let before = self.scroll;
