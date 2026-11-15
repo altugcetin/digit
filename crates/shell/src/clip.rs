@@ -3,7 +3,7 @@ use gtk::{gdk, glib};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use wayland_client::backend::ObjectId;
@@ -245,11 +245,8 @@ fn take(conn: &Connection, o: &offer::ExtDataControlOfferV1, mimes: &[String]) -
         Some(t) => (t.to_string(), false),
         None => (mimes.iter().find(|m| *m == "image/png")?.clone(), true),
     };
-    let mut fds = [0; 2];
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-        return None;
-    }
-    let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    let (read, write) = std::io::pipe().ok()?;
+    let read = OwnedFd::from(read);
     o.receive(mime, write.as_fd());
     conn.flush().ok()?;
     drop(write);

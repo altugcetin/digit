@@ -79,13 +79,15 @@ fn members(gid: u32) -> Vec<u32> {
     }
     let mut uids = Vec::new();
     let mut p = gr.gr_mem;
+    // This runs on zbus's thread, so only the reentrant lookups: getpwnam's
+    // static buffer is shared with getpwuid calls on GTK's thread.
+    let mut pwbuf = vec![0 as libc::c_char; 4096];
     unsafe {
         while !(*p).is_null() {
-            if let Ok(c) = std::ffi::CString::new(std::ffi::CStr::from_ptr(*p).to_bytes()) {
-                let pw = libc::getpwnam(c.as_ptr());
-                if !pw.is_null() {
-                    uids.push((*pw).pw_uid);
-                }
+            let mut pw: libc::passwd = std::mem::zeroed();
+            let mut found: *mut libc::passwd = std::ptr::null_mut();
+            if libc::getpwnam_r(*p, &mut pw, pwbuf.as_mut_ptr(), pwbuf.len(), &mut found) == 0 && !found.is_null() {
+                uids.push(pw.pw_uid);
             }
             p = p.add(1);
         }
@@ -94,7 +96,7 @@ fn members(gid: u32) -> Vec<u32> {
 }
 
 fn users(identities: &[(String, HashMap<String, OwnedValue>)]) -> Vec<(u32, String)> {
-    let me = unsafe { libc::getuid() };
+    let me = std::fs::metadata("/proc/self").map_or(u32::MAX, |m| std::os::unix::fs::MetadataExt::uid(&m));
     let mut uids: Vec<u32> = Vec::new();
     for (kind, map) in identities {
         let num = |k: &str| map.get(k).and_then(|v| u32::try_from(v.try_clone().ok()?).ok());

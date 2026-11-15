@@ -100,11 +100,11 @@ fn stretched(sw: &gtk::ScrolledWindow) -> Option<gtk::Widget> {
 }
 
 fn elastic(sw: &gtk::ScrolledWindow) -> Rc<RefCell<Elastic>> {
-    if let Some(e) = unsafe { sw.data::<Rc<RefCell<Elastic>>>("digit-elastic") } {
-        return unsafe { e.as_ref() }.clone();
+    if let Some(e) = crate::tag::get::<Rc<RefCell<Elastic>>>(sw, "digit-elastic") {
+        return e;
     }
     let e = Rc::new(RefCell::new(Elastic::default()));
-    unsafe { sw.set_data("digit-elastic", e.clone()) };
+    crate::tag::set(sw, "digit-elastic", e.clone());
     // Watch the page move so a fling that runs into an edge can bounce off it.
     let adj = sw.vadjustment();
     let (weak, state) = (sw.downgrade(), e.clone());
@@ -369,10 +369,10 @@ fn glide(widget: &gtk::Widget, adj: &gtk::Adjustment, delta: f64, bounce: Option
     // GTK's own wheel step.
     let step = adj.page_size().powf(2.0 / 3.0);
     let now = widget.frame_clock().map_or_else(glib::monotonic_time, |c| c.frame_time());
-    let state = unsafe { adj.data::<Rc<RefCell<Glide>>>("digit-glide").map(|p| p.as_ref().clone()) };
+    let state = crate::tag::get::<Rc<RefCell<Glide>>>(adj, "digit-glide");
     let state = state.unwrap_or_else(|| {
         let s = Rc::new(RefCell::new(Glide { left: 0.0, carry: 0.0, at: now, ticking: false }));
-        unsafe { adj.set_data("digit-glide", s.clone()) };
+        crate::tag::set(adj, "digit-glide", s.clone());
         s
     });
     let start = {

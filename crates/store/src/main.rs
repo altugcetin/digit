@@ -892,7 +892,7 @@ fn watch_arch_installed(store: &Rc<Store>) {
             }
         });
     });
-    unsafe { store.window.set_data("digit-pacman-watch", monitor) };
+    kit::tag::set(&store.window, "digit-pacman-watch", monitor);
 }
 
 async fn set_up_flathub() {

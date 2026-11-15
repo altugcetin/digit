@@ -72,7 +72,7 @@ pub fn build() -> gtk::Widget {
             b.set_sensitive(true);
         });
     });
-    unsafe { scroll.set_data("digit-wifi", page.clone()) };
+    kit::tag::set(&scroll, "digit-wifi", page.clone());
     watch(Rc::downgrade(&page));
     refresh(&page);
     scroll.upcast()

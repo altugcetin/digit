@@ -166,8 +166,8 @@ fn icon_for(info: &gio::FileInfo) -> gio::Icon {
 // model's offscreen items. A list tag covers its icon + name cell, not metadata.
 fn item_widgets(view: &gtk::Widget) -> Vec<(u32, gtk::Widget)> {
     fn visit(widget: &gtk::Widget, out: &mut Vec<(u32, gtk::Widget)>) {
-        if let Some(item) = unsafe { widget.data::<glib::WeakRef<glib::Object>>("digit-item") } {
-            if let Some(pos) = position(unsafe { item.as_ref() }) {
+        if let Some(item) = kit::tag::get::<glib::WeakRef<glib::Object>>(widget, "digit-item") {
+            if let Some(pos) = position(&item) {
                 out.push((pos, widget.clone()));
             }
             return;
@@ -640,8 +640,8 @@ impl Pane {
 
     fn item_at(view: &gtk::Widget, x: f64, y: f64) -> Option<u32> {
         fn tagged(w: &gtk::Widget) -> Option<u32> {
-            let item = unsafe { w.data::<glib::WeakRef<glib::Object>>("digit-item") }?;
-            position(unsafe { item.as_ref() })
+            let item = kit::tag::get::<glib::WeakRef<glib::Object>>(w, "digit-item")?;
+            position(&item)
         }
         fn search(w: &gtk::Widget, depth: u32) -> Option<u32> {
             if let Some(pos) = tagged(w) {
@@ -898,9 +898,7 @@ impl Pane {
             }
         });
         w.add_controller(click);
-        unsafe {
-            w.set_data("digit-item", item.clone());
-        }
+        kit::tag::set(w, "digit-item", item.clone());
         let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY | gdk::DragAction::MOVE);
         let me = self.weak();
         let it = item.clone();

@@ -43,12 +43,7 @@ pub fn os_id() -> String {
 }
 
 pub fn kernel() -> String {
-    let mut u: libc::utsname = unsafe { std::mem::zeroed() };
-    if unsafe { libc::uname(&mut u) } != 0 {
-        return String::new();
-    }
-    let field = |f: &[libc::c_char]| f.iter().take_while(|c| **c != 0).map(|c| *c as u8 as char).collect::<String>();
-    field(&u.release)
+    read("/proc/sys/kernel/osrelease")
 }
 
 pub fn hostname() -> String {
@@ -74,13 +69,9 @@ pub fn uptime() -> u64 {
 }
 
 pub fn disk(path: &str) -> Option<(u64, u64)> {
-    let c = std::ffi::CString::new(path).ok()?;
-    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
-        return None;
-    }
-    let block = s.f_frsize as u64;
-    Some((s.f_blocks as u64 * block, s.f_bavail as u64 * block))
+    use gtk::gio::{self, prelude::FileExt};
+    let info = gio::File::for_path(path).query_filesystem_info("filesystem::size,filesystem::free", gio::Cancellable::NONE).ok()?;
+    Some((info.attribute_uint64("filesystem::size"), info.attribute_uint64("filesystem::free")))
 }
 
 pub fn bytes(n: u64) -> String {
