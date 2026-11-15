@@ -294,7 +294,7 @@ impl Ink<'_> {
     /// A rounded label button; `on` fills it with the accent.
     fn pill(&self, it: &Item, label: &str, on: bool) {
         let hot = self.hot(it.hit);
-        let back = if on { self.pal.accent } else { self.pal.ink_main.mix(self.pal.body, if hot { 0.14 } else { 0.08 }) };
+        let back = if on { self.pal.accent } else { self.pal.tile(if hot { 0.14 } else { 0.08 }) };
         draw::fill(self.s, &draw::round(it.x, it.y, it.w, it.h, it.h / 2.0), back);
         self.text(label, 13.0, Face::Text(500), if on { self.pal.on_accent } else { self.pal.ink_main }, it.x, it.y + it.h / 2.0, it.w, pango::Alignment::Center);
     }
@@ -313,7 +313,7 @@ impl Ink<'_> {
         for (i, (it, l)) in items.iter().zip(labels).enumerate() {
             let on = i == chosen;
             let hot = self.hot(it.hit);
-            let back = if on { self.pal.accent } else if hot { self.pal.ink_main.mix(self.pal.body, 0.12) } else { self.pal.body.alpha(0.0) };
+            let back = if on { self.pal.accent } else if hot { self.pal.tile(0.12) } else { self.pal.body.alpha(0.0) };
             draw::fill(self.s, &draw::round(it.x, it.y, it.w, it.h, it.h / 2.0), back);
             self.text(l, 13.0, Face::Text(if on { 600 } else { 500 }), if on { self.pal.on_accent } else { self.pal.ink_meta }, it.x, it.y + it.h / 2.0, it.w, pango::Alignment::Center);
         }
@@ -355,7 +355,7 @@ pub fn draw(st: &State, s: &gtk::Snapshot, kind: Kind, pal: &Palette, w: f64, h:
                         let live = r != Rec::Save || replay;
                         let on = r == Rec::Record && taping;
                         let glow = if live && ink.hot(it.hit) { 0.07 } else { 0.0 };
-                        let back = if on { RED.alpha(0.2 + glow) } else { pal.ink_main.mix(pal.body, 0.07 + glow) };
+                        let back = if on { RED.alpha(0.2 + glow) } else { pal.tile(0.07 + glow) };
                         draw::fill(s, &draw::round(it.x, it.y, it.w, it.h, 20.0 * st.app.round()), back);
                         let (glyph, label) = match r {
                             Rec::Region => ("screenshot_region", "Region"),
@@ -609,7 +609,7 @@ pub fn draw(st: &State, s: &gtk::Snapshot, kind: Kind, pal: &Palette, w: f64, h:
                         let on = aim.color == v;
                         // The chosen colour sits on an accent disc, like a selected pill.
                         if on || ink.hot(it.hit) {
-                            draw::fill(s, &draw::round(it.x - 4.0, it.y - 4.0, it.w + 8.0, it.h + 8.0, it.h / 2.0 + 4.0), if on { pal.accent } else { pal.ink_main.mix(pal.body, 0.14) });
+                            draw::fill(s, &draw::round(it.x - 4.0, it.y - 4.0, it.w + 8.0, it.h + 8.0, it.h / 2.0 + 4.0), if on { pal.accent } else { pal.tile(0.14) });
                         }
                         draw::fill(s, &draw::round(it.x, it.y, it.w, it.h, it.h / 2.0), AIM_COLORS[v as usize]);
                     }

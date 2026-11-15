@@ -1763,7 +1763,7 @@ impl State {
                 let on = *mode == self.mode;
                 let glow = self.glow[i].value(now).clamp(0.0, 1.0);
                 let grow = if motion::reduced() { 0.0 } else { 1.5 * glow };
-                let fill = if on { pal.accent } else { pal.ink_main.mix(pal.body, 0.09 * glow) };
+                let fill = if on { pal.accent } else { pal.tile(0.09 * glow) };
                 // The shadow keeps the resting size: a blurred shadow whose size changes every frame
                 // gets re-rendered by the GL renderer and flickers, so only the face grows on hover.
                 shadow(s, &rounded(x, PAD, BUBBLE, BUBBLE, BUBBLE / 2.0));
@@ -1788,7 +1788,7 @@ impl State {
                 let grow = if motion::reduced() { 0.0 } else { 1.5 * glow };
                 let (x, y) = (cx - BUBBLE / 2.0, cy - BUBBLE / 2.0);
                 shadow(s, &rounded(x, y, BUBBLE, BUBBLE, BUBBLE / 2.0));
-                face(s, &rounded(x - grow, y - grow, BUBBLE + 2.0 * grow, BUBBLE + 2.0 * grow, BUBBLE / 2.0 + grow), pal.ink_main.mix(pal.body, 0.09 * glow));
+                face(s, &rounded(x - grow, y - grow, BUBBLE + 2.0 * grow, BUBBLE + 2.0 * grow, BUBBLE / 2.0 + grow), pal.tile(0.09 * glow));
                 draw::icon(s, &canvas, &cfg, "delete_sweep", 24.0, false, pal.ink_main.mix(pal.ink_sec, glow), cx, cy);
             }
         }

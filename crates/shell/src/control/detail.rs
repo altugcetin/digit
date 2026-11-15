@@ -146,7 +146,7 @@ impl State {
         s.push_clip(&graphene::Rect::new((x0 - 8.0) as f32, y as f32, (inner + 16.0) as f32, vis as f32));
         s.push_opacity(reveal.powf(0.6));
         let top = y + TOP;
-        fill(s, &rounded(x0, top, inner, full - TOP, 20.0 * self.app.round()), pal.ink_main.mix(pal.body, 0.045));
+        fill(s, &rounded(x0, top, inner, full - TOP, 20.0 * self.app.round()), pal.tile(0.045));
         let (cx, cw) = (x0 + INSET, inner - 2.0 * INSET);
         let mut iy = top + INSET;
         let mut local: Vec<(D, f64, f64, f64, f64)> = Vec::new();
@@ -214,7 +214,7 @@ impl State {
                 let armed = self.armed.as_ref() == Some(&d.path);
                 let hovered = matches!(self.hover, Some(Hit::Detail(D::Device(j) | D::Trust(j) | D::Remove(j))) if j == i);
                 if hovered {
-                    fill(s, &rounded(x, y + 2.0, w, h - 4.0, 14.0), pal.ink_main.mix(pal.body, 0.07));
+                    fill(s, &rounded(x, y + 2.0, w, h - 4.0, 14.0), pal.tile(0.07));
                 }
                 hits.push((D::Device(i), x, y + 2.0, w, h - 4.0));
                 fill(s, &rounded(x + 6.0, mid - 16.0, 32.0, 32.0, 16.0), if d.connected { pal.accent.alpha(0.22) } else { pal.raised });
@@ -306,7 +306,7 @@ impl State {
                 let armed = n.saved.is_some() && self.armed == n.saved;
                 let hovered = matches!(self.hover, Some(Hit::Detail(D::Net(j) | D::Forget(j))) if j == i);
                 if hovered || self.pass.as_ref().is_some_and(|p| p.ssid == n.ssid) {
-                    fill(s, &rounded(x, y + 2.0, w, h - 4.0, 14.0), pal.ink_main.mix(pal.body, 0.07));
+                    fill(s, &rounded(x, y + 2.0, w, h - 4.0, 14.0), pal.tile(0.07));
                 }
                 hits.push((D::Net(i), x, y + 2.0, w, h - 4.0));
                 draw::icon(s, canvas, cfg, nm::bars(n.strength), 20.0, false, pal.ink_main, x + 22.0, mid);
