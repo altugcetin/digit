@@ -806,6 +806,29 @@ impl Picker {
             _ => app.wallpapers.unpreview(&output),
         }
         self.kick();
+        // Once it has faded out, let go of every picture it made; opening again fetches what
+        // it shows from the stash on disk, and the memory goes back to the system.
+        let weak = Rc::downgrade(&self.0);
+        glib::timeout_add_local_once(std::time::Duration::from_millis(900), move || {
+            let Some(state) = weak.upgrade() else { return };
+            let Ok(mut s) = state.try_borrow_mut() else { return };
+            if s.open {
+                return;
+            }
+            s.thumbs = HashMap::new();
+            s.previews = HashMap::new();
+            s.big = HashMap::new();
+            s.side = HashMap::new();
+            s.frames = Vec::new();
+            s.born = HashMap::new();
+            s.order = Vec::new();
+            s.ring = None;
+            s.ghosts = None;
+            s.items = Rc::default();
+            s.all = Rc::default();
+            drop(s);
+            kit::app::trim_later(200);
+        });
     }
 
     fn load(&self, source: Source) {

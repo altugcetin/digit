@@ -621,6 +621,9 @@ impl App {
     }
 
     pub fn apply_prefs(self: &Rc<Self>, next: crate::config::Prefs) {
+        // Whatever a change rebuilds (dock icons, themes, panels) leaves freed memory behind;
+        // hand it back once things have settled.
+        kit::app::trim_later(2500);
         let before = self.prefs.replace(next.clone());
         kit::appearance::apply_gtk();
         kit::motion::refresh();

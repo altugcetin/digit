@@ -46,18 +46,32 @@ impl DockKey {
     }
 }
 
+thread_local! {
+    /// The theme styled icons come from, made once: each new one reads its theme's directories
+    /// and caches into memory again on the first lookup.
+    static STYLED: std::cell::RefCell<Option<(String, gtk::IconTheme)>> = const { std::cell::RefCell::new(None) };
+}
+
 pub fn dock_theme(display: &gdk::Display, key: &DockKey) -> gtk::IconTheme {
     let active = gtk::IconTheme::for_display(display);
     if key.style == Style::Native {
         return active;
     }
-    let theme = gtk::IconTheme::new();
-    let paths = active.search_path();
-    theme.set_search_path(&paths.iter().map(|p| p.as_path()).collect::<Vec<_>>());
-    let paths = active.resource_path();
-    theme.set_resource_path(&paths.iter().map(|p| p.as_str()).collect::<Vec<_>>());
-    theme.set_theme_name(Some(&key.theme));
-    theme
+    STYLED.with(|slot| {
+        if let Some((name, theme)) = slot.borrow().as_ref()
+            && *name == key.theme
+        {
+            return theme.clone();
+        }
+        let theme = gtk::IconTheme::new();
+        let paths = active.search_path();
+        theme.set_search_path(&paths.iter().map(|p| p.as_path()).collect::<Vec<_>>());
+        let paths = active.resource_path();
+        theme.set_resource_path(&paths.iter().map(|p| p.as_str()).collect::<Vec<_>>());
+        theme.set_theme_name(Some(&key.theme));
+        *slot.borrow_mut() = Some((key.theme.clone(), theme.clone()));
+        theme
+    })
 }
 
 pub fn dock_icon(theme: &gtk::IconTheme, icon: Option<&gio::Icon>, app_id: &str, key: &DockKey) -> Option<gdk::Paintable> {
