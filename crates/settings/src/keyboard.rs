@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 pub fn build() -> gtk::Widget {
-    let (scroll, body) = ui::page("Keyboard", "digit's shortcuts. Click one to record new keys, use the scroll wheel or turn it off; changes apply right away.");
+    let (scroll, body) = ui::page("Keyboard", "Typing and digit's shortcuts. Click a shortcut to record new keys, use the scroll wheel or turn it off; changes apply right away.");
     let Some(kind) = kit::setup::kind() else {
         let card = ui::card();
         let (row, _) = ui::row(Some("warning"), "digit can't set shortcuts on this compositor", "digit manages its shortcuts on Hyprland and niri. Bind digit's commands, such as \"digitctl key launcher\", in your compositor's own config");
@@ -17,6 +17,7 @@ pub fn build() -> gtk::Widget {
         crate::desktop::session_notice(&body, kind);
         return scroll.upcast();
     }
+    crate::compositor::typing(&body);
     let live = kit::setup::shortcuts();
     // Only what the compositor can do: niri has no scratchpad or pinned windows, for one.
     let all: Vec<Bind> = keybinds::all().into_iter().filter(kit::setup::supports).collect();

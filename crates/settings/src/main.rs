@@ -28,7 +28,7 @@ use gtk::{gio, glib, prelude::*};
 use std::cell::RefCell;
 
 /// Sidebar pages: id, name, icon and the group they're listed under.
-pub(crate) const PAGES: [(&str, &str, &str, &str); 19] = [
+pub(crate) const PAGES: [(&str, &str, &str, &str); 20] = [
     ("wifi", "Wi-Fi", "wifi", "Connections"),
     ("bluetooth", "Bluetooth", "bluetooth", "Connections"),
     ("appearance", "Appearance", "palette", "Personalize"),
@@ -39,6 +39,7 @@ pub(crate) const PAGES: [(&str, &str, &str, &str); 19] = [
     ("compositor", "Windows", "select_window", "Workspace"),
     ("rules", "Window rules", "rule", "Workspace"),
     ("keyboard", "Keyboard", "keyboard", "Workspace"),
+    ("mouse", "Mouse and touchpad", "mouse", "Workspace"),
     ("displays", "Displays", "monitor", "Workspace"),
     ("power", "Lock and power", "power_settings_new", "System"),
     ("screenshots", "Screenshots", "screenshot_region", "System"),
@@ -81,6 +82,7 @@ fn build_page(name: &str) -> gtk::Widget {
         "displays" => displays::build(),
         "drivers" => drivers::build(),
         "keyboard" => keyboard::build(),
+        "mouse" => compositor::mouse_page(),
         "compositor" => compositor::build(),
         "rules" => rules::build(),
         "appearance" => desktop::build(name, "Appearance", "How digit and its apps look. Changes apply right away."),

@@ -198,10 +198,17 @@ pub(crate) fn tiles(card: &gtk::Box, icon: &str, title: &str, sub: &str, items: 
     let block = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let (row, _) = ui::row(Some(icon), title, sub);
     block.append(&row);
-    let strip = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    // A grid that folds onto more lines when the window is too narrow for one.
+    let count = items.len() as u32;
+    let strip = gtk::FlowBox::new();
     strip.add_css_class("corners");
+    strip.set_selection_mode(gtk::SelectionMode::None);
     strip.set_homogeneous(true);
     strip.set_halign(gtk::Align::Start);
+    strip.set_max_children_per_line(count.max(1));
+    strip.set_min_children_per_line(count.clamp(1, 2));
+    strip.set_column_spacing(10);
+    strip.set_row_spacing(10);
     let mut buttons = Vec::new();
     for (name, picture) in items {
         let b = gtk::ToggleButton::new();
@@ -209,13 +216,21 @@ pub(crate) fn tiles(card: &gtk::Box, icon: &str, title: &str, sub: &str, items: 
         let col = gtk::Box::new(gtk::Orientation::Vertical, 8);
         picture.add_css_class("corner-tile");
         picture.set_size_request(136, 72);
+        if let Some(a) = picture.downcast_ref::<gtk::DrawingArea>() {
+            a.set_content_width(136);
+            a.set_content_height(72);
+        }
         picture.set_overflow(gtk::Overflow::Hidden);
         col.append(&picture);
         let label = gtk::Label::new(Some(name));
         label.add_css_class("corner-name");
         col.append(&label);
         b.set_child(Some(&col));
-        strip.append(&b);
+        strip.insert(&b, -1);
+        // The cell takes no focus or hover of its own; the tile shows both.
+        if let Some(cell) = b.parent() {
+            cell.set_focusable(false);
+        }
         buttons.push(b);
     }
     ui::select_buttons(&buttons, (at < buttons.len()).then_some(at), pick);
@@ -316,6 +331,41 @@ fn when_on(source: &gtk::Box, target: &impl IsA<gtk::Widget>) {
             if let Some(target) = target.upgrade() { target.set_sensitive(s.is_active() && !target.has_css_class("controlled")); }
         });
     }
+}
+
+/// Shows `target` only while the switch in `source` is on.
+fn show_when_on(source: &gtk::Box, target: &impl IsA<gtk::Widget>) {
+    if let Some(sw) = find_switch(source.upcast_ref()) {
+        target.set_visible(sw.is_active());
+        let target = target.as_ref().downgrade();
+        sw.connect_active_notify(move |s| {
+            if let Some(target) = target.upgrade() { target.set_visible(s.is_active()); }
+        });
+    }
+}
+
+/// A "Show advanced options" row at the end of `card`; returns where the advanced rows go,
+/// folded away until it's opened.
+fn advanced_rows(card: &gtk::Box) -> gtk::Box {
+    let (row, end) = ui::row(Some("tune"), "Advanced options", "");
+    let arrow = ui::sym("expand_more");
+    end.append(&arrow);
+    row.set_cursor_from_name(Some("pointer"));
+    card.append(&row);
+    let reveal = gtk::Revealer::new();
+    reveal.set_transition_type(gtk::RevealerTransitionType::SlideDown);
+    reveal.set_transition_duration(200);
+    let rows = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    reveal.set_child(Some(&rows));
+    card.append(&reveal);
+    let click = gtk::GestureClick::new();
+    click.connect_released(move |_, _, _, _| {
+        let open = !reveal.reveals_child();
+        reveal.set_reveal_child(open);
+        arrow.set_label(if open { "expand_less" } else { "expand_more" });
+    });
+    row.add_controller(click);
+    rows
 }
 
 pub(crate) fn toggle(card: &gtk::Box, icon: &str, title: &str, sub: &str, key: &'static str, on: bool) -> gtk::Box {
@@ -547,10 +597,10 @@ pub type Section = fn(&gtk::Box, &toml::Table);
 
 pub fn sections(page: &str) -> &'static [Section] {
     match page {
-        "appearance" => &[shell_look, app_look, app_themes, effects],
+        "appearance" => &[shell_look, app_look, roundness, window_buttons, app_themes, effects],
         "dock" => &[dock],
-        "notch" => &[notch, menu_bar, panels, screen_edges],
-        "desktop" => &[desktop, window_buttons, weather],
+        "notch" => &[notch, menu_bar, workspaces, screen_edges],
+        "desktop" => &[desktop],
         "spotlight" => &[search, scopes, clipboard],
         "compositor" => &[session],
         "displays" => &[night_light],
@@ -620,14 +670,26 @@ fn shell_look(body: &gtk::Box, t: &toml::Table) {
     let look = section(body, "Shell");
     // Frosted glass needs the compositor's blur, so it is offered only while that is on.
     let glass = kit::effects::frosted(&{ let mut g = t.clone(); g.insert("surface".into(), toml::Value::String("frosted".into())); g }, kit::effects::reduced());
-    let mut surfaces = vec![("black", "Pure black"), ("tinted", "Tinted by wallpaper")];
+    let mut surfaces: Vec<(&'static str, &str)> = vec![("black", "Pure black"), ("tinted", "Tinted")];
     if glass {
         surfaces.push(("frosted", "Frosted glass"));
     }
     let current = prefs::get_str(&t, "surface", "black");
     let shown = if current == "frosted" && !glass { "tinted".to_string() } else { current };
     let sub = if glass { "Notch, dock, menus and panels" } else { "Notch, dock, menus and panels. Turn on Blur behind windows for Frosted glass" };
-    choice(&look, "dark_mode", "Shell surfaces", sub, "surface", &surfaces, &shown);
+    // Tinted is the wallpaper's color as the shell mixes it.
+    let tint = kit::theme::load().and_then(|th| th.shell_roles()).map(|r| r.surface_high.mix(r.accent_container, 0.84)).map_or((0.16, 0.15, 0.2), |c| (c.r, c.g, c.b));
+    let at = surfaces.iter().position(|s| s.0 == shown).unwrap_or(0);
+    let items = surfaces.iter().map(|(value, name)| {
+        let picture = match *value {
+            "tinted" => kit::pictures::shell_surface(tint, false),
+            "frosted" => kit::pictures::shell_surface(tint, true),
+            _ => kit::pictures::shell_surface((0.0, 0.0, 0.0), false),
+        };
+        (*name, picture.upcast())
+    }).collect();
+    let values: Vec<&'static str> = surfaces.iter().map(|s| s.0).collect();
+    tiles(&look, "dark_mode", "Shell surfaces", sub, items, at, move |i| save("surface", toml::Value::String(values[i].into())));
     let (row, end) = ui::row(Some("palette"), "Color scheme", "Colors generated from your wallpaper");
     let current = kit::theme::load().map(|t| t.scheme).unwrap_or_else(|| prefs::get_str(&t, "scheme", "content"));
     let schemes: Vec<&str> = kit::theme::SCHEMES.to_vec();
@@ -726,7 +788,6 @@ fn app_look(body: &gtk::Box, t: &toml::Table) {
     let apps = section(body, "Apps");
     surfaces(&apps, "layers", "App surfaces", "Background of Digit apps and the Game Bar", &prefs::get_str(&t, "ui_surface", "black"));
     accent(&apps, &t);
-    corners(&apps, "rounded_corner", "Corners", "Cards, menus, buttons and dialogs", "ui_round", prefs::get_f64(&t, "ui_round", 1.0));
     choice(&apps, "density_medium", "Density", "", "ui_density", &[("comfortable", "Comfortable"), ("compact", "Compact")], &prefs::get_str(&t, "ui_density", "comfortable"));
     toggle(&apps, "select_window", "Open Settings as a window", "Settings opens over everything by default; turn this on for an ordinary window. Takes effect the next time Settings opens", "settings_window", prefs::get_bool(&t, "settings_window", false));
 }
@@ -736,13 +797,13 @@ fn app_themes(body: &gtk::Box, t: &toml::Table) {
     let gtk = toggle(&card, "palette", "Theme GTK apps", "Colors and theme for GTK apps", "theme_gtk", prefs::get_bool(t, "theme_gtk", false));
     // Build searchable rows immediately; discover packages and themes without blocking GTK.
     let gtk_choice = choice(&card, "palette", "GTK theme", "Digit follows your wallpaper and accent", "gtk_theme", &[("digit", "Digit")], "digit");
-    when_on(&gtk, &gtk_choice.row);
+    show_when_on(&gtk, &gtk_choice.row);
     let qt = toggle(&card, "palette", "Theme Qt apps", "Needs qt6ct", "theme_qt", false);
     qt.set_sensitive(false);
     let qt_choice = choice(&card, "palette", "Qt theme", "Style for Qt apps", "qt_theme", &[], "Fusion");
-    when_on(&qt, &qt_choice.row);
+    show_when_on(&qt, &qt_choice.row);
     let colors_choice = choice(&card, "palette", "Qt colors", "Digit follows your wallpaper and accent", "qt_colors", &[("digit", "Digit"), ("style", "Style default")], "digit");
-    when_on(&qt, &colors_choice.row);
+    show_when_on(&qt, &colors_choice.row);
     let t = t.clone();
     glib::spawn_future_local(async move {
         let Ok((themes, styles, schemes, platform)) = gio::spawn_blocking(|| {
@@ -759,7 +820,7 @@ fn app_themes(body: &gtk::Box, t: &toml::Table) {
             holder.remove(&next.row);
             card.insert_child_after(&next.row, old.prev_sibling().as_ref());
             card.remove(old);
-            when_on(source, &next.row);
+            show_when_on(source, &next.row);
         };
         replace(&gtk_choice.row, "gtk_theme", "GTK theme", "Digit follows your wallpaper and accent", themes, "digit", true, &gtk);
         use kit::distro::QtPlatform;
@@ -778,7 +839,7 @@ fn app_themes(body: &gtk::Box, t: &toml::Table) {
         holder.remove(&colors.row);
         card.insert_child_after(&colors.row, colors_choice.row.prev_sibling().as_ref());
         card.remove(&colors_choice.row);
-        when_on(&next, &colors.row);
+        show_when_on(&next, &colors.row);
     });
 }
 
@@ -787,36 +848,155 @@ fn effects(body: &gtk::Box, t: &toml::Table) {
     kit::motion::refresh();
     let motion_detail = if kit::motion::automatic() { "On automatically for software rendering" } else { "Turn off motion in Digit and compositor animations" };
     toggle(&look, "motion_photos_off", "Reduce motion", motion_detail, "reduce_motion", kit::motion::reduced());
-    toggle(&look, "swipe_vertical", "Smooth scrolling", "Mouse wheel steps glide instead of jumping. Touchpads always scroll smoothly", "smooth_scroll", prefs::get_bool(&t, "smooth_scroll", true));
-    toggle(&look, "auto_awesome", "Startup animation", "Greet each start of the shell with a short full-screen animation", "intro", prefs::get_bool(&t, "intro", true));
+    // The motion Reduce motion turns off, one by one.
+    for row in [
+        toggle(&look, "swipe_vertical", "Smooth scrolling", "Mouse wheel steps glide instead of jumping. Touchpads always scroll smoothly", "smooth_scroll", prefs::get_bool(&t, "smooth_scroll", true)),
+        toggle(&look, "text_select_move_forward_character", "Smooth caret", "The caret in Spotlight glides as you type and blinks softly", "smooth_caret", prefs::get_bool(&t, "smooth_caret", true)),
+        toggle(&look, "auto_awesome", "Startup animation", "Greet each start of the shell with a short full-screen animation", "intro", prefs::get_bool(&t, "intro", true)),
+    ] {
+        row.add_css_class("nested");
+    }
     kit::effects::invalidate();
     let effects_detail = if kit::effects::automatic() { "On automatically for software rendering" } else { "No shadows, blur or frosted panels in digit and the compositor; smoother on older laptops" };
     toggle(&look, "speed", "Reduce effects", effects_detail, "reduced_effects", kit::effects::reduced());
-    choice(&look, "memory", "Rendering", "How digit and its apps draw. Takes effect when they next start", "renderer", &[("auto", "Automatic"), ("gl", "GPU (OpenGL)"), ("vulkan", "GPU (Vulkan)"), ("cairo", "Software")], &prefs::get_str(&t, "renderer", "auto"));
+}
+
+/// Every roundness in one place: the apps', and the notch and screen corners that can follow it.
+fn roundness(body: &gtk::Box, t: &toml::Table) {
+    let card = section(body, "Corners");
+    corners(&card, "rounded_corner", "Apps", "Cards, menus, buttons and dialogs", "ui_round", prefs::get_f64(t, "ui_round", 1.0));
+    let legacy = prefs::get_f64(t, "screen_corners", 0.0);
+    let screen_row = toggle(&card, "fit_screen", "Rounded screen corners", "Softens the corners of every display", "screen_round", prefs::get_bool(t, "screen_round", legacy >= 2.0));
+    let screen_follows = prefs::get_bool(t, "screen_round_follow", t.contains_key("screen_round") || legacy < 2.0);
+    let follows = prefs::get_bool(t, "notch_round_follow", true) && screen_follows;
+    let (follow_row, end) = ui::row(Some("join"), "Notch and screen corners follow", "They round like the apps. Turn off to set their own below");
+    let follow = gtk::Switch::new();
+    follow.set_valign(gtk::Align::Center);
+    ui::bind_switch(&follow, follows, |on| save_many(&[("notch_round_follow", toml::Value::Boolean(on)), ("screen_round_follow", toml::Value::Boolean(on))]));
+    end.append(&follow);
+    card.append(&follow_row);
+    let notch_own = corners(&card, "toolbar", "Notch corners", "", "notch_round", prefs::get_f64(t, "notch_round", 1.0));
+    let screen_own = slider(&card, "rounded_corner", "Screen corner radius", "", "screen_corners", (4.0, 24.0, 1.0), if legacy >= 4.0 { legacy.min(24.0) } else { 12.0 }, 12.0, 0);
+    // Their own roundness only matters while they don't follow, and the screen's while it's on.
+    if let Some(on) = find_switch(screen_row.upcast_ref()) {
+        let sync = {
+            let (on, follow) = (on.clone(), follow.clone());
+            move || {
+                notch_own.set_sensitive(!follow.is_active());
+                screen_own.set_sensitive(on.is_active() && !follow.is_active());
+            }
+        };
+        sync();
+        let again = sync.clone();
+        on.connect_active_notify(move |_| again());
+        follow.connect_active_notify(move |_| sync());
+    }
 }
 
 fn dock(body: &gtk::Box, t: &toml::Table) {
     let dock = section(body, "Dock");
     let shows = keys("dock").map(|k| format!("{k} shows or hides it at any time")).unwrap_or_default();
-    let visibility = choice(&dock, "dock_to_bottom", "Visibility", &shows, "dock_mode", &[("on", "Always shown"), ("autohide", "Auto-hide"), ("smart", "Hide when windows are open"), ("off", "Off")], &prefs::get_str(&t, "dock_mode", "on"));
-    choice(&dock, "side_navigation", "Position", "", "dock_side", &[("bottom", "Bottom"), ("left", "Left"), ("right", "Right")], &prefs::get_str(&t, "dock_side", "bottom"));
+    const MODES: [(&str, &str); 4] = [("on", "Always"), ("autohide", "Auto-hide"), ("smart", "Beside windows"), ("off", "Off")];
+    let mode = prefs::get_str(&t, "dock_mode", "on");
+    let at = MODES.iter().position(|m| m.0 == mode).unwrap_or(0);
+    let items = MODES.iter().map(|(v, name)| (*name, kit::pictures::dock_visibility(v).upcast())).collect();
+    let shows = if shows.is_empty() { "Beside windows hides it while a window is open".to_string() } else { format!("{shows}. Beside windows hides it while a window is open") };
+    let rest = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let visibility = {
+        let rest = rest.downgrade();
+        tiles(&dock, "dock_to_bottom", "Visibility", &shows, items, at, move |i| {
+            let ok = save("dock_mode", toml::Value::String(MODES[i].0.into()));
+            if ok && let Some(rest) = rest.upgrade() { rest.set_sensitive(MODES[i].0 != "off"); }
+            ok
+        })
+    };
+    let _ = visibility;
+    rest.set_sensitive(mode != "off");
+    dock.append(&rest);
+    let dock = rest;
+    const SIDES: [(&str, &str); 3] = [("bottom", "Bottom"), ("left", "Left"), ("right", "Right")];
+    let side = prefs::get_str(&t, "dock_side", "bottom");
+    let items = SIDES.iter().map(|(v, name)| (*name, kit::pictures::dock_side(v).upcast())).collect();
+    tiles(&dock, "side_navigation", "Position", "", items, SIDES.iter().position(|s| s.0 == side).unwrap_or(0), |i| save("dock_side", toml::Value::String(SIDES[i].0.into())));
     slider(&dock, "photo_size_select_small", "Icon size", "", "dock_size", (32.0, 80.0, 2.0), prefs::get_f64(&t, "dock_size", 50.0), 50.0, 0);
     slider(&dock, "zoom_in", "Magnification", "1.0 turns it off", "dock_magnify", (1.0, 2.0, 0.05), prefs::get_f64(&t, "dock_magnify", 1.5), 1.5, 2);
     toggle(&dock, "apps", "Show running apps", "Apps that are open but not kept in the dock", "dock_running", prefs::get_bool(&t, "dock_running", true));
-    toggle(&dock, "delete", "Trash", "Show the Trash at the end of the dock", "dock_trash", prefs::get_bool(&t, "dock_trash", true));
+    // The Trash, and a hidden dock sliding in while something flies to it, as one choice.
+    {
+        let (row, end) = ui::row(Some("delete"), "Trash", "At the end of the dock. A hidden dock slides in while a deleted file flies to it");
+        let sw = gtk::Switch::new();
+        sw.set_valign(gtk::Align::Center);
+        ui::bind_switch(&sw, prefs::get_bool(&t, "dock_trash", true), |on| save_many(&[("dock_trash", toml::Value::Boolean(on)), ("dock_trash_reveal", toml::Value::Boolean(on))]));
+        end.append(&sw);
+        dock.append(&row);
+    }
     toggle(&dock, "history", "Recent files", "A stack of the files you used last", "dock_recent", prefs::get_bool(&t, "dock_recent", true));
-    toggle(&dock, "auto_delete", "Show trash animation when hidden", "A hidden dock slides in while a deleted file flies to the Trash", "dock_trash_reveal", prefs::get_bool(&t, "dock_trash_reveal", true));
     toggle(&dock, "notifications", "Notification badges", "Unread notification counts on icons", "dock_badges", prefs::get_bool(&t, "dock_badges", true));
     let style = match prefs::get_str(&t, "dock_icons", "light").as_str() {
         "tile" => "graphite".to_string(),
         other => other.to_string(),
     };
-    choice(&dock, "style", "Icon style", "Big Sur shaped icons for every app", "dock_icons", &[("light", "Big Sur"), ("graphite", "Big Sur graphite"), ("mono", "Mono"), ("tinted", "Tinted"), ("native", "Original")], &style);
-    let mut child = dock.first_child();
-    while let Some(row) = child {
-        child = row.next_sibling();
-        if row != visibility.row { visibility.enable_when(&row, |v| v != "off"); }
+    const STYLES: [(&str, &str); 5] = [("light", "Big Sur"), ("graphite", "Graphite"), ("mono", "Mono"), ("tinted", "Tinted"), ("native", "Original")];
+    let apps = preview_apps();
+    let items = STYLES.iter().map(|(v, name)| (*name, dock_icons(v, &apps))).collect();
+    tiles(&dock, "style", "Icon style", "Big Sur shapes every app's icon alike; Original keeps each app's own", items, STYLES.iter().position(|s| s.0 == style).unwrap_or(0), |i| save("dock_icons", toml::Value::String(STYLES[i].0.into())));
+}
+
+/// Three installed apps whose own icons aren't already plates, so the styles visibly reshape
+/// them (Steam, kitty, OBS…). Missing ones fall back to their icon names.
+fn preview_apps() -> Vec<(String, gio::Icon)> {
+    const WANTED: [&str; 10] = ["steam", "kitty", "com.obsproject.Studio", "vesktop", "discord", "blender", "obsidian", "org.kde.krita", "vlc", "org.gimp.GIMP"];
+    let mut out: Vec<(String, gio::Icon)> = WANTED
+        .iter()
+        .filter_map(|id| {
+            let info = gio_unix::DesktopAppInfo::new(&format!("{id}.desktop"))?;
+            Some((id.to_string(), info.icon()?))
+        })
+        .take(3)
+        .collect();
+    for name in ["steam", "kitty", "vlc"] {
+        if out.len() < 3 && !out.iter().any(|(id, _)| id == name) {
+            out.push((name.to_string(), gio::ThemedIcon::new(name).upcast()));
+        }
     }
+    out
+}
+
+/// The dock's icons in `style`, drawn by the dock's own code, so the preview is what it shows.
+fn dock_icons(style: &'static str, apps: &[(String, gio::Icon)]) -> gtk::Widget {
+    const PX: i32 = 30;
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+    row.add_css_class("tile-sky");
+    row.set_halign(gtk::Align::Fill);
+    let inner = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+    inner.set_halign(gtk::Align::Center);
+    inner.set_valign(gtk::Align::Center);
+    inner.set_hexpand(true);
+    row.append(&inner);
+    let Some(display) = gtk::gdk::Display::default() else { return row.upcast() };
+    let parsed = kit::art::Style::parse(style);
+    // Styled icons start from the apps' original artwork, as the dock does.
+    let theme = if parsed == kit::art::Style::Native {
+        gtk::IconTheme::for_display(&display)
+    } else {
+        let active = gtk::IconTheme::for_display(&display);
+        let t = gtk::IconTheme::new();
+        t.set_search_path(&active.search_path().iter().map(|p| p.as_path()).collect::<Vec<_>>());
+        t.set_resource_path(&active.resource_path().iter().map(|p| p.as_str()).collect::<Vec<_>>());
+        t.set_theme_name(Some("Adwaita"));
+        t
+    };
+    let accent = kit::palette::Rgb::hex(&kit::style::ink().accent).unwrap_or(kit::palette::Rgb::new(0.55, 0.72, 0.95));
+    for (id, icon) in apps {
+        let paintable = theme.lookup_by_gicon(icon, PX, 1, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty());
+        let image = match kit::art::texture(&inner, id, Some(paintable.upcast_ref()), id, PX as f64, parsed, accent, "Readex Pro") {
+            Some(texture) => gtk::Image::from_paintable(Some(&texture)),
+            None => gtk::Image::from_paintable(Some(&paintable)),
+        };
+        image.set_pixel_size(PX);
+        inner.append(&image);
+    }
+    row.upcast()
 }
 
 pub fn session_notice(body: &gtk::Box, kind: kit::setup::Kind) {
@@ -890,34 +1070,40 @@ fn notch(body: &gtk::Box, t: &toml::Table) {
     choice(&notch, "call", "Call activity", "A live pill with the call timer and voice waveform while an app uses the microphone", "notch_call", &[("voice", "Voice and video apps"), ("any", "Any app using the microphone"), ("off", "Off")], &prefs::get_str(&t, "notch_call", "voice"));
     toggle(&notch, "mic_off", "Block idle microphone", "Voice apps like Discord can keep listening after a call ends. Digit silences only their microphone stream until a real call starts, then gives it back instantly", "mic_guard", prefs::get_bool(&t, "mic_guard", true));
     toggle(&notch, "touch_app", "Open on hover", "Expand the notch when the pointer rests on it", "hover", prefs::get_bool(&t, "hover", true));
-    toggle(&notch, "rounded_corner", "Match app roundness", "The notch's corners follow Corners in Appearance", "notch_round_follow", prefs::get_bool(&t, "notch_round_follow", true));
-    corners(&notch, "rounded_corner", "Notch corners", "Used when the notch doesn't match the apps", "notch_round", prefs::get_f64(&t, "notch_round", 1.0));
-    // The notch's own roundness only applies while it doesn't follow the apps.
-    if let (Some(own), Some(follow)) = (notch.last_child(), notch.last_child().and_then(|w| w.prev_sibling()).and_then(|row| find_switch(&row))) {
-        own.set_sensitive(!follow.is_active());
-        follow.connect_active_notify(move |s| own.set_sensitive(!s.is_active()));
-    }
+    // One choice for every panel that opens from the notch, the corners and the date.
+    const CLOSE: [&str; 4] = ["notch_close", "spaces_close", "control_close", "calendar_close"];
+    let (row, end) = ui::row(Some("close_fullscreen"), "Panels close", "The open notch, Workspaces, Control Center and the calendar");
+    let at = if prefs::get_str(t, "notch_close", "leave") == "click" { 1 } else { 0 };
+    end.append(&ui::segmented(&["Pointer leaves", "Click elsewhere"], at, |i| {
+        let value = if i == 1 { "click" } else { "leave" };
+        save_many(&CLOSE.map(|k| (k, toml::Value::String(value.into()))))
+    }));
+    notch.append(&row);
 }
 
 fn menu_bar(body: &gtk::Box, t: &toml::Table) {
     let bar = section(body, "Menu bar");
     toggle(&bar, "menu", "App menus", "The focused app's name and menus at the top left. The logo, workspaces, status and date always show", "menubar", prefs::get_bool(&t, "menubar", true));
-    choice(&bar, "blur_on", "Menu bar backdrop", "Adaptive stays clear over the wallpaper and turns to frosted glass when windows are open", "menubar_look", &[("adaptive", "Adaptive"), ("clear", "Clear"), ("glass", "Glass")], &prefs::get_str(&t, "menubar_look", "adaptive"));
+    const LOOKS: [(&str, &str); 3] = [("adaptive", "Adaptive"), ("clear", "Clear"), ("glass", "Glass")];
+    let detail = controlled("menubar_look");
+    let look = if detail.is_some() { "clear".to_string() } else { prefs::get_str(&t, "menubar_look", "adaptive") };
+    let items = LOOKS.iter().map(|(v, name)| (*name, kit::pictures::menubar_look(v).upcast())).collect();
+    let backdrop = tiles(&bar, "blur_on", "Menu bar backdrop", detail.unwrap_or("Adaptive stays clear over the wallpaper and turns to glass when windows are open"), items, LOOKS.iter().position(|l| l.0 == look).unwrap_or(0), |i| save("menubar_look", toml::Value::String(LOOKS[i].0.into())));
+    controlled_row(&backdrop, detail);
     choice(&bar, "deployed_code", "Menu bar logo", "The mark at the top left", "menubar_logo", &[("distro", "Distribution"), ("digit", "Digit")], &prefs::get_str(t, "menubar_logo", "distro"));
-    choice(&bar, "workspaces", "Workspaces", "A pill with the workspaces on this screen: beside the logo, or in the notch in place of the clock while switching", "menubar_spaces", &[("switch", "While switching"), ("always", "Always"), ("notch", "In the notch")], &prefs::get_str(t, "menubar_spaces", "switch"));
     slider(&bar, "height", "Bar height", "Used by the full-width bar", "wide_height", (28.0, 56.0, 1.0), prefs::get_f64(&t, "wide_height", 34.0), 34.0, 0);
     toggle(&bar, "widgets", "Menu bar app icons", "Shows the icons apps like Discord or Steam put in the system tray. Applies after digit restarts", "tray", prefs::get_bool(&t, "tray", true));
 }
 
-fn panels(body: &gtk::Box, t: &toml::Table) {
-    let panels = section(body, "Panels close");
-    let close = [("leave", "When the pointer leaves"), ("click", "On a click elsewhere")];
-    choice(&panels, "toolbar", "Notch", "When the open notch folds away", "notch_close", &close, &prefs::get_str(&t, "notch_close", "leave"));
-    choice(&panels, "grid_view", "Workspaces", "When the workspaces panel in the top-left corner closes", "spaces_close", &close, &prefs::get_str(&t, "spaces_close", "leave"));
+/// The workspace pill and the Workspaces panel.
+fn workspaces(body: &gtk::Box, t: &toml::Table) {
+    let card = section(body, "Workspaces");
+    const SPACES: [(&str, &str); 3] = [("switch", "While switching"), ("always", "Always"), ("notch", "In the notch")];
+    let current = prefs::get_str(t, "menubar_spaces", "switch");
+    let items = SPACES.iter().map(|(v, name)| (*name, kit::pictures::menubar_spaces(v).upcast())).collect();
+    tiles(&card, "workspaces", "Workspace pill", "The workspaces on this screen: beside the logo, or in the notch in place of the clock", items, SPACES.iter().position(|s| s.0 == current).unwrap_or(0), |i| save("menubar_spaces", toml::Value::String(SPACES[i].0.into())));
     let always = t.get("spaces_always").and_then(toml::Value::as_integer).unwrap_or(0).clamp(0, 10).to_string();
-    choice(&panels, "push_pin", "Always show", "Workspaces listed even when empty", "spaces_always", &[("0", "Used only"), ("2", "1–2"), ("3", "1–3"), ("4", "1–4"), ("5", "1–5"), ("6", "1–6"), ("7", "1–7"), ("8", "1–8"), ("9", "1–9"), ("10", "1–10")], &always);
-    choice(&panels, "tune", "Control Center", "When Control Center in the bottom-right corner closes", "control_close", &close, &prefs::get_str(&t, "control_close", "leave"));
-    choice(&panels, "calendar_month", "Calendar", "When the calendar under the date closes", "calendar_close", &close, &prefs::get_str(&t, "calendar_close", "leave"));
+    choice(&card, "push_pin", "Always show", "Workspaces listed in the Workspaces panel even when empty", "spaces_always", &[("0", "Used only"), ("2", "1–2"), ("3", "1–3"), ("4", "1–4"), ("5", "1–5"), ("6", "1–6"), ("7", "1–7"), ("8", "1–8"), ("9", "1–9"), ("10", "1–10")], &always);
 }
 
 /// What each screen corner opens. A panel opens from its corner and lives in one corner at
@@ -960,7 +1146,7 @@ fn corners_picker(card: &gtk::Box, t: &toml::Table) {
 }
 
 fn screen_edges(body: &gtk::Box, t: &toml::Table) {
-    let edge = section(body, "Screen corners");
+    let edge = section(body, "Hot corners");
     corners_picker(&edge, t);
     toggle(&edge, "fullscreen", "Over fullscreen apps", "Let the dock edge and screen corners open panels while an app or game is fullscreen. Spotlight always opens", "fullscreen_edges", prefs::get_bool(&t, "fullscreen_edges", false));
 }
@@ -1032,42 +1218,213 @@ fn desktop(body: &gtk::Box, t: &toml::Table) {
     });
     end.append(&pickb);
     desk.append(&row);
-    choice(&desk, "schedule", "Desktop clock", "A large clock with the date and weather on the wallpaper, behind your windows", "desktop_widget", &[("off", "Off"), ("left", "Top left"), ("center", "Center")], &prefs::get_str(&t, "desktop_widget", "off"));
+    desk_widgets(&desk, t);
+    field(&desk, "location_on", "Weather city", "Shown in Control Center and on the desktop clock. The city name goes to open-meteo.com over HTTPS; leave empty to keep weather off", "weather_city", &prefs::get_str(t, "weather_city", ""), "Istanbul", |_| true);
+    choice(&desk, "device_thermostat", "Units", "", "weather_unit", &[("celsius", "°C"), ("fahrenheit", "°F")], &prefs::get_str(t, "weather_unit", "celsius"));
     if gtk::gdk::Display::default().is_some_and(|d| d.monitors().n_items() > 1) {
-        choice(&desk, "wallpaper", "Wallpaper on several screens", "Change it from the wallpaper picker", "wallpaper_layout", &[("same", "Same on each"), ("span", "Span across"), ("separate", "One per screen")], &prefs::get_str(&t, "wallpaper_layout", "same"));
+        choice(&desk, "wallpaper", "Wallpaper on several screens", "Change it from the wallpaper picker", "wallpaper_layout", &[("same", "Same on each"), ("span", "Span across"), ("separate", "One per screen")], &prefs::get_str(t, "wallpaper_layout", "same"));
     }
-    choice(&desk, "battery_full", "Batteries widget", "This computer, headphones and other devices, as rings on the wallpaper", "desktop_battery", &[("off", "Off"), ("top_left", "Top left"), ("top_right", "Top right"), ("bottom_left", "Bottom left"), ("bottom_right", "Bottom right")], &prefs::get_str(&t, "desktop_battery", "off"));
-    toggle(&desk, "folder", "Desktop icons", "Show what's in your Desktop folder on the wallpaper", "desktop_icons", prefs::get_bool(&t, "desktop_icons", true));
-    let legacy = prefs::get_f64(&t, "screen_corners", 0.0);
-    let on_row = toggle(&desk, "rounded_corner", "Rounded screen corners", "Softens the corners of every display", "screen_round", prefs::get_bool(&t, "screen_round", legacy >= 2.0));
-    let has_toggle = t.contains_key("screen_round");
-    let follow_row = toggle(&desk, "rounded_corner", "Match app roundness", "The screen corners follow Corners in Appearance", "screen_round_follow", prefs::get_bool(&t, "screen_round_follow", has_toggle || legacy < 2.0));
-    let own = slider(&desk, "rounded_corner", "Screen corner radius", "Used when the screen corners don't match the apps", "screen_corners", (4.0, 24.0, 1.0), if legacy >= 4.0 { legacy.min(24.0) } else { 12.0 }, 12.0, 0);
-    // Matching only matters while the corners are on, and the radius only while they don't match.
-    if let (Some(on), Some(follow)) = (find_switch(on_row.upcast_ref()), find_switch(follow_row.upcast_ref())) {
-        let sync = {
-            let (follow_row, own, on, follow) = (follow_row.clone(), own.clone(), on.clone(), follow.clone());
-            move || {
-                follow_row.set_sensitive(on.is_active());
-                own.set_sensitive(on.is_active() && !follow.is_active());
-            }
-        };
-        sync();
-        let again = sync.clone();
-        on.connect_active_notify(move |_| again());
-        follow.connect_active_notify(move |_| sync());
-    }
+    toggle(&desk, "folder", "Desktop icons", "Show what's in your Desktop folder on the wallpaper", "desktop_icons", prefs::get_bool(t, "desktop_icons", true));
 }
 
-fn weather(body: &gtk::Box, t: &toml::Table) {
-    let sky = section(body, "Weather");
-    field(&sky, "location_on", "City", "Shown in Control Center and on the desktop clock. The city name goes to open-meteo.com over HTTPS; leave empty to keep weather off", "weather_city", &prefs::get_str(&t, "weather_city", ""), "Istanbul", |_| true);
-    choice(&sky, "device_thermostat", "Units", "", "weather_unit", &[("celsius", "°C"), ("fahrenheit", "°F")], &prefs::get_str(&t, "weather_unit", "celsius"));
+/// A spot a desktop widget can take on the mini screen, as fractions of the screen.
+struct Spot {
+    value: &'static str,
+    name: &'static str,
+    rect: (f64, f64, f64, f64),
+}
+
+const CLOCK_SPOTS: [Spot; 2] = [
+    Spot { value: "left", name: "Top left", rect: (0.04, 0.12, 0.29, 0.24) },
+    Spot { value: "center", name: "Center", rect: (0.355, 0.20, 0.29, 0.24) },
+];
+
+const BATTERY_SPOTS: [Spot; 4] = [
+    Spot { value: "top_left", name: "Top left", rect: (0.03, 0.08, 0.30, 0.20) },
+    Spot { value: "top_right", name: "Top right", rect: (0.67, 0.08, 0.30, 0.20) },
+    Spot { value: "bottom_left", name: "Bottom left", rect: (0.03, 0.72, 0.30, 0.20) },
+    Spot { value: "bottom_right", name: "Bottom right", rect: (0.67, 0.72, 0.30, 0.20) },
+];
+
+/// Where a widget sits now; the batteries make way under a top-left clock, as on the desktop.
+fn spot_rect(spots: &[Spot], value: &str, clock: &str) -> Option<(f64, f64, f64, f64)> {
+    let r = spots.iter().find(|s| s.value == value)?.rect;
+    Some(if value == "top_left" && clock == "left" { (r.0, 0.40, r.2, r.3) } else { r })
+}
+
+/// The desktop clock and the batteries on one small screen: pick which to place, then click a
+/// spot for it. Clicking the spot in use takes it off.
+fn desk_widgets(card: &gtk::Box, t: &toml::Table) {
+    let state = Rc::new(std::cell::RefCell::new((prefs::get_str(t, "desktop_widget", "off"), prefs::get_str(t, "desktop_battery", "off"))));
+    // Which widget clicks place: the clock first.
+    let placing = Rc::new(Cell::new(true));
+    let hover: Rc<Cell<Option<usize>>> = Rc::default();
+    let (row, end) = ui::row(Some("dashboard_customize"), "Desktop widgets", "Pick one, then click a spot on the screen. Click its spot again to take it off");
+    let area = gtk::DrawingArea::new();
+    let caption = gtk::Label::new(None);
+    caption.add_css_class("corner-name");
+    let say = {
+        let (st, caption) = (state.clone(), caption.downgrade());
+        move || {
+            let (clock, battery) = st.borrow().clone();
+            if let Some(c) = caption.upgrade() {
+                c.set_text(&format!("{}   ·   {}", desk_label(&CLOCK_SPOTS, true, &clock), desk_label(&BATTERY_SPOTS, false, &battery)));
+            }
+        }
+    };
+    say();
+    let seg = {
+        let (placing, a) = (placing.clone(), area.downgrade());
+        ui::segmented(&["Clock", "Batteries"], 0, move |i| {
+            placing.set(i == 0);
+            if let Some(a) = a.upgrade() { a.queue_draw(); }
+            true
+        })
+    };
+    end.append(&seg);
+    card.append(&row);
+    area.add_css_class("corner-tile");
+    area.add_css_class("desk-map");
+    area.set_overflow(gtk::Overflow::Hidden);
+    area.set_content_width(320);
+    area.set_content_height(180);
+    area.set_size_request(320, 180);
+    area.set_halign(gtk::Align::Start);
+    area.set_cursor_from_name(Some("pointer"));
+    {
+        let (st, pl, hv) = (state.clone(), placing.clone(), hover.clone());
+        area.set_draw_func(move |_, cr, w, h| {
+            let (clock, battery) = st.borrow().clone();
+            draw_desk_map(cr, w as f64, h as f64, pl.get(), &clock, &battery, hv.get());
+        });
+    }
+    let spot_at = |placing: bool, clock: &str, x: f64, y: f64, w: f64, h: f64| {
+        let spots: &[Spot] = if placing { &CLOCK_SPOTS } else { &BATTERY_SPOTS };
+        spots.iter().position(|s| spot_rect(spots, s.value, clock).is_some_and(|r| x >= r.0 * w && x <= (r.0 + r.2) * w && y >= r.1 * h && y <= (r.1 + r.3) * h))
+    };
+    let motion = gtk::EventControllerMotion::new();
+    {
+        let (a, st, pl, hv) = (area.downgrade(), state.clone(), placing.clone(), hover.clone());
+        motion.connect_motion(move |_, x, y| {
+            let Some(a) = a.upgrade() else { return };
+            let clock = st.borrow().0.clone();
+            let now = spot_at(pl.get(), &clock, x, y, a.width() as f64, a.height() as f64);
+            if hv.replace(now) != now { a.queue_draw(); }
+        });
+        let (a, hv) = (area.downgrade(), hover.clone());
+        motion.connect_leave(move |_| {
+            hv.set(None);
+            if let Some(a) = a.upgrade() { a.queue_draw(); }
+        });
+    }
+    area.add_controller(motion);
+    let click = gtk::GestureClick::new();
+    {
+        let (a, st, pl) = (area.downgrade(), state.clone(), placing.clone());
+        click.connect_released(move |_, _, x, y| {
+            let Some(a) = a.upgrade() else { return };
+            let (clock, battery) = st.borrow().clone();
+            let clock_on = pl.get();
+            let Some(i) = spot_at(clock_on, &clock, x, y, a.width() as f64, a.height() as f64) else { return };
+            let chosen = if clock_on { CLOCK_SPOTS[i].value } else { BATTERY_SPOTS[i].value };
+            let current = if clock_on { &clock } else { &battery };
+            let next = if current == chosen { "off" } else { chosen };
+            if !save(if clock_on { "desktop_widget" } else { "desktop_battery" }, toml::Value::String(next.into())) { return; }
+            {
+                let mut s = st.borrow_mut();
+                if clock_on { s.0 = next.into() } else { s.1 = next.into() }
+            }
+            say();
+            a.queue_draw();
+        });
+    }
+    area.add_controller(click);
+    let block = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    block.add_css_class("corners");
+    block.set_halign(gtk::Align::Start);
+    block.append(&area);
+    caption.set_halign(gtk::Align::Start);
+    block.append(&caption);
+    card.append(&block);
+}
+
+fn desk_label(spots: &[Spot], clock: bool, value: &str) -> String {
+    let what = if clock { "Clock" } else { "Batteries" };
+    format!("{what}: {}", spots.iter().find(|s| s.value == value).map_or("Off", |s| s.name))
+}
+
+/// The small screen: the wallpaper, the notch, both widgets where they are, and the spots the
+/// widget being placed can take.
+fn draw_desk_map(cr: &gtk::cairo::Context, w: f64, h: f64, placing_clock: bool, clock: &str, battery: &str, hover: Option<usize>) {
+    let g = gtk::cairo::LinearGradient::new(0.0, 0.0, w, h);
+    g.add_color_stop_rgb(0.0, 0.34, 0.43, 0.62);
+    g.add_color_stop_rgb(1.0, 0.86, 0.55, 0.42);
+    cr.rectangle(0.0, 0.0, w, h);
+    let _ = cr.set_source(&g);
+    let _ = cr.fill();
+    // The notch, scaled like the screen.
+    let nw = w * 0.25;
+    cr.set_source_rgb(0.0, 0.0, 0.0);
+    kit::paint::rounded(cr, (w - nw) / 2.0, -h * 0.06, nw, h * 0.125, h * 0.045);
+    let _ = cr.fill();
+    let px = |r: (f64, f64, f64, f64)| (r.0 * w, r.1 * h, r.2 * w, r.3 * h);
+    let draw_clock = |r: (f64, f64, f64, f64), alpha: f64| {
+        let (x, y, rw, rh) = px(r);
+        let centered = r.0 > 0.2;
+        let l = kit::paint::layout(cr, "12:30", &format!("Readex Pro Light {}", (rh * 0.48).round()));
+        let (_, ext) = l.pixel_extents();
+        let tx = if centered { x + (rw - ext.width() as f64) / 2.0 } else { x + rw * 0.04 };
+        cr.move_to(tx - ext.x() as f64, y + rh * 0.08 - ext.y() as f64);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.95 * alpha);
+        kit::paint::show(cr, &l);
+        let line = rw * 0.42;
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.7 * alpha);
+        kit::paint::rounded(cr, if centered { x + (rw - line) / 2.0 } else { tx }, y + rh * 0.08 + ext.height() as f64 + rh * 0.08, line, rh * 0.07, rh * 0.035);
+        let _ = cr.fill();
+    };
+    let draw_battery = |r: (f64, f64, f64, f64), alpha: f64| {
+        let (x, y, rw, rh) = px(r);
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.30 * alpha);
+        kit::paint::rounded(cr, x, y, rw, rh, rh * 0.22);
+        let _ = cr.fill();
+        let rad = rh * 0.26;
+        cr.set_line_width(rh * 0.09);
+        for (i, level) in [0.8, 0.55, 0.3].iter().enumerate() {
+            let (cx, cy) = (x + rw * (0.2 + 0.3 * i as f64), y + rh / 2.0);
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.25 * alpha);
+            cr.arc(cx, cy, rad, 0.0, std::f64::consts::TAU);
+            let _ = cr.stroke();
+            cr.set_source_rgba(0.19, 0.82, 0.35, alpha);
+            let start = -std::f64::consts::FRAC_PI_2;
+            cr.arc(cx, cy, rad, start, start + std::f64::consts::TAU * level);
+            let _ = cr.stroke();
+        }
+    };
+    // Both widgets where they are; the one not being placed stays in the background.
+    if let Some(r) = spot_rect(&CLOCK_SPOTS, clock, clock) { draw_clock(r, if placing_clock { 1.0 } else { 0.45 }); }
+    if let Some(r) = spot_rect(&BATTERY_SPOTS, battery, clock) { draw_battery(r, if placing_clock { 0.45 } else { 1.0 }); }
+    let (spots, current): (&[Spot], &str) = if placing_clock { (&CLOCK_SPOTS, clock) } else { (&BATTERY_SPOTS, battery) };
+    for (i, spot) in spots.iter().enumerate() {
+        if spot.value == current { continue; }
+        let Some(r) = spot_rect(spots, spot.value, clock) else { continue };
+        let (x, y, rw, rh) = px(r);
+        let hot = hover == Some(i);
+        if hot {
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.18);
+            kit::paint::rounded(cr, x, y, rw, rh, rh * 0.22);
+            let _ = cr.fill();
+        }
+        cr.set_source_rgba(1.0, 1.0, 1.0, if hot { 0.95 } else { 0.65 });
+        cr.set_line_width(1.0);
+        cr.set_dash(&[3.0, 3.0], 0.0);
+        kit::paint::rounded(cr, x + 0.5, y + 0.5, rw - 1.0, rh - 1.0, rh * 0.22);
+        let _ = cr.stroke();
+        cr.set_dash(&[], 0.0);
+    }
 }
 
 fn search(body: &gtk::Box, t: &toml::Table) {
     let find = section(body, "Search");
-    toggle(&find, "text_select_move_forward_character", "Smooth caret", "The caret in Spotlight glides as you type and blinks softly, like VS Code", "smooth_caret", prefs::get_bool(&t, "smooth_caret", true));
     toggle(&find, "deployed_code", "Minecraft instances", "PrismLauncher's instances show up as you type their name; pl and a space lists them all", "spotlight_prism", prefs::get_bool(&t, "spotlight_prism", false));
     let enabled = toggle(&find, "manage_search", "Search inside apps", "Spotlight asks apps that offer results, such as Files, Firefox tabs and Characters", "search_apps", prefs::get_bool(&t, "search_apps", true));
     let listed = kit::search::listed();
@@ -1231,11 +1588,17 @@ fn recording_capture(body: &gtk::Box, t: &toml::Table) {
     targets.push(("portal".into(), "A window, chosen in the system picker".into()));
     let pairs: Vec<(&str, &str)> = targets.iter().map(|(value, label)| (value.as_str(), label.as_str())).collect();
     choice(&cap, "screenshot_monitor", "What to record", "", "rec_target", &pairs, &prefs::get_str(t, "rec_target", "monitor"));
-    choice(&cap, "speed", "Frame rate", "", "rec_fps", &[("30", "30 fps"), ("60", "60 fps"), ("120", "120 fps"), ("144", "144 fps"), ("165", "165 fps"), ("240", "240 fps")], &prefs::get_str(t, "rec_fps", "60"));
+    // Only the rates a screen here can show, and the one chosen even if it's no longer one.
+    const RATES: [(&str, &str); 6] = [("30", "30 fps"), ("60", "60 fps"), ("120", "120 fps"), ("144", "144 fps"), ("165", "165 fps"), ("240", "240 fps")];
+    let fps = prefs::get_str(t, "rec_fps", "60");
+    let fastest = gtk::gdk::Display::default().map_or(60, |d| d.monitors().iter::<gtk::gdk::Monitor>().filter_map(Result::ok).map(|m| (m.refresh_rate() + 999) / 1000).max().unwrap_or(60));
+    let rates: Vec<(&str, &str)> = RATES.iter().copied().filter(|(v, _)| *v == fps || v.parse::<i32>().is_ok_and(|r| r <= 60 || r <= fastest)).collect();
+    choice(&cap, "speed", "Frame rate", "", "rec_fps", &rates, &fps);
     choice(&cap, "high_quality", "Quality", "", "rec_quality", &[("medium", "Medium"), ("high", "High"), ("very_high", "Very high"), ("ultra", "Ultra")], &prefs::get_str(t, "rec_quality", "very_high"));
-    choice(&cap, "movie", "Codec", "", "rec_codec", &[("auto", "Automatic (H.264)"), ("hevc", "HEVC"), ("av1", "AV1"), ("vp9", "VP9")], &prefs::get_str(t, "rec_codec", "auto"));
-    choice(&cap, "video_file", "File type", "", "rec_container", &[("mp4", "MP4"), ("mkv", "MKV"), ("mov", "MOV")], &prefs::get_str(t, "rec_container", "mp4"));
     toggle(&cap, "arrow_selector_tool", "Show the pointer", "", "rec_cursor", prefs::get_bool(t, "rec_cursor", true));
+    let more = advanced_rows(&cap);
+    choice(&more, "movie", "Codec", "H.264 plays everywhere; HEVC and AV1 are smaller, VP9 suits the web", "rec_codec", &[("auto", "Automatic (H.264)"), ("hevc", "HEVC"), ("av1", "AV1"), ("vp9", "VP9")], &prefs::get_str(t, "rec_codec", "auto"));
+    choice(&more, "video_file", "File type", "", "rec_container", &[("mp4", "MP4"), ("mkv", "MKV"), ("mov", "MOV")], &prefs::get_str(t, "rec_container", "mp4"));
 }
 
 fn recording_sound(body: &gtk::Box, t: &toml::Table) {
@@ -1393,7 +1756,7 @@ fn files(body: &gtk::Box, t: &toml::Table) {
     choice(&files, "photo_size_select_small", "Thumbnails", "Videos, PDFs and documents are rendered in a sandbox", "files_thumbnails", &[("local", "This computer only"), ("all", "Everywhere, also network"), ("off", "Never")], &prefs::get_str(&t, "files_thumbnails", "local"));
 }
 
-pub fn advanced(body: &gtk::Box, _: &toml::Table) {
+pub fn advanced(body: &gtk::Box, t: &toml::Table) {
     let adv = section(body, "Advanced");
     let (row, end) = ui::row(Some("description"), "Configuration file", &prefs::path().display().to_string());
     let open = ui::button("Open", "");
@@ -1407,6 +1770,10 @@ pub fn advanced(body: &gtk::Box, _: &toml::Table) {
     });
     end.append(&open);
     adv.append(&row);
+    choice(&adv, "memory", "Rendering", "How digit and its apps draw. Takes effect when they next start", "renderer", &[("auto", "Automatic"), ("gl", "GPU (OpenGL)"), ("vulkan", "GPU (Vulkan)"), ("cairo", "Software")], &prefs::get_str(t, "renderer", "auto"));
+    if crate::compositor::show_nvidia_variables(kit::hyprconf::nvidia(), prefs::get_bool(t, "nvidia_env", false)) {
+        toggle(&adv, "developer_board", "NVIDIA variables", "For hardware video and older apps. Takes effect at the next login", "nvidia_env", prefs::get_bool(t, "nvidia_env", false));
+    }
 }
 
 #[cfg(test)]
