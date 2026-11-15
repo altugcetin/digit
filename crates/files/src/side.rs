@@ -163,10 +163,14 @@ impl Side {
             }
         }
         self.header("Devices", &mut targets);
-        self.row("hard_drive", "Computer", None, &mut targets, Target::File(gio::File::for_path("/")));
+        let row = self.row_widget("hard_drive", "Computer", None, &Target::File(gio::File::for_path("/")), true);
+        self.list.append(&row);
+        targets.push(Some(Target::File(gio::File::for_path("/"))));
         self.device_start.set(targets.len());
         for device in devices::rows(&self.monitor) {
-            self.row(device.icon, &device.name, device.eject, &mut targets, device.target);
+            let row = self.row_widget(device.icon, &device.name, device.eject, &device.target, true);
+            self.list.append(&row);
+            targets.push(Some(device.target));
         }
         self.device_count.set(targets.len() - self.device_start.get());
         self.header("Network", &mut targets);
@@ -202,7 +206,7 @@ impl Side {
         }
         let mut targets = Vec::with_capacity(devices.len());
         for (i, device) in devices.into_iter().enumerate() {
-            let row = self.row_widget(device.icon, &device.name, device.eject, &device.target);
+            let row = self.row_widget(device.icon, &device.name, device.eject, &device.target, true);
             self.list.insert(&row, (start + i) as i32);
             targets.push(Some(device.target));
         }
@@ -228,12 +232,13 @@ impl Side {
     }
 
     fn row(&self, icon: &str, label: &str, eject: Option<gio::Mount>, targets: &mut Vec<Option<Target>>, target: Target) {
-        let row = self.row_widget(icon, label, eject, &target);
+        let row = self.row_widget(icon, label, eject, &target, false);
         self.list.append(&row);
         targets.push(Some(target));
     }
 
-    fn row_widget(&self, icon: &str, label: &str, eject: Option<gio::Mount>, target: &Target) -> gtk::ListBoxRow {
+    /// A row of the sidebar. A drive (`usage`) shows how full it is under its name.
+    fn row_widget(&self, icon: &str, label: &str, eject: Option<gio::Mount>, target: &Target, usage: bool) -> gtk::ListBoxRow {
         let b = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         let s = kit::ui::sym(icon);
         s.add_css_class("place-icon");
@@ -241,7 +246,17 @@ impl Side {
         let l = kit::ui::text(label, "");
         l.set_hexpand(true);
         l.set_ellipsize(pango::EllipsizeMode::End);
-        b.append(&l);
+        l.set_xalign(0.0);
+        match target {
+            Target::File(f) if usage => {
+                let col = gtk::Box::new(gtk::Orientation::Vertical, 3);
+                col.set_hexpand(true);
+                col.append(&l);
+                col.append(&fullness(f));
+                b.append(&col);
+            }
+            _ => b.append(&l),
+        }
         if let Some(m) = eject {
             let e = kit::app::control("eject", "");
             e.set_tooltip_text(Some(if m.can_eject() { "Eject" } else { "Unmount" }));
@@ -382,4 +397,34 @@ fn connect() {
         });
         true
     });
+}
+
+/// How full the drive holding `file` is: a thin bar and the space left, filled in once the
+/// filesystem answers, so a slow network drive never holds up the sidebar.
+fn fullness(file: &gio::File) -> gtk::Box {
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    line.add_css_class("usage");
+    line.set_visible(false);
+    let bar = gtk::LevelBar::for_interval(0.0, 1.0);
+    bar.set_hexpand(true);
+    bar.set_valign(gtk::Align::Center);
+    // No low/high marks: it is a measure, not a warning, until the drive is nearly full.
+    bar.remove_offset_value(Some(gtk::LEVEL_BAR_OFFSET_LOW));
+    bar.remove_offset_value(Some(gtk::LEVEL_BAR_OFFSET_HIGH));
+    bar.remove_offset_value(Some(gtk::LEVEL_BAR_OFFSET_FULL));
+    bar.add_offset_value("nearly-full", 0.9);
+    let free = kit::ui::text("", "usage-free");
+    line.append(&bar);
+    line.append(&free);
+    let (file, weak) = (file.clone(), line.downgrade());
+    glib::spawn_future_local(async move {
+        let Ok(info) = file.query_filesystem_info_future("filesystem::size,filesystem::free", glib::Priority::LOW).await else { return };
+        let (size, left) = (info.attribute_uint64("filesystem::size"), info.attribute_uint64("filesystem::free"));
+        let Some(line) = weak.upgrade().filter(|_| size > 0) else { return };
+        bar.set_value(1.0 - left as f64 / size as f64);
+        free.set_text(&format!("{} free", glib::format_size(left)));
+        line.set_tooltip_text(Some(&format!("{} free of {}", glib::format_size(left), glib::format_size(size))));
+        line.set_visible(true);
+    });
+    line
 }

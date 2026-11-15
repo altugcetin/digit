@@ -1,4 +1,5 @@
 mod app;
+mod appgrid;
 mod appmenu;
 mod apps;
 mod art;

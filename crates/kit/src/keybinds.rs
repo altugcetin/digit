@@ -177,6 +177,7 @@ pub fn defaults() -> Vec<Bind> {
     let mut out = vec![
         bind("notch", "Shell", "Open the notch", "SUPER + SPACE", ctl("key notch"), n, false),
         bind("launcher", "Shell", "Spotlight", "ALT + SPACE", ctl("key launcher"), n, false),
+        bind("appgrid", "Shell", "All apps", "SUPER + A", ctl("key appgrid"), n, false),
         bind("clipboard", "Shell", "Clipboard history", "ALT + V", ctl("key clipboard"), n, false),
         bind("control", "Shell", "Control Center", "ALT + C", ctl("key control"), n, false),
         bind("gamebar", "Shell", "Game Bar", "ALT + Z", ctl("gamebar toggle"), n, false),

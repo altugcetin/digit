@@ -710,6 +710,18 @@ fn section(body: &gtk::Box, title: &str) -> gtk::Box {
     card
 }
 
+/// How app icons are shaped in the dock, the app grid and the switcher.
+fn icon_style(card: &gtk::Box, t: &toml::Table) {
+    let style = match prefs::get_str(t, "dock_icons", "light").as_str() {
+        "tile" => "graphite".to_string(),
+        other => other.to_string(),
+    };
+    const STYLES: [(&str, &str); 5] = [("light", "Big Sur"), ("graphite", "Graphite"), ("mono", "Mono"), ("tinted", "Tinted"), ("native", "Original")];
+    let apps = preview_apps();
+    let items = STYLES.iter().map(|(v, name)| (*name, dock_icons(v, &apps))).collect();
+    tiles(card, "style", "App icon style", "In the dock and the app grid. Big Sur shapes every app's icon alike; Original keeps each app's own", items, STYLES.iter().position(|s| s.0 == style).unwrap_or(0), |i| save("dock_icons", toml::Value::String(STYLES[i].0.into())));
+}
+
 fn shell_look(body: &gtk::Box, t: &toml::Table) {
     let look = section(body, "Shell");
     const SURFACES: [(&str, &str); 3] = [("black", "Black"), ("graphite", "Graphite"), ("tinted", "Tinted")];
@@ -724,6 +736,7 @@ fn shell_look(body: &gtk::Box, t: &toml::Table) {
     tiles(&look, "dark_mode", "Shell surfaces", "Notch, dock, menus and panels, in the same colors as App surfaces", items, at, |i| save("surface", toml::Value::String(SURFACES[i].0.into())));
     scheme_choice(&look, t);
     icon_theme_choice(&look, t);
+    icon_style(&look, t);
     choice(&look, "palette", "Glyph backgrounds", "The colored squares behind the symbols in Settings, Files and Store", "ui_tiles", &kit::style::TILES, &prefs::get_str(t, "ui_tiles", "colorful"));
     cursor(&look, t);
 }
@@ -1063,16 +1076,9 @@ fn dock(body: &gtk::Box, t: &toml::Table) {
         end.append(&sw);
         dock.append(&row);
     }
+    toggle(&dock, "apps", "Apps button", &kit::keybinds::shown("appgrid").map_or("At the start of the dock, opens all your apps".to_string(), |k| format!("At the start of the dock, opens all your apps; so does {k}")), "dock_apps", prefs::get_bool(t, "dock_apps", true));
     toggle(&dock, "history", "Recent files", "A stack of the files you used last", "dock_recent", prefs::get_bool(&t, "dock_recent", true));
     toggle(&dock, "notifications", "Notification badges", "Unread notification counts on icons", "dock_badges", prefs::get_bool(&t, "dock_badges", true));
-    let style = match prefs::get_str(&t, "dock_icons", "light").as_str() {
-        "tile" => "graphite".to_string(),
-        other => other.to_string(),
-    };
-    const STYLES: [(&str, &str); 5] = [("light", "Big Sur"), ("graphite", "Graphite"), ("mono", "Mono"), ("tinted", "Tinted"), ("native", "Original")];
-    let apps = preview_apps();
-    let items = STYLES.iter().map(|(v, name)| (*name, dock_icons(v, &apps))).collect();
-    tiles(&dock, "style", "Icon style", "Big Sur shapes every app's icon alike; Original keeps each app's own", items, STYLES.iter().position(|s| s.0 == style).unwrap_or(0), |i| save("dock_icons", toml::Value::String(STYLES[i].0.into())));
 }
 
 /// Three installed apps whose own icons aren't already plates, so the styles visibly reshape

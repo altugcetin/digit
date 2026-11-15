@@ -40,6 +40,8 @@ pub struct Config {
     pub dock_trash_reveal: bool,
     pub dock_badges: bool,
     pub dock_icons: String,
+    /// The Apps button at the start of the dock, which opens every app.
+    pub dock_apps: bool,
     pub corner_top_left: String,
     pub corner_top_right: String,
     pub corner_bottom_left: String,
@@ -162,6 +164,7 @@ impl Default for Config {
             dock_trash_reveal: true,
             dock_badges: true,
             dock_icons: "light".into(),
+            dock_apps: true,
             corner_top_left: "workspaces".into(),
             corner_top_right: "none".into(),
             corner_bottom_left: "none".into(),
@@ -241,6 +244,7 @@ pub struct DockPrefs {
     pub trash_reveal: bool,
     pub badges: bool,
     pub icons: String,
+    pub apps: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -328,6 +332,7 @@ impl From<&Config> for Prefs {
             trash_reveal: c.dock_trash_reveal,
             badges: c.dock_badges,
             icons: c.dock_icons.clone(),
+            apps: c.dock_apps,
         };
         Self {
             dock,

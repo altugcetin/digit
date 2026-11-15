@@ -55,6 +55,40 @@ pub fn glyph(file: &gio::File) -> &'static str {
 }
 
 /// Draws the folder for an accent color ("#rrggbb"). Callers keep their own cache.
+/// The dock's Apps button: a dark tile holding a grid of colored squares, as Launchpad's.
+pub fn grid_texture(size: i32) -> Option<gdk::Texture> {
+    let size = size.clamp(16, 512);
+    let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, size, size).ok()?;
+    {
+        let cr = cairo::Context::new(&surface).ok()?;
+        let s = size as f64;
+        let (x, w) = (s * 0.06, s * 0.88);
+        rounded(&cr, x, x, w, w, w * 0.235);
+        let g = cairo::LinearGradient::new(0.0, x, 0.0, x + w);
+        g.add_color_stop_rgb(0.0, 0.25, 0.26, 0.3);
+        g.add_color_stop_rgb(1.0, 0.11, 0.11, 0.13);
+        cr.set_source(&g).ok()?;
+        cr.fill().ok()?;
+        const COLORS: [[f64; 3]; 9] = [
+            [1.0, 0.36, 0.33], [1.0, 0.62, 0.2], [1.0, 0.84, 0.25],
+            [0.3, 0.82, 0.45], [0.22, 0.75, 0.9], [0.28, 0.52, 1.0],
+            [0.62, 0.42, 1.0], [0.95, 0.4, 0.75], [0.85, 0.85, 0.88],
+        ];
+        let cell = w * 0.2;
+        let gap = (w - 3.0 * cell) / 4.0;
+        for (k, c) in COLORS.iter().enumerate() {
+            let (cx, cy) = ((k % 3) as f64, (k / 3) as f64);
+            rounded(&cr, x + gap + cx * (cell + gap), x + gap + cy * (cell + gap), cell, cell, cell * 0.28);
+            cr.set_source_rgb(c[0], c[1], c[2]);
+            cr.fill().ok()?;
+        }
+    }
+    surface.flush();
+    let stride = surface.stride() as usize;
+    let data = surface.data().ok()?.to_vec();
+    Some(gdk::MemoryTexture::new(size, size, gdk::MemoryFormat::B8g8r8a8Premultiplied, &glib::Bytes::from_owned(data), stride).upcast())
+}
+
 pub fn texture(accent: &str, glyph: &str, size: i32) -> Option<gdk::Texture> {
     let size = size.clamp(16, 512);
     let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, size, size).ok()?;

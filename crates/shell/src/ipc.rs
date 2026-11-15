@@ -191,6 +191,10 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
                     crate::launcher::toggle(app);
                     "ok".into()
                 }
+                "appgrid" => {
+                    crate::appgrid::toggle(app);
+                    "ok".into()
+                }
                 "control" => {
                     crate::control::toggle(app);
                     "ok".into()
