@@ -655,7 +655,7 @@ pub fn build() -> gtk::Widget {
         let widget = area.clone();
         area.set_draw_func(move |_, cr, w, h| {
             #[allow(deprecated)]
-            let accent = widget.style_context().lookup_color("accent_bg_color").map(rgb).unwrap_or((0.45, 0.65, 1.0));
+            let accent = widget.style_context().lookup_color("d_accent").map(rgb).unwrap_or((0.45, 0.65, 1.0));
             let ink = rgb(widget.color());
             if let Ok(mut s) = st.try_borrow_mut() {
                 draw(&mut s, cr, w as f64, h as f64, accent, ink);

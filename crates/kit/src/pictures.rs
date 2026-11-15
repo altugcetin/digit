@@ -377,56 +377,77 @@ fn glass(cr: &Cr, x: f64, width: f64) {
     let _ = cr.fill();
 }
 
-const ICON_COLORS: [(f64, f64, f64); 5] = [(0.29, 0.64, 1.0), (0.31, 0.86, 0.47), (1.0, 0.70, 0.25), (0.81, 0.48, 0.96), (1.0, 0.42, 0.53)];
-const DOCK_ICON: f64 = 5.0;
-const DOCK_PAD: f64 = 2.0;
-
-fn dock_long() -> f64 {
-    5.0 * DOCK_ICON + 6.0 * DOCK_PAD
+thread_local! {
+    /// Pictures drawn in the app's live colors, redrawn when the style changes.
+    static LIVE: std::cell::RefCell<Vec<gtk::glib::WeakRef<gtk::DrawingArea>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// The dock along `side`, in `body` color.
-fn dock_on(cr: &Cr, side: &str, (r, g, b): (f64, f64, f64), alpha: f64) {
-    let (long, short) = (dock_long(), DOCK_ICON + 2.0 * DOCK_PAD);
-    let (x, y, across) = match side {
-        "left" => (4.0, (TH - long) / 2.0 + 3.0, false),
-        "right" => (TW - 4.0 - short, (TH - long) / 2.0 + 3.0, false),
-        _ => ((TW - long) / 2.0, TH - 4.0 - short, true),
-    };
-    let (dw, dh) = if across { (long, short) } else { (short, long) };
-    cr.set_source_rgba(r, g, b, 0.82 * alpha);
-    rounded(cr, x, y, dw, dh, 3.5);
-    let _ = cr.fill();
-    for (i, (cr_, cg, cb)) in ICON_COLORS.iter().enumerate() {
-        let step = DOCK_PAD + i as f64 * (DOCK_ICON + DOCK_PAD);
-        let (ix, iy) = if across { (x + step, y + DOCK_PAD) } else { (x + DOCK_PAD, y + step) };
-        cr.set_source_rgba(*cr_, *cg, *cb, alpha);
-        rounded(cr, ix, iy, DOCK_ICON, DOCK_ICON, 1.6);
-        let _ = cr.fill();
-    }
+/// Redraws the pictures that follow the app's colors, after the style changed (a new accent).
+pub fn redraw_live() {
+    LIVE.with(|l| {
+        let mut l = l.borrow_mut();
+        l.retain(|w| w.upgrade().is_some());
+        for a in l.iter().filter_map(|w| w.upgrade()) {
+            a.queue_draw();
+        }
+    });
 }
 
-/// A shell surface: the notch, the dock and a panel in that fill.
-pub fn shell_surface(fill: (f64, f64, f64)) -> gtk::DrawingArea {
-    tile(move |cr| {
-        pane(cr, 8.0, 15.0, 62.0, 38.0, 0.16);
-        notch_shape(cr, TW, NOTCH_W, BAND, fill, 1.0);
-        // Control Center in its corner, over the windows.
-        let (px, py, pw, ph) = (TW - 6.0 - 40.0, 14.0, 40.0, 42.0);
-        cr.set_source_rgb(fill.0, fill.1, fill.2);
-        rounded(cr, px, py, pw, ph, 6.0);
+/// A shell surface ("black", "graphite" or "tinted"), pictured as the top corner of Control
+/// Center over the wallpaper: the weather, then four tiles, the top two on. The panel is the
+/// surface's color and the tiles the apps' cards, worked out from the live accent as it draws.
+pub fn shell_surface(surface: &'static str) -> gtk::DrawingArea {
+    let a = gtk::DrawingArea::new();
+    a.set_content_width(TW as i32);
+    a.set_content_height(TH as i32);
+    a.set_draw_func(move |a, cr, w, h| {
+        let (w, h) = (w as f64, h as f64);
+        let g = gtk::cairo::LinearGradient::new(0.0, 0.0, w, h);
+        g.add_color_stop_rgb(0.0, 0.34, 0.43, 0.62);
+        g.add_color_stop_rgb(1.0, 0.86, 0.55, 0.42);
+        cr.rectangle(0.0, 0.0, w, h);
+        let _ = cr.set_source(&g);
         let _ = cr.fill();
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.24);
-        rounded(cr, px + 4.0, py + 4.0, 15.0, 9.0, 3.0);
-        let _ = cr.fill();
-        rounded(cr, px + 21.0, py + 4.0, 15.0, 9.0, 3.0);
-        let _ = cr.fill();
-        rounded(cr, px + 4.0, py + 17.0, pw - 8.0, 4.0, 2.0);
-        let _ = cr.fill();
-        rounded(cr, px + 4.0, py + 25.0, pw - 8.0, 4.0, 2.0);
-        let _ = cr.fill();
-        dock_on(cr, "bottom", fill, 1.0);
-    })
+        let k = (w / TW).min(h / TH);
+        cr.translate((w - TW * k) / 2.0, (h - TH * k) / 2.0);
+        cr.scale(k, k);
+        let accent = named(a, "d_accent", (0.82, 0.74, 1.0));
+        let on_accent = named(a, "d_on_accent", (0.1, 0.1, 0.1));
+        let tone = crate::palette::Rgb::new(accent.0, accent.1, accent.2);
+        let rgb = |c: crate::palette::Rgb| (c.r, c.g, c.b);
+        let (body, card) = (rgb(crate::style::base_color(surface, tone)), rgb(crate::style::card_color(surface, tone)));
+        let fill = |x: f64, y: f64, w: f64, h: f64, r: f64, (cr_, cg, cb): (f64, f64, f64), alpha: f64| {
+            cr.set_source_rgba(cr_, cg, cb, alpha);
+            rounded(cr, x, y, w, h, r);
+            let _ = cr.fill();
+        };
+        // The panel, running on past the right and bottom edges, its top-left corner showing as
+        // far in from the left as from the top.
+        let (px, py) = (14.0, 14.0);
+        fill(px, py, TW - px + 12.0, TH - py + 12.0, 11.0, body, 1.0);
+        let white = (1.0, 1.0, 1.0);
+        // The weather: a cloud, the temperature, the sky and the place.
+        // Inset from the panel's edges as much on the left as on top.
+        fill(px + 5.0, py + 7.0, 9.0, 5.0, 2.5, white, 0.9);
+        fill(px + 7.0, py + 5.0, 5.0, 5.0, 2.5, white, 0.9);
+        fill(px + 17.0, py + 5.5, 11.0, 6.0, 1.5, white, 0.92);
+        fill(px + 31.0, py + 5.5, 9.0, 2.2, 1.1, white, 0.8);
+        fill(px + 31.0, py + 9.5, 20.0, 1.6, 0.8, white, 0.45);
+        // Four tiles: the top two on, in the accent, the others cards.
+        let (pad, gap, th) = (5.0, 4.0, 15.0);
+        let tw = (TW - px - 2.0 * pad - gap) / 2.0;
+        for (i, (col, row)) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].into_iter().enumerate() {
+            let on = i < 2;
+            let (x, y) = (px + pad + col * (tw + gap), py + 16.0 + row * (th + gap));
+            fill(x, y, tw, th, 6.0, if on { accent } else { card }, 1.0);
+            let (ink, soft) = if on { (on_accent, 0.8) } else { (white, 0.9) };
+            fill(x + 4.5, y + th / 2.0 - 2.5, 5.0, 5.0, 2.5, ink, soft * 0.8);
+            fill(x + 13.0, y + 4.5, 16.0, 2.4, 1.2, ink, soft);
+            fill(x + 13.0, y + 9.5, 11.0, 1.8, 0.9, ink, soft * 0.6);
+        }
+    });
+    LIVE.with(|l| l.borrow_mut().push(a.downgrade()));
+    a
 }
 
 /// The menu bar's backdrop: "clear" shades the top, "glass" is a band, "adaptive" is half of
@@ -654,7 +675,7 @@ pub fn focus_mark(kind: &'static str) -> gtk::DrawingArea {
         let k = (w / TW).min(h / TH);
         cr.translate((w - TW * k) / 2.0, (h - TH * k) / 2.0);
         cr.scale(k, k);
-        let accent = named(a, "accent_bg_color", (0.55, 0.72, 0.95));
+        let accent = named(a, "d_accent", (0.55, 0.72, 0.95));
         pane(cr, 10.0, 14.0, 52.0, 44.0, 0.16);
         let (x, y, ww, hh) = (72.0, 14.0, 54.0, 44.0);
         pane(cr, x, y, ww, hh, 0.32);
