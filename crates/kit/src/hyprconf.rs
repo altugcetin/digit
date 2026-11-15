@@ -303,6 +303,8 @@ fn compositor() -> String {
 }
 
 fn compositor_with(t: &toml::Table, motion: bool, reduced: bool) -> String {
+    // Compositor animations off under Motion and effects stills the compositor like Reduce motion.
+    let motion = motion || !crate::prefs::flag(t, "compositor_motion", true);
     let pick = |key: &str| t.get(&format!("hypr_{key}")).cloned();
     let text = |key: &str, def: &str| pick(key).and_then(|v| v.as_str().map(str::to_string)).or_else(|| Some(def.to_string()));
     let num = |key: &str, def: f64| pick(key).and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))).or(Some(def));
@@ -426,19 +428,32 @@ fn compositor_with(t: &toml::Table, motion: bool, reduced: bool) -> String {
         out.push_str("hl.curve(\"md3_decel\", { type = \"bezier\", points = { { 0.05, 0.7 }, { 0.1, 1 } } })\n");
         out.push_str("hl.curve(\"md3_accel\", { type = \"bezier\", points = { { 0.3, 0 }, { 0.8, 0.15 } } })\n");
     }
+    // "none" turns that one animation off and leaves the rest moving.
     if let Some(w) = windows {
+        let on = enabled && w != "none";
         let style = if w == "slide" { "slide" } else { "popin 85%" };
-        out.push_str(&format!("hl.animation({{ leaf = \"windowsIn\", enabled = {enabled}, speed = 3, bezier = \"md3_decel\", style = \"{style}\" }})\n"));
-        out.push_str(&format!("hl.animation({{ leaf = \"windowsOut\", enabled = {enabled}, speed = 3, bezier = \"md3_accel\", style = \"{style}\" }})\n"));
+        out.push_str(&format!("hl.animation({{ leaf = \"windowsIn\", enabled = {on}, speed = 3, bezier = \"md3_decel\", style = \"{style}\" }})\n"));
+        out.push_str(&format!("hl.animation({{ leaf = \"windowsOut\", enabled = {on}, speed = 3, bezier = \"md3_accel\", style = \"{style}\" }})\n"));
     }
     if let Some(sp) = spaces {
-        let style = if sp == "horizontal" { "slidefade 20%" } else { "slidefadevert 20%" };
-        out.push_str(&format!("hl.animation({{ leaf = \"workspaces\", enabled = {enabled}, speed = 3, bezier = \"md3_standard\", style = \"{style}\" }})\n"));
+        let on = enabled && sp != "none";
+        let style = workspace_style(&sp);
+        out.push_str(&format!("hl.animation({{ leaf = \"workspaces\", enabled = {on}, speed = 3, bezier = \"md3_standard\", style = \"{style}\" }})\n"));
     }
     if flag("gesture", true) == Some(true) {
         out.push_str("-- Three fingers sideways switch workspaces.\nhl.gesture({ fingers = 3, direction = \"horizontal\", action = \"workspace\" })\n");
     }
     out
+}
+
+/// Hyprland's style for a Switching workspaces choice: a plain slide, or one that fades as it goes.
+fn workspace_style(choice: &str) -> &'static str {
+    match choice {
+        "horizontal" => "slide",
+        "horizontal_fade" => "slidefade 20%",
+        "vertical_fade" => "slidefadevert 20%",
+        _ => "slidevert",
+    }
 }
 
 /// digit-decorations.lua: gaps, borders, corners, shadows and motion of windows. The corner
@@ -570,6 +585,31 @@ mod tests {
     }
 
     #[test]
+    fn each_animation_can_be_none_and_workspaces_fade_only_when_chosen() {
+        let leaf = |s: &str, leaf: &str| s.lines().find(|l| l.contains(&format!("leaf = \"{leaf}\""))).unwrap().to_string();
+        for (choice, style) in [("vertical", "slidevert"), ("horizontal", "slide"), ("vertical_fade", "slidefadevert 20%"), ("horizontal_fade", "slidefade 20%")] {
+            let out = compositor_with(&format!("hypr_workspace_anim = '{choice}'").parse().unwrap(), false, false);
+            assert!(leaf(&out, "workspaces").contains(&format!("enabled = true, speed = 3, bezier = \"md3_standard\", style = \"{style}\"")));
+        }
+        let out = compositor_with(&"hypr_workspace_anim = 'none'".parse().unwrap(), false, false);
+        assert!(leaf(&out, "workspaces").contains("enabled = false"));
+        assert!(leaf(&out, "windowsIn").contains("enabled = true"));
+        assert!(out.contains("animations = { enabled = true }"));
+        let out = compositor_with(&"hypr_window_anim = 'none'".parse().unwrap(), false, false);
+        assert!(leaf(&out, "windowsIn").contains("enabled = false") && leaf(&out, "windowsOut").contains("enabled = false"));
+        assert!(leaf(&out, "workspaces").contains("enabled = true"));
+    }
+
+    #[test]
+    fn compositor_animations_off_stills_hyprland_like_reduce_motion() {
+        let t: toml::Table = "compositor_motion = false\nhypr_window_anim = 'slide'".parse().unwrap();
+        let out = compositor_with(&t, false, false);
+        assert!(out.contains("animations = { enabled = false }"));
+        assert!(out.lines().filter(|l| l.starts_with("hl.animation(")).all(|l| l.contains("enabled = false")));
+        assert!(compositor_with(&"compositor_motion = true".parse().unwrap(), false, false).contains("animations = { enabled = true }"));
+    }
+
+    #[test]
     fn reduced_motion_disables_all_animations_without_changing_stored_choices() {
         for windows in ["popin", "slide"] {
             for spaces in ["vertical", "horizontal"] {
@@ -586,7 +626,7 @@ mod tests {
                 let restored = compositor_with(&t, false, false);
                 assert!(restored.contains("animations = { enabled = true }"));
                 assert!(restored.contains(if windows == "slide" { "style = \"slide\"" } else { "style = \"popin 85%\"" }));
-                assert!(restored.contains(if spaces == "horizontal" { "style = \"slidefade 20%\"" } else { "style = \"slidefadevert 20%\"" }));
+                assert!(restored.contains(if spaces == "horizontal" { "style = \"slide\"" } else { "style = \"slidevert\"" }));
                 assert_eq!(toml::to_string(&t).unwrap(), stored, "config.toml choices stay stored");
             }
         }

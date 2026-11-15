@@ -192,6 +192,7 @@ fn compositor() -> String {
 }
 
 fn compositor_with(t: &toml::Table, motion: bool, reduced: bool) -> String {
+    let motion = motion || !crate::prefs::flag(t, "compositor_motion", true);
     let pick = |key: &str| t.get(&format!("hypr_{key}")).cloned();
     let text = |key: &str, def: &str| pick(key).and_then(|v| v.as_str().map(str::to_string)).or_else(|| Some(def.to_string()));
     let num = |key: &str, def: f64| pick(key).and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))).or(Some(def));
@@ -469,6 +470,12 @@ mod tests {
     fn qt_environment_is_opt_in() {
         assert!(!base_with(&toml::Table::new(), "").contains("QT_QPA_PLATFORMTHEME"));
         assert!(base_with(&"theme_qt = true".parse().unwrap(), "").contains("QT_QPA_PLATFORMTHEME \"qt6ct\""));
+    }
+
+    #[test]
+    fn compositor_animations_off_stills_niri() {
+        let t: toml::Table = "compositor_motion = false\nniri_motion = 'slow'".parse().unwrap();
+        assert!(compositor_with(&t, false, false).contains("animations {\n    off\n}"));
     }
 
     #[test]
