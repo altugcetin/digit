@@ -1058,7 +1058,7 @@ impl State {
             let ty = y + (i / 2) as f64 * (TILE_H + TILE_GAP) + if i >= 2 { opened } else { 0.0 };
             let (icon, title, state, on) = self.tile_look(*tile);
             let hovered = self.hover == Some(Hit::Tile(*tile));
-            let base = if on { pal.accent } else { pal.ink_main.mix(pal.body, if hovered { 0.11 } else { 0.06 }) };
+            let base = if on { pal.accent } else { pal.tile(if hovered { 0.11 } else { 0.06 }) };
             fill(s, &rounded(tx, ty, tile_w, TILE_H, (18.0 * self.app.round()).min(TILE_H / 2.0)), base);
             let (ink, sub) = if on { (pal.on_accent, pal.on_accent.mix(pal.accent, 0.72)) } else { (pal.ink_main, pal.ink_meta) };
             draw::icon(s, &canvas, &cfg, icon, 22.0, on, ink, tx + 30.0, ty + TILE_H / 2.0);
@@ -1095,7 +1095,7 @@ impl State {
             for (i, (glyph, name, frac, value, tint)) in cells.iter().enumerate() {
                 let cx = x0 + cw * i as f64 + cw / 2.0;
                 let cy = y + 28.0;
-                fill(s, &rounded(cx - 26.0, cy - 26.0, 52.0, 52.0, 26.0), pal.ink_main.mix(pal.body, 0.05));
+                fill(s, &rounded(cx - 26.0, cy - 26.0, 52.0, 52.0, 26.0), pal.tile(0.05));
                 ring(s, cx, cy, 22.0, *frac, 3.5, pal.ink_main.alpha(0.12), *tint);
                 draw::icon(s, &canvas, &cfg, glyph, 19.0, false, pal.ink_main, cx, cy);
                 draw::text(s, &canvas, &cfg, value, 13.0, Face::Number(560), pal.ink_main, cx - cw / 2.0 + 3.0, cy + 39.0, cw - 6.0, pango::Alignment::Center);
@@ -1118,7 +1118,7 @@ impl State {
         let (level, muted) = self.app.volume.get().unwrap_or((0.0, false));
         let mid = y + SOUND / 2.0;
         let mute_hover = self.hover == Some(Hit::Mute);
-        fill(s, &rounded(x0, mid - 18.0, 36.0, 36.0, 18.0), pal.ink_main.mix(pal.body, if mute_hover { 0.12 } else { 0.06 }));
+        fill(s, &rounded(x0, mid - 18.0, 36.0, 36.0, 18.0), pal.tile(if mute_hover { 0.12 } else { 0.06 }));
         let speaker = if muted { "volume_off" } else if level < 0.01 { "volume_mute" } else if level < 0.5 { "volume_down" } else { "volume_up" };
         draw::icon(s, &canvas, &cfg, speaker, 20.0, true, if muted { pal.ink_meta } else { pal.ink_main }, x0 + 18.0, mid);
         hits.push((Hit::Mute, x0, mid - 18.0 + shift, 36.0, 36.0));
@@ -1144,7 +1144,7 @@ impl State {
             let cw = draw::width(&canvas, &cfg, "Clear", 13.0, Face::Text(500)) + 20.0;
             let cx = x0 + inner - cw;
             if self.hover == Some(Hit::Clear) {
-                fill(s, &rounded(cx, y + 4.0, cw, HEAD - 8.0, (HEAD - 8.0) / 2.0), pal.ink_main.mix(pal.body, 0.08));
+                fill(s, &rounded(cx, y + 4.0, cw, HEAD - 8.0, (HEAD - 8.0) / 2.0), pal.tile(0.08));
             }
             draw::text(s, &canvas, &cfg, "Clear", 13.0, Face::Text(500), pal.ink_meta, cx + 10.0, y + HEAD / 2.0, cw - 20.0, pango::Alignment::Left);
             hits.push((Hit::Clear, cx, y + 4.0 + shift, cw, HEAD - 8.0));
@@ -1160,7 +1160,7 @@ impl State {
             }
             let hovered = matches!(self.hover, Some(Hit::Row(j)) | Some(Hit::Close(j)) if j == i);
             if hovered {
-                fill(s, &rounded(x0 - 6.0, ry + 2.0, inner + 12.0, ROW - 4.0, 14.0), pal.ink_main.mix(pal.body, 0.07));
+                fill(s, &rounded(x0 - 6.0, ry + 2.0, inner + 12.0, ROW - 4.0, 14.0), pal.tile(0.07));
             }
             let icon_box = rounded(x0 + 2.0, ry + ROW / 2.0 - 16.0, 32.0, 32.0, 9.0);
             match &n.icon {
@@ -1185,7 +1185,7 @@ impl State {
             let rx = x0 + inner - 36.0;
             if hovered {
                 let close_hover = self.hover == Some(Hit::Close(i));
-                fill(s, &rounded(rx + 4.0, ry + ROW / 2.0 - 14.0, 28.0, 28.0, 14.0), pal.ink_main.mix(pal.body, if close_hover { 0.14 } else { 0.08 }));
+                fill(s, &rounded(rx + 4.0, ry + ROW / 2.0 - 14.0, 28.0, 28.0, 14.0), pal.tile(if close_hover { 0.14 } else { 0.08 }));
                 draw::icon(s, &canvas, &cfg, "close", 16.0, false, pal.ink_sec, rx + 18.0, ry + ROW / 2.0);
             } else {
                 draw::text(s, &canvas, &cfg, &ago(n.at), 12.0, Face::Number(450), pal.ink_faint, rx - 4.0, ry + 22.0, 40.0, pango::Alignment::Right);

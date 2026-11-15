@@ -1259,7 +1259,7 @@ impl State {
                 Hit::Pin(_) => ("keep", c.pinned),
                 _ => ("close", false),
             };
-            let back = if on { pal.accent } else if hot { pal.ink_main.mix(pal.body, 0.12) } else { pal.body.alpha(0.0) };
+            let back = if on { pal.accent } else if hot { pal.tile(0.12) } else { pal.body.alpha(0.0) };
             draw::fill(s, &draw::round(item.x, item.y, item.w, item.h, item.h / 2.0), back);
             draw::icon(s, &self.paint, cfg, glyph, 18.0, on, if on { pal.on_accent } else { pal.ink_meta }, item.x + item.w / 2.0, item.y + item.h / 2.0);
         }
@@ -1278,7 +1278,7 @@ impl State {
         for (kind, sx) in &slots {
             let on = self.cards.iter().any(|c| c.kind == *kind && c.open);
             let hot = self.hot == Some(Hit::Bar(*kind));
-            let back = if on { pal.accent } else if hot { pal.ink_main.mix(pal.body, 0.12) } else { pal.body.alpha(0.0) };
+            let back = if on { pal.accent } else if hot { pal.tile(0.12) } else { pal.body.alpha(0.0) };
             draw::fill(s, &draw::round(x0 + sx, mid - SLOT / 2.0, SLOT, SLOT, SLOT / 2.0), back);
             let glyph = if *kind == Kind::Recorder && gsr::status().is_some() { "radio_button_checked" } else { kind.glyph() };
             let ink = if *kind == Kind::Recorder && gsr::status().is_some() { RED } else if on { pal.on_accent } else { pal.ink_main };

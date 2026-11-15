@@ -263,11 +263,11 @@ impl App {
     pub fn new(cfg: Config, blur: Option<blur::Blur>) -> Rc<Self> {
         let frosted = blur.as_ref().is_some_and(|b| b.able()) && !kit::effects::reduced();
         let prefs = crate::config::Prefs::from(&cfg);
-        let body = Self::body_for(&cfg, &cfg.surface, &cfg.ui_accent, Roles::default(), frosted, prefs.wide(&cfg));
+        let first = Self::palette_for(&cfg, &cfg.surface, &cfg.ui_accent, Roles::default(), frosted, prefs.wide(&cfg));
         let app = Rc::new(Self {
             blur,
-            palette: Cell::new(Palette::new(Roles::default(), body)),
-            palette_from: Cell::new(Palette::new(Roles::default(), body)),
+            palette: Cell::new(first),
+            palette_from: Cell::new(first),
             palette_since: Cell::new(0),
             motion_reduced: Cell::new(kit::motion::reduced()),
             effects_reduced: Cell::new(kit::effects::reduced()),
@@ -320,12 +320,28 @@ impl App {
         app
     }
 
-    /// Shell surfaces in the apps' colors: Black, Graphite or Tinted with the apps' accent (the
-    /// wallpaper's unless one is picked under Accent).
+    /// The apps' accent: the one picked under Accent, or the wallpaper's.
+    fn apps_accent(ui_accent: &str, roles: Roles) -> Rgb {
+        kit::style::custom_accent(ui_accent).map_or(roles.primary, |(a, _)| a)
+    }
+
+    /// "frosted" is what older configs chose; it reads as tinted.
+    fn surface_name(surface: &str) -> &str {
+        if surface == "frosted" { "tinted" } else { surface }
+    }
+
+    /// Shell surfaces in the apps' colors: Black, Graphite or Tinted with the apps' accent.
     fn surface(surface: &str, ui_accent: &str, roles: Roles) -> Rgb {
-        let accent = kit::style::custom_accent(ui_accent).map_or(roles.primary, |(a, _)| a);
-        // "frosted" is what older configs chose; it reads as tinted.
-        kit::style::base_color(if surface == "frosted" { "tinted" } else { surface }, accent)
+        kit::style::base_color(Self::surface_name(surface), Self::apps_accent(ui_accent, roles))
+    }
+
+    /// The shell's palette. On a surface in the apps' colors, its tiles are the apps' cards.
+    fn palette_for(cfg: &Config, surface: &str, ui_accent: &str, roles: Roles, frosted: bool, wide: bool) -> Palette {
+        let mut palette = Palette::new(roles, Self::body_for(cfg, surface, ui_accent, roles, frosted, wide));
+        if wide || (cfg.dock == Dock::Screen && !frosted) {
+            palette.card = kit::style::card_color(Self::surface_name(surface), Self::apps_accent(ui_accent, roles));
+        }
+        palette
     }
 
     fn body_for(cfg: &Config, surface: &str, ui_accent: &str, roles: Roles, frosted: bool, wide: bool) -> Rgb {
@@ -350,7 +366,7 @@ impl App {
             let p = self.prefs.borrow();
             (p.surface.clone(), p.ui_accent.clone(), p.wide(&self.cfg))
         };
-        let next = Palette::new(roles, Self::body_for(&self.cfg, &surface, &ui_accent, roles, frosted, wide));
+        let next = Self::palette_for(&self.cfg, &surface, &ui_accent, roles, frosted, wide);
         let now = Self::now();
         let shown = if self.notches.borrow().is_empty() { next } else { self.palette_at(now) };
         self.palette_from.set(shown);
@@ -498,8 +514,7 @@ impl App {
             palette.accent = accent;
             palette.on_accent = Rgb::hex(on_accent).expect("valid accent text color");
         }
-        palette.body = kit::style::card_color(&prefs.ui_surface, palette.accent);
-        palette
+        palette.on_body(kit::style::card_color(&prefs.ui_surface, palette.accent))
     }
 
     /// Screen edges and corners stay quiet while a fullscreen app is up, unless the user allows them.

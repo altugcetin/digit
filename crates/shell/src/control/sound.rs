@@ -91,7 +91,7 @@ impl State {
         s.push_clip(&graphene::Rect::new((x0 - 8.0) as f32, y as f32, (inner + 16.0) as f32, vis as f32));
         s.push_opacity(reveal.powf(0.6));
         let top = y + TOP;
-        fill(s, &rounded(x0, top, inner, full - TOP, 20.0 * self.app.round()), pal.ink_main.mix(pal.body, 0.045));
+        fill(s, &rounded(x0, top, inner, full - TOP, 20.0 * self.app.round()), pal.tile(0.045));
         let (cx, cw) = (x0 + 8.0, inner - 16.0);
         let left = pango::Alignment::Left;
         let mut local: Vec<(Hit, f64, f64, f64, f64)> = Vec::new();

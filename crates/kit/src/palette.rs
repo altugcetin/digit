@@ -109,12 +109,37 @@ pub struct Palette {
     pub ink_faint: Rgb,
     pub hairline: Rgb,
     pub raised: Rgb,
+    /// A tile at rest on the body (see [`Palette::tile`]): the apps' card color for the shell's
+    /// surface, or ink over the body as strongly as [`TILE_REST`].
+    pub card: Rgb,
     pub accent: Rgb,
     pub on_accent: Rgb,
     pub risk: Rgb,
 }
 
+/// How strongly a tile at rest is drawn: ink over the body this much, or the card color.
+pub const TILE_REST: f64 = 0.06;
+
 impl Palette {
+    /// A tile, button or well on the body, `t` as strong as ink over it would be. At
+    /// [`TILE_REST`] it is the card color; lighter ones fade into the body, and stronger ones (a
+    /// hovered tile) go from the card toward the ink. With the default card this is exactly ink
+    /// over the body by `t`.
+    pub fn tile(&self, t: f64) -> Rgb {
+        if t <= TILE_REST {
+            self.card.mix(self.body, (t / TILE_REST).max(0.0))
+        } else {
+            self.ink_main.mix(self.card, ((t - TILE_REST) / (1.0 - TILE_REST)).min(1.0))
+        }
+    }
+
+    /// The same palette over another body, its tiles drawn as ink over it.
+    pub fn on_body(mut self, body: Rgb) -> Palette {
+        self.body = body;
+        self.card = self.ink_main.mix(body, TILE_REST);
+        self
+    }
+
     pub fn lerp(&self, to: &Palette, t: f64) -> Palette {
         let m = |a: Rgb, b: Rgb| b.mix(a, t);
         Palette {
@@ -126,6 +151,7 @@ impl Palette {
             ink_faint: m(self.ink_faint, to.ink_faint),
             hairline: m(self.hairline, to.hairline),
             raised: m(self.raised, to.raised),
+            card: m(self.card, to.card),
             accent: m(self.accent, to.accent),
             on_accent: m(self.on_accent, to.on_accent),
             risk: m(self.risk, to.risk),
@@ -146,6 +172,7 @@ impl Palette {
             ink_faint: ink_for(60.0, roles.on_surface, ground),
             hairline: ink_for(16.0, roles.on_surface, ground),
             raised: main.mix(ground, 0.11),
+            card: main.mix(body, TILE_REST),
             accent: roles.primary,
             on_accent: roles.on_accent,
             risk: roles.error,
@@ -198,4 +225,29 @@ pub fn gtk_roles() -> Option<Roles> {
         on_accent: resolve("accent_fg_color").unwrap_or(fallback.on_accent),
         error: resolve("destructive_bg_color").or_else(|| resolve("error_color")).unwrap_or(fallback.error),
     })
+}
+
+#[cfg(test)]
+mod tile_tests {
+    use super::*;
+
+    fn close(a: Rgb, b: Rgb) -> bool {
+        (a.r - b.r).abs() < 1e-9 && (a.g - b.g).abs() < 1e-9 && (a.b - b.b).abs() < 1e-9 && (a.a - b.a).abs() < 1e-9
+    }
+
+    #[test]
+    fn tiles_are_ink_over_the_body_until_a_card_color_is_given() {
+        let p = Palette::new(Roles::default(), Rgb::new(0.07, 0.07, 0.08));
+        for t in [0.0, 0.03, 0.045, TILE_REST, 0.08, 0.11, 0.14, 0.5] {
+            assert!(close(p.tile(t), p.ink_main.mix(p.body, t)), "{t}");
+        }
+        let mut carded = p;
+        carded.card = Rgb::new(0.11, 0.12, 0.12);
+        assert!(close(carded.tile(TILE_REST), carded.card));
+        assert!(close(carded.tile(0.0), carded.body));
+        // Hovered tiles go lighter than the card, toward the ink.
+        assert!(carded.tile(0.11).r > carded.card.r && carded.tile(0.14).r > carded.tile(0.11).r);
+        let on = carded.on_body(Rgb::new(0.0, 0.0, 0.0));
+        assert!(close(on.tile(0.08), on.ink_main.mix(on.body, 0.08)));
+    }
 }

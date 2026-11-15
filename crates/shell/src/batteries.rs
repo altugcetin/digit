@@ -28,7 +28,7 @@ pub fn cell(s: &gtk::Snapshot, widget: &impl IsA<gtk::Widget>, cfg: &Config, pal
     let low = !g.charging && g.level <= 20;
     let tint = if g.charging { GREEN } else if low { RED } else { pal.ink_main };
     if disc {
-        draw::fill(s, &draw::round(cx - 26.0, cy - 26.0, 52.0, 52.0, 26.0), pal.ink_main.mix(pal.body, 0.05));
+        draw::fill(s, &draw::round(cx - 26.0, cy - 26.0, 52.0, 52.0, 26.0), pal.tile(0.05));
     }
     let ring = |frac: f64| {
         let pb = gsk::PathBuilder::new();
