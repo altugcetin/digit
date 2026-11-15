@@ -578,10 +578,11 @@ impl Notch {
                 let Some(v) = weak.upgrade() else { return };
                 if zone == Zone::Spaces {
                     // A dot in the workspace pill switches to its workspace.
-                    let picked = target.hovered_space().and_then(|i| v.borrow().spaces().0.get(i).map(|s| s.id));
-                    if let Some(id) = picked {
+                    let picked = target.hovered_space().and_then(|i| v.borrow().spaces().0.get(i).cloned());
+                    if let Some(space) = picked {
                         glib::spawn_future_local(async move {
-                            let _ = gtk::gio::spawn_blocking(move || kit::wm::focus_space(id)).await;
+                            // The empty one after the last may not exist yet: make it on this screen.
+                            let _ = gtk::gio::spawn_blocking(move || if space.filled || space.active { kit::wm::focus_space(space.id) } else { kit::wm::focus_space_index(space.idx, &space.output) }).await;
                         });
                     }
                     return;
@@ -1147,7 +1148,7 @@ impl View {
         let all = self.app.spaces.borrow();
         let list: Vec<_> = all.iter().filter(|s| s.output == self.output && (s.filled || s.active)).cloned().collect();
         let active = list.iter().position(|s| s.active).unwrap_or(0);
-        (list, active)
+        (with_next(list, &all, &self.output), active)
     }
 
 
@@ -1684,5 +1685,68 @@ mod tests {
         assert_eq!(phone_rows(false, 4).collect::<Vec<_>>(), vec![(0, 0), (1, 1), (2, 2)]);
         assert_eq!(phone_rows(true, 4).collect::<Vec<_>>(), vec![(1, 0), (2, 1)]);
         assert_eq!(phone_rows(true, 0).count(), 0);
+    }
+}
+
+/// The workspaces in use on `output`, and when the active one is the last of them and has
+/// windows, an empty one after it: the place a step to the right goes. niri keeps that empty
+/// workspace already; on Hyprland it's the next number no other screen is using.
+fn with_next(mut list: Vec<crate::compositor::Space>, all: &[crate::compositor::Space], output: &str) -> Vec<crate::compositor::Space> {
+    let Some(last) = list.last().filter(|s| s.active && s.filled).cloned() else { return list };
+    let next = all.iter().filter(|s| s.output == output && s.idx > last.idx && !s.filled).min_by_key(|s| s.idx).cloned();
+    let next = next.unwrap_or_else(|| {
+        let mut idx = last.idx + 1;
+        while all.iter().any(|s| s.idx == idx) {
+            idx += 1;
+        }
+        crate::compositor::Space { id: idx, idx, output: output.to_string(), active: false, focused: false, filled: false }
+    });
+    list.push(next);
+    list
+}
+
+#[cfg(test)]
+mod next_space_tests {
+    use super::with_next;
+    use crate::compositor::Space;
+
+    fn space(idx: u64, output: &str, active: bool, filled: bool) -> Space {
+        Space { id: idx, idx, output: output.into(), active, focused: active, filled }
+    }
+
+    fn shown(all: &[Space], output: &str) -> Vec<u64> {
+        let list: Vec<Space> = all.iter().filter(|s| s.output == output && (s.filled || s.active)).cloned().collect();
+        with_next(list, all, output).iter().map(|s| s.idx).collect()
+    }
+
+    #[test]
+    fn the_last_workspace_in_use_shows_an_empty_one_after_it() {
+        let mut all: Vec<Space> = (1..=4).map(|i| space(i, "DP-1", i == 4, true)).collect();
+        assert_eq!(shown(&all, "DP-1"), [1, 2, 3, 4, 5]);
+        all[3].active = false;
+        all[2].active = true;
+        assert_eq!(shown(&all, "DP-1"), [1, 2, 3, 4], "only on the rightmost");
+    }
+
+    #[test]
+    fn an_empty_active_workspace_adds_nothing_more() {
+        let mut all: Vec<Space> = (1..=4).map(|i| space(i, "DP-1", false, true)).collect();
+        all.push(space(5, "DP-1", true, false));
+        assert_eq!(shown(&all, "DP-1"), [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn niris_trailing_empty_workspace_is_the_one_shown() {
+        let mut all: Vec<Space> = (1..=3).map(|i| space(i, "eDP-1", i == 3, true)).collect();
+        all.push(Space { id: 42, idx: 4, output: "eDP-1".into(), active: false, focused: false, filled: false });
+        let list: Vec<Space> = all.iter().filter(|s| s.filled || s.active).cloned().collect();
+        assert_eq!(with_next(list, &all, "eDP-1").last().map(|s| s.id), Some(42));
+    }
+
+    #[test]
+    fn a_number_another_screen_uses_is_skipped() {
+        let mut all: Vec<Space> = (1..=2).map(|i| space(i, "DP-1", i == 2, true)).collect();
+        all.push(space(3, "HDMI-A-1", true, true));
+        assert_eq!(shown(&all, "DP-1"), [1, 2, 4]);
     }
 }
