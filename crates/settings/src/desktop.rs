@@ -719,12 +719,8 @@ fn shell_look(body: &gtk::Box, t: &toml::Table) {
         s => s.to_string(),
     };
     let at = SURFACES.iter().position(|s| s.0 == current).unwrap_or(0);
-    // The same colors as App surfaces, Tinted with the apps' accent.
-    let accent = kit::palette::Rgb::hex(&kit::style::ink().accent).unwrap_or(kit::palette::Rgb::new(0.82, 0.74, 1.0));
-    let items = SURFACES.iter().map(|(value, name)| {
-        let c = kit::style::base_color(value, accent);
-        (*name, kit::pictures::shell_surface((c.r, c.g, c.b)).upcast())
-    }).collect();
+    // The same colors as App surfaces: panels are the window color and their tiles the cards.
+    let items = SURFACES.iter().map(|(value, name)| (*name, kit::pictures::shell_surface(value).upcast())).collect();
     tiles(&look, "dark_mode", "Shell surfaces", "Notch, dock, menus and panels, in the same colors as App surfaces", items, at, |i| save("surface", toml::Value::String(SURFACES[i].0.into())));
     scheme_choice(&look, t);
     icon_theme_choice(&look, t);
@@ -1341,7 +1337,7 @@ fn draw_idle(a: &gtk::DrawingArea, cr: &gtk::cairo::Context, w: f64, h: f64, [lo
     let ink = a.color();
     let (r, g, b) = (ink.red() as f64, ink.green() as f64, ink.blue() as f64);
     #[allow(deprecated)]
-    let accent = a.style_context().lookup_color("accent_bg_color").map_or((0.55, 0.72, 0.95), |c| (c.red() as f64, c.green() as f64, c.blue() as f64));
+    let accent = a.style_context().lookup_color("d_accent").map_or((0.55, 0.72, 0.95), |c| (c.red() as f64, c.green() as f64, c.blue() as f64));
     let events: Vec<(f64, &str, &str)> = [(lock, "lock", "Lock"), (off, "monitor", "Screen off"), (sleep, "bedtime", "Sleep")].into_iter().filter(|e| e.0 > 0.0).collect();
     let span = events.iter().map(|e| e.0).fold(30.0_f64, f64::max) * 1.1;
     let (x0, x1, y) = (14.0, w - 14.0, h * 0.5);

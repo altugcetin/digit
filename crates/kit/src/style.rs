@@ -309,6 +309,10 @@ pub fn css() -> String {
 @define-color d_field {field};
 @define-color accent_bg_color {accent};
 @define-color accent_fg_color {on_accent};
+/* The same accent under names no GTK theme or gtk.css defines: GTK reads gtk.css once, at start,
+   above this, so pictures that draw in the accent look these up to follow a change live. */
+@define-color d_accent {accent};
+@define-color d_on_accent {on_accent};
 @define-color accent_color {accent};
 @define-color theme_selected_bg_color {accent};
 @define-color theme_selected_fg_color {on_accent};

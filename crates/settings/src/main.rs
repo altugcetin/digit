@@ -207,6 +207,7 @@ fn brand() -> gtk::DrawingArea {
 }
 
 fn refresh_brand() {
+    kit::pictures::redraw_live();
     SHELL.with(|s| {
         if let Some(shell) = s.borrow().as_ref() {
             shell.brand.queue_draw();
