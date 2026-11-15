@@ -1,6 +1,6 @@
 ---
 name: digit-design-principles
-description: Digit's design language — the calm, dark, Apple-leaning look and motion of the digit desktop shell (notch, dock, Spotlight, Control Center, Game Bar) and its companion apps (Settings, Store, Files, Screenshot, Recorder). Use before designing, changing or reviewing any UI in this repo: new panels, rows, buttons, cards, settings, animations, colors, spacing, copy, or when the user says something looks off, inconsistent, "slop", or "not like the rest of the shell".
+description: Digit's design language — the calm, dark, rounded look and motion of the digit desktop shell (notch, dock, Spotlight, Control Center, Game Bar) and its companion apps (Settings, Store, Files, Screenshot, Recorder). Use before designing, changing or reviewing any UI in this repo: new panels, rows, buttons, cards, settings, animations, colors, spacing, copy, or when the user says something looks off, inconsistent, "slop", or "not like the rest of the shell".
 ---
 
 # Digit design principles
@@ -16,7 +16,7 @@ These come straight from how the owner reviews work. Breaking them is what gets 
 3. **Selection = solid accent.** A selected row/item gets an `accent` fill with `on_accent` ink, exactly like other rows in that list. Don't invent a different selection style (outline, tinted border) for a special row.
 4. **Compact, not huge.** Prefer a row-sized element over a big card. Extra decoration that doesn't help the task (e.g. tone strips, ornamental gradients) is "slop" — leave it out.
 5. **Follow the user's look settings everywhere.** Corner radii scale with Roundness (`ui_round`), app surfaces follow Surfaces (black / graphite / tinted), accent follows the wallpaper or the chosen accent. Never hard-code `#000000`/`#050505` backgrounds or fixed radii in app UI.
-6. **New behaviour ships on, with an off switch.** Animations and conveniences (smooth scrolling, smooth caret, edge bounce…) default to on and get a toggle in Settings that applies live where possible.
+6. **New behaviour ships on, with an off switch, but extra chrome ships off.** Animations and conveniences (smooth scrolling, smooth caret, edge bounce…) default to on and get a toggle in Settings that applies live where possible. Optional decoration and secondary controls (desktop widget backgrounds, a widget's media buttons) default to **off**. Where a convenience doesn't suit a surface, leave it out there (the app grid's search uses the plain GTK caret).
 7. **Smooth, interruptible motion.** Every state change animates; any animation can be reversed mid-flight (e.g. scrolling the other way during an edge bounce cancels it immediately).
 
 ## 2. Color
@@ -43,6 +43,8 @@ Fixed semantic colors exist only for status: green `Rgb(0.19, 0.82, 0.35)` (call
 - tray/empty area hint: `ink_main.alpha(0.04)`
 
 In the GTK apps, CSS gets the same tokens: `@d_base`, `@d_card`, `@d_raised`, `@d_pop`, `@d_field` (from `kit::style::surfaces` for the chosen Surface), plus `{main}`, `{meta}`, `{accent}`, `{on_accent}`, `{risk}`. App content areas use `mix(@d_base, @d_card, 0.35)`, never a fixed black.
+
+**Surfaces** (`kit::style::base_color`): Black is pure black, Graphite a neutral dark grey (`#121214`), and Tinted a near-black base with 5 % of the accent mixed in (`BASE_TINT`). The shell's panels and the apps must give the **same** base for each choice. Tiles and chips on shell panels use the apps' card colour (`palette.tile`/`card`), so a Control Center tile and a Settings card read as one material. Don't tint at card level separately; the tint lives in the base.
 
 Palette changes (new wallpaper) cross-fade over 900 ms with `IN_OUT_CUBIC` (`app.palette_at(now)`); draw with `palette_at`, not a cached palette.
 
@@ -91,7 +93,7 @@ Use `kit::motion::{Tween, Curve}`; drive animations from the frame clock (`add_t
 
 - Dialogs and overlay cards use `kit::ui::settle` (fade + 18 px drop).
 - Hover is a tween per target (`glow[i]`), never an instant color swap; hovered round buttons grow by ~1.5 px.
-- Springs (edge rubber-band) are critically damped; resistance follows Apple's curve `(1 − 1/(x·0.55/d + 1))·d`.
+- Springs (edge rubber-band) are critically damped; resistance follows the curve `(1 − 1/(x·0.55/d + 1))·d`.
 - Panels that close on "leave" wait ~350 ms after the pointer leaves.
 - Prefer whole-pixel positions for moving text (round offsets) so text stays crisp.
 
@@ -108,17 +110,33 @@ Use `kit::motion::{Tween, Curve}`; drive animations from the frame clock (`add_t
 - Shell: `draw::{text, icon, slab, fill, round, monogram, paintable}`, glow-tween hover, `kit::ui::settle`, `overlay_card` + `overlay_handling`.
 - Scrollbars: thin pill (4 px, 8 px on hover, centred, no track or arrows). Wheel scrolling glides (`kit::scroll::smooth`).
 
-## 8. Copy
+## 8. Settings patterns
+
+- **Master switches grey out what they govern.** A switch that overrides other rows (Reduce motion over Compositor animations and the motion choices) keeps those rows visible but insensitive, with the reason in their subtitle (`controlled_in` in `desktop.rs`). Don't hide them.
+- **Choices list variants beside their plain form.** "Vertical, Vertical fade, Horizontal, Horizontal fade". Animation choices include **None**.
+- **Secondary actions appear on hover.** Reset, add (+) and remove buttons on a row use `button.on-hover`: invisible at rest, shown on row hover or keyboard focus. Only the row's main control stays visible.
+- **Multiple values in one row** (several keys for one shortcut) are chips in the row, with a hover-revealed + to add one. Clicking a chip records a new value or clears that one.
+- **A preview shows the real thing in live colours.** Picture tiles draw the actual component in miniature (the Shell surfaces picture is Control Center's corner with four tiles), redraw when accent or scheme change, and keep equal margins on the sides that touch the frame.
+- **Names say what both halves do.** When one shortcut does two things depending on context, name both ("Focus up or the previous workspace") and put the rule in the row's note.
+
+## 9. Desktop and drag-and-drop
+
+- **Desktop widgets** are compact cards in fixed sizes, transparent by default (background is an option), and placed by corner. They stay clear of the dock: when the dock is always shown, bottom widgets move up by the dock's height. Desktop icons flow around the space widgets reserve.
+- **Dragging:** the item being dragged is drawn above everything, the dock included. Where it would land opens a gap that previews the drop, and neighbours slide aside with the usual tweens. A release that ends a drag never also counts as a click (no app opens). Dragging between dock and app grid pins and unpins.
+
+## 10. Copy
 
 - UI strings are **English**, sentence case, short. Titles name the thing ("Smooth caret"); subtitles say the effect in one plain sentence ("The caret in Spotlight glides as you type and blinks softly").
 - Status lines are brief and human: "Not reachable", "Starting screen mirror…", "Couldn't reach the phone. Plug it in over USB or turn on wireless debugging".
 - No exclamation marks, no jargon when a plain word works, ellipsis "…" for in-progress states.
 
-## 9. Before you call a UI change done
+## 11. Before you call a UI change done
 
 - [ ] Does it match its nearest sibling in size, fill, radius, hover and selection?
 - [ ] No new borders, hard-coded colors or fixed radii; follows Surfaces, Roundness, accent?
 - [ ] Animated in and out with the curves above, interruptible, no flicker (shadows still)?
 - [ ] Compact; nothing decorative that the user didn't ask for?
-- [ ] New behaviour defaults on and has a Settings toggle?
+- [ ] New behaviour defaults on and has a Settings toggle; optional chrome defaults off?
+- [ ] Same base on Black / Graphite / Tinted as the apps; live accent via `@d_accent`, not `@accent_bg_color`?
+- [ ] Rows governed by a master switch grey out; secondary row buttons only on hover?
 - [ ] Checked on screen (grim screenshot) — not just compiled?
