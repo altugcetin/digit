@@ -21,10 +21,11 @@ pub fn list(app: &App) -> Vec<Gadget> {
     list
 }
 
-/// One device: a ring around its glyph, its level, and its name, centered on `cx` in a cell
-/// `cw` wide. `disc` fills the ring for a panel; on the wallpaper it stays clear.
+/// One device: a ring around its glyph, its level (unless not `levels`), and its name, centered
+/// on `cx` in a cell `cw` wide. `disc` fills the ring for a panel; on the wallpaper it stays
+/// clear.
 #[allow(clippy::too_many_arguments)]
-pub fn cell(s: &gtk::Snapshot, widget: &impl IsA<gtk::Widget>, cfg: &Config, pal: &Palette, g: &Gadget, cx: f64, cy: f64, cw: f64, disc: bool) {
+pub fn cell(s: &gtk::Snapshot, widget: &impl IsA<gtk::Widget>, cfg: &Config, pal: &Palette, g: &Gadget, cx: f64, cy: f64, cw: f64, disc: bool, levels: bool) {
     let low = !g.charging && g.level <= 20;
     let tint = if g.charging { GREEN } else if low { RED } else { pal.ink_main };
     if disc {
@@ -51,6 +52,9 @@ pub fn cell(s: &gtk::Snapshot, widget: &impl IsA<gtk::Widget>, cfg: &Config, pal
         Some(l) => l.to_string(),
         None => format!("{}%", g.level),
     };
-    draw::text(s, widget, cfg, &value, 13.0, Face::Number(560), if low { RED } else { pal.ink_main }, cx - cw / 2.0 + 3.0, cy + 39.0, cw - 6.0, pango::Alignment::Center);
-    draw::text(s, widget, cfg, &g.name, 11.5, Face::Text(450), pal.ink_meta, cx - cw / 2.0 + 3.0, cy + 56.0, cw - 6.0, pango::Alignment::Center);
+    if levels {
+        draw::text(s, widget, cfg, &value, 13.0, Face::Number(560), if low { RED } else { pal.ink_main }, cx - cw / 2.0 + 3.0, cy + 39.0, cw - 6.0, pango::Alignment::Center);
+    }
+    let name_y = if levels { cy + 56.0 } else { cy + 39.0 };
+    draw::text(s, widget, cfg, &g.name, 11.5, Face::Text(450), pal.ink_meta, cx - cw / 2.0 + 3.0, name_y, cw - 6.0, pango::Alignment::Center);
 }

@@ -128,7 +128,10 @@ async fn refresh(app: Rc<App>, generation: u64) -> bool {
         if let Some(c) = control {
             c.changed();
         }
-        if current() { crate::desk::changed(&app); }
+        if current() {
+            crate::desk::changed(&app);
+            crate::deskcards::changed();
+        }
     }
     true
 }

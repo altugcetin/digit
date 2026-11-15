@@ -74,7 +74,7 @@ fn profile_name(p: &str) -> &'static str {
     }
 }
 
-fn ring(s: &gtk::Snapshot, cx: f64, cy: f64, r: f64, frac: f64, width: f32, track: Rgb, tint: Rgb) {
+pub(crate) fn ring(s: &gtk::Snapshot, cx: f64, cy: f64, r: f64, frac: f64, width: f32, track: Rgb, tint: Rgb) {
     let path = |frac: f64| {
         let pb = gsk::PathBuilder::new();
         let start = -std::f64::consts::FRAC_PI_2;
@@ -1111,7 +1111,7 @@ impl State {
             for (i, g) in gadgets.iter().enumerate() {
                 let cx = x0 + cw * (i % PER_ROW) as f64 + cw / 2.0;
                 let cy = y + (i / PER_ROW) as f64 * CELL + 28.0;
-                crate::batteries::cell(s, &canvas, &cfg, &pal, g, cx, cy, cw, true);
+                crate::batteries::cell(s, &canvas, &cfg, &pal, g, cx, cy, cw, true, true);
             }
             y += gadgets.len().div_ceil(PER_ROW) as f64 * CELL + 6.0;
         }
