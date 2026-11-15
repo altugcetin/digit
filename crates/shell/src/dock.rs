@@ -237,6 +237,21 @@ fn monitor_for(output: Option<&str>) -> Option<gdk::Monitor> {
         .cloned()
 }
 
+/// How far the always-shown dock keeps windows off the left, right and bottom edges of
+/// `output`, 0 where it doesn't, so desktop widgets in those corners can sit clear of it.
+pub fn room(output: &str) -> [i32; 3] {
+    let Some(st) = current() else { return [0; 3] };
+    let Ok(s) = st.try_borrow() else { return [0; 3] };
+    if s.reserved <= 0 || s.output != output {
+        return [0; 3];
+    }
+    match s.geo.side {
+        Side::Left => [s.reserved, 0, 0],
+        Side::Right => [0, s.reserved, 0],
+        Side::Bottom => [0, 0, s.reserved],
+    }
+}
+
 pub fn primary_changed(app: &Rc<App>) {
     PREFER.with(|p| p.borrow_mut().take());
     apply(app);
@@ -1015,6 +1030,8 @@ fn settle(st: &Shared) {
         if zone != s.reserved {
             s.keep.set_exclusive_zone(zone);
             s.reserved = zone;
+            // Desktop widgets in the dock's corners move clear of it.
+            glib::idle_add_local_once(crate::deskcards::dock_moved);
         }
     }
     region(st);

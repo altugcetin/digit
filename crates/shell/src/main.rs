@@ -22,6 +22,7 @@ mod datepop;
 mod batteries;
 mod batterywidget;
 mod desk;
+mod deskcards;
 mod deskicons;
 mod devices;
 mod dock;
@@ -187,6 +188,7 @@ fn run() {
                     desk::apply(&app);
                     deskicons::apply(&app);
                     batterywidget::apply(&app);
+                    deskcards::apply(&app);
                     corners::apply(&app);
                 }
             });
@@ -217,6 +219,7 @@ fn run() {
     desk::apply(&app);
     deskicons::apply(&app);
     batterywidget::apply(&app);
+    deskcards::apply(&app);
     corners::apply(&app);
     if app.cfg.clipboard {
         clip::start(&app);
@@ -317,6 +320,7 @@ fn reshape(app: &Rc<App>, display: &gdk::Display, output: &str) {
     desk::apply(app);
     deskicons::apply(app);
     batterywidget::apply(app);
+    deskcards::apply(app);
     corners::apply(app);
 }
 

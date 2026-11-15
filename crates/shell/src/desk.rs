@@ -3,13 +3,40 @@ use crate::draw::{self, Face};
 use crate::paint::Paint;
 use gtk::{cairo, gdk, glib, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-use kit::palette::Rgb;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
 const W: i32 = 560;
 const H: i32 = 210;
+/// Room around the clock for its card, which reaches this far past what it shows.
+const PAD: f64 = crate::deskcards::CARD_PAD;
+/// The heights of the date, the time and the weather (with the gap above it).
+const DATE_H: f64 = 44.0;
+const TIME_H: f64 = 96.0;
+const WEATHER_H: f64 = 66.0;
+
+/// Which of the date and the weather show under the clock.
+fn rows(app: &App) -> (bool, bool) {
+    let p = app.prefs.borrow();
+    (p.desktop_clock_date, p.desktop_clock_weather && !p.weather_city.trim().is_empty())
+}
+
+/// How tall what the clock shows is.
+fn height(date: bool, weather: bool) -> f64 {
+    TIME_H + if date { DATE_H } else { 0.0 } + if weather { WEATHER_H } else { 0.0 }
+}
+
+/// How far a widget at the top left sits under the clock there: below it and its card. 0 while
+/// the clock isn't at the left.
+pub fn room(app: &App) -> i32 {
+    if app.prefs.borrow().desktop_widget != "left" {
+        return 0;
+    }
+    let (date, weather) = rows(app);
+    let card = if app.prefs.borrow().desktop_clock_bg { PAD } else { 0.0 };
+    (height(date, weather) + card + 8.0).round() as i32
+}
 
 thread_local! {
     static DESKS: RefCell<Vec<(String, gtk::Window, Paint)>> = const { RefCell::new(Vec::new()) };
@@ -70,13 +97,15 @@ pub fn apply(app: &Rc<App>) {
         window.set_monitor(Some(&m));
         window.add_css_class("digit");
         let center = mode == "center";
+        // The surface reaches PAD past the clock on every side, room for its card.
+        let pad = PAD as i32;
         window.set_anchor(Edge::Top, true);
         if !center {
             window.set_anchor(Edge::Left, true);
-            window.set_margin(Edge::Left, 64);
+            window.set_margin(Edge::Left, 64 - pad);
         }
-        window.set_margin(Edge::Top, if center { (m.geometry().height() as f64 * 0.16) as i32 } else { top });
-        let paint = Paint::new(W, H);
+        window.set_margin(Edge::Top, if center { (m.geometry().height() as f64 * 0.16) as i32 } else { top } - pad);
+        let paint = Paint::new(W + 2 * pad, H + 2 * pad);
         let weak = paint.downgrade();
         let a = Rc::downgrade(app);
         let output = name.clone();
@@ -98,26 +127,50 @@ pub fn apply(app: &Rc<App>) {
 
 fn draw_desk(s: &gtk::Snapshot, p: &Paint, app: &App, output: &str, center: bool) {
     let cfg = &app.cfg;
-    let luma = app.wallpapers.top_luma(output, 0.32).unwrap_or(0.0);
-    let dark = luma > 0.42;
-    let ink = if dark { Rgb::new(0.08, 0.08, 0.1) } else { Rgb::new(1.0, 1.0, 1.0) };
-    let shade = if dark { gdk::RGBA::new(1.0, 1.0, 1.0, 0.28) } else { gdk::RGBA::new(0.0, 0.0, 0.0, 0.32) };
+    let (date_on, weather_on) = rows(app);
+    let look = crate::deskcards::look(app, output, true, app.prefs.borrow().desktop_clock_bg);
+    let ink = look.ink;
     let dt = glib::DateTime::now_local().ok();
     let time = dt.as_ref().and_then(|d| d.format(&cfg.clock).ok()).map(|s| s.to_string()).unwrap_or_default();
     let date = dt.as_ref().and_then(|d| d.format("%A, %-d %B").ok()).map(|s| s.to_string()).unwrap_or_default();
+    let wx = app.weather.borrow().clone().filter(|_| weather_on);
+    let line = wx.as_ref().map(|wx| format!("{}°  {}  ·  H {}°  L {}°", wx.temp.round(), crate::weather::describe(wx.code), wx.hi.round(), wx.lo.round()));
     let align = if center { pango::Alignment::Center } else { pango::Alignment::Left };
     let w = W as f64;
-    let shadow = !kit::effects::reduced();
-    if shadow { s.push_shadow(&[gtk::gsk::Shadow::new(shade, 0.0, 1.0, 14.0)]); }
-    draw::text(s, p, cfg, &date, 21.0, Face::Text(560), ink.alpha(0.88), 0.0, 22.0, w, align);
-    draw::text(s, p, cfg, &time, 96.0, Face::Text(330), ink.alpha(0.96), 0.0, 92.0, w, align);
-    if let Some(wx) = app.weather.borrow().as_ref() {
-        let line = format!("{}°  {}  ·  H {}°  L {}°", wx.temp.round(), crate::weather::describe(wx.code), wx.hi.round(), wx.lo.round());
-        let tw = draw::width(p, cfg, &line, 17.0, Face::Text(500)).ceil();
-        let gx = if center { (w - tw - 30.0) / 2.0 } else { 2.0 };
-        draw::icon(s, p, cfg, crate::weather::glyph(wx.code, wx.day), 22.0, true, ink.alpha(0.9), gx + 11.0, 168.0);
-        draw::text(s, p, cfg, &line, 17.0, Face::Text(500), ink.alpha(0.88), gx + 30.0, 168.0, tw + 2.0, pango::Alignment::Left);
-        draw::text(s, p, cfg, &wx.place, 14.0, Face::Text(450), ink.alpha(0.66), 0.0, 194.0, if center { w } else { w - 4.0 }, align);
+    // What shows, top to bottom, and how wide its widest line is.
+    let mut widths = vec![draw::width(p, cfg, &time, 96.0, Face::Text(330))];
+    if date_on {
+        widths.push(draw::width(p, cfg, &date, 21.0, Face::Text(560)));
     }
-    if shadow { s.pop(); }
+    if let (Some(line), Some(wx)) = (&line, &wx) {
+        widths.push(draw::width(p, cfg, line, 17.0, Face::Text(500)) + 30.0);
+        widths.push(draw::width(p, cfg, &wx.place, 14.0, Face::Text(450)));
+    }
+    let cw = widths.into_iter().fold(0.0_f64, f64::max).ceil().min(w);
+    if let Some(fill) = look.card {
+        let x0 = if center { PAD + (w - cw) / 2.0 } else { PAD };
+        let h = height(date_on, wx.is_some());
+        crate::deskcards::card(s, app, (x0 - PAD, 0.0, cw + 2.0 * PAD, h + 2.0 * PAD), fill);
+    }
+    if let Some(shade) = look.shade {
+        s.push_shadow(&[gtk::gsk::Shadow::new(shade, 0.0, 1.0, 14.0)]);
+    }
+    let mut y = PAD;
+    if date_on {
+        draw::text(s, p, cfg, &date, 21.0, Face::Text(560), ink.alpha(0.88), PAD, y + 22.0, w, align);
+        y += DATE_H;
+    }
+    draw::text(s, p, cfg, &time, 96.0, Face::Text(330), ink.alpha(0.96), PAD, y + 48.0, w, align);
+    y += TIME_H;
+    if let (Some(line), Some(wx)) = (line, wx) {
+        y += 10.0;
+        let tw = draw::width(p, cfg, &line, 17.0, Face::Text(500)).ceil();
+        let gx = PAD + if center { (w - tw - 30.0) / 2.0 } else { 2.0 };
+        draw::icon(s, p, cfg, crate::weather::glyph(wx.code, wx.day), 22.0, true, ink.alpha(0.9), gx + 11.0, y + 18.0);
+        draw::text(s, p, cfg, &line, 17.0, Face::Text(500), ink.alpha(0.88), gx + 30.0, y + 18.0, tw + 2.0, pango::Alignment::Left);
+        draw::text(s, p, cfg, &wx.place, 14.0, Face::Text(450), ink.alpha(0.66), PAD, y + 44.0, if center { w } else { w - 4.0 }, align);
+    }
+    if look.shade.is_some() {
+        s.pop();
+    }
 }

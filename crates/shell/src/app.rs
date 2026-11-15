@@ -691,9 +691,11 @@ impl App {
             crate::desk::apply(self);
         }
         crate::deskicons::apply(self);
-        if (&before.desktop_battery, &before.desktop_widget) != (&next.desktop_battery, &next.desktop_widget) {
-            crate::batterywidget::apply(self);
-        }
+        // Each widget's options (what the clock shows, levels, cards) redraw it, and the room the
+        // clock takes moves what sits under it; apply only rebuilds what moved.
+        crate::desk::changed(self);
+        crate::batterywidget::apply(self);
+        crate::deskcards::apply(self);
         if before.screen_corners != next.screen_corners {
             crate::corners::apply(self);
         }
@@ -787,6 +789,7 @@ impl App {
         for n in self.notches.borrow().iter() {
             n.redraw();
         }
+        crate::deskcards::media_changed();
     }
 
     pub fn changed(&self) {

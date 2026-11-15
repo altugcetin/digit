@@ -1422,7 +1422,7 @@ fn desktop(body: &gtk::Box, t: &toml::Table) {
     end.append(&pickb);
     desk.append(&row);
     desk_widgets(&desk, t);
-    field(&desk, "location_on", "Weather city", "Shown in Control Center and on the desktop clock. The city name goes to open-meteo.com over HTTPS; leave empty to keep weather off", "weather_city", &prefs::get_str(t, "weather_city", ""), "Istanbul", |_| true);
+    field(&desk, "location_on", "Weather city", "Shown in Control Center, under the desktop clock and in the Weather widget. The city name goes to open-meteo.com over HTTPS; leave empty to keep weather off", "weather_city", &prefs::get_str(t, "weather_city", ""), "Istanbul", |_| true);
     choice(&desk, "device_thermostat", "Units", "", "weather_unit", &[("celsius", "°C"), ("fahrenheit", "°F")], &prefs::get_str(t, "weather_unit", "celsius"));
     if gtk::gdk::Display::default().is_some_and(|d| d.monitors().n_items() > 1) {
         const LAYOUTS: [(&str, &str); 3] = [("same", "Same on each"), ("span", "Span across"), ("separate", "One per screen")];
@@ -1452,18 +1452,47 @@ struct DeskWidget {
     key: &'static str,
     places: &'static [(&'static str, &'static str)],
     draw: fn(&gtk::cairo::Context, Rect, f64),
+    /// What can be turned on or off for it, offered when its spot is clicked: setting, name and
+    /// default. Its "_bg" setting puts it on a card.
+    options: &'static [(&'static str, &'static str, bool)],
 }
 
-const WIDGETS: [DeskWidget; 2] = [
-    DeskWidget { id: "clock", name: "Clock", key: "desktop_widget", places: &[("top_left", "left"), ("top_center", "center")], draw: draw_clock },
+/// The four corners, each stored under its own name.
+const CORNERS_ONLY: &[(&str, &str)] = &[("top_left", "top_left"), ("top_right", "top_right"), ("bottom_left", "bottom_left"), ("bottom_right", "bottom_right")];
+
+const WIDGETS: [DeskWidget; 5] = [
+    DeskWidget {
+        id: "clock",
+        name: "Clock",
+        key: "desktop_widget",
+        places: &[("top_left", "left"), ("top_center", "center")],
+        draw: draw_clock,
+        options: &[("desktop_clock_date", "Date", true), ("desktop_clock_weather", "Weather", true), ("desktop_clock_bg", "Background", false)],
+    },
     DeskWidget {
         id: "batteries",
         name: "Batteries",
         key: "desktop_battery",
-        places: &[("top_left", "top_left"), ("top_right", "top_right"), ("bottom_left", "bottom_left"), ("bottom_right", "bottom_right")],
+        places: CORNERS_ONLY,
         draw: draw_batteries,
+        options: &[("desktop_battery_levels", "Levels", true), ("desktop_battery_bg", "Background", false)],
     },
+    DeskWidget {
+        id: "media",
+        name: "Now playing",
+        key: "desktop_media",
+        places: CORNERS_ONLY,
+        draw: draw_media,
+        options: &[("desktop_media_controls", "Player controls", false), ("desktop_media_bg", "Background", false)],
+    },
+    DeskWidget { id: "weather", name: "Weather", key: "desktop_weather", places: CORNERS_ONLY, draw: draw_weather, options: &[("desktop_weather_bg", "Background", false)] },
+    DeskWidget { id: "system", name: "System", key: "desktop_system", places: CORNERS_ONLY, draw: draw_system, options: &[("desktop_system_bg", "Background", false)] },
 ];
+
+/// Whether each widget sits on a card, from its "_bg" option.
+fn cards(t: &toml::Table) -> Vec<bool> {
+    WIDGETS.iter().map(|w| w.options.iter().find(|o| o.0.ends_with("_bg")).is_some_and(|o| prefs::get_bool(t, o.0, o.2))).collect()
+}
 
 /// Where each widget is now (its spot, or None when it's off), from the settings.
 fn placed(t: &toml::Table) -> Vec<Option<&'static str>> {
@@ -1478,6 +1507,7 @@ fn desk_widgets(card: &gtk::Box, t: &toml::Table) {
     let (row, _) = ui::row(Some("dashboard_customize"), "Desktop widgets", "Click a spot on the screen to choose what sits there");
     card.append(&row);
     let state = Rc::new(std::cell::RefCell::new(placed(t)));
+    let backed = Rc::new(std::cell::RefCell::new(cards(t)));
     let hover: Rc<Cell<Option<usize>>> = Rc::default();
     let area = gtk::DrawingArea::new();
     area.add_css_class("desk-map");
@@ -1488,20 +1518,25 @@ fn desk_widgets(card: &gtk::Box, t: &toml::Table) {
     area.set_cursor_from_name(Some("pointer"));
     let caption = gtk::Label::new(None);
     caption.add_css_class("corner-name");
+    caption.set_wrap(true);
+    caption.set_justify(gtk::Justification::Center);
     let say = {
         let (st, caption) = (state.clone(), caption.downgrade());
         move || {
             let st = st.borrow();
-            let parts: Vec<String> = WIDGETS.iter().zip(st.iter()).map(|(w, at)| {
-                format!("{}: {}", w.name, at.and_then(|a| SPOTS.iter().find(|s| s.0 == a)).map_or("Off", |s| s.1))
+            // What's out, in screen order; there are more widgets than fit in a line otherwise.
+            let parts: Vec<String> = SPOTS.iter().filter_map(|(spot, place, _)| {
+                let w = WIDGETS.iter().zip(st.iter()).find(|(_, at)| **at == Some(*spot))?.0;
+                Some(format!("{}: {}", w.name, place.to_lowercase()))
             }).collect();
-            if let Some(c) = caption.upgrade() { c.set_text(&parts.join("   ·   ")); }
+            let text = if parts.is_empty() { "No widgets yet".to_string() } else { parts.join("   ·   ") };
+            if let Some(c) = caption.upgrade() { c.set_text(&text); }
         }
     };
     say();
     {
-        let (st, hv) = (state.clone(), hover.clone());
-        area.set_draw_func(move |_, cr, w, h| draw_desk_map(cr, w as f64, h as f64, &st.borrow(), hv.get()));
+        let (st, hv, bk) = (state.clone(), hover.clone(), backed.clone());
+        area.set_draw_func(move |_, cr, w, h| draw_desk_map(cr, w as f64, h as f64, &st.borrow(), &bk.borrow(), hv.get()));
     }
     let spot_at = |x: f64, y: f64, w: f64, h: f64| {
         SPOTS.iter().position(|(id, _, r)| WIDGETS.iter().any(|wd| wd.places.iter().any(|p| p.0 == *id)) && x >= r.0 * w && x <= (r.0 + r.2) * w && y >= r.1 * h && y <= (r.1 + r.3) * h)
@@ -1552,6 +1587,23 @@ fn desk_widgets(card: &gtk::Box, t: &toml::Table) {
     }
     let group = gio::SimpleActionGroup::new();
     group.add_action(&put);
+    // Each widget's options, as checks in the menu of its spot.
+    for (i, w) in WIDGETS.iter().enumerate() {
+        for &(key, _, default) in w.options {
+            let action = gio::SimpleAction::new_stateful(&option_action(key), None, &prefs::get_bool(t, key, default).to_variant());
+            let (bk, a) = (backed.clone(), area.downgrade());
+            action.connect_activate(move |action, _| {
+                let on = !action.state().and_then(|v| v.get::<bool>()).unwrap_or(default);
+                if !save(key, toml::Value::Boolean(on)) { return; }
+                action.set_state(&on.to_variant());
+                if key.ends_with("_bg") {
+                    bk.borrow_mut()[i] = on;
+                    if let Some(a) = a.upgrade() { a.queue_draw(); }
+                }
+            });
+            group.add_action(&action);
+        }
+    }
     area.insert_action_group("desk", Some(&group));
     let click = gtk::GestureClick::new();
     {
@@ -1565,10 +1617,20 @@ fn desk_widgets(card: &gtk::Box, t: &toml::Table) {
             let here = WIDGETS.iter().zip(st.borrow().iter()).find(|(_, at)| **at == Some(id)).map_or("none", |(wd, _)| wd.id);
             put.set_state(&here.to_variant());
             let menu = gio::Menu::new();
+            let choices = gio::Menu::new();
             for wd in WIDGETS.iter().filter(|wd| wd.places.iter().any(|p| p.0 == id)) {
-                menu.append(Some(wd.name), Some(&format!("desk.put::{}", wd.id)));
+                choices.append(Some(wd.name), Some(&format!("desk.put::{}", wd.id)));
             }
-            menu.append(Some("Nothing"), Some("desk.put::none"));
+            choices.append(Some("Nothing"), Some("desk.put::none"));
+            menu.append_section(None, &choices);
+            // What the widget here shows, and whether it has a card.
+            if let Some(wd) = WIDGETS.iter().find(|wd| wd.id == here) {
+                let options = gio::Menu::new();
+                for (key, name, _) in wd.options {
+                    options.append(Some(name), Some(&format!("desk.{}", option_action(key))));
+                }
+                menu.append_section(Some(wd.name), &options);
+            }
             let pop = gtk::PopoverMenu::from_model(Some(&menu));
             pop.set_parent(&a);
             pop.set_has_arrow(false);
@@ -1604,9 +1666,6 @@ fn draw_clock(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
 }
 
 fn draw_batteries(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
-    cr.set_source_rgba(0.0, 0.0, 0.0, 0.30 * alpha);
-    kit::paint::rounded(cr, x, y, rw, rh, rh * 0.22);
-    let _ = cr.fill();
     let rad = rh * 0.26;
     cr.set_line_width(rh * 0.09);
     for (i, level) in [0.8, 0.55, 0.3].iter().enumerate() {
@@ -1621,9 +1680,76 @@ fn draw_batteries(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
     }
 }
 
+/// The menu action of a widget option: its setting, as action names allow.
+fn option_action(key: &str) -> String {
+    format!("opt-{}", key.replace('_', "-"))
+}
+
+/// A white shape on the small screen.
+fn blob(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, alpha: f64) {
+    cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
+    kit::paint::rounded(cr, x, y, w, h, w.min(h) / 2.0);
+    let _ = cr.fill();
+}
+
+fn draw_media(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
+    let a = rh * 0.62;
+    let (ax, ay) = (x + rw * 0.06, y + (rh - a) / 2.0);
+    let g = gtk::cairo::LinearGradient::new(ax, ay, ax + a, ay + a);
+    g.add_color_stop_rgba(0.0, 0.93, 0.36, 0.30, alpha);
+    g.add_color_stop_rgba(1.0, 0.98, 0.78, 0.40, alpha);
+    kit::paint::rounded(cr, ax, ay, a, a, a * 0.2);
+    let _ = cr.set_source(&g);
+    let _ = cr.fill();
+    let tx = ax + a + rw * 0.07;
+    let tw = x + rw * 0.94 - tx;
+    blob(cr, tx, ay + a * 0.2, tw * 0.8, rh * 0.08, 0.95 * alpha);
+    blob(cr, tx, ay + a * 0.42, tw * 0.5, rh * 0.06, 0.6 * alpha);
+    blob(cr, tx, ay + a * 0.68, tw, rh * 0.035, 0.3 * alpha);
+    blob(cr, tx, ay + a * 0.68, tw * 0.6, rh * 0.035, 0.9 * alpha);
+}
+
+fn draw_weather(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
+    // A sun behind a cloud, the temperature beside it, and the coming hours under them.
+    let (cx, cy, r) = (x + rw * 0.14, y + rh * 0.3, rh * 0.13);
+    cr.set_source_rgba(1.0, 0.82, 0.35, alpha);
+    cr.arc(cx + r * 0.5, cy - r * 0.4, r, 0.0, std::f64::consts::TAU);
+    let _ = cr.fill();
+    blob(cr, cx - r * 1.1, cy, r * 2.6, r * 1.2, 0.95 * alpha);
+    let l = kit::paint::layout(cr, "11°", &format!("Readex Pro Light {}", (rh * 0.36).round()));
+    let (_, ext) = l.pixel_extents();
+    cr.move_to(x + rw * 0.3 - ext.x() as f64, cy - ext.height() as f64 / 2.0 - ext.y() as f64);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.95 * alpha);
+    kit::paint::show(cr, &l);
+    let rx = x + rw * 0.3 + ext.width() as f64 + rw * 0.06;
+    blob(cr, rx, cy - rh * 0.1, rw * 0.22, rh * 0.06, 0.85 * alpha);
+    blob(cr, rx, cy + rh * 0.04, rw * 0.16, rh * 0.05, 0.55 * alpha);
+    for i in 0..5 {
+        let hx = x + rw * (0.12 + 0.19 * i as f64);
+        blob(cr, hx - rh * 0.05, y + rh * 0.66, rh * 0.1, rh * 0.1, 0.85 * alpha);
+        blob(cr, hx - rh * 0.06, y + rh * 0.83, rh * 0.12, rh * 0.05, 0.6 * alpha);
+    }
+}
+
+fn draw_system(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
+    let rad = rh * 0.2;
+    cr.set_line_width(rh * 0.07);
+    for (i, level) in [0.46, 0.62, 0.3, 0.55].iter().enumerate() {
+        let (cx, cy) = (x + rw * (0.13 + 0.248 * i as f64), y + rh * 0.42);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.25 * alpha);
+        cr.arc(cx, cy, rad, 0.0, std::f64::consts::TAU);
+        let _ = cr.stroke();
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.95 * alpha);
+        let start = -std::f64::consts::FRAC_PI_2;
+        cr.arc(cx, cy, rad, start, start + std::f64::consts::TAU * level);
+        let _ = cr.stroke();
+        blob(cr, cx - rh * 0.09, y + rh * 0.78, rh * 0.18, rh * 0.06, 0.7 * alpha);
+    }
+}
+
 /// The small screen: the wallpaper, the notch, every widget in its spot and the empty spots,
 /// dashed with a plus.
-fn draw_desk_map(cr: &gtk::cairo::Context, w: f64, h: f64, placed: &[Option<&'static str>], hover: Option<usize>) {
+fn draw_desk_map(cr: &gtk::cairo::Context, w: f64, h: f64, placed: &[Option<&'static str>], backed: &[bool], hover: Option<usize>) {
     let g = gtk::cairo::LinearGradient::new(0.0, 0.0, w, h);
     g.add_color_stop_rgb(0.0, 0.34, 0.43, 0.62);
     g.add_color_stop_rgb(1.0, 0.86, 0.55, 0.42);
@@ -1639,7 +1765,7 @@ fn draw_desk_map(cr: &gtk::cairo::Context, w: f64, h: f64, placed: &[Option<&'st
         let rect = (r.0 * w, r.1 * h, r.2 * w, r.3 * h);
         let hot = hover == Some(i);
         // Two widgets can share a spot from older settings: the second sits under the first.
-        let here: Vec<&DeskWidget> = WIDGETS.iter().zip(placed.iter()).filter(|(_, at)| **at == Some(*id)).map(|(wd, _)| wd).collect();
+        let here: Vec<(&DeskWidget, bool)> = WIDGETS.iter().zip(placed.iter()).zip(backed.iter()).filter(|((_, at), _)| **at == Some(*id)).map(|((wd, _), card)| (wd, *card)).collect();
         if hot {
             cr.set_source_rgba(1.0, 1.0, 1.0, 0.16);
             kit::paint::rounded(cr, rect.0, rect.1, rect.2, rect.3, rect.3 * 0.22);
@@ -1660,8 +1786,13 @@ fn draw_desk_map(cr: &gtk::cairo::Context, w: f64, h: f64, placed: &[Option<&'st
             cr.line_to(cx, cy + arm);
             let _ = cr.stroke();
         }
-        for (k, wd) in here.iter().enumerate() {
+        for (k, (wd, card)) in here.iter().enumerate() {
             let dy = k as f64 * (rect.3 + h * 0.03);
+            if *card {
+                cr.set_source_rgba(0.08, 0.08, 0.1, 0.42);
+                kit::paint::rounded(cr, rect.0, rect.1 + dy, rect.2, rect.3, rect.3 * 0.24);
+                let _ = cr.fill();
+            }
             (wd.draw)(cr, (rect.0, rect.1 + dy, rect.2, rect.3), 1.0);
         }
     }

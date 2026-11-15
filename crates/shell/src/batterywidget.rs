@@ -4,7 +4,6 @@ use crate::app::App;
 use crate::paint::Paint;
 use gtk::{cairo, gdk, glib, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-use kit::palette::Rgb;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -17,8 +16,6 @@ const INSET: f64 = 12.0;
 const AIR: f64 = 28.0;
 const SURFACE_W: f64 = SHOWN as f64 * CELL_W + 2.0 * INSET + 2.0 * AIR;
 const SURFACE_H: f64 = CARD_H + 2.0 * AIR;
-// Clears the desktop clock when both sit top left.
-const CLOCK_ROOM: i32 = 214;
 
 /// The card face (excluding its shadow), in logical monitor coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -37,39 +34,26 @@ fn card_x(left: bool, width: f64, card_width: f64) -> f64 {
     if left { AIR } else { width - AIR - card_width }
 }
 
-fn surface_margin(top: bool, left: bool, top_margin: i32, clock: &str) -> i32 {
-    if top {
-        top_margin
-            + if left && clock == "left" {
-                CLOCK_ROOM
-            } else {
-                0
-            }
-    } else {
-        0
-    }
+/// The surface's margin from the top or bottom edge: under the bar (and `clock`, the room the
+/// clock takes at the top left) at the top, clear of the dock (`dock`) at the bottom.
+fn surface_margin(top: bool, left: bool, top_margin: i32, clock: i32, dock: i32) -> i32 {
+    if top { top_margin + if left { clock } else { 0 } } else { dock }
 }
 
-pub(crate) fn card_rect(
-    placement: &str,
-    device_count: usize,
-    screen: (i32, i32),
-    top_margin: i32,
-    clock: &str,
-) -> Option<CardRect> {
+/// Where the batteries sit on a screen `screen` big. `clock` is the room the desktop clock takes
+/// at the top left (see `desk::room`) and `dock` the room the dock keeps on the left, right and
+/// bottom (see `dock::room`).
+pub(crate) fn card_rect(placement: &str, device_count: usize, screen: (i32, i32), top_margin: i32, clock: i32, dock: [i32; 3]) -> Option<CardRect> {
     if matches!(placement, "" | "off") || device_count == 0 {
         return None;
     }
     let (top, left) = (placement.starts_with("top"), placement.ends_with("left"));
-    let margin = surface_margin(top, left, top_margin, clock) as f64;
+    let margin = surface_margin(top, left, top_margin, clock, dock[2]) as f64;
+    let side = if left { dock[0] } else { dock[1] } as f64;
     let w = card_width(device_count);
     Some(CardRect {
-        x: card_x(left, screen.0 as f64, w),
-        y: if top {
-            margin + AIR
-        } else {
-            screen.1 as f64 - margin - AIR - CARD_H
-        },
+        x: if left { side + card_x(true, screen.0 as f64, w) } else { card_x(false, screen.0 as f64 - side, w) },
+        y: if top { margin + AIR } else { screen.1 as f64 - margin - AIR - CARD_H },
         w,
         h: CARD_H,
     })
@@ -100,21 +84,22 @@ fn clear() {
 }
 
 /// The primary display, or the first one.
-fn monitor() -> Option<gdk::Monitor> {
+pub(crate) fn monitor() -> Option<gdk::Monitor> {
     let primary = kit::prefs::text(&kit::prefs::read(), "primary_monitor", "");
     let all: Vec<gdk::Monitor> = gdk::Display::default()?.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect();
     all.iter().find(|m| m.connector().is_some_and(|c| c == primary)).or(all.first()).cloned()
 }
 
 pub fn apply(app: &Rc<App>) {
-    let (place, clock) = {
-        let prefs = app.prefs.borrow();
-        (prefs.desktop_battery.clone(), prefs.desktop_widget.clone())
-    };
+    let place = app.prefs.borrow().desktop_battery.clone();
+    let clock = crate::desk::room(app);
     let target = monitor();
     let output = target.as_ref().and_then(|m| m.connector()).map(|c| c.to_string()).unwrap_or_default();
-    let key = (format!("{place} {clock}"), output.clone());
+    let dock = crate::dock::room(&output);
+    let key = (format!("{place} {clock} {} {dock:?}", app.reserve()), output.clone());
     if SHOWN_AT.with(|s| *s.borrow() == key) && WIDGET.with(|w| w.borrow().is_some()) {
+        // Same place: options (levels, the card) only need a redraw.
+        changed();
         return;
     }
     clear();
@@ -131,10 +116,8 @@ pub fn apply(app: &Rc<App>) {
     window.add_css_class("digit");
     window.set_anchor(if top { Edge::Top } else { Edge::Bottom }, true);
     window.set_anchor(if left { Edge::Left } else { Edge::Right }, true);
-    window.set_margin(
-        if top { Edge::Top } else { Edge::Bottom },
-        surface_margin(top, left, app.reserve(), &clock),
-    );
+    window.set_margin(if top { Edge::Top } else { Edge::Bottom }, surface_margin(top, left, app.reserve(), clock, dock[2]));
+    window.set_margin(if left { Edge::Left } else { Edge::Right }, if left { dock[0] } else { dock[1] });
     let paint = Paint::new(SURFACE_W as i32, SURFACE_H as i32);
     let weak = paint.downgrade();
     let a = Rc::downgrade(app);
@@ -166,22 +149,33 @@ fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, output: &str, left: bool, top: 
     // This computer's own battery first, like the Mac's widget.
     list.sort_by_key(|g| !g.own);
     list.truncate(SHOWN);
-    // No background: like the desktop clock, the ink follows the wallpaper behind it.
-    let luma = app.wallpapers.top_luma(output, if top { 0.32 } else { 1.0 }).unwrap_or(0.0);
-    let dark = luma > 0.42;
-    let ink = if dark { Rgb::new(0.08, 0.08, 0.1) } else { Rgb::new(1.0, 1.0, 1.0) };
-    let shade = if dark { gdk::RGBA::new(1.0, 1.0, 1.0, 0.28) } else { gdk::RGBA::new(0.0, 0.0, 0.0, 0.32) };
+    let (with_card, levels) = {
+        let prefs = app.prefs.borrow();
+        (prefs.desktop_battery_bg, prefs.desktop_battery_levels)
+    };
+    // Like the desktop clock, the ink follows the wallpaper behind it, or sits on a card.
+    let look = crate::deskcards::look(app, output, top, with_card);
     let mut pal = app.palette_at(glib::monotonic_time());
-    pal.ink_main = ink;
-    pal.ink_meta = ink;
-    let x = card_x(left, SURFACE_W, card_width(list.len()));
-    let shadow = !kit::effects::reduced();
-    if shadow { s.push_shadow(&[gtk::gsk::Shadow::new(shade, 0.0, 1.0, 10.0)]); }
+    pal.ink_main = look.ink;
+    pal.ink_meta = look.ink;
+    let w = card_width(list.len());
+    let x = card_x(left, SURFACE_W, w);
+    // Without the levels, the names move up under the rings and the card shrinks to fit.
+    let h = if levels { CARD_H } else { CARD_H - 18.0 };
+    let top_y = if top { AIR } else { AIR + CARD_H - h };
+    if let Some(fill) = look.card {
+        crate::deskcards::card(s, app, (x, top_y, w, h), fill);
+    }
+    if let Some(shade) = look.shade {
+        s.push_shadow(&[gtk::gsk::Shadow::new(shade, 0.0, 1.0, 10.0)]);
+    }
     for (i, g) in list.iter().enumerate() {
         let cx = x + INSET + CELL_W * (i as f64 + 0.5);
-        crate::batteries::cell(s, p, &app.cfg, &pal, g, cx, AIR + 42.0, CELL_W, false);
+        crate::batteries::cell(s, p, &app.cfg, &pal, g, cx, top_y + 42.0, CELL_W, false, levels);
     }
-    if shadow { s.pop(); }
+    if look.shade.is_some() {
+        s.pop();
+    }
 }
 
 #[cfg(test)]
@@ -196,26 +190,29 @@ mod tests {
                 ("top_left", AIR, 26.0 + AIR),
                 ("top_right", 800.0 - AIR - w, 26.0 + AIR),
                 ("bottom_left", AIR, 600.0 - AIR - CARD_H),
-                (
-                    "bottom_right",
-                    800.0 - AIR - w,
-                    600.0 - AIR - CARD_H,
-                ),
+                ("bottom_right", 800.0 - AIR - w, 600.0 - AIR - CARD_H),
             ] {
-                assert_eq!(
-                    card_rect(placement, count, (800, 600), 26, "off"),
-                    Some(CardRect { x, y, w, h: CARD_H })
-                );
+                assert_eq!(card_rect(placement, count, (800, 600), 26, 0, [0; 3]), Some(CardRect { x, y, w, h: CARD_H }));
             }
         }
-        let normal = card_rect("top_left", SHOWN, (800, 600), 26, "off").unwrap();
-        let clock = card_rect("top_left", SHOWN, (800, 600), 26, "left").unwrap();
-        assert_eq!(clock.y, normal.y + CLOCK_ROOM as f64);
-        assert_eq!(
-            card_rect("top_left", 99, (800, 600), 26, "off"),
-            Some(normal)
-        );
-        assert!(card_rect("off", SHOWN, (800, 600), 26, "off").is_none());
-        assert!(card_rect("top_right", 0, (800, 600), 26, "off").is_none());
+        let normal = card_rect("top_left", SHOWN, (800, 600), 26, 0, [0; 3]).unwrap();
+        let clock = card_rect("top_left", SHOWN, (800, 600), 26, 214, [0; 3]).unwrap();
+        assert_eq!(clock.y, normal.y + 214.0);
+        // The clock only pushes the left corner down.
+        assert_eq!(card_rect("top_right", SHOWN, (800, 600), 26, 214, [0; 3]).unwrap().y, normal.y);
+        assert_eq!(card_rect("top_left", 99, (800, 600), 26, 0, [0; 3]), Some(normal));
+        assert!(card_rect("off", SHOWN, (800, 600), 26, 0, [0; 3]).is_none());
+        assert!(card_rect("top_right", 0, (800, 600), 26, 0, [0; 3]).is_none());
+    }
+
+    #[test]
+    fn the_dock_pushes_the_batteries_off_its_edge() {
+        let w = card_width(SHOWN);
+        let bottom = card_rect("bottom_left", SHOWN, (800, 600), 26, 0, [0, 0, 70]).unwrap();
+        assert_eq!(bottom.y, 600.0 - 70.0 - AIR - CARD_H);
+        assert_eq!(card_rect("bottom_right", SHOWN, (800, 600), 26, 0, [0, 60, 0]).unwrap().x, 800.0 - 60.0 - AIR - w);
+        assert_eq!(card_rect("top_left", SHOWN, (800, 600), 26, 0, [60, 0, 0]).unwrap().x, 60.0 + AIR);
+        // A dock at the bottom leaves the top corners where they were.
+        assert_eq!(card_rect("top_left", SHOWN, (800, 600), 26, 0, [0, 0, 70]).unwrap().y, 26.0 + AIR);
     }
 }
