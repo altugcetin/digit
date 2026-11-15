@@ -349,6 +349,10 @@ button.ctl {{ background: transparent; border: none; box-shadow: none; outline: 
 button.ctl:hover {{ background: alpha({main}, 0.10); color: {main}; }}
 button.ctl.close:hover {{ background: alpha({risk}, 0.22); color: {risk}; }}
 button.ctl .sym {{ font-size: 18px; }}
+/* A row's secondary controls (adding keys, back to the default): shown with the row under the
+   pointer or the keyboard on them. */
+.row button.on-hover {{ opacity: 0; transition: opacity 120ms ease; }}
+.row:hover button.on-hover, .row button.on-hover:focus-visible {{ opacity: 1; }}
 .side list, .side listview {{ background: transparent; }}
 .side row {{ border-radius: var(--r-row); padding: 9px 12px; margin: 2px 0; background: transparent; color: {meta}; }}
 .side row:hover {{ background: alpha({main}, 0.06); }}

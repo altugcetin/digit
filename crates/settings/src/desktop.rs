@@ -1751,9 +1751,9 @@ fn clipboard(body: &gtk::Box, t: &toml::Table) {
 
 fn screenshots(body: &gtk::Box, t: &toml::Table) {
     let snap = section(body, "Screenshots");
-    let said: Vec<String> = [("snap", "area"), ("snap-area", "area"), ("snap-screen", "screen"), ("snap-window", "window"), ("snap-delay", "3 s timer")]
+    let said: Vec<String> = [("snap", "area"), ("snap-screen", "screen"), ("snap-window", "window"), ("snap-delay", "3 s timer")]
         .iter()
-        .filter_map(|(id, what)| keys(id).map(|k| format!("{k}: {what}")))
+        .filter_map(|(id, what)| kit::keybinds::shown_all(id).map(|k| format!("{k}: {what}")))
         .collect();
     let said = if said.is_empty() { "None set".to_string() } else { said.join(" · ") };
     let (row, end) = ui::row(Some("screenshot_region"), "Shortcuts", &said);

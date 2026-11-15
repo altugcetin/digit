@@ -20,7 +20,9 @@ pub fn build() -> gtk::Widget {
     crate::compositor::typing(&body);
     let live = kit::setup::shortcuts();
     // Only what the compositor can do: niri has no scratchpad or pinned windows, for one.
-    let all: Vec<Bind> = keybinds::all().into_iter().filter(kit::setup::supports).collect();
+    // Going to and moving to workspaces are set as a whole, at the top of their group.
+    let all: Vec<Bind> = keybinds::all().into_iter().filter(kit::setup::supports).filter(|b| !numbered(b)).collect();
+    let across = keybinds::spaces_across();
     let mut group = "";
     let mut card = ui::card();
     for b in &all {
@@ -31,8 +33,11 @@ pub fn build() -> gtk::Widget {
             group = b.group;
             body.append(&ui::heading(group));
             card = ui::card();
+            if group == "Workspaces" {
+                spaces_rows(&card);
+            }
         }
-        card.append(&default_row(b, &live));
+        card.append(&default_row(b, across));
     }
     if !group.is_empty() {
         body.append(&card);
@@ -72,41 +77,207 @@ fn key_button(keys: &str) -> gtk::Button {
     b
 }
 
-fn default_row(b: &Bind, _live: &[Bind]) -> gtk::Box {
-    let (row, end) = ui::row(None, &b.label, "");
-    let keys = key_button(&b.keys);
-    // A change updates this row in place; redrawing the whole page would flicker.
-    let reset = kit::app::control("restart_alt", "");
+/// Going to or moving the window to one numbered workspace, which [`spaces_rows`] sets for all.
+fn numbered(b: &Bind) -> bool {
+    matches!(b.act, keybinds::Act::Window(keybinds::Win::Workspace(_) | keybinds::Win::ToWorkspace(_)))
+}
+
+/// A shortcut with each of its key combinations, + to add another, and back to the default.
+fn default_row(b: &Bind, across: bool) -> gtk::Box {
+    let note = keybinds::note(b, across).unwrap_or_default();
+    let (row, end) = ui::row(None, &b.label, &note);
+    let reset = kit::app::control("restart_alt", "on-hover");
     reset.set_tooltip_text(Some("Back to the default"));
-    reset.set_visible(keybinds::changed(&b.id));
+    let keys = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    keys.set_valign(gtk::Align::Center);
     {
-        let (id, keys) = (b.id.clone(), keys.clone());
+        let (id, keys) = (b.id.clone(), keys.downgrade());
         reset.connect_clicked(move |r| {
-            if save(keybinds::reset(&id)) {
-                let def = keybinds::defaults().into_iter().find(|d| d.id == id).map(|d| d.keys).unwrap_or_default();
-                keys.set_label(&if def.is_empty() { "Off".into() } else { keybinds::label(&def) });
-                r.set_visible(false);
+            if save(keybinds::reset(&id)) && let Some(keys) = keys.upgrade() {
+                fill_keys(&keys, r, &id);
             }
         });
     }
     end.append(&reset);
-    let (id, reset_btn) = (b.id.clone(), reset.clone());
-    keys.connect_clicked(move |btn| {
-        let (id, btn2, reset_btn) = (id.clone(), btn.clone(), reset_btn.clone());
-        let current = keybinds::all().into_iter().find(|b| b.id == id).map(|b| b.keys).unwrap_or_default();
-        record(btn.upcast_ref(), &current, true, move |picked| {
-            if !picked.is_empty() && let Some(o) = taken(&kit::setup::shortcuts(), &picked, &id) {
-                ui::fail(&format!("{picked} already opens {o}"));
-                return;
-            }
-            if save(keybinds::set_keys(&id, &picked)) {
-                btn2.set_label(&if picked.is_empty() { "Off".into() } else { keybinds::label(&picked) });
-                reset_btn.set_visible(keybinds::changed(&id));
-            }
-        });
-    });
     end.append(&keys);
+    fill_keys(&keys, &reset, &b.id);
     row
+}
+
+/// Shows shortcut `id`'s combinations in `holder`, each a key to change or remove. Changes
+/// update the row in place; redrawing the whole page would flicker.
+fn fill_keys(holder: &gtk::Box, reset: &gtk::Button, id: &str) {
+    while let Some(c) = holder.first_child() {
+        holder.remove(&c);
+    }
+    reset.set_visible(keybinds::changed(id));
+    let current = keybinds::all().into_iter().find(|b| b.id == id).map(|b| b.keys).unwrap_or_default();
+    let list = keybinds::combos(&current);
+    let refresh = {
+        let (holder, reset, id) = (holder.downgrade(), reset.downgrade(), id.to_string());
+        Rc::new(move || if let (Some(h), Some(r)) = (holder.upgrade(), reset.upgrade()) { fill_keys(&h, &r, &id) })
+    };
+    // Puts `picked` in place `at` (a new one past the end), or removes that one when empty.
+    let change = {
+        let (list, id, refresh) = (list.clone(), id.to_string(), refresh.clone());
+        Rc::new(move |at: usize, picked: String| {
+            let mut next = list.clone();
+            if picked.is_empty() {
+                if at < next.len() { next.remove(at); }
+            } else {
+                let k = keybinds::normalize(&picked);
+                if next.iter().enumerate().any(|(i, c)| i != at && keybinds::normalize(c) == k) {
+                    return;
+                }
+                if let Some(o) = taken(&kit::setup::shortcuts(), &picked, &id) {
+                    ui::fail(&format!("{} already opens {o}", keybinds::label(&picked)));
+                    return;
+                }
+                if at < next.len() { next[at] = picked } else { next.push(picked) }
+            }
+            if save(keybinds::set_keys(&id, &next.join(keybinds::SEP))) {
+                refresh();
+            }
+        })
+    };
+    let several = list.len() > 1;
+    for (i, k) in list.iter().enumerate() {
+        let chip = key_button(k);
+        let (k, change) = (k.clone(), change.clone());
+        chip.connect_clicked(move |btn| {
+            let change = change.clone();
+            record(btn.upcast_ref(), &k, Some(if several { "Remove these keys" } else { "Turn off" }), move |picked| change(i, picked));
+        });
+        holder.append(&chip);
+    }
+    if list.is_empty() {
+        let off = key_button("");
+        let change = change.clone();
+        off.connect_clicked(move |btn| {
+            let change = change.clone();
+            record(btn.upcast_ref(), "", None, move |picked| change(0, picked));
+        });
+        holder.append(&off);
+        return;
+    }
+    // Before the keys, so the keys line up at the row's end with or without it.
+    let add = kit::app::control("add", "on-hover");
+    add.set_tooltip_text(Some("Add other keys for this"));
+    let at = list.len();
+    add.connect_clicked(move |btn| {
+        let change = change.clone();
+        record(btn.upcast_ref(), "", None, move |picked| change(at, picked));
+    });
+    holder.prepend(&add);
+}
+
+/// The modifiers offered for going to and moving to workspaces.
+const MODIFIERS: [(&str, &str); 10] = [
+    ("SUPER", "Super"),
+    ("SUPER + SHIFT", "Super+Shift"),
+    ("SUPER + CTRL", "Super+Ctrl"),
+    ("SUPER + ALT", "Super+Alt"),
+    ("ALT", "Alt"),
+    ("ALT + SHIFT", "Alt+Shift"),
+    ("CTRL", "Ctrl"),
+    ("CTRL + SHIFT", "Ctrl+Shift"),
+    ("CTRL + ALT", "Ctrl+Alt"),
+    ("", "Off"),
+];
+
+/// Another shortcut on the keys `next` would give the workspaces, by its keys and label.
+fn spaces_clash(next: &keybinds::Spaces) -> Option<String> {
+    let live: Vec<Bind> = kit::setup::shortcuts().into_iter().filter(|b| !numbered(b)).collect();
+    let mut mine: Vec<String> = Vec::new();
+    for i in 1..=keybinds::SPACES as u8 {
+        for keys in [next.go_keys(i), next.move_keys(i)] {
+            if keys.is_empty() { continue; }
+            let k = keybinds::normalize(&keys);
+            if mine.contains(&k) {
+                return Some(format!("{} would be on two workspaces", keybinds::label(&keys)));
+            }
+            if let Some(o) = taken(&live, &keys, "") {
+                return Some(format!("{} already opens {o}", keybinds::label(&keys)));
+            }
+            mine.push(k);
+        }
+    }
+    None
+}
+
+/// Saves the workspace shortcuts unless they would land on other shortcuts.
+fn save_spaces(next: &keybinds::Spaces) -> bool {
+    if let Some(why) = spaces_clash(next) {
+        ui::fail(&why);
+        return false;
+    }
+    save(keybinds::set_spaces(next))
+}
+
+/// A dropdown of [`MODIFIERS`] (and `current`, if it is none of them) for one way of reaching
+/// workspaces; `set` puts the pick into the workspace shortcuts.
+fn modifier_row(card: &gtk::Box, title: &str, sub: &str, current: &str, set: fn(&mut keybinds::Spaces, String)) {
+    let (row, end) = ui::row(None, title, sub);
+    let mut options: Vec<(String, String)> = MODIFIERS.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect();
+    let at = match options.iter().position(|(v, _)| keybinds::normalize(v) == keybinds::normalize(current)) {
+        Some(at) => at,
+        None => {
+            options.insert(0, (current.to_string(), keybinds::label(current)));
+            0
+        }
+    };
+    let labels: Vec<&str> = options.iter().map(|(_, l)| l.as_str()).collect();
+    let pick = ui::dropdown(&labels, at as u32);
+    let last = Rc::new(Cell::new(at as u32));
+    pick.connect_selected_notify(move |p| {
+        let i = p.selected();
+        if i == last.get() { return; }
+        let mut next = keybinds::spaces();
+        set(&mut next, options.get(i as usize).map(|o| o.0.clone()).unwrap_or_default());
+        if save_spaces(&next) { last.set(i) } else { p.set_selected(last.get()) }
+    });
+    end.append(&pick);
+    card.append(&row);
+}
+
+/// Going to and moving the window to workspaces: a modifier for each, and each workspace's key.
+fn spaces_rows(card: &gtk::Box) {
+    let now = keybinds::spaces();
+    modifier_row(card, "Go to a workspace", "Held with the workspace's key", &now.go, |s, m| s.go = m);
+    modifier_row(card, "Move the window to a workspace", "Held with the workspace's key", &now.to, |s, m| s.to = m);
+    let (row, end) = ui::row(None, "Workspace keys", "Pick a workspace, then click its key to change it");
+    let names: Vec<String> = (1..=keybinds::SPACES).map(|i| format!("Workspace {i}")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let which = ui::dropdown(&refs, 0);
+    let key = key_button(&now.keys[0]);
+    {
+        let key = key.clone();
+        which.connect_selected_notify(move |w| {
+            let k = keybinds::spaces().keys.get(w.selected() as usize).cloned().unwrap_or_default();
+            key.set_label(&if k.is_empty() { "Off".into() } else { keybinds::label(&k) });
+        });
+    }
+    {
+        let which = which.clone();
+        key.connect_clicked(move |btn| {
+            let at = which.selected() as usize;
+            let current = keybinds::spaces().keys.get(at).cloned().unwrap_or_default();
+            let btn2 = btn.clone();
+            record(btn.upcast_ref(), &current, Some("Turn off"), move |picked| {
+                // Only the key counts: the modifiers come from the rows above.
+                let k = picked.rsplit('+').next().map(str::trim).unwrap_or("").to_string();
+                let mut next = keybinds::spaces();
+                let Some(slot) = next.keys.get_mut(at) else { return };
+                *slot = k.clone();
+                if save_spaces(&next) {
+                    btn2.set_label(&if k.is_empty() { "Off".into() } else { keybinds::label(&k) });
+                }
+            });
+        });
+    }
+    end.append(&which);
+    end.append(&key);
+    card.append(&row);
 }
 
 /// Another shortcut in effect on these keys, by its label.
@@ -136,7 +307,7 @@ fn custom_card(live: &[Bind]) -> gtk::Box {
         keys.connect_clicked(move |btn| {
             let others = others.clone();
             let current = keybinds::custom().get(i).map(|b| b.0.clone()).unwrap_or_default();
-            record(btn.upcast_ref(), &current, false, move |picked| {
+            record(btn.upcast_ref(), &current, None, move |picked| {
                 if picked.is_empty() {
                     return;
                 }
@@ -161,7 +332,7 @@ fn custom_card(live: &[Bind]) -> gtk::Box {
         let (btn, others) = (btn.clone(), others.clone());
         ui::prompt(ui::root(&btn), "New shortcut", "The command it runs. Next, press the keys for it.", Some(("Command", false)), "Next", move |cmd| {
             let Some(cmd) = cmd.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()) else { return };
-            record(btn.upcast_ref(), "", false, move |picked| {
+            record(btn.upcast_ref(), "", None, move |picked| {
                 if picked.is_empty() {
                     return;
                 }
@@ -254,10 +425,10 @@ fn item(icon: &str, label: &str) -> gtk::Button {
 }
 
 /// Changes a shortcut. A small menu offers recording new keys, a scroll-wheel combination and,
-/// when `clear` and the shortcut has keys, turning it off. `done` gets the new keys ("" = off).
+/// with a `clear` label and keys to clear, removing them. `done` gets the new keys ("" = off).
 /// Keys are only captured once "Record keys" is chosen; Hyprland hands every key to Settings
 /// meanwhile, so keys that are already shortcuts can be recorded too.
-fn record(anchor: &gtk::Widget, current: &str, clear: bool, done: impl Fn(String) + 'static) {
+fn record(anchor: &gtk::Widget, current: &str, clear: Option<&str>, done: impl Fn(String) + 'static) {
     let pop = gtk::Popover::new();
     kit::ui::menu_popover(&pop);
     pop.set_parent(anchor);
@@ -291,8 +462,8 @@ fn record(anchor: &gtk::Widget, current: &str, clear: bool, done: impl Fn(String
     let wheel_item = item("mouse", "Scroll combination…");
     menu.append(&keys_item);
     menu.append(&wheel_item);
-    if clear && !current.is_empty() {
-        let off = item("block", "Turn off");
+    if let Some(clear) = clear.filter(|_| !current.is_empty()) {
+        let off = item("block", clear);
         let pick = pick.clone();
         off.connect_clicked(move |_| pick(String::new()));
         menu.append(&off);

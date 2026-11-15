@@ -4,8 +4,14 @@
 //!
 //! ```toml
 //! [keys]
-//! launcher = "SUPER + K"   # moved
-//! files = ""               # turned off
+//! launcher = "SUPER + K"                 # moved
+//! files = ""                             # turned off
+//! snap = ["PRINT", "SUPER + SHIFT + S"]  # on more than one combination
+//!
+//! [workspaces]                           # going to and moving windows to workspaces
+//! go = "SUPER"
+//! move = "SUPER + SHIFT"
+//! keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
 //!
 //! [[custom]]
 //! keys = "SUPER + B"
@@ -46,8 +52,10 @@ pub enum Win {
     Move(Dir),
     Workspace(u8),
     ToWorkspace(u8),
-    /// The next (1) or previous (-1) workspace in use.
+    /// The next (1) or previous (-1) workspace in use; past the last one, an empty one.
     StepWorkspace(i8),
+    /// Moves the window to the next (1) or previous (-1) workspace, as `StepWorkspace` goes.
+    MoveStepWorkspace(i8),
     /// Traverse windows in compositor order (1 forward, -1 backward).
     StepWindow(i8),
     Drag,
@@ -88,6 +96,46 @@ impl Dir {
     }
 }
 
+/// Whether focusing or moving `d` carries on to a workspace at the edge: up and down, or left
+/// and right while workspaces lie side by side (see [`spaces_across`]).
+pub fn crosses(d: Dir, across: bool) -> bool {
+    matches!(d, Dir::Left | Dir::Right) == across
+}
+
+/// Whether workspaces lie side by side: Hyprland with workspaces switching horizontally. They
+/// stack otherwise, as niri's always do.
+pub fn spaces_across() -> bool {
+    crate::wm::which() == crate::wm::Wm::Hyprland && crate::prefs::text(&crate::prefs::read(), "hypr_workspace_anim", "vertical").starts_with("horizontal")
+}
+
+/// "Focus up", or "Focus up or the previous workspace" when it carries on to one.
+fn directed(what: &str, d: Dir, across: bool) -> String {
+    if !crosses(d, across) {
+        return format!("{what} {}", d.name());
+    }
+    let to = if what == "Focus" { "" } else { " to" };
+    let side = if matches!(d, Dir::Up | Dir::Left) { "previous" } else { "next" };
+    format!("{what} {} or{to} the {side} workspace", d.name())
+}
+
+/// What a shortcut does that its name can't say, shown under it in Settings.
+pub fn note(b: &Bind, across: bool) -> Option<String> {
+    let place = |d: Dir| match d {
+        Dir::Up => "above",
+        Dir::Down => "below",
+        Dir::Left => "to the left",
+        Dir::Right => "to the right",
+    };
+    let side = |d: Dir| if matches!(d, Dir::Up | Dir::Left) { "previous" } else { "next" };
+    match b.act {
+        Act::Window(Win::Focus(d)) if crosses(d, across) => Some(format!("The window {}; with none there, the {} workspace", place(d), side(d))),
+        Act::Window(Win::Move(d)) if crosses(d, across) => Some(format!("Moves the window {}; at the edge, to the {} workspace", match d { Dir::Up => "up", Dir::Down => "down", Dir::Left => "left", Dir::Right => "right" }, side(d))),
+        Act::Window(Win::StepWorkspace(1) | Win::MoveStepWorkspace(1)) => Some("The next one in use; after the last, a new empty one".into()),
+        Act::Window(Win::StepWorkspace(_) | Win::MoveStepWorkspace(_)) => Some("The previous one in use".into()),
+        _ => None,
+    }
+}
+
 /// How a shortcut fires besides a plain press.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Opts {
@@ -104,7 +152,8 @@ pub struct Bind {
     pub id: String,
     pub group: &'static str,
     pub label: String,
-    /// Keys as "SUPER + SHIFT + E"; empty when turned off.
+    /// Keys as "SUPER + SHIFT + E", several combinations joined by ", " (see [`combos`]);
+    /// empty when turned off.
     pub keys: String,
     pub act: Act,
     pub opts: Opts,
@@ -147,8 +196,7 @@ pub fn defaults() -> Vec<Bind> {
         bind("pick", "Shell", "Color picker", "", ctl("pick"), n, false),
         bind("lock", "Session", "Lock the screen", "SUPER + L", ctl("key lock"), n, false),
         bind("session", "Session", "Lock, sleep, restart or shut down", "SUPER + SHIFT + E", ctl("key session"), n, false),
-        bind("snap", "Screenshots", "Screenshot of an area", "PRINT", run("digit-snap"), n, false),
-        bind("snap-area", "Screenshots", "Screenshot of an area", "SUPER + SHIFT + S", run("digit-snap"), n, false),
+        bind("snap", "Screenshots", "Screenshot of an area", "PRINT, SUPER + SHIFT + S", run("digit-snap"), n, false),
         bind("snap-screen", "Screenshots", "Screenshot of the screen", "CTRL + PRINT", run("digit-snap screen"), n, false),
         bind("snap-window", "Screenshots", "Screenshot of a window", "ALT + PRINT", run("digit-snap window"), n, false),
         bind("snap-delay", "Screenshots", "Screenshot after 3 seconds", "SHIFT + PRINT", run("digit-snap --delay 3"), n, false),
@@ -181,22 +229,20 @@ pub fn defaults() -> Vec<Bind> {
         bind("column-width", "Windows", "Cycle the column width", "SUPER + R", Act::Window(Win::PresetWidth), n, true),
         bind("overview", "Workspaces", "Overview of all workspaces", "SUPER + O", Act::Window(Win::Overview), n, true),
         bind("center", "Windows", "Center the column", "", Act::Window(Win::Center), n, true),
-        // Keep the workspace-only ids for saved overrides; the wheel now follows spatial focus.
-        bind("focus-scroll-up", "Windows", "Focus above", "SUPER + mouse_up", Act::Window(Win::Focus(Dir::Up)), n, true),
-        bind("focus-scroll-down", "Windows", "Focus below", "SUPER + mouse_down", Act::Window(Win::Focus(Dir::Down)), n, true),
         bind("window-next", "Windows", "Next window", "SUPER + SHIFT + mouse_down", Act::Window(Win::StepWindow(1)), n, true),
         bind("window-prev", "Windows", "Previous window", "SUPER + SHIFT + mouse_up", Act::Window(Win::StepWindow(-1)), n, true),
-        bind("workspace-next", "Workspaces", "Next workspace", "", Act::Window(Win::StepWorkspace(1)), n, true),
-        bind("workspace-prev", "Workspaces", "Previous workspace", "", Act::Window(Win::StepWorkspace(-1)), n, true),
-        bind("play", "Media keys", "Play or pause", "XF86AudioPlay", Act::Shell("playerctl play-pause".into()), LOCKED, true),
-        bind("pause", "Media keys", "Play or pause", "XF86AudioPause", Act::Shell("playerctl play-pause".into()), LOCKED, true),
+        bind("workspace-next", "Workspaces", "Next workspace", "SUPER + PAGE_DOWN, SUPER + mouse_down", Act::Window(Win::StepWorkspace(1)), n, true),
+        bind("workspace-prev", "Workspaces", "Previous workspace", "SUPER + PAGE_UP, SUPER + mouse_up", Act::Window(Win::StepWorkspace(-1)), n, true),
+        bind("to-workspace-next", "Workspaces", "Move window to the next workspace", "SUPER + SHIFT + PAGE_DOWN", Act::Window(Win::MoveStepWorkspace(1)), n, true),
+        bind("to-workspace-prev", "Workspaces", "Move window to the previous workspace", "SUPER + SHIFT + PAGE_UP", Act::Window(Win::MoveStepWorkspace(-1)), n, true),
+        bind("play", "Media keys", "Play or pause", "XF86AudioPlay, XF86AudioPause", Act::Shell("playerctl play-pause".into()), LOCKED, true),
         bind("next", "Media keys", "Next track", "XF86AudioNext", Act::Shell("playerctl next".into()), LOCKED, true),
         bind("previous", "Media keys", "Previous track", "XF86AudioPrev", Act::Shell("playerctl previous".into()), LOCKED, true),
         bind("mic-mute", "Media keys", "Mute the microphone", "XF86AudioMicMute", Act::Shell("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle".into()), LOCKED, true),
     ];
     for (d, key) in [(Dir::Left, "LEFT"), (Dir::Right, "RIGHT"), (Dir::Up, "UP"), (Dir::Down, "DOWN")] {
-        out.push(bind(&format!("focus-{}", d.name()), "Windows", &format!("Focus {}", d.name()), &format!("SUPER + {key}"), Act::Window(Win::Focus(d)), n, true));
-        out.push(bind(&format!("move-{}", d.name()), "Windows", &format!("Move window {}", d.name()), &format!("SUPER + SHIFT + {key}"), Act::Window(Win::Move(d)), n, true));
+        out.push(bind(&format!("focus-{}", d.name()), "Windows", &directed("Focus", d, false), &format!("SUPER + {key}"), Act::Window(Win::Focus(d)), n, true));
+        out.push(bind(&format!("move-{}", d.name()), "Windows", &directed("Move window", d, false), &format!("SUPER + SHIFT + {key}"), Act::Window(Win::Move(d)), n, true));
         out.push(bind(&format!("grow-{}", d.name()), "Windows", &format!("Resize window {}", d.name()), &format!("SUPER + CTRL + {key}"), Act::Window(Win::Grow(d)), Opts { repeating: true, ..n }, true));
     }
     for (zone, key, label) in [("left", "LEFT", "Snap left"), ("right", "RIGHT", "Snap right"), ("max", "UP", "Maximize floating window"), ("restore", "DOWN", "Restore floating window")] {
@@ -207,10 +253,11 @@ pub fn defaults() -> Vec<Bind> {
     }
     out.push(bind("hypr-monitor-next", "Windows", "Move window to the next monitor", "SUPER + ALT + PERIOD", Act::Window(Win::ToMonitor(1)), n, true));
     out.push(bind("hypr-monitor-prev", "Windows", "Move window to the previous monitor", "SUPER + ALT + COMMA", Act::Window(Win::ToMonitor(-1)), n, true));
-    for i in 1..=10u8 {
-        let key = i % 10;
-        out.push(bind(&format!("workspace-{i}"), "Workspaces", &format!("Go to workspace {i}"), &format!("SUPER + {key}"), Act::Window(Win::Workspace(i)), n, true));
-        out.push(bind(&format!("to-workspace-{i}"), "Workspaces", &format!("Move window to workspace {i}"), &format!("SUPER + SHIFT + {key}"), Act::Window(Win::ToWorkspace(i)), n, true));
+    // Settings shows these as two modifiers and a key per workspace (see [`Spaces`]).
+    let spaces = Spaces::default();
+    for i in 1..=SPACES as u8 {
+        out.push(bind(&format!("workspace-{i}"), "Workspaces", &format!("Go to workspace {i}"), &spaces.go_keys(i), Act::Window(Win::Workspace(i)), n, true));
+        out.push(bind(&format!("to-workspace-{i}"), "Workspaces", &format!("Move window to workspace {i}"), &spaces.move_keys(i), Act::Window(Win::ToWorkspace(i)), n, true));
     }
     // Keep each group together (lists show one heading per group), in the order groups first appear.
     let mut order: Vec<&'static str> = Vec::new();
@@ -239,21 +286,156 @@ fn for_writing(file: &std::path::Path) -> Result<toml::Table, String> {
     }
 }
 
-/// The shortcuts in effect: the defaults with the user's changes and own shortcuts. Turned-off
-/// ones are dropped.
-pub fn effective() -> Vec<Bind> {
-    let t = overrides();
+/// Separates the combinations of a shortcut on more than one.
+pub const SEP: &str = ", ";
+
+/// The key combinations in `keys`, each as "SUPER + SHIFT + E".
+pub fn combos(keys: &str) -> Vec<String> {
+    keys.split(',').map(str::trim).filter(|k| !k.is_empty()).map(str::to_string).collect()
+}
+
+/// One shortcut per key combination, for the compositor configs that bind each on its own.
+pub fn expand(binds: &[Bind]) -> Vec<Bind> {
+    binds.iter().flat_map(|b| combos(&b.keys).into_iter().map(move |keys| Bind { keys, ..b.clone() })).collect()
+}
+
+/// Shortcuts that became a second combination of another one: (old id, the one it joined, which
+/// combination it was). A saved override of the old id still counts.
+const JOINED: [(&str, &str, usize); 2] = [("snap-area", "snap", 1), ("pause", "play", 1)];
+
+/// How many workspaces have shortcuts.
+pub const SPACES: usize = 10;
+
+/// Workspace shortcuts: a modifier to go to a workspace, one to move the window there, and each
+/// workspace's own key (keybinds.toml's [workspaces]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Spaces {
+    pub go: String,
+    pub to: String,
+    pub keys: [String; SPACES],
+}
+
+impl Default for Spaces {
+    fn default() -> Self {
+        Self { go: "SUPER".into(), to: "SUPER + SHIFT".into(), keys: std::array::from_fn(|i| ((i + 1) % 10).to_string()) }
+    }
+}
+
+impl Spaces {
+    fn read(t: &toml::Table) -> Self {
+        let mut s = Self::default();
+        let Some(w) = t.get("workspaces").and_then(|v| v.as_table()) else { return s };
+        let text = |k: &str| w.get(k).and_then(|v| v.as_str()).map(|v| v.trim().to_string());
+        if let Some(go) = text("go") { s.go = go; }
+        if let Some(to) = text("move") { s.to = to; }
+        if let Some(keys) = w.get("keys").and_then(|v| v.as_array()) {
+            for (slot, k) in s.keys.iter_mut().zip(keys) {
+                if let Some(k) = k.as_str() { *slot = k.trim().to_string(); }
+            }
+        }
+        s
+    }
+
+    fn join(modifier: &str, key: &str) -> String {
+        if modifier.is_empty() || key.is_empty() { String::new() } else { format!("{modifier} + {key}") }
+    }
+
+    /// The keys that go to workspace `i` (1-based); empty when off.
+    pub fn go_keys(&self, i: u8) -> String {
+        self.keys.get(usize::from(i).wrapping_sub(1)).map_or(String::new(), |k| Self::join(&self.go, k))
+    }
+
+    /// The keys that move the window to workspace `i` (1-based); empty when off.
+    pub fn move_keys(&self, i: u8) -> String {
+        self.keys.get(usize::from(i).wrapping_sub(1)).map_or(String::new(), |k| Self::join(&self.to, k))
+    }
+}
+
+/// The workspace shortcuts in effect.
+pub fn spaces() -> Spaces {
+    Spaces::read(&overrides())
+}
+
+/// Saves the workspace shortcuts; digit's defaults leave nothing behind.
+pub fn set_spaces(s: &Spaces) -> Result<(), String> {
+    let mut t = for_writing(&path())?;
+    if *s == Spaces::default() {
+        t.remove("workspaces");
+    } else {
+        let mut w = toml::Table::new();
+        w.insert("go".into(), toml::Value::String(s.go.clone()));
+        w.insert("move".into(), toml::Value::String(s.to.clone()));
+        w.insert("keys".into(), toml::Value::Array(s.keys.iter().map(|k| toml::Value::String(k.clone())).collect()));
+        t.insert("workspaces".into(), toml::Value::Table(w));
+    }
+    // Workspaces are set as a whole now; older per-workspace overrides would only confuse.
+    if let Some(k) = t.get_mut("keys").and_then(|v| v.as_table_mut()) {
+        k.retain(|id, _| !is_space(id));
+    }
+    save(&t)
+}
+
+/// Whether `id` is one of the go-to or move-to workspace shortcuts.
+fn is_space(id: &str) -> bool {
+    id.strip_prefix("to-").unwrap_or(id).strip_prefix("workspace-").is_some_and(|n| n.parse::<u8>().is_ok())
+}
+
+/// Keys saved for a shortcut: one combination as a string, several as a list.
+fn saved(v: &toml::Value) -> Option<String> {
+    match v {
+        toml::Value::String(k) => Some(combos(k).join(SEP)),
+        toml::Value::Array(a) => Some(a.iter().filter_map(|k| k.as_str()).flat_map(combos).collect::<Vec<_>>().join(SEP)),
+        _ => None,
+    }
+}
+
+/// The defaults with the user's changes, one per shortcut, turned-off ones included. `across`:
+/// workspaces lie side by side (see [`spaces_across`]), which names the directions that reach them.
+fn with_overrides(t: &toml::Table, across: bool) -> Vec<Bind> {
     let keys = t.get("keys").and_then(|v| v.as_table()).cloned().unwrap_or_default();
-    let mut out: Vec<Bind> = defaults()
+    let spaces = Spaces::read(t);
+    defaults()
         .into_iter()
         .map(|mut b| {
-            if let Some(k) = keys.get(&b.id).and_then(|v| v.as_str()) {
-                b.keys = k.trim().to_string();
+            match b.act {
+                Act::Window(Win::Workspace(i)) => b.keys = spaces.go_keys(i),
+                Act::Window(Win::ToWorkspace(i)) => b.keys = spaces.move_keys(i),
+                Act::Window(Win::Focus(d)) => b.label = directed("Focus", d, across),
+                Act::Window(Win::Move(d)) => b.label = directed("Move window", d, across),
+                _ => {}
+            }
+            if is_space(&b.id) {
+                return b;
+            }
+            let joined = JOINED.iter().any(|j| j.1 == b.id);
+            match keys.get(&b.id) {
+                // Saved as a list, or a shortcut that was never more than one: just that.
+                Some(v) if !joined || v.is_array() => b.keys = saved(v).unwrap_or_default(),
+                v => {
+                    // Saved before other shortcuts joined it: that was its first combination,
+                    // and the joined ones keep theirs, moved or turned off.
+                    let mut list = combos(&b.keys);
+                    if let (Some(k), Some(slot)) = (v.and_then(|v| v.as_str()), list.first_mut()) {
+                        *slot = k.trim().to_string();
+                    }
+                    for (old, _, at) in JOINED.iter().filter(|j| j.1 == b.id) {
+                        if let (Some(k), Some(slot)) = (keys.get(*old).and_then(|v| v.as_str()), list.get_mut(*at)) {
+                            *slot = k.trim().to_string();
+                        }
+                    }
+                    b.keys = list.into_iter().filter(|k| !k.is_empty()).collect::<Vec<_>>().join(SEP);
+                }
             }
             b
         })
-        .filter(|b| !b.keys.is_empty())
-        .collect();
+        .collect()
+}
+
+/// The shortcuts in effect, one per key combination: the defaults with the user's changes and
+/// own shortcuts. Turned-off ones are dropped.
+pub fn effective() -> Vec<Bind> {
+    let t = overrides();
+    let mut out: Vec<Bind> = expand(&with_overrides(&t, spaces_across()));
     let custom = t.get("custom").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     for (i, c) in custom.iter().enumerate() {
         let (Some(k), Some(cmd)) = (c.get("keys").and_then(|v| v.as_str()), c.get("command").and_then(|v| v.as_str())) else { continue };
@@ -315,12 +497,20 @@ fn save(t: &toml::Table) -> Result<(), String> {
     result.map_err(|e| e.to_string())
 }
 
-/// Moves a default shortcut to new keys; empty keys turn it off.
+/// Moves a default shortcut to new keys: one or more combinations joined by ", ", or empty to
+/// turn it off.
 pub fn set_keys(id: &str, keys: &str) -> Result<(), String> {
     let mut t = for_writing(&path())?;
+    let list = combos(keys);
     let table = t.entry("keys").or_insert_with(|| toml::Value::Table(toml::Table::new()));
     if let Some(k) = table.as_table_mut() {
-        k.insert(id.to_string(), toml::Value::String(keys.trim().to_string()));
+        // A shortcut others joined is saved as a list, which tells it from one saved before.
+        let listed = list.len() > 1 || JOINED.iter().any(|j| j.1 == id);
+        let value = if listed { toml::Value::Array(list.into_iter().map(toml::Value::String).collect()) } else { toml::Value::String(list.join(SEP)) };
+        k.insert(id.to_string(), value);
+        for (old, _, _) in JOINED.iter().filter(|j| j.1 == id) {
+            k.remove(*old);
+        }
     }
     save(&t)
 }
@@ -330,28 +520,26 @@ pub fn reset(id: &str) -> Result<(), String> {
     let mut t = for_writing(&path())?;
     if let Some(k) = t.get_mut("keys").and_then(|v| v.as_table_mut()) {
         k.remove(id);
+        for (old, _, _) in JOINED.iter().filter(|j| j.1 == id) {
+            k.remove(*old);
+        }
     }
     save(&t)
 }
 
 /// Whether the user moved or turned off this default shortcut.
 pub fn changed(id: &str) -> bool {
-    overrides().get("keys").and_then(|v| v.as_table()).is_some_and(|k| k.contains_key(id))
+    let t = overrides();
+    if is_space(id) {
+        return t.contains_key("workspaces");
+    }
+    t.get("keys").and_then(|v| v.as_table()).is_some_and(|k| k.contains_key(id) || JOINED.iter().any(|j| j.1 == id && k.contains_key(j.0)))
 }
 
-/// Default shortcuts including turned-off ones, with the keys in effect ("" when off).
+/// Default shortcuts including turned-off ones, one per shortcut with all its keys in effect
+/// ("" when off).
 pub fn all() -> Vec<Bind> {
-    let t = overrides();
-    let keys = t.get("keys").and_then(|v| v.as_table()).cloned().unwrap_or_default();
-    defaults()
-        .into_iter()
-        .map(|mut b| {
-            if let Some(k) = keys.get(&b.id).and_then(|v| v.as_str()) {
-                b.keys = k.trim().to_string();
-            }
-            b
-        })
-        .collect()
+    with_overrides(&overrides(), spaces_across())
 }
 
 /// The keys a shortcut is on now, written for people: "Super+Shift+E". None when it is
@@ -365,14 +553,22 @@ pub fn shown(id: &str) -> Option<String> {
     }
     let b = cache.as_ref()?.1.iter().find(|b| b.id == id)?.clone();
     drop(cache);
-    if b.keys.trim().is_empty() {
-        return None;
-    }
-    Some(label(&b.keys))
+    combos(&b.keys).first().map(|k| label(k))
 }
 
-/// A shortcut written for people, including mouse wheel directions.
+/// Like [`shown`], with every combination: "Print or Super+Shift+S".
+pub fn shown_all(id: &str) -> Option<String> {
+    let b = all().into_iter().find(|b| b.id == id)?;
+    let list: Vec<String> = combos(&b.keys).iter().map(|k| label(k)).collect();
+    (!list.is_empty()).then(|| list.join(" or "))
+}
+
+/// A shortcut written for people, including mouse wheel directions. Several combinations read
+/// "Print or Super+Shift+S".
 pub fn label(keys: &str) -> String {
+    if keys.contains(',') {
+        return combos(keys).iter().map(|k| label(k)).collect::<Vec<_>>().join(" or ");
+    }
     let parts: Vec<String> = keys
         .split('+')
         .map(str::trim)
@@ -552,16 +748,135 @@ mod tests {
     fn wheel_focus_and_window_defaults_replace_workspace_only_wheel_actions() {
         let binds = defaults();
         let get = |id: &str| binds.iter().find(|b| b.id == id).unwrap();
-        assert_eq!(get("focus-scroll-up").keys, "SUPER + mouse_up");
-        assert_eq!(get("focus-scroll-up").act, Act::Window(Win::Focus(Dir::Up)));
-        assert_eq!(get("focus-scroll-down").keys, "SUPER + mouse_down");
-        assert_eq!(get("focus-scroll-down").act, Act::Window(Win::Focus(Dir::Down)));
+        // The arrows focus; the wheel steps through workspaces.
+        assert_eq!(get("focus-up").keys, "SUPER + UP");
+        assert_eq!(get("focus-down").keys, "SUPER + DOWN");
+        assert!(!binds.iter().any(|b| b.id.starts_with("focus-scroll-")));
         assert_eq!(get("window-next").keys, "SUPER + SHIFT + mouse_down");
         assert_eq!(get("window-next").act, Act::Window(Win::StepWindow(1)));
         assert_eq!(get("window-prev").keys, "SUPER + SHIFT + mouse_up");
         assert_eq!(get("window-prev").act, Act::Window(Win::StepWindow(-1)));
-        assert!(get("workspace-next").keys.is_empty());
-        assert!(get("workspace-prev").keys.is_empty());
+        assert_eq!(get("workspace-next").keys, "SUPER + PAGE_DOWN, SUPER + mouse_down");
+        assert_eq!(get("workspace-prev").keys, "SUPER + PAGE_UP, SUPER + mouse_up");
+        assert_eq!(get("to-workspace-next").act, Act::Window(Win::MoveStepWorkspace(1)));
+        assert_eq!(get("to-workspace-prev").keys, "SUPER + SHIFT + PAGE_UP");
+        let mut seen = std::collections::HashSet::new();
+        for k in expand(&binds).iter().map(|b| normalize(&b.keys)) {
+            assert!(seen.insert(k.clone()), "{k} is on two defaults");
+        }
+    }
+
+    #[test]
+    fn a_shortcut_can_hold_several_combinations() {
+        let binds = defaults();
+        let snap = binds.iter().find(|b| b.id == "snap").unwrap();
+        assert_eq!(combos(&snap.keys), ["PRINT", "SUPER + SHIFT + S"]);
+        assert!(!binds.iter().any(|b| b.id == "snap-area" || b.id == "pause"));
+        let each: Vec<_> = expand(std::slice::from_ref(snap));
+        assert_eq!(each.iter().map(|b| b.keys.as_str()).collect::<Vec<_>>(), ["PRINT", "SUPER + SHIFT + S"]);
+        assert!(each.iter().all(|b| b.id == "snap" && b.label == snap.label));
+        assert_eq!(label(&snap.keys), "Print or Super+Shift+S");
+        for render in [crate::hyprconf::render_keybinds(&binds), crate::niriconf::render_keybinds(&binds)] {
+            assert!(render.contains("PRINT") || render.contains("Print"));
+            assert!(render.contains("SUPER + SHIFT + S") || render.contains("Super+Shift+S"));
+            assert!(render.contains("XF86AudioPause"));
+        }
+    }
+
+    #[test]
+    fn saved_keys_read_as_text_or_list_and_old_ids_still_count() {
+        let get = |t: &str, id: &str| with_overrides(&t.parse().unwrap(), false).into_iter().find(|b| b.id == id).unwrap().keys;
+        assert_eq!(get("[keys]\nsnap = ['SUPER + A', 'SUPER + B']", "snap"), "SUPER + A, SUPER + B");
+        assert_eq!(get("[keys]\nsnap = ['SUPER + A']", "snap"), "SUPER + A");
+        assert_eq!(get("[keys]\nsnap = []", "snap"), "");
+        assert_eq!(get("[keys]\nfiles = 'SUPER + A'", "files"), "SUPER + A");
+        assert_eq!(get("[keys]\nfiles = ['SUPER + A', 'F2']", "files"), "SUPER + A, F2");
+        // Saved before others joined it: only its own combination changes.
+        assert_eq!(get("[keys]\nsnap = 'SUPER + A'", "snap"), "SUPER + A, SUPER + SHIFT + S");
+        assert_eq!(get("[keys]\nsnap = ''", "snap"), "SUPER + SHIFT + S");
+        assert_eq!(get("[keys]\nfocus-up = 'SUPER + K'", "focus-up"), "SUPER + K");
+        // Moved or turned off when it was a shortcut of its own.
+        assert_eq!(get("[keys]\nsnap-area = 'SUPER + A'", "snap"), "PRINT, SUPER + A");
+        assert_eq!(get("[keys]\nsnap-area = ''", "snap"), "PRINT");
+        assert_eq!(get("[keys]\npause = ''", "play"), "XF86AudioPlay");
+        assert_eq!(get("[keys]\nsnap = 'F9'\nsnap-area = 'SUPER + A'", "snap"), "F9, SUPER + A");
+    }
+
+    #[test]
+    fn workspaces_take_two_modifiers_and_a_key_each() {
+        let d = Spaces::default();
+        assert_eq!((d.go_keys(1), d.move_keys(1)), ("SUPER + 1".to_string(), "SUPER + SHIFT + 1".to_string()));
+        assert_eq!(d.go_keys(10), "SUPER + 0");
+        assert_eq!(d.go_keys(11), "");
+        let binds = defaults();
+        assert_eq!(binds.iter().find(|b| b.id == "workspace-3").unwrap().keys, "SUPER + 3");
+        assert_eq!(binds.iter().find(|b| b.id == "to-workspace-10").unwrap().keys, "SUPER + SHIFT + 0");
+        let t: toml::Table = "[workspaces]\ngo = 'ALT'\nmove = ''\nkeys = ['Q', '', 'E']\n[keys]\nworkspace-1 = 'F1'".parse().unwrap();
+        let got = with_overrides(&t, false);
+        let keys = |id: &str| got.iter().find(|b| b.id == id).unwrap().keys.clone();
+        assert_eq!(keys("workspace-1"), "ALT + Q");
+        assert_eq!(keys("workspace-2"), "");
+        assert_eq!(keys("workspace-4"), "ALT + 4");
+        assert_eq!(keys("to-workspace-1"), "");
+        for (id, space) in [("workspace-1", true), ("to-workspace-10", true), ("workspace-next", false), ("workspace-layout", false), ("to-scratchpad", false)] {
+            assert_eq!(is_space(id), space, "{id}");
+        }
+    }
+
+    #[test]
+    fn edits_write_lists_and_drop_what_they_replace() {
+        const CHILD: &str = "DIGIT_KEYBINDS_LIST_TEST";
+        if std::env::var_os(CHILD).is_some() {
+            std::fs::create_dir_all(path().parent().unwrap()).unwrap();
+            std::fs::write(path(), "[keys]\nsnap-area = 'SUPER + A'\nworkspace-2 = 'F2'\n").unwrap();
+            assert!(changed("snap"));
+            set_keys("snap", "PRINT, SUPER + Y").unwrap();
+            let t = overrides();
+            let keys = t["keys"].as_table().unwrap();
+            assert_eq!(keys["snap"].as_array().unwrap().len(), 2);
+            assert!(!keys.contains_key("snap-area"));
+            assert_eq!(all().into_iter().find(|b| b.id == "snap").unwrap().keys, "PRINT, SUPER + Y");
+            assert_eq!(effective().iter().filter(|b| b.id == "snap").count(), 2);
+            set_keys("snap", "F9").unwrap();
+            assert_eq!(overrides()["keys"]["snap"].as_array().map(Vec::len), Some(1));
+            assert_eq!(all().into_iter().find(|b| b.id == "snap").unwrap().keys, "F9");
+            set_keys("files", "F9").unwrap();
+            assert_eq!(overrides()["keys"]["files"].as_str(), Some("F9"));
+            assert!(!changed("workspace-1"));
+            let mut s = spaces();
+            s.go = "ALT".into();
+            set_spaces(&s).unwrap();
+            assert!(changed("workspace-1") && changed("to-workspace-5"));
+            assert!(!overrides()["keys"].as_table().unwrap().contains_key("workspace-2"));
+            assert_eq!(spaces(), s);
+            set_spaces(&Spaces::default()).unwrap();
+            assert!(!overrides().contains_key("workspaces"));
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("digit-keybinds-list-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "keybinds::tests::edits_write_lists_and_drop_what_they_replace"])
+            .env(CHILD, "1").env("XDG_CONFIG_HOME", &root).output().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+        assert!(result.status.success(), "{}{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+    }
+
+    #[test]
+    fn the_directions_that_reach_workspaces_say_so() {
+        let t = toml::Table::new();
+        let label = |across: bool, id: &str| with_overrides(&t, across).into_iter().find(|b| b.id == id).unwrap().label;
+        assert_eq!(label(false, "focus-up"), "Focus up or the previous workspace");
+        assert_eq!(label(false, "move-down"), "Move window down or to the next workspace");
+        assert_eq!(label(false, "focus-left"), "Focus left");
+        assert_eq!(label(true, "focus-up"), "Focus up");
+        assert_eq!(label(true, "focus-right"), "Focus right or the next workspace");
+        assert_eq!(label(true, "move-left"), "Move window left or to the previous workspace");
+        let binds = with_overrides(&t, false);
+        let note_of = |id: &str| note(binds.iter().find(|b| b.id == id).unwrap(), false);
+        assert_eq!(note_of("focus-up").as_deref(), Some("The window above; with none there, the previous workspace"));
+        assert_eq!(note_of("focus-left"), None);
+        assert!(note_of("workspace-next").unwrap().contains("empty"));
     }
 
     #[test]
