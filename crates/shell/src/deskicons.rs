@@ -56,8 +56,9 @@ struct Grid {
     width: i32,
     height: i32,
     top: i32,
-    /// Where desktop widgets sit (the batteries and the corner widgets), which icons keep out of.
-    reserved: [Option<Rect>; 4],
+    /// Where desktop widgets sit (the clock, the batteries and the corner widgets), which
+    /// icons keep out of.
+    reserved: [Option<Rect>; 5],
 }
 impl Grid {
     fn new(width: i32, height: i32, top: i32) -> Self {
@@ -68,7 +69,7 @@ impl Grid {
             width,
             height,
             top,
-            reserved: [None; 4],
+            reserved: [None; 5],
         }
     }
     fn clamp(self, p: FreePos) -> FreePos {
@@ -101,6 +102,10 @@ impl Grid {
 
 /// Restore free positions, including overlaps, before assigning automatic cells.
 /// Persisting the result makes later additions independent of the current name order.
+///
+/// Widgets win over icons: an icon saved where a widget now sits (one dropped there, or a
+/// widget turned on over it) moves just outside that widget, to whichever side is nearest,
+/// or to the nearest free cell when no side has room.
 fn place(names: &[String], saved: &Positions, grid: Grid) -> Positions {
     let mut cells = grid.automatic_cells();
     // On very small displays there may be no room beside the card. Keep icons reachable.
@@ -108,12 +113,54 @@ fn place(names: &[String], saved: &Positions, grid: Grid) -> Positions {
         cells.extend((0..(grid.cols * grid.rows) as usize).map(|n| grid.nth(n)));
     }
     let mut out = Positions::new();
+    let mut displaced = Vec::new();
     for name in names {
         if let Some(&p) = saved.get(name)
             && p.x.is_finite()
             && p.y.is_finite()
         {
-            out.insert(name.clone(), grid.clamp(p));
+            let p = grid.clamp(p);
+            if grid.reserved(p) {
+                displaced.push((name.clone(), p));
+            } else {
+                out.insert(name.clone(), p);
+            }
+        }
+    }
+    for (name, was) in displaced {
+        let far = |c: &FreePos| (c.x - was.x).powi(2) + (c.y - was.y).powi(2);
+        let free = |c: &FreePos| !grid.reserved(*c) && !out.values().any(|other| c.overlaps(*other));
+        // Beside each widget it overlaps, keeping the other coordinate, with a little air.
+        let (cw, ch, air) = (CELL_W as f64, CELL_H as f64, 4.0);
+        let beside: Vec<FreePos> = grid
+            .reserved
+            .iter()
+            .flatten()
+            .filter(|r| r.intersects(was.rect()))
+            .flat_map(|r| {
+                [
+                    FreePos { x: r.x - cw - air, ..was },
+                    FreePos { x: r.x + r.w + air, ..was },
+                    FreePos { y: r.y - ch - air, ..was },
+                    FreePos { y: r.y + r.h + air, ..was },
+                ]
+            })
+            .map(|c| grid.clamp(c))
+            .collect();
+        let nearest = beside
+            .into_iter()
+            .filter(free)
+            .min_by(|a, b| far(a).total_cmp(&far(b)))
+            .or_else(|| {
+                cells
+                    .iter()
+                    .map(|c| FreePos { page: was.page, ..*c })
+                    .filter(free)
+                    .min_by(|a, b| far(a).total_cmp(&far(b)))
+            });
+        // A full page leaves it to the automatic placement below.
+        if let Some(p) = nearest {
+            out.insert(name, p);
         }
     }
     let mut next = 0;
@@ -1257,11 +1304,12 @@ impl Desktop {
         let mut ordered: Vec<_> = self.items.iter().map(|i| &i.data).collect();
         ordered.sort_by_cached_key(|data| (data.label.to_lowercase(), data.name.clone()));
         let names: Vec<_> = ordered.into_iter().map(|data| data.name.clone()).collect();
-        self.grid.reserved = [None; 4];
+        self.grid.reserved = [None; 5];
         if let Some(app) = self.app.upgrade().filter(|app| self.primary && app.cfg.wallpaper) {
             let screen = (self.geometry.0, self.geometry.1);
             let battery = crate::batterywidget::card_rect(&app.prefs.borrow().desktop_battery, crate::batterywidget::SHOWN, screen, app.reserve(), crate::desk::room(&app), crate::dock::room(&self.output));
-            let all = battery.into_iter().chain(crate::deskcards::rects(&app, &self.output, screen));
+            let clock = crate::desk::rect(&app, screen);
+            let all = clock.into_iter().chain(battery).chain(crate::deskcards::rects(&app, &self.output, screen));
             for (slot, r) in self.grid.reserved.iter_mut().zip(all) {
                 *slot = Some(Rect { x: r.x, y: r.y, w: r.w, h: r.h });
             }
@@ -3636,9 +3684,10 @@ fn finish_cross_drag(target: &Rc<RefCell<Desktop>>, source: &Rc<RefCell<Desktop>
     }
     source.borrow_mut().pointer_down = false;
     target.borrow_mut().pointer_down = false;
-    // Relayout all outputs before queuing GTK drawing, so ownership changes once.
+    // Relayout all outputs before queuing GTK drawing, so ownership changes once. Animated:
+    // an icon dropped on a widget glides out beside it instead of jumping there.
     for surface in surfaces() {
-        surface.borrow_mut().layout(false);
+        surface.borrow_mut().layout(true);
     }
     clear_drag_surfaces(source);
     for surface in surfaces() {
@@ -3870,8 +3919,9 @@ fn finish_drag(d: &Rc<RefCell<Desktop>>, x: f64, y: f64) {
     let refresh_needed = state.shared.borrow().dirty;
     drop(state);
     d.borrow_mut().pointer_down = false;
+    // Animated: an icon dropped on a widget glides out beside it instead of jumping there.
     for surface in surfaces() {
-        surface.borrow_mut().layout(false);
+        surface.borrow_mut().layout(true);
     }
     clear_drag_surfaces(d);
     for surface in surfaces() {
@@ -4810,7 +4860,7 @@ mod tests {
         assert_ne!(p[&names[1]], g.nth(1));
     }
     #[test]
-    fn saved_positions_inside_battery_card_and_overlaps_stay_put() {
+    fn saved_positions_under_a_widget_move_out_beside_it() {
         let names = names(3);
         let g = battery_grid("top_right", "off");
         let saved = [(names[0].clone(), g.nth(0)), (names[1].clone(), g.nth(0))]
@@ -4818,9 +4868,22 @@ mod tests {
             .collect();
         assert!(g.reserved(g.nth(0)));
         let p = place(&names, &saved, g);
-        assert_eq!(p[&names[0]], g.nth(0));
-        assert_eq!(p[&names[1]], g.nth(0));
-        assert!(!g.reserved(p[&names[2]]));
+        assert!(!p.values().any(|p| g.reserved(*p)));
+        assert_separate(&p);
+        // Just outside the card, never farther than the nearest free grid cell.
+        let far = |c: FreePos| (c.x - g.nth(0).x).powi(2) + (c.y - g.nth(0).y).powi(2);
+        let cell = g.automatic_cells().into_iter().map(far).fold(f64::INFINITY, f64::min);
+        assert!(far(p[&names[0]]) <= cell);
+        let card = g.reserved.iter().flatten().next().copied().unwrap();
+        let gap = |c: FreePos| {
+            let r = c.rect();
+            (card.x - (r.x + r.w)).max(r.x - (card.x + card.w)).max(card.y - (r.y + r.h)).max(r.y - (card.y + card.h))
+        };
+        assert!((0.0..=8.0).contains(&gap(p[&names[0]])), "{}", gap(p[&names[0]]));
+        // Overlapping saved positions stay overlapping only where nothing reserves them.
+        let free = g.automatic_cells()[3];
+        let p = place(&names, &[(names[0].clone(), free), (names[1].clone(), free)].into_iter().collect(), g);
+        assert_eq!((p[&names[0]], p[&names[1]]), (free, free));
     }
     #[test]
     fn smaller_screen_pulls_restored_positions_to_the_nearest_edge_without_regridding() {
@@ -4861,9 +4924,15 @@ mod tests {
         let old_names = vec!["b".into(), "c".into()];
         let saved = place(&old_names, &Positions::new(), grid());
         let new_names = vec!["a".into(), "b".into(), "c".into()];
-        let p = place(&new_names, &saved, battery_grid("top_right", "off"));
+        let card = battery_grid("top_right", "off");
+        let p = place(&new_names, &saved, card);
+        // Icons the card now covers move aside; the rest stay where they were.
         for name in old_names {
-            assert_eq!(p[&name], saved[&name]);
+            if card.reserved(saved[&name]) {
+                assert!(!card.reserved(p[&name]));
+            } else {
+                assert_eq!(p[&name], saved[&name]);
+            }
         }
         assert_eq!(place(&new_names, &p, grid()), p);
     }

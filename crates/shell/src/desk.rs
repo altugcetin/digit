@@ -38,6 +38,23 @@ pub fn room(app: &App) -> i32 {
     (height(date, weather) + card + 8.0).round() as i32
 }
 
+/// Where the clock sits on a screen `screen` big, for desktop icons to keep out of: the
+/// column its lines can fill, as tall as what it shows, with its card when it has one.
+pub(crate) fn rect(app: &App, screen: (i32, i32)) -> Option<crate::batterywidget::CardRect> {
+    let mode = app.prefs.borrow().desktop_widget.clone();
+    if mode == "off" || mode.is_empty() || !app.cfg.wallpaper {
+        return None;
+    }
+    let (date, weather) = rows(app);
+    let pad = if app.prefs.borrow().desktop_clock_bg { PAD } else { 0.0 };
+    let (x, y) = if mode == "center" {
+        ((screen.0 - W) as f64 / 2.0, (screen.1 as f64 * 0.16).trunc())
+    } else {
+        (64.0, (app.reserve() + 36) as f64)
+    };
+    Some(crate::batterywidget::CardRect { x: x - pad, y: y - pad, w: W as f64 + 2.0 * pad, h: height(date, weather) + 2.0 * pad })
+}
+
 thread_local! {
     static DESKS: RefCell<Vec<(String, gtk::Window, Paint)>> = const { RefCell::new(Vec::new()) };
     static MODE: RefCell<String> = const { RefCell::new(String::new()) };

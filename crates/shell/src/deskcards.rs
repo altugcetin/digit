@@ -142,13 +142,14 @@ fn top_margin(app: &App, left: bool) -> i32 {
 }
 
 /// Where the widgets that are out sit on a screen `screen` big, in its coordinates: their
-/// cards, or what they draw when they have none. Desktop icons keep out of these.
+/// cards, or just what they draw when they have none (a card's padding would reach into the
+/// next row of icons and empty it). Desktop icons keep out of these.
 pub(crate) fn rects(app: &App, output: &str, screen: (i32, i32)) -> Vec<CardRect> {
     let prefs = app.prefs.borrow().clone();
     Kind::ALL
         .iter()
         .filter_map(|k| {
-            let (place, _) = k.place(&prefs);
+            let (place, backed) = k.place(&prefs);
             if matches!(place.as_str(), "" | "off") {
                 return None;
             }
@@ -157,7 +158,8 @@ pub(crate) fn rects(app: &App, output: &str, screen: (i32, i32)) -> Vec<CardRect
             let (side, bottom) = dock_margins(output, top, left);
             let x = if left { side as f64 + AIR } else { screen.0 as f64 - side as f64 - AIR - w };
             let y = if top { top_margin(app, left) as f64 + AIR } else { screen.1 as f64 - bottom as f64 - AIR - h };
-            Some(CardRect { x: x - CARD_PAD, y: y - CARD_PAD, w: w + 2.0 * CARD_PAD, h: h + 2.0 * CARD_PAD })
+            let pad = if backed { CARD_PAD } else { 0.0 };
+            Some(CardRect { x: x - pad, y: y - pad, w: w + 2.0 * pad, h: h + 2.0 * pad })
         })
         .collect()
 }
