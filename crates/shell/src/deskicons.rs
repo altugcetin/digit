@@ -703,11 +703,15 @@ pub fn style(display: &gdk::Display) {
 enum KeyboardEvent {
     Select,
     Clear,
+    /// The user clicked the desktop itself (or dragged a band on it): it becomes the
+    /// active place, like a file manager window, so Ctrl+A and paste work with nothing
+    /// selected yet.
+    Clicked,
     Window,
     Overlay,
 }
 fn keyboard_requested(selected: bool, event: KeyboardEvent) -> bool {
-    selected && matches!(event, KeyboardEvent::Select)
+    (selected && matches!(event, KeyboardEvent::Select)) || matches!(event, KeyboardEvent::Clicked)
 }
 
 fn release_surface_for(d: &Rc<RefCell<Desktop>>, event: KeyboardEvent) -> bool {
@@ -790,11 +794,22 @@ fn defer_release_keyboard() {
 }
 
 fn focus_selection(d: &Rc<RefCell<Desktop>>) {
+    focus_desktop(d, false);
+}
+
+/// Takes the keyboard for the selection, or for any click on the desktop (`clicked`).
+fn focus_desktop(d: &Rc<RefCell<Desktop>>, clicked: bool) {
     FOCUS_GENERATION.set(FOCUS_GENERATION.get().wrapping_add(1));
     let target = {
         let mut d = d.borrow_mut();
         let wanted = !d.selected.is_empty() || can_undo();
-        let event = if wanted { KeyboardEvent::Select } else { KeyboardEvent::Clear };
+        let event = if wanted {
+            KeyboardEvent::Select
+        } else if clicked {
+            KeyboardEvent::Clicked
+        } else {
+            KeyboardEvent::Clear
+        };
         let requested = keyboard_requested(wanted, event);
         d.acquiring |= requested && !d.keyboard;
         d.keyboard = requested;
@@ -1499,7 +1514,9 @@ fn sync_selection() {
                 true
             }
         };
-        if selected.is_empty() {
+        // A selection emptied elsewhere lets this surface's keyboard go. An empty selection
+        // alone doesn't: a click on the bare desktop takes the keyboard (Ctrl+A, paste).
+        if changed && selected.is_empty() {
             release_surface(&d);
         }
         if changed {
@@ -2913,7 +2930,7 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
             (at.is_some(), open_file)
         };
         animate(&d);
-        focus_selection(&d);
+        focus_desktop(&d, true);
         if button == 3 {
             g.set_state(gtk::EventSequenceState::Claimed);
             menu(&d, on_icon, x, y);
@@ -3020,7 +3037,7 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
         state.select(selected);
         drop(state);
         animate(&d);
-        focus_selection(&d);
+        focus_desktop(&d, true);
     });
     let weak = Rc::downgrade(d);
     band.connect_drag_end(move |_, _, _| {
@@ -4217,7 +4234,7 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_is_requested_only_by_selection_and_revoked_by_windows_or_overlays() {
+    fn keyboard_is_requested_by_selection_or_a_desktop_click_and_revoked_by_windows_or_overlays() {
         for selected in [false, true] {
             assert_eq!(
                 keyboard_requested(selected, KeyboardEvent::Select),
@@ -4231,6 +4248,8 @@ mod tests {
                 assert!(!keyboard_requested(selected, event));
             }
         }
+        // Clicking the desktop makes it active even with nothing selected (Ctrl+A).
+        assert!(keyboard_requested(false, KeyboardEvent::Clicked));
         // Visible selection is not permission to reacquire after a window event.
         let selected = true;
         assert!(!keyboard_requested(selected, KeyboardEvent::Window));
