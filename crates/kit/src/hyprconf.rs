@@ -442,6 +442,10 @@ fn compositor_with(t: &toml::Table, motion: bool, reduced: bool) -> String {
     // Super and the wheel step through workspaces: one step per notch, no faster than niri allows
     // (its suggested wheel cooldown), instead of Hyprland's slower default of 300 ms.
     sections.push("    binds = { scroll_event_delay = 150 },".to_string());
+    // A full-screen app that asks for HDR or wide color switches the display only when the user
+    // allowed it in Displays (which needs a display in 10-bit color). Hyprland's own default
+    // switches an 8-bit display too, then warns that wide color is on without 10-bit.
+    sections.push(format!("    render = {{ cm_auto_hdr = {} }},", i32::from(crate::prefs::flag(t, "hdr_fullscreen", false))));
     if !input.is_empty() {
         sections.push(format!("    input = {{\n{}\n    }},", input.iter().map(|l| format!("        {l},")).collect::<Vec<_>>().join("\n")));
     }
@@ -858,6 +862,10 @@ mod tests {
         assert!(rendered.contains("bind(\"SUPER + mouse_up\", step_workspace(-1))"));
         assert!(rendered.contains("bind(\"SUPER + mouse_down\", step_workspace(1))"));
         assert!(compositor_with(&toml::Table::new(), false, false).contains("binds = { scroll_event_delay = 150 }"));
+        // Full-screen HDR switching stays off until Displays turns it on.
+        assert!(compositor_with(&toml::Table::new(), false, false).contains("render = { cm_auto_hdr = 0 }"));
+        let on: toml::Table = toml::from_str("hdr_fullscreen = true").unwrap();
+        assert!(compositor_with(&on, false, false).contains("render = { cm_auto_hdr = 1 }"));
         assert!(rendered.contains("bind(\"SUPER + SHIFT + mouse_down\", per_layout({ default = hl.dsp.window.cycle_next({ next = true }), scrolling = hl.dsp.layout(\"focus r\") }))"));
         assert!(rendered.contains("bind(\"SUPER + SHIFT + mouse_up\", per_layout({ default = hl.dsp.window.cycle_next({ next = false }), scrolling = hl.dsp.layout(\"focus l\") }))"));
     }

@@ -32,6 +32,8 @@ struct Out {
     turn: u8,
     flip: bool,
     on: bool,
+    /// 10 bits per color channel (Hyprland's `bitdepth = 10`).
+    ten_bit: bool,
 }
 
 impl Out {
@@ -93,6 +95,7 @@ fn read() -> (Wm, Vec<Out>) {
                             turn,
                             flip: t.starts_with("Flipped"),
                             on,
+                            ten_bit: false,
                         })
                     })
                     .collect()
@@ -141,6 +144,8 @@ fn read() -> (Wm, Vec<Out>) {
                             turn: t % 4,
                             flip: t >= 4,
                             on: !o.get("disabled").and_then(Value::as_bool).unwrap_or(false),
+                            // Formats such as XRGB2101010 carry 10 bits a channel.
+                            ten_bit: o.get("currentFormat").and_then(Value::as_str).is_some_and(|f| f.contains("2101010")),
                         })
                     })
                     .collect()
@@ -208,6 +213,9 @@ fn hypr_lua(outs: &[Out], old: &str) -> String {
             props.push(format!("    scale = {}", trim(o.scale)));
             if o.hypr_transform() != 0 {
                 props.push(format!("    transform = {}", o.hypr_transform()));
+            }
+            if o.ten_bit {
+                props.push("    bitdepth = 10".into());
             }
         } else {
             props.push("    disabled = true".into());
@@ -788,6 +796,21 @@ pub fn build() -> gtk::Widget {
             });
             end.append(&pick);
             detail.append(&row);
+            if st.borrow().wm == Wm::Hypr {
+                // Applied with the rest, so a display that can't take it comes back by itself.
+                let (row, end) = ui::row(Some("palette"), "10-bit color", "Smoother gradients and the full range of wide-color content. Some capture apps may not support it");
+                let sw = gtk::Switch::new();
+                sw.set_active(o.ten_bit);
+                sw.set_valign(gtk::Align::Center);
+                let s2 = st.clone();
+                sw.connect_active_notify(move |w| {
+                    let mut s = s2.borrow_mut();
+                    let i = s.pick;
+                    s.outs[i].ten_bit = w.is_active();
+                });
+                end.append(&sw);
+                detail.append(&row);
+            }
         })
     };
     *refill.borrow_mut() = Some(fill.clone());
@@ -847,8 +870,10 @@ pub fn build() -> gtk::Widget {
             f2();
         });
     }
+    // The Color card, refilled once kept settings change which displays are in 10-bit color.
+    let color: Rc<RefCell<Option<gtk::Box>>> = Rc::default();
     let finish = {
-        let (s2, a2, f2, bar, apply) = (st.clone(), area.clone(), fill.clone(), bar.clone(), apply.clone());
+        let (s2, a2, f2, bar, apply, color) = (st.clone(), area.clone(), fill.clone(), bar.clone(), apply.clone(), color.clone());
         Rc::new(move |keep: bool| {
             let previous = REVERT.with(|r| r.borrow_mut().take());
             drop(previous);
@@ -863,7 +888,14 @@ pub fn build() -> gtk::Widget {
             apply.set_sensitive(true);
             if keep {
                 match persist(wm, &outs) {
-                    Ok(msg) => { s2.borrow_mut().saved = outs; ui::done(&msg); }
+                    Ok(msg) => {
+                        let ten_bit = outs.iter().any(|o| o.on && o.ten_bit);
+                        s2.borrow_mut().saved = outs;
+                        if let Some(card) = color.borrow().as_ref() {
+                            hdr_row(card, ten_bit);
+                        }
+                        ui::done(&msg);
+                    }
                     Err(e) => ui::fail(&e),
                 }
             } else {
@@ -941,8 +973,31 @@ pub fn build() -> gtk::Widget {
             s2.borrow_mut().pending = Some(id);
         });
     }
+    if wm == Wm::Hypr {
+        let card = crate::desktop::section(&body, "Color");
+        hdr_row(&card, st.borrow().saved.iter().any(|o| o.on && o.ten_bit));
+        *color.borrow_mut() = Some(card);
+    }
     crate::desktop::night_light(&body, &crate::prefs::read());
     scroll.upcast()
+}
+
+/// Whether full-screen apps may switch a display to HDR or wide color. Only offered with a
+/// display in 10-bit color: wide color on 8 bits bands, and Hyprland warns about it.
+fn hdr_row(card: &gtk::Box, ten_bit: bool) {
+    kit::ui::clear(card);
+    let key = "hdr_fullscreen";
+    let mut on = crate::prefs::get_bool(&crate::prefs::read(), key, false);
+    if on && !ten_bit {
+        // No display is in 10-bit color any more: don't leave the switching on behind it.
+        on = !crate::desktop::save(key, toml::Value::Boolean(false));
+    }
+    let row = crate::desktop::toggle(card, "hdr_on", "HDR and wide color in full screen", if ten_bit {
+        "Games and videos that ask for it switch the display while they're full screen"
+    } else {
+        "Turn on 10-bit color for a display above first"
+    }, key, on);
+    row.set_sensitive(ten_bit);
 }
 
 #[cfg(test)]
@@ -961,6 +1016,15 @@ mod tests {
         revert_pending();
         revert_pending();
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn a_display_in_10_bit_color_is_written_with_its_bit_depth() {
+        let out = |name: &str, ten_bit: bool| Out { name: name.into(), label: String::new(), modes: Vec::new(), mode: Mode { w: 2560, h: 1440, mhz: 165000 }, x: 0, y: 0, scale: 1.0, turn: 0, flip: false, on: true, ten_bit };
+        let lua = hypr_lua(&[out("DP-2", true), out("HDMI-A-1", false)], "");
+        let block = |name: &str| lua.split("hl.monitor(").find(|b| b.contains(&format!("\"{name}\""))).unwrap().to_string();
+        assert!(block("DP-2").contains("bitdepth = 10"));
+        assert!(!block("HDMI-A-1").contains("bitdepth"));
     }
 
     #[test]
