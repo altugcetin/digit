@@ -1994,27 +1994,42 @@ fn trash(d: &Rc<RefCell<Desktop>>, paths: Vec<PathBuf>) {
             })
             .collect()
     };
+    let desktop = Rc::downgrade(d);
     glib::spawn_future_local(async move {
         let mut gone = Vec::new();
         for entry in entries {
+            // The folder icon to fly, made before the folder is gone.
+            let folder = flights.iter().find(|(p, ..)| p == &entry.path).filter(|(.., directory)| *directory)
+                .and_then(|_| crate::dock::folder_icon(kit::folder::glyph(&gio::File::for_path(&entry.path)), ICON as f64));
             match gio::File::for_path(&entry.path)
                 .trash_future(glib::Priority::DEFAULT)
                 .await
             {
-                Ok(()) => gone.push(entry),
+                Ok(()) => {
+                    // Seamless: the icon leaves the desktop in the same frame its flight
+                    // starts there, rather than whenever the folder monitor notices.
+                    if let Some(d) = desktop.upgrade() {
+                        let paint = {
+                            let mut state = d.borrow_mut();
+                            state.items.retain(|i| i.data.path != entry.path);
+                            state.paint.clone()
+                        };
+                        paint.queue_draw();
+                    }
+                    if gone.len() < 3
+                        && let Some(app) = app.upgrade()
+                        && let Some((_, at, icon, directory)) = flights.iter().find(|(p, ..)| p == &entry.path)
+                    {
+                        // Folders fly as the accent folder the desktop draws for them.
+                        let icon = folder.or_else(|| icon.as_deref().and_then(|i| gio::Icon::for_string(i).ok())).unwrap_or_else(|| {
+                            let content_type = if *directory { "inode/directory".into() } else { gio::content_type_guess(Some(&entry.path), None).0 };
+                            gio::content_type_get_icon(&content_type)
+                        });
+                        crate::dock::fly_to_trash(&app, *at, ICON as f64, Some(icon));
+                    }
+                    gone.push(entry);
+                }
                 Err(e) => eprintln!("digit: desktop trash: {e}"),
-            }
-        }
-        if let Some(app) = app.upgrade() {
-            for entry in gone.iter().take(3) {
-                let Some((_, at, icon, directory)) = flights.iter().find(|(p, _, _, _)| p == &entry.path) else { continue };
-                // Folders fly as the accent folder the desktop draws for them.
-                let folder = directory.then(|| crate::dock::folder_icon(kit::folder::glyph(&gio::File::for_path(&entry.path)), ICON as f64)).flatten();
-                let icon = folder.or_else(|| icon.as_deref().and_then(|i| gio::Icon::for_string(i).ok())).unwrap_or_else(|| {
-                    let content_type = if *directory { "inode/directory".into() } else { gio::content_type_guess(Some(&entry.path), None).0 };
-                    gio::content_type_get_icon(&content_type)
-                });
-                crate::dock::fly_to_trash(&app, *at, ICON as f64, Some(icon));
             }
         }
         if !gone.is_empty() {
