@@ -610,6 +610,8 @@ struct IncomingDrag {
 }
 
 struct Desktop {
+    /// The [`ICON_LOOK`] its items' icons were made under.
+    icon_look: u64,
     // The item being renamed: its label is the editor while that lasts.
     renaming: Option<String>,
     shared: Rc<RefCell<Folder>>,
@@ -861,16 +863,35 @@ fn acquire_after_release(d: &Rc<RefCell<Desktop>>) {
             // keyboard focus. Unmapping first would refocus the old app and send
             // a misleading activewindow event during acquisition.
             let window = desktop_window(&monitor, KeyboardMode::OnDemand);
-            old.set_child(gtk::Widget::NONE);
+            // The old surface shows a still copy of the icons until the new one has drawn:
+            // emptying it at once made every icon blink. It empties right after that first
+            // frame, since two surfaces on top of each other double the labels' shadows.
+            let still = gtk::Picture::for_paintable(&gtk::WidgetPaintable::new(Some(&paint)).current_image());
+            still.set_can_shrink(true);
+            still.set_content_fit(gtk::ContentFit::Fill);
+            old.set_child(Some(&still));
             window.set_child(Some(&paint));
             {
                 let mut state = d.borrow_mut();
-                state.retiring = Some(old);
+                state.retiring = Some(old.clone());
                 state.window = window.clone();
             }
             watch_focus(&d, &window);
             window.present();
             paint.grab_focus();
+            // Tick callbacks run before a frame is drawn: the second tick comes after the
+            // first frame went out.
+            let (old, frames) = (old.downgrade(), std::cell::Cell::new(0));
+            paint.add_tick_callback(move |_, _| {
+                frames.set(frames.get() + 1);
+                if frames.get() < 2 {
+                    return glib::ControlFlow::Continue;
+                }
+                if let Some(old) = old.upgrade() {
+                    old.set_child(gtk::Widget::NONE);
+                }
+                glib::ControlFlow::Break
+            });
         }
     });
 }
@@ -994,6 +1015,7 @@ pub fn apply(app: &Rc<App>) {
         }
     }
     DESKTOPS.with(|s| *s.borrow_mut() = keep);
+    let mut made = false;
     for monitor in monitors {
         let output = monitor
             .connector()
@@ -1001,10 +1023,26 @@ pub fn apply(app: &Rc<App>) {
             .unwrap_or_default();
         if !surfaces().iter().any(|d| d.borrow().output == output) {
             create_surface(app, monitor, shared.clone(), output == primary);
+            made = true;
         }
     }
-    if let Some(d) = surfaces().first() {
-        refresh(d);
+    // Every settings change lands here. Only a new surface needs the folder read again;
+    // otherwise the icons just make room for widgets that moved, without rebuilding them.
+    if made || !shared.borrow().ready {
+        if let Some(d) = surfaces().first() {
+            refresh(d);
+        }
+        return;
+    }
+    for d in surfaces() {
+        let busy = {
+            let state = d.borrow();
+            state.drag.is_some() || state.rubber.is_some() || state.importing
+        };
+        if !busy {
+            d.borrow_mut().layout(true);
+            animate(&d);
+        }
     }
 }
 
@@ -1108,6 +1146,7 @@ fn create_surface(
         rubber: None,
         drag: None,
         importing: false,
+        icon_look: ICON_LOOK.get(),
         pending_imports: Positions::new(),
         ticking: false,
         closed: false,
@@ -1125,6 +1164,7 @@ fn create_surface(
     let theme = gtk::IconTheme::for_display(&paint.display());
     let weak = Rc::downgrade(&desktop);
     let handler = theme.connect_changed(move |_| {
+        ICON_LOOK.set(ICON_LOOK.get() + 1);
         if let Some(d) = weak.upgrade() {
             refresh(&d);
         }
@@ -1240,7 +1280,8 @@ impl Desktop {
             if animate {
                 i.x.go(x, now, 180, motion::STANDARD);
                 i.y.go(y, now, 180, motion::STANDARD);
-            } else {
+            } else if (i.x.target(), i.y.target()) != (x, y) {
+                // A glide already heading here keeps going.
                 i.x.set(x);
                 i.y.set(y);
             }
@@ -1256,27 +1297,27 @@ struct ItemFrame {
     editing: bool,
 }
 
-fn draw_item(s: &gtk::Snapshot, app: &App, pal: &kit::palette::Palette, item: &ItemFrame) {
+fn draw_item(s: &gtk::Snapshot, app: &App, item: &ItemFrame) {
     let ItemFrame {
         icon,
-        label,
         rect: r,
         selected,
         editing,
+        ..
     } = item;
     let selected = *selected;
     let x = r.x.round();
     let y = r.y.round();
-    // Finder's look: a soft tile behind the icon and a pill around the words when selected,
-    // white text with a small shadow otherwise, so any wallpaper stays readable.
-    let (w, h) = label.pixel_size();
-    let (w, h) = (w as f64, h as f64);
-    let label_y = y + ICON as f64 + 6.0;
+    // A soft tile behind the icon when selected; the label's pill is drawn with the labels.
     if *editing {
         draw::paintable(s, icon, x + (CELL_W - ICON) as f64 / 2.0, y, ICON as f64);
         return;
     }
     let plate = 6.0;
+    if selected <= 0.0 {
+        draw::paintable(s, icon, x + (CELL_W - ICON) as f64 / 2.0, y, ICON as f64);
+        return;
+    }
     s.push_opacity(selected);
     draw::fill(
         s,
@@ -1289,35 +1330,48 @@ fn draw_item(s: &gtk::Snapshot, app: &App, pal: &kit::palette::Palette, item: &I
         ),
         Rgb::new(0.0, 0.0, 0.0).alpha(0.24),
     );
-    draw::fill(
-        s,
-        &draw::round(
-            x + (CELL_W as f64 - w) / 2.0 - 6.0,
-            label_y - 1.0,
-            w + 12.0,
-            h + 2.0,
-            6.0 * app.round(),
-        ),
-        pal.accent,
-    );
     s.pop();
     draw::paintable(s, icon, x + (CELL_W - ICON) as f64 / 2.0, y, ICON as f64);
-    s.save();
-    s.translate(&graphene::Point::new(
-        (x + LABEL_INSET as f64) as f32,
-        label_y as f32,
-    ));
-    let shadow = !kit::effects::reduced();
-    if shadow { s.push_shadow(&[gtk::gsk::Shadow::new(
-        gdk::RGBA::new(0.0, 0.0, 0.0, 0.55 * (1.0 - selected as f32)),
-        0.0,
-        1.0,
-        3.0,
-    )]); }
-    let ink = pal.on_accent.mix(Rgb::new(1.0, 1.0, 1.0), selected);
-    s.append_layout(label, &ink.rgba());
-    if shadow { s.pop(); }
-    s.restore();
+}
+
+/// Draws every item's label: white with a small shadow, so any wallpaper stays readable, and
+/// on an accent pill when selected.
+///
+/// Each shadow node is its own offscreen blur on the GPU, so all labels share one: with many
+/// icons, a redraw (a selection, a drag, the rubber band) stays one blur instead of one per
+/// icon. The group keeps the same labels while one gets selected, whose white copy only fades
+/// out under it, so the other labels' shadows don't shift as the group changes.
+fn draw_labels(s: &gtk::Snapshot, app: &App, pal: &kit::palette::Palette, items: &[ItemFrame]) {
+    let place = |s: &gtk::Snapshot, item: &ItemFrame, ink: Rgb| {
+        s.save();
+        s.translate(&graphene::Point::new(
+            (item.rect.x.round() + LABEL_INSET as f64) as f32,
+            (item.rect.y.round() + ICON as f64 + 6.0) as f32,
+        ));
+        s.append_layout(&item.label, &ink.rgba());
+        s.restore();
+    };
+    let shown: Vec<&ItemFrame> = items.iter().filter(|i| !i.editing).collect();
+    let shadow = !kit::effects::reduced() && !shown.is_empty();
+    if shadow {
+        s.push_shadow(&[gtk::gsk::Shadow::new(gdk::RGBA::new(0.0, 0.0, 0.0, 0.55), 0.0, 1.0, 3.0)]);
+    }
+    for item in &shown {
+        // Never fully transparent: GTK drops a clear text node, and the group would change.
+        place(s, item, Rgb::new(1.0, 1.0, 1.0).alpha((1.0 - item.selected).max(0.004)));
+    }
+    if shadow {
+        s.pop();
+    }
+    for item in shown.iter().filter(|i| i.selected > 0.0) {
+        let (w, h) = item.label.pixel_size();
+        let (w, h) = (w as f64, h as f64);
+        let (x, y) = (item.rect.x.round(), item.rect.y.round() + ICON as f64 + 6.0);
+        s.push_opacity(item.selected);
+        draw::fill(s, &draw::round(x + (CELL_W as f64 - w) / 2.0 - 6.0, y - 1.0, w + 12.0, h + 2.0, 6.0 * app.round()), pal.accent);
+        place(s, item, pal.on_accent);
+        s.pop();
+    }
 }
 
 fn draw_desktop(d: &Rc<RefCell<Desktop>>, s: &gtk::Snapshot) {
@@ -1372,8 +1426,9 @@ fn draw_desktop(d: &Rc<RefCell<Desktop>>, s: &gtk::Snapshot) {
         ),
     );
     for item in &items {
-        draw_item(s, &app, &pal, item);
+        draw_item(s, &app, item);
     }
+    draw_labels(s, &app, &pal, &items);
     let incoming = { d.borrow().incoming.clone() };
     if let Some(IncomingDrag {
         preview,
@@ -1575,8 +1630,14 @@ fn watch_folder(shared: &Rc<RefCell<Folder>>, folder: &Path) {
     });
     shared.borrow_mut().monitor = Some(monitor);
 }
+thread_local! {
+    /// Counts icon theme and accent changes: icons made before one aren't kept.
+    static ICON_LOOK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// The accent changed: folders are drawn in it.
 pub fn restyle() {
+    ICON_LOOK.set(ICON_LOOK.get() + 1);
     if let Some(d) = surfaces().first() {
         refresh(d);
     }
@@ -1751,9 +1812,32 @@ async fn materialize(d: Rc<RefCell<Desktop>>, files: Vec<FileData>) {
                 .iter()
                 .map(|i| (i.data.name.clone(), i.selected))
                 .collect();
+            // Positions carry over too, with any glide in flight: the rescan that follows a
+            // drop must not cut the icon's move beside a widget short.
+            let motion: BTreeMap<_, _> = state.items.iter().map(|i| (i.data.name.clone(), (i.x, i.y))).collect();
             for item in &mut items {
                 if let Some(selected) = selection.get(&item.data.name) {
                     item.selected = *selected;
+                }
+                if let Some(&(x, y)) = motion.get(&item.data.name) {
+                    (item.x, item.y) = (x, y);
+                }
+            }
+            // Keep the icon an unchanged item already shows: a fresh themed icon loads on
+            // its first frame, and every file icon blinked whenever the folder changed.
+            let shown: BTreeMap<_, _> = state
+                .items
+                .iter()
+                .map(|i| (i.data.name.clone(), (i.data.icon.clone(), i.data.directory, i.icon.clone())))
+                .collect();
+            let same_look = std::mem::replace(&mut state.icon_look, ICON_LOOK.get()) == ICON_LOOK.get();
+            for item in items.iter_mut().filter(|_| same_look) {
+                if let Some((icon, directory, paintable)) = shown.get(&item.data.name)
+                    && *icon == item.data.icon
+                    && *directory == item.data.directory
+                    && !item.data.directory
+                {
+                    item.icon = paintable.clone();
                 }
             }
             // Only confirmed absence releases outgoing MOVE suppression.
@@ -2987,19 +3071,29 @@ fn controllers(d: &Rc<RefCell<Desktop>>, paint: &Paint) {
     let weak = Rc::downgrade(d);
     source.connect_drag_begin(move |_, system| {
         let Some(d) = weak.upgrade() else { return };
-        let (preview, hotspot) = {
+        let (preview, hotspot, local) = {
             let mut state = d.borrow_mut();
             let Some(drag) = state.drag.as_mut() else {
                 return;
             };
             drag.system = Some(system.clone());
-            let preview = (drag.preview.clone(), drag.hotspot);
+            // A drag starts over the desktop: keep drawing the items here from the first
+            // frame, instead of hiding them until the drop target's enter arrives a frame
+            // or two later and showing them again, which blinked every dragged icon.
+            if drag.local_preview {
+                drag.over_desktop = true;
+            }
+            let preview = (drag.preview.clone(), drag.hotspot, drag.local_preview);
             state.last_click = None;
             preview
         };
         // The shared helper also repairs Hyprland's offset after GPU attaches;
         // merely setting GDK's hotspot before the frame cannot survive those.
         let mut picture = Some(kit::drag::set_icon(system, &preview, hotspot));
+        if local && let Some(picture) = &picture {
+            // Over the desktop the native visual stays empty (see desktop_drag_target).
+            picture.set_paintable(Some(&clear_texture()));
+        }
         let previous = {
             let mut state = d.borrow_mut();
             state
@@ -3235,8 +3329,9 @@ fn make_preview(
     ));
     let pal = app.palette_at(now);
     for item in &frames {
-        draw_item(&s, &app, &pal, item);
+        draw_item(&s, &app, item);
     }
+    draw_labels(&s, &app, &pal, &frames);
     s.to_paintable(Some(&graphene::Size::new(bounds.w as f32, bounds.h as f32)))
         .map(|preview| (preview, hot))
 }
@@ -3530,6 +3625,11 @@ fn drag_selection(selected: &BTreeSet<String>, anchor: &str) -> BTreeSet<String>
     }
 }
 
+/// A one-pixel transparent texture: a real node, so the drag surface still submits a buffer.
+fn clear_texture() -> gdk::MemoryTexture {
+    gdk::MemoryTexture::new(1, 1, gdk::MemoryFormat::R8g8b8a8, &glib::Bytes::from_static(&[0, 0, 0, 0]), 4)
+}
+
 fn desktop_drag_target(d: &Rc<RefCell<Desktop>>, over: bool) {
     let (paint, visual, preview) = {
         let mut state = d.borrow_mut();
@@ -3552,14 +3652,7 @@ fn desktop_drag_target(d: &Rc<RefCell<Desktop>>, over: bool) {
         if over {
             // A real texture node submits a transparent buffer, clearing the
             // previous native visual. Keep its allocation/hotspot unchanged.
-            let empty = gdk::MemoryTexture::new(
-                1,
-                1,
-                gdk::MemoryFormat::R8g8b8a8,
-                &glib::Bytes::from_static(&[0, 0, 0, 0]),
-                4,
-            );
-            visual.set_paintable(Some(&empty));
+            visual.set_paintable(Some(&clear_texture()));
         } else {
             visual.set_paintable(Some(&preview));
         }
