@@ -58,10 +58,11 @@ These come from the maintainer. Breaking one costs more than any feature gains.
 `timeout 5 grim -o <output> -s 0.5 out.png`, plus `hyprctl layers -j` to check which layer a surface ended up on. Look only; never click or type.
 
 ### Generated Hyprland Lua
+Digit writes its Hyprland config under `~/.config/digit/hyprland/` (`hyprconf::hypr()`); `~/.config/hypr/` is an old copy. Regenerate after a template change with `digit-settings --hypr-sync`.
 ```
-luac -p ~/.config/hypr/digit/digit-keybinds.lua
-lua scripts/hl-mock.lua ~/.config/hypr/digit/digit-keybinds.lua                     # list binds
-lua scripts/hl-mock.lua ~/.config/hypr/digit/digit-keybinds.lua "SUPER + mouse_down" # what it dispatches
+luac -p ~/.config/digit/hyprland/digit/digit-keybinds.lua
+lua scripts/hl-mock.lua ~/.config/digit/hyprland/digit/digit-keybinds.lua                     # list binds
+lua scripts/hl-mock.lua ~/.config/digit/hyprland/digit/digit-keybinds.lua "SUPER + mouse_down" # what it dispatches
 ```
 Edit `STATE` in the mock to model edge cases: the last workspace, an empty workspace, a shown special workspace, no active window. Special workspaces have **`id == nil`**, so guard every `ws.id` use. `hl.dispatch` is synchronous.
 
