@@ -1652,8 +1652,11 @@ fn desk_widgets(card: &gtk::Box, t: &toml::Table) {
     let block = gtk::Box::new(gtk::Orientation::Vertical, 8);
     block.add_css_class("corners");
     block.set_halign(gtk::Align::Center);
+    // The small screen keeps its size: a long caption wraps under it instead of widening it.
+    area.set_halign(gtk::Align::Center);
     block.append(&area);
     caption.set_halign(gtk::Align::Center);
+    caption.set_max_width_chars(44);
     block.append(&caption);
     card.append(&block);
 }
@@ -1671,11 +1674,19 @@ fn draw_clock(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
     let _ = cr.fill();
 }
 
+/// Where the `i`th of `n` rings of radius `rad` sits: packed together and centred, as on the
+/// desktop, rather than spread over the whole spot.
+fn ring_x(x: f64, rw: f64, rad: f64, n: usize, i: usize) -> f64 {
+    let step = rad * 2.7;
+    x + rw / 2.0 - step * (n as f64 - 1.0) / 2.0 + step * i as f64
+}
+
 fn draw_batteries(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
-    let rad = rh * 0.26;
-    cr.set_line_width(rh * 0.09);
+    let rad = rh * 0.24;
+    cr.set_line_width(rh * 0.08);
     for (i, level) in [0.8, 0.55, 0.3].iter().enumerate() {
-        let (cx, cy) = (x + rw * (0.2 + 0.3 * i as f64), y + rh / 2.0);
+        let (cx, cy) = (ring_x(x, rw, rad, 3, i), y + rh * 0.38);
+        blob(cr, cx - rh * 0.08, y + rh * 0.76, rh * 0.16, rh * 0.06, 0.7 * alpha);
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.25 * alpha);
         cr.arc(cx, cy, rad, 0.0, std::f64::consts::TAU);
         let _ = cr.stroke();
@@ -1716,8 +1727,8 @@ fn draw_media(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
 }
 
 fn draw_weather(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
-    // A sun behind a cloud, the temperature beside it, and the coming hours under them.
-    let (cx, cy, r) = (x + rw * 0.14, y + rh * 0.3, rh * 0.13);
+    // A sun behind a cloud, with the temperature and the day's range beside it.
+    let (cx, cy, r) = (x + rw * 0.14, y + rh * 0.5, rh * 0.13);
     cr.set_source_rgba(1.0, 0.82, 0.35, alpha);
     cr.arc(cx + r * 0.5, cy - r * 0.4, r, 0.0, std::f64::consts::TAU);
     let _ = cr.fill();
@@ -1730,18 +1741,13 @@ fn draw_weather(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
     let rx = x + rw * 0.3 + ext.width() as f64 + rw * 0.06;
     blob(cr, rx, cy - rh * 0.1, rw * 0.22, rh * 0.06, 0.85 * alpha);
     blob(cr, rx, cy + rh * 0.04, rw * 0.16, rh * 0.05, 0.55 * alpha);
-    for i in 0..5 {
-        let hx = x + rw * (0.12 + 0.19 * i as f64);
-        blob(cr, hx - rh * 0.05, y + rh * 0.66, rh * 0.1, rh * 0.1, 0.85 * alpha);
-        blob(cr, hx - rh * 0.06, y + rh * 0.83, rh * 0.12, rh * 0.05, 0.6 * alpha);
-    }
 }
 
 fn draw_system(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
     let rad = rh * 0.2;
     cr.set_line_width(rh * 0.07);
     for (i, level) in [0.46, 0.62, 0.3, 0.55].iter().enumerate() {
-        let (cx, cy) = (x + rw * (0.13 + 0.248 * i as f64), y + rh * 0.42);
+        let (cx, cy) = (ring_x(x, rw, rad, 4, i), y + rh * 0.42);
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.25 * alpha);
         cr.arc(cx, cy, rad, 0.0, std::f64::consts::TAU);
         let _ = cr.stroke();
