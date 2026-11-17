@@ -4,6 +4,8 @@
 /// Corner radius of an edge-docked panel (Control Center, Workspaces, calendar).
 pub const PANEL_RADIUS: f64 = 28.0;
 /// The concave fillet where a docked panel meets the screen edge.
+/// How far a card under the island drops in as it opens.
+pub const CARD_DROP: f64 = 16.0;
 pub const FILLET: f64 = 14.0;
 /// Space between a panel's edge and its content.
 pub const PANEL_PAD: f64 = 18.0;

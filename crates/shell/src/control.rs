@@ -5,7 +5,7 @@ use crate::draw::{self, Face};
 use crate::panel_corner;
 use gtk::subclass::prelude::*;
 use gtk::{cairo, gdk, glib, graphene, gsk, pango, prelude::*};
-use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
+use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use kit::bluez;
 use kit::corners::{Corner, Panel};
 use kit::motion::{self, Tween};
@@ -172,6 +172,10 @@ struct State {
     max_h: f64,
     screen: (f64, f64),
     corner: Corner,
+    /// Where the panel opens: its hot corner, or beside the bar button that opened it.
+    mount: Mount,
+    /// Runs once when the panel closes, so the bar button lets go of its held look.
+    on_close: Option<Box<dyn FnOnce()>>,
     margins: [i32; 4],
     net: Net,
     bt: bluez::Snapshot,
@@ -218,6 +222,7 @@ pub fn show_on(app: &Rc<App>, output: Option<String>) {
         c
     });
     if !control.0.borrow().open {
+        control.0.borrow_mut().mount = Mount::Corner;
         control.open_on(output);
     }
 }
@@ -227,6 +232,52 @@ pub fn show_sound(app: &Rc<App>) {
     show_on(app, compositor::focused_output());
     if let Some(c) = app.control.borrow().clone() && !c.0.borrow().sound.open {
         c.toggle_sound();
+    }
+}
+
+/// Where Control Center opens.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Mount {
+    /// In its hot corner, against both screen edges.
+    Corner,
+    /// Hanging from the top bar against the screen's side edge, like the calendar
+    /// on a notch. `left` is the side; `top` is where the bar ends.
+    Hang { left: bool, top: f64 },
+    /// A free card under the island, its right edge at `right` and its top at `top`.
+    Card { right: f64, top: f64 },
+}
+
+/// The gap a card keeps from the screen's edges.
+const CARD_AIR: f64 = 8.0;
+use crate::metrics::CARD_DROP;
+
+/// Opens or closes Control Center from a bar button whose right edge is at `right` and whose
+/// bar ends at `below` (both in screen pixels). When the setting allows, the panel opens beside
+/// that button: a card under the island, or hanging from a notch's bar like the calendar.
+/// `on_close` runs once when the panel goes, so the button can stop looking pressed.
+pub fn toggle_from(app: &Rc<App>, right: f64, below: f64, screen_w: f64, on_close: impl FnOnce() + 'static) {
+    let mount = if !app.prefs.borrow().control_follows_button {
+        Mount::Corner
+    } else if app.floating() {
+        Mount::Card { right, top: below }
+    } else {
+        Mount::Hang { left: right < screen_w / 2.0, top: if app.wide() { app.reserve() as f64 } else { below } }
+    };
+    let existing = app.control.borrow().clone();
+    let control = existing.unwrap_or_else(|| {
+        let c = Control::new(app);
+        *app.control.borrow_mut() = Some(c.clone());
+        c
+    });
+    if control.0.borrow().open {
+        control.close();
+    } else {
+        {
+            let mut s = control.0.borrow_mut();
+            s.mount = mount;
+            s.on_close = Some(Box::new(on_close));
+        }
+        control.open_on(compositor::focused_output());
     }
 }
 
@@ -319,6 +370,8 @@ impl Control {
             max_h: 600.0,
             screen: (1920.0, 1080.0),
             corner: panel_corner::selected(app, Panel::Control),
+            mount: Mount::Corner,
+            on_close: None,
             margins: [0; 4],
             net: Net::default(),
             bt: bluez::Snapshot::default(),
@@ -529,12 +582,17 @@ impl Control {
         self.kick();
     }
 
+    pub fn is_open(&self) -> bool {
+        self.0.borrow().open
+    }
+
     fn toggle(&self) {
         let open = self.0.borrow().open;
         if open { self.close() } else { self.open() }
     }
 
     fn open(&self) {
+        self.0.borrow_mut().mount = Mount::Corner;
         self.open_on(compositor::focused_output());
     }
 
@@ -654,6 +712,9 @@ impl Control {
             s.window.set_keyboard_mode(KeyboardMode::None);
             if let Some(scrim) = s.scrim.take() {
                 scrim.destroy();
+            }
+            if let Some(f) = s.on_close.take() {
+                glib::idle_add_local_once(f);
             }
         }
         self.stop_scan();
@@ -867,10 +928,35 @@ fn max_height(screen_h: f64) -> f64 {
 
 impl State {
     fn reposition(&mut self) {
-        self.corner = panel_corner::selected(&self.app, Panel::Control);
-        self.margins = panel_corner::position(&self.window, self.corner);
-        self.max_h = max_height(self.screen.1);
-        let (w, h) = ((W + FILLET) as i32, (self.max_h + FILLET) as i32);
+        match self.mount {
+            Mount::Corner => {
+                self.corner = panel_corner::selected(&self.app, Panel::Control);
+                self.margins = panel_corner::position(&self.window, self.corner);
+                self.max_h = max_height(self.screen.1);
+            }
+            Mount::Hang { left, top } => {
+                self.corner = if left { Corner::TopLeft } else { Corner::TopRight };
+                panel_corner::anchor(&self.window, self.corner);
+                let top = (top - FILLET).max(0.0);
+                self.margins = [top as i32, 0, 0, 0];
+                self.max_h = (self.screen.1 - top - 3.0 * FILLET - 12.0).clamp(200.0, 820.0);
+            }
+            Mount::Card { right, top } => {
+                self.corner = Corner::TopLeft;
+                panel_corner::anchor(&self.window, self.corner);
+                let left = (right - W).clamp(CARD_AIR, (self.screen.0 - W - CARD_AIR).max(CARD_AIR));
+                // The surface starts a drop higher, so the card falls in without being cut off.
+                self.margins = [(top - CARD_DROP).max(0.0).round() as i32, left.round() as i32, 0, 0];
+                self.max_h = (self.screen.1 - top - 2.0 * CARD_AIR).clamp(200.0, 820.0);
+            }
+        }
+        if self.mount != Mount::Corner {
+            for (edge, margin) in [Edge::Top, Edge::Left, Edge::Right, Edge::Bottom].into_iter().zip(self.margins) {
+                self.window.set_margin(edge, margin);
+            }
+        }
+        let (w, h) = self.wanted();
+        let (w, h) = (w as i32, h as i32);
         self.window.set_default_size(w, h);
         self.canvas.set_size_request(w, h);
         self.hits.clear();
@@ -882,13 +968,51 @@ impl State {
         self.scroll = (self.scroll + dy).clamp(0.0, limit);
     }
 
+    /// The surface each mount needs: room for the fillets it draws, and no more.
+    fn wanted(&self) -> (f64, f64) {
+        match self.mount {
+            Mount::Corner => (W + FILLET, self.max_h + FILLET),
+            Mount::Hang { .. } => (W, self.max_h + 2.0 * FILLET),
+            Mount::Card { .. } => (W, self.max_h + CARD_DROP),
+        }
+    }
+
     fn surface_size(&self) -> (f64, f64) {
         let (w, h) = (self.canvas.width(), self.canvas.height());
-        (if w > 1 { w as f64 } else { W + FILLET }, if h > 1 { h as f64 } else { self.max_h + FILLET })
+        let wanted = self.wanted();
+        (if w > 1 { w as f64 } else { wanted.0 }, if h > 1 { h as f64 } else { wanted.1 })
     }
 
     fn placement(&self, now: i64) -> panel_corner::Rect {
-        panel_corner::placement(self.corner, self.surface_size(), (W, self.height.value(now).max(1.0)), self.rise.value(now), FILLET)
+        self.placement_at(self.rise.value(now), self.height.value(now).max(1.0))
+    }
+
+    fn placement_at(&self, rise: f64, h: f64) -> panel_corner::Rect {
+        let surface = self.surface_size();
+        match self.mount {
+            Mount::Corner => panel_corner::placement(self.corner, surface, (W, h), rise, FILLET),
+            Mount::Hang { left, .. } => {
+                // Slides in from the side edge it hangs on, as the calendar does.
+                let mut r = panel_corner::placement(self.corner, surface, (W, h), 1.0, FILLET);
+                r.y += FILLET;
+                r.x += ((1.0 - rise) * W).round() * if left { -1.0 } else { 1.0 };
+                r
+            }
+            Mount::Card { .. } => panel_corner::Rect { x: 0.0, y: (rise.clamp(0.0, 1.0) * CARD_DROP).round(), w: W, h },
+        }
+    }
+
+    /// The input region: the panel and the fillets it draws.
+    fn envelope(&self, now: i64) -> panel_corner::Rect {
+        let r = self.placement(now);
+        match self.mount {
+            Mount::Corner => panel_corner::envelope(self.corner, r, self.surface_size(), FILLET),
+            Mount::Hang { .. } => {
+                let y = (r.y - FILLET).max(0.0);
+                panel_corner::Rect { x: r.x, y, w: r.w, h: (r.y + r.h + FILLET - y).max(0.0) }
+            }
+            Mount::Card { .. } => r,
+        }
     }
 
     fn bt_on(&self) -> bool {
@@ -930,7 +1054,7 @@ impl State {
             self.expand = None;
         }
         let r = if self.open {
-            panel_corner::envelope(self.corner, self.placement(now), self.surface_size(), FILLET).region()
+            self.envelope(now).region()
         } else {
             cairo::RectangleInt::new(0, 0, 0, 0)
         };
@@ -1017,16 +1141,34 @@ impl State {
         let cfg = self.app.cfg.clone();
         let canvas = self.canvas.clone();
         let h = self.height.value(now).max(1.0);
-        let shift = ((1.0 - rise) * (h + FILLET)).round() * if self.corner.is_top() { -1.0 } else { 1.0 };
         let placed = self.placement(now);
+        let shift = placed.y - self.placement_at(1.0, h).y;
         let rect = panel_corner::Rect { x: placed.x, y: placed.y - shift, w: W, h };
         let right = rect.x + W;
         let bottom = rect.y + h;
         s.save();
         s.translate(&graphene::Point::new(0.0, shift as f32));
         let radius = RADIUS * self.app.round();
-        panel_corner::slab(s, self.corner, rect, radius, FILLET, pal.body);
-        s.push_rounded_clip(&panel_corner::clip(self.corner, rect, radius, FILLET));
+        let card = matches!(self.mount, Mount::Card { .. });
+        if card {
+            s.push_opacity(rise.clamp(0.0, 1.0));
+        }
+        match self.mount {
+            Mount::Corner => {
+                panel_corner::slab(s, self.corner, rect, radius, FILLET, pal.body);
+                s.push_rounded_clip(&panel_corner::clip(self.corner, rect, radius, FILLET));
+            }
+            Mount::Hang { left, .. } => {
+                let bar = self.app.wide();
+                panel_corner::hang(s, rect, left, bar, radius, FILLET, pal.body);
+                s.push_rounded_clip(&panel_corner::hang_clip(rect, left, bar, radius));
+            }
+            Mount::Card { .. } => {
+                let body = draw::round(rect.x, rect.y, W, h, radius);
+                fill(s, &body, pal.body);
+                s.push_rounded_clip(&body);
+            }
+        }
         s.push_opacity(self.fade.value(now).clamp(0.0, 1.0));
         let left = right - W;
         let x0 = left + PAD;
@@ -1195,6 +1337,9 @@ impl State {
         }
         s.pop();
         s.pop();
+        if card {
+            s.pop();
+        }
         s.restore();
         let floor = bottom - h + shift;
         self.hits = hits.into_iter().filter(|(_, _, hy, _, hh)| hy + hh > floor && *hy < bottom + shift).collect();

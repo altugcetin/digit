@@ -54,6 +54,7 @@ pub struct Config {
     pub intro: bool,
     pub smooth_caret: bool,
     pub fullscreen_edges: bool,
+    pub control_follows_button: bool,
     pub ui_round: f64,
     pub ui_surface: String,
     pub ui_accent: String,
@@ -179,6 +180,7 @@ impl Default for Config {
             intro: true,
             smooth_caret: true,
             fullscreen_edges: false,
+            control_follows_button: true,
             ui_round: 1.0,
             ui_surface: "black".into(),
             ui_accent: "wallpaper".into(),
@@ -308,6 +310,8 @@ pub struct Prefs {
     pub tray: bool,
     pub mic_guard: bool,
     pub fullscreen_edges: bool,
+    /// Control Center opens under the bar button that opened it, not in its hot corner.
+    pub control_follows_button: bool,
     /// Spotlight draws a caret that glides between positions and blinks softly.
     pub smooth_caret: bool,
     /// Settings > Apps: corner roundness and card surface, shared with the shell's panels.
@@ -393,6 +397,7 @@ impl From<&Config> for Prefs {
             tray: c.tray,
             mic_guard: c.mic_guard,
             fullscreen_edges: c.fullscreen_edges,
+            control_follows_button: c.control_follows_button,
             smooth_caret: c.smooth_caret,
             ui_round: c.ui_round,
             ui_surface: c.ui_surface.clone(),

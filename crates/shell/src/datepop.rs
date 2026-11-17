@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 const W: f64 = 360.0;
-use crate::metrics::{FILLET, PANEL_PAD as PAD, PANEL_RADIUS as RADIUS};
+use crate::metrics::{CARD_DROP, FILLET, PANEL_PAD as PAD, PANEL_RADIUS as RADIUS};
 const HEAD: f64 = 52.0;
 const NAMES: f64 = 26.0;
 const CELL: f64 = 44.0;
@@ -122,7 +122,7 @@ fn list_top() -> f64 {
 
 /// Docked panels include the concave fillets; floating cards use only their rounded body.
 fn surface(agenda: bool, floating: bool) -> (f64, f64) {
-    (W, height(agenda) + if floating { 0.0 } else { 2.0 * FILLET })
+    (W, height(agenda) + if floating { CARD_DROP } else { 2.0 * FILLET })
 }
 
 fn height(agenda: bool) -> f64 {
@@ -141,7 +141,7 @@ impl Pop {
     }
 
     fn spot_at(&self, x: f64, y: f64) -> Option<Spot> {
-        let y = y - if self.floating { 0.0 } else { FILLET };
+        let y = y - if self.floating { CARD_DROP } else { FILLET };
         if (0.0..HEAD).contains(&y) {
             return if x >= W - PAD - 30.0 {
                 Some(Spot::Ahead)
@@ -199,8 +199,14 @@ impl Pop {
         let h = height(self.agenda);
         let hot = |spot: Spot| self.hover == Some(spot);
         s.save();
-        // One motion for every layout: the panel slides in from the screen's right edge.
-        s.translate(&graphene::Point::new(((1.0 - slide) * self.reach).round() as f32, 0.0));
+        if self.floating {
+            // A card under the island drops in and fades, as Control Center does.
+            s.translate(&graphene::Point::new(0.0, (slide * CARD_DROP).round() as f32));
+            s.push_opacity(slide.clamp(0.0, 1.0));
+        } else {
+            // Docked, the panel slides in from the screen's right edge.
+            s.translate(&graphene::Point::new(((1.0 - slide) * self.reach).round() as f32, 0.0));
+        }
         let radius = RADIUS * self.app.round();
         if self.bar {
             // Flat against the top bar, a cove into the screen edge under the right side.
@@ -313,6 +319,9 @@ impl Pop {
         }
         s.pop();
         s.pop();
+        if self.floating {
+            s.pop();
+        }
         s.restore();
     }
 }
@@ -348,7 +357,9 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, right: f64, y: f64) {
     let floating = app.floating();
     window.set_anchor(Edge::Right, !floating);
     window.set_anchor(Edge::Left, floating);
-    window.set_margin(Edge::Top, (app.reserve() - FILLET as i32).max(0));
+    // Flat against a full bar; under a notch, as far below the pill as the pill is from the top.
+    let top = if app.wide() { app.reserve() as f64 } else { y };
+    window.set_margin(Edge::Top, (top - FILLET).max(0.0).round() as i32);
     let paint = Paint::new(1, 1);
     let now_us = glib::monotonic_time();
     let mut slide = Tween::still(0.0);
@@ -360,7 +371,7 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, right: f64, y: f64) {
         let screen = monitor.as_ref().map_or(f64::MAX, |m| m.geometry().width() as f64);
         let left = (right - W).clamp(0.0, (screen - W).max(0.0)).round();
         window.set_margin(Edge::Left, left as i32);
-        window.set_margin(Edge::Top, y.round() as i32);
+        window.set_margin(Edge::Top, (y - CARD_DROP).max(0.0).round() as i32);
         if screen.is_finite() {
             sw = (screen - left).max(W);
         }
@@ -492,7 +503,7 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, right: f64, y: f64) {
     window.present();
     if let Some(surface) = window.surface() {
         let body = if floating {
-            cairo::RectangleInt::new(0, 0, W as i32, height(agenda) as i32)
+            cairo::RectangleInt::new(0, CARD_DROP as i32, W as i32, height(agenda) as i32)
         } else {
             cairo::RectangleInt::new(0, FILLET as i32, W as i32, height(agenda) as i32)
         };
