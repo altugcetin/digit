@@ -645,8 +645,7 @@ pub fn sections(page: &str) -> &'static [Section] {
         "appearance" => &[shell_look, app_look, roundness, window_buttons, app_themes, effects],
         "dock" => &[dock],
         "notch" => &[notch, menu_bar, workspaces, screen_edges],
-        "wallpaper" => &[crate::wallpaper::screens_section, crate::wallpaper::source],
-        "desktop" => &[desktop],
+        "desktop" => &[crate::wallpaper::section_for, desktop],
         "spotlight" => &[search, scopes, clipboard],
         "compositor" => &[session],
         "displays" => &[night_light],
@@ -1400,7 +1399,6 @@ pub fn night_light(body: &gtk::Box, t: &toml::Table) {
 
 fn desktop(body: &gtk::Box, t: &toml::Table) {
     let desk = section(body, "Desktop");
-    desk_widgets(&desk, t);
     field(&desk, "location_on", "Weather city", "Shown in Control Center, under the desktop clock and in the Weather widget. The city name goes to open-meteo.com over HTTPS; leave empty to keep weather off", "weather_city", &prefs::get_str(t, "weather_city", ""), "Istanbul", |_| true);
     choice(&desk, "device_thermostat", "Units", "", "weather_unit", &[("celsius", "°C"), ("fahrenheit", "°F")], &prefs::get_str(t, "weather_unit", "celsius"));
     toggle(&desk, "folder", "Desktop icons", "Show what's in your Desktop folder on the wallpaper", "desktop_icons", prefs::get_bool(t, "desktop_icons", true));
@@ -1476,66 +1474,37 @@ fn placed(t: &toml::Table) -> Vec<Option<&'static str>> {
     }).collect()
 }
 
-/// The desktop widgets on one small screen: click a spot to choose what sits there.
-fn desk_widgets(card: &gtk::Box, t: &toml::Table) {
-    let (row, _) = ui::row(Some("dashboard_customize"), "Desktop widgets", "Click a spot on the screen to choose what sits there");
-    card.append(&row);
+/// The desktop widgets for the primary screen's small map (see `wallpaper::Overlay`): click a
+/// spot to choose what sits there, and what the widget there shows.
+pub(crate) fn widget_overlay(t: &toml::Table) -> crate::wallpaper::Overlay {
+    use crate::wallpaper::Overlay;
     let state = Rc::new(std::cell::RefCell::new(placed(t)));
     let backed = Rc::new(std::cell::RefCell::new(cards(t)));
     let hover: Rc<Cell<Option<usize>>> = Rc::default();
-    let area = gtk::DrawingArea::new();
-    area.add_css_class("desk-map");
-    area.set_overflow(gtk::Overflow::Hidden);
-    area.set_content_width(360);
-    area.set_content_height(203);
-    area.set_size_request(360, 203);
-    area.set_cursor_from_name(Some("pointer"));
-    let caption = gtk::Label::new(None);
-    caption.add_css_class("corner-name");
-    caption.set_wrap(true);
-    caption.set_justify(gtk::Justification::Center);
-    let say = {
-        let (st, caption) = (state.clone(), caption.downgrade());
-        move || {
-            let st = st.borrow();
-            // What's out, in screen order; there are more widgets than fit in a line otherwise.
-            let parts: Vec<String> = SPOTS.iter().filter_map(|(spot, place, _)| {
-                let w = WIDGETS.iter().zip(st.iter()).find(|(_, at)| **at == Some(*spot))?.0;
-                Some(format!("{}: {}", w.name, place.to_lowercase()))
-            }).collect();
-            let text = if parts.is_empty() { "No widgets yet".to_string() } else { parts.join("   ·   ") };
-            if let Some(c) = caption.upgrade() { c.set_text(&text); }
-        }
-    };
-    say();
-    {
-        let (st, hv, bk) = (state.clone(), hover.clone(), backed.clone());
-        area.set_draw_func(move |_, cr, w, h| draw_desk_map(cr, w as f64, h as f64, &st.borrow(), &bk.borrow(), hv.get()));
-    }
+    let areas: Rc<std::cell::RefCell<Option<glib::WeakRef<gtk::DrawingArea>>>> = Rc::default();
+    let spot = Rc::new(Cell::new(0usize));
+    let put = gio::SimpleAction::new_stateful("put", Some(glib::VariantTy::STRING), &"none".to_variant());
     let spot_at = |x: f64, y: f64, w: f64, h: f64| {
         SPOTS.iter().position(|(id, _, r)| WIDGETS.iter().any(|wd| wd.places.iter().any(|p| p.0 == *id)) && x >= r.0 * w && x <= (r.0 + r.2) * w && y >= r.1 * h && y <= (r.1 + r.3) * h)
     };
-    let motion = gtk::EventControllerMotion::new();
-    {
-        let (a, hv) = (area.downgrade(), hover.clone());
-        motion.connect_motion(move |_, x, y| {
-            let Some(a) = a.upgrade() else { return };
-            let now = spot_at(x, y, a.width() as f64, a.height() as f64);
-            if hv.replace(now) != now { a.queue_draw(); }
-        });
-        let (a, hv) = (area.downgrade(), hover.clone());
-        motion.connect_leave(move |_| {
-            hv.set(None);
-            if let Some(a) = a.upgrade() { a.queue_draw(); }
-        });
-    }
-    area.add_controller(motion);
+    let redraw = {
+        let areas = areas.clone();
+        move || if let Some(a) = areas.borrow().as_ref().and_then(|a| a.upgrade()) { a.queue_draw(); }
+    };
+    let draw: crate::wallpaper::DrawFn = {
+        let (st, hv, bk) = (state.clone(), hover.clone(), backed.clone());
+        Box::new(move |cr, w, h| draw_desk_map(cr, w, h, &st.borrow(), &bk.borrow(), hv.get()))
+    };
+    let moved: crate::wallpaper::MovedFn = {
+        let hv = hover.clone();
+        Box::new(move |at, w, h| {
+            let now = at.and_then(|(x, y)| spot_at(x, y, w, h));
+            (hv.replace(now) != now, now.is_some())
+        })
+    };
     // What a spot holds is picked from a menu at the spot.
-    let spot = Rc::new(Cell::new(0usize));
-    let put = gio::SimpleAction::new_stateful("put", Some(glib::VariantTy::STRING), &"none".to_variant());
     {
-        let (st, spot, a) = (state.clone(), spot.clone(), area.downgrade());
-        let say = say.clone();
+        let (st, spot, redraw) = (state.clone(), spot.clone(), redraw.clone());
         put.connect_activate(move |action, param| {
             let Some(choice) = param.and_then(|p| p.get::<String>()) else { return };
             let here = SPOTS[spot.get()].0;
@@ -1555,78 +1524,99 @@ fn desk_widgets(card: &gtk::Box, t: &toml::Table) {
             if !save_many(&values) { return; }
             *st.borrow_mut() = next;
             action.set_state(&choice.to_variant());
-            say();
-            if let Some(a) = a.upgrade() { a.queue_draw(); }
+            redraw();
         });
     }
-    let group = gio::SimpleActionGroup::new();
-    group.add_action(&put);
-    // Each widget's options, as checks in the menu of its spot.
-    for (i, w) in WIDGETS.iter().enumerate() {
-        for &(key, _, default) in w.options {
-            let action = gio::SimpleAction::new_stateful(&option_action(key), None, &prefs::get_bool(t, key, default).to_variant());
-            let (bk, a) = (backed.clone(), area.downgrade());
-            action.connect_activate(move |action, _| {
-                let on = !action.state().and_then(|v| v.get::<bool>()).unwrap_or(default);
-                if !save(key, toml::Value::Boolean(on)) { return; }
-                action.set_state(&on.to_variant());
-                if key.ends_with("_bg") {
-                    bk.borrow_mut()[i] = on;
-                    if let Some(a) = a.upgrade() { a.queue_draw(); }
+    let install: Box<dyn Fn(&gtk::DrawingArea)> = {
+        let (areas, put, backed, t) = (areas.clone(), put.clone(), backed.clone(), t.clone());
+        Box::new(move |area| {
+            *areas.borrow_mut() = Some(area.downgrade());
+            let group = gio::SimpleActionGroup::new();
+            group.add_action(&put);
+            // Each widget's options, as checks in the menu of its spot.
+            for (i, w) in WIDGETS.iter().enumerate() {
+                for &(key, _, default) in w.options {
+                    let action = gio::SimpleAction::new_stateful(&option_action(key), None, &prefs::get_bool(&t, key, default).to_variant());
+                    let (bk, a) = (backed.clone(), area.downgrade());
+                    action.connect_activate(move |action, _| {
+                        let on = !action.state().and_then(|v| v.get::<bool>()).unwrap_or(default);
+                        if !save(key, toml::Value::Boolean(on)) { return; }
+                        action.set_state(&on.to_variant());
+                        if key.ends_with("_bg") {
+                            bk.borrow_mut()[i] = on;
+                            if let Some(a) = a.upgrade() { a.queue_draw(); }
+                        }
+                    });
+                    group.add_action(&action);
                 }
-            });
-            group.add_action(&action);
-        }
-    }
-    area.insert_action_group("desk", Some(&group));
-    let click = gtk::GestureClick::new();
-    {
-        let (a, st) = (area.downgrade(), state.clone());
-        click.connect_released(move |_, _, x, y| {
-            let Some(a) = a.upgrade() else { return };
-            let (w, h) = (a.width() as f64, a.height() as f64);
+            }
+            area.insert_action_group("desk", Some(&group));
+        })
+    };
+    let click: crate::wallpaper::ClickFn = {
+        let (st, put, spot) = (state.clone(), put.clone(), spot.clone());
+        Box::new(move |area, (ox, oy), (w, h), (x, y)| {
             let Some(i) = spot_at(x, y, w, h) else { return };
             spot.set(i);
             let (id, _, r) = SPOTS[i];
             let here = WIDGETS.iter().zip(st.borrow().iter()).find(|(_, at)| **at == Some(id)).map_or("none", |(wd, _)| wd.id);
             put.set_state(&here.to_variant());
-            let menu = gio::Menu::new();
-            let choices = gio::Menu::new();
-            for wd in WIDGETS.iter().filter(|wd| wd.places.iter().any(|p| p.0 == id)) {
-                choices.append(Some(wd.name), Some(&format!("desk.put::{}", wd.id)));
+            // What can sit here on the left; what the one here shows on the right, beside it.
+            let pop = gtk::Popover::new();
+            pop.add_css_class("menu-pop");
+            pop.set_parent(area);
+            let both = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            list.add_css_class("pop-menu");
+            let entries = WIDGETS.iter().filter(|wd| wd.places.iter().any(|p| p.0 == id)).map(|wd| (wd.id, wd.name)).chain([("none", "Nothing")]);
+            for (choice, name) in entries {
+                let item = gtk::Button::new();
+                item.add_css_class("pop-item");
+                let line = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+                let label = gtk::Label::new(Some(name));
+                label.set_xalign(0.0);
+                label.set_hexpand(true);
+                line.append(&label);
+                let mark = gtk::Label::new(Some("check"));
+                mark.add_css_class("sym");
+                mark.set_opacity(if choice == here { 1.0 } else { 0.0 });
+                line.append(&mark);
+                item.set_child(Some(&line));
+                let (put, pop) = (put.clone(), pop.downgrade());
+                item.connect_clicked(move |_| {
+                    put.activate(Some(&choice.to_variant()));
+                    if let Some(pop) = pop.upgrade() { pop.popdown(); }
+                });
+                list.append(&item);
             }
-            choices.append(Some("Nothing"), Some("desk.put::none"));
-            menu.append_section(None, &choices);
-            // What the widget here shows, and whether it has a card.
-            if let Some(wd) = WIDGETS.iter().find(|wd| wd.id == here) {
-                let options = gio::Menu::new();
+            both.append(&list);
+            if let Some(wd) = WIDGETS.iter().find(|wd| wd.id == here).filter(|wd| !wd.options.is_empty()) {
+                both.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+                let panel = gtk::Box::new(gtk::Orientation::Vertical, 2);
+                panel.add_css_class("pop-panel");
+                panel.set_valign(gtk::Align::Start);
+                let title = gtk::Label::new(Some(wd.name));
+                title.add_css_class("heading");
+                title.set_xalign(0.0);
+                panel.append(&title);
                 for (key, name, _) in wd.options {
-                    options.append(Some(name), Some(&format!("desk.{}", option_action(key))));
+                    let check = gtk::CheckButton::with_label(name);
+                    check.set_action_name(Some(&format!("desk.{}", option_action(key))));
+                    panel.append(&check);
                 }
-                menu.append_section(Some(wd.name), &options);
+                both.append(&panel);
             }
-            let pop = gtk::PopoverMenu::from_model(Some(&menu));
-            pop.set_parent(&a);
+            pop.set_child(Some(&both));
             pop.set_has_arrow(false);
-            pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new((r.0 * w) as i32, (r.1 * h) as i32, (r.2 * w) as i32, (r.3 * h) as i32)));
+            pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new((ox + r.0 * w) as i32, (oy + r.1 * h) as i32, (r.2 * w) as i32, (r.3 * h) as i32)));
             pop.connect_closed(|p| {
                 let p = p.clone();
                 glib::idle_add_local_once(move || p.unparent());
             });
             pop.popup();
-        });
-    }
-    area.add_controller(click);
-    let block = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    block.add_css_class("corners");
-    block.set_halign(gtk::Align::Center);
-    // The small screen keeps its size: a long caption wraps under it instead of widening it.
-    area.set_halign(gtk::Align::Center);
-    block.append(&area);
-    caption.set_halign(gtk::Align::Center);
-    caption.set_max_width_chars(44);
-    block.append(&caption);
-    card.append(&block);
+        })
+    };
+    Overlay { draw, moved, click, install }
 }
 
 fn draw_clock(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
@@ -1730,12 +1720,6 @@ fn draw_system(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
 /// The small screen: the wallpaper, the notch, every widget in its spot and the empty spots,
 /// dashed with a plus.
 fn draw_desk_map(cr: &gtk::cairo::Context, w: f64, h: f64, placed: &[Option<&'static str>], backed: &[bool], hover: Option<usize>) {
-    let g = gtk::cairo::LinearGradient::new(0.0, 0.0, w, h);
-    g.add_color_stop_rgb(0.0, 0.34, 0.43, 0.62);
-    g.add_color_stop_rgb(1.0, 0.86, 0.55, 0.42);
-    cr.rectangle(0.0, 0.0, w, h);
-    let _ = cr.set_source(&g);
-    let _ = cr.fill();
     let nw = w * 0.25;
     cr.set_source_rgb(0.0, 0.0, 0.0);
     kit::paint::rounded(cr, (w - nw) / 2.0, -h * 0.06, nw, h * 0.125, h * 0.045);
