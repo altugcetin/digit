@@ -269,8 +269,9 @@ fn monitors() -> Vec<String> {
         .unwrap_or_default()
 }
 
-async fn target() -> Option<(String, Option<String>)> {
-    let want = kit::prefs::text(&kit::prefs::read(), "rec_target", "monitor");
+/// What to record: `pick` overrides the Recorder setting ("region" or "monitor").
+async fn target(pick: Option<&str>) -> Option<(String, Option<String>)> {
+    let want = pick.map_or_else(|| kit::prefs::text(&kit::prefs::read(), "rec_target", "monitor"), str::to_string);
     let screens = monitors();
     match want.as_str() {
         "region" => Some(("region".into(), Some(region().await?))),
@@ -340,6 +341,16 @@ fn argv(mode: Mode, target: &str, region: Option<&str>) -> Result<(Vec<String>, 
 }
 
 pub fn start(app: &Rc<App>, mode: Mode) {
+    start_on(app, mode, None);
+}
+
+/// Starts a regular recording of a chosen region, or of the focused screen, whatever the
+/// Recorder setting says. Does nothing while something is already running.
+pub fn record_target(app: &Rc<App>, region: bool) {
+    start_on(app, Mode::Record, Some(if region { "region" } else { "monitor" }));
+}
+
+fn start_on(app: &Rc<App>, mode: Mode, pick: Option<&'static str>) {
     let blocked = ENGINE.with(|e| {
         let mut e = e.borrow_mut();
         e.app = Rc::downgrade(app);
@@ -359,7 +370,7 @@ pub fn start(app: &Rc<App>, mode: Mode) {
     }
     crate::gamebar::changed();
     glib::spawn_future_local(async move {
-        let built = match target().await {
+        let built = match target(pick).await {
             Some((target, region)) => argv(mode, &target, region.as_deref()),
             None => Err(String::new()),
         };

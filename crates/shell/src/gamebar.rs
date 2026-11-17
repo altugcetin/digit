@@ -872,15 +872,6 @@ fn bluetooth(st: &Shared, device: Option<usize>) {
     });
 }
 
-fn snap(mode: &'static str) {
-    after_close(move || {
-        let argv: [&std::ffi::OsStr; 2] = ["digit-snap".as_ref(), mode.as_ref()];
-        if crate::child::spawn(&argv, gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE).is_err() {
-            gsr::notify("Can't take a screenshot", "digit-snap is missing");
-        }
-    });
-}
-
 fn flip(st: &Shared, kind: Kind, open: bool) {
     {
         let mut s = st.borrow_mut();
@@ -937,8 +928,12 @@ fn press(st: &Shared, hit: Hit) {
             }
         }
         Hit::Rec(rec) => match rec {
-            Rec::Region => snap("region"),
-            Rec::Screen => snap("screen"),
+            Rec::Region | Rec::Screen if gsr::status().is_none() => {
+                // Off the screen first, so the region picker and the recording don't catch the overlay.
+                let region = rec == Rec::Region;
+                after_close(move || gsr::record_target(&app, region));
+            }
+            Rec::Region | Rec::Screen => {}
             Rec::Record => {
                 if gsr::status().is_some() {
                     gsr::toggle_record(&app);
