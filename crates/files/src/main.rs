@@ -847,6 +847,15 @@ fn actions(window: &gtk::ApplicationWindow) {
         });
         window.add_action(&a);
     }
+    action(window, "install", || {
+        if let Some(p) = active()
+            && let [info] = p.selected().as_slice()
+            && ops::installable(info)
+            && let Some(f) = pane::file_of(info)
+        {
+            ops::install(&f);
+        }
+    });
     action(window, "extract", || {
         if let Some(p) = active() {
             ops::extract(p.selected().iter().filter(|i| ops::archive(i)).filter_map(pane::file_of).collect());
@@ -1072,6 +1081,9 @@ pub fn menu(p: &Rc<Pane>, at: Option<(f64, f64)>, items: bool) {
             }
             if picked.iter().all(|i| tools::family(i) == tools::Family::Image) {
                 m.push(act("auto_fix_high", "Remove Background", "win.cutout"));
+            }
+            if picked.len() == 1 && ops::installable(&picked[0]) {
+                m.push(act("install_desktop", "Install", "win.install"));
             }
             if picked.iter().any(ops::archive) {
                 m.push(act("unarchive", "Extract Here", "win.extract"));

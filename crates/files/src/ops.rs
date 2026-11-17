@@ -1139,6 +1139,32 @@ pub fn archive(info: &gio::FileInfo) -> bool {
     [".zip", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.zst", ".tar.bz2", ".tbz2", ".7z", ".rar", ".gz", ".xz", ".zst", ".bz2", ".iso", ".jar", ".apk", ".deb", ".rpm", ".cab"].iter().any(|e| n.ends_with(e))
 }
 
+/// An app the Store can install straight from the file: a Flatpak bundle or link, an AppImage,
+/// or a package for this system's package manager (the Store says so when it's for another).
+pub fn installable(info: &gio::FileInfo) -> bool {
+    let n = info.name().to_string_lossy().to_lowercase();
+    [".flatpak", ".flatpakref", ".appimage", ".pkg.tar.zst", ".pkg.tar.xz", ".rpm", ".deb"].iter().any(|e| n.ends_with(e))
+}
+
+/// Hands the file to the Store, which shows what it is and asks before installing it.
+pub fn install(file: &gio::File) {
+    let Some(path) = file.path() else {
+        crate::toast("Installing works on local files");
+        return;
+    };
+    // Beside this binary first: a desktop launch's PATH may not include ~/.local/bin.
+    let beside = std::fs::read_link("/proc/self/exe").ok().and_then(|e| Some(e.parent()?.join("digit-store"))).filter(|p| p.is_file());
+    let store = beside.or_else(|| glib::find_program_in_path("digit-store"));
+    let Some(store) = store else {
+        crate::toast("Digit Store isn't installed");
+        return;
+    };
+    let argv: [&std::ffi::OsStr; 2] = [store.as_os_str(), path.as_os_str()];
+    if gio::Subprocess::newv(&argv, gio::SubprocessFlags::NONE).is_err() {
+        crate::toast("Digit Store isn't installed");
+    }
+}
+
 pub fn extract(files: Vec<gio::File>) {
     for f in files {
         let (Some(path), Some(dir)) = (f.path(), f.parent().and_then(|p| p.path())) else { continue };
