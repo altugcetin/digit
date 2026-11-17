@@ -19,6 +19,7 @@ mod style;
 mod system;
 mod ui;
 mod updates;
+mod wallpaper;
 mod welcome;
 mod wifi;
 #[cfg(test)]
@@ -28,13 +29,14 @@ use gtk::{gio, glib, prelude::*};
 use std::cell::RefCell;
 
 /// Sidebar pages: id, name, icon and the group they're listed under.
-pub(crate) const PAGES: [(&str, &str, &str, &str); 20] = [
+pub(crate) const PAGES: [(&str, &str, &str, &str); 21] = [
     ("wifi", "Wi-Fi", "wifi", "Connections"),
     ("bluetooth", "Bluetooth", "bluetooth", "Connections"),
     ("appearance", "Appearance", "palette", "Personalize"),
     ("dock", "Dock", "dock_to_bottom", "Personalize"),
     ("notch", "Notch and menu bar", "toolbar", "Personalize"),
-    ("desktop", "Desktop", "wallpaper", "Personalize"),
+    ("wallpaper", "Wallpaper", "wallpaper", "Personalize"),
+    ("desktop", "Desktop", "desktop_windows", "Personalize"),
     ("spotlight", "Spotlight", "search", "Personalize"),
     ("compositor", "Windows", "select_window", "Workspace"),
     ("rules", "Window rules", "rule", "Workspace"),
@@ -88,6 +90,7 @@ fn build_page(name: &str) -> gtk::Widget {
         "appearance" => desktop::build(name, "Appearance", "How digit and its apps look. Changes apply right away."),
         "dock" => desktop::build(name, "Dock", ""),
         "notch" => desktop::build(name, "Notch and menu bar", "The notch, the bar beside it, the panels they open and the screen corners."),
+        "wallpaper" => desktop::build(name, "Wallpaper", "The picture behind your windows, on each screen."),
         "desktop" => desktop::build(name, "Desktop", "What sits on the wallpaper, behind your windows."),
         "spotlight" => desktop::build(name, "Spotlight", &match kit::keybinds::shown("launcher") {
             Some(k) => format!("{k} searches apps, files, settings and the web."),

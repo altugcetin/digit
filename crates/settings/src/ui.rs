@@ -434,6 +434,35 @@ pub fn choose_folder(parent: Option<gtk::Window>, initial: &std::path::Path, don
     });
 }
 
+/// Asks for a picture with the system chooser, opening in `initial`; the same care for a
+/// layer-shell host as in [`choose_folder`].
+pub fn choose_image(parent: Option<gtk::Window>, initial: &std::path::Path, done: impl FnOnce(std::path::PathBuf) + 'static) {
+    use gtk4_layer_shell::LayerShell;
+    let chooser = gtk::FileDialog::new();
+    chooser.set_title("Choose a picture");
+    chooser.set_accept_label(Some("Choose"));
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some("Pictures"));
+    filter.add_mime_type("image/*");
+    chooser.set_default_filter(Some(&filter));
+    if initial.is_dir() { chooser.set_initial_folder(Some(&gtk::gio::File::for_path(initial))); }
+    let overlay = parent.as_ref().is_some_and(|w| w.is_layer_window());
+    let restore = parent.as_ref().filter(|w| overlay && w.is_visible()).cloned();
+    if let Some(window) = &restore { window.set_visible(false); }
+    let native_parent = if overlay { None } else { parent.as_ref() };
+    chooser.open(native_parent, gtk::gio::Cancellable::NONE, move |result| {
+        if let Some(window) = restore { window.present(); }
+        match result {
+            Ok(file) => match file.path() {
+                Some(path) => done(path),
+                None => fail("Choose a picture on this computer"),
+            },
+            Err(e) if e.matches(gtk::DialogError::Cancelled) || e.matches(gtk::DialogError::Dismissed) => {},
+            Err(e) => fail(&format!("Could not open the picture chooser: {e}")),
+        }
+    });
+}
+
 pub fn open_uri(uri: &str) {
     aside();
     let _ = gtk::gio::AppInfo::launch_default_for_uri(uri, gtk::gio::AppLaunchContext::NONE);
