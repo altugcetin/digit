@@ -245,7 +245,7 @@ fn settings_controls_and_dialogs() {
     assert_eq!(prefs::get_str(&prefs::read(), "snap_frame", ""), "Ocean");
     assert!(widgets(&screenshot_page).into_iter().filter_map(|w| w.downcast::<gtk::Button>().ok()).any(|b| b.label().as_deref() == Some("Choose…")));
 
-    let wallpaper_page = desktop::build("wallpaper", "Wallpaper", "");
+    let wallpaper_page = desktop::build("desktop", "Desktop", "");
     let folder_row = widgets(&wallpaper_page).into_iter().filter_map(|w| w.downcast::<gtk::Label>().ok()).find(|l| l.text() == "Wallpaper folder").unwrap().parent().unwrap().parent().unwrap();
     let folder = widgets(&folder_row).into_iter().find_map(|w| w.downcast::<gtk::Entry>().ok()).unwrap();
     assert!(folder.text().is_empty(), "an empty folder keeps the default search locations");
