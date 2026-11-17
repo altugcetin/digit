@@ -64,15 +64,26 @@ pub fn master(path: &str, need: &[(i32, i32)]) -> Option<Pixbuf> {
 }
 
 pub fn cover(pb: &Pixbuf, w: i32, h: i32) -> Option<Pixbuf> {
+    cover_at(pb, w, h, kit::wallfocus::CENTER)
+}
+
+/// As [`cover`], keeping the part of the image `focus` points at (see `kit::wallfocus`).
+pub fn cover_at(pb: &Pixbuf, w: i32, h: i32, focus: kit::wallfocus::Focus) -> Option<Pixbuf> {
     if w < 1 || h < 1 { return None; }
-    let (x, y, cw, ch) = crop_size(pb.width(), pb.height(), w, h);
+    let (x, y, cw, ch) = crop_at(pb.width(), pb.height(), w, h, focus);
     pb.new_subpixbuf(x, y, cw, ch).scale_simple(w, h, InterpType::Bilinear)
 }
 
+#[cfg(test)]
 fn crop_size(pw: i32, ph: i32, w: i32, h: i32) -> (i32, i32, i32, i32) {
+    crop_at(pw, ph, w, h, kit::wallfocus::CENTER)
+}
+
+fn crop_at(pw: i32, ph: i32, w: i32, h: i32, focus: kit::wallfocus::Focus) -> (i32, i32, i32, i32) {
     let cw = ((ph as f64 * w as f64 / h as f64).round() as i32).clamp(1, pw);
     let ch = ((pw as f64 * h as f64 / w as f64).round() as i32).clamp(1, ph);
-    ((pw - cw) / 2, (ph - ch) / 2, cw, ch)
+    let focus = kit::wallfocus::clamp(focus);
+    (((pw - cw) as f64 * focus.0).floor() as i32, ((ph - ch) as f64 * focus.1).floor() as i32, cw, ch)
 }
 
 pub fn texture(pb: &Pixbuf) -> gdk::Texture {
@@ -123,5 +134,15 @@ mod tests {
         assert_eq!(crop_size(82, 8192, 1920, 1080), (0, 4073, 82, 46));
         assert_eq!(crop_size(8192, 82, 1080, 1920), (4073, 0, 46, 82));
         assert_eq!(crop_size(7680, 7680, 7680, 2160), (0, 2760, 7680, 2160));
+    }
+
+    #[test]
+    fn cover_keeps_the_part_the_focus_points_at() {
+        // A square image on a wide screen overflows up and down: 0 keeps the top, 1 the bottom.
+        assert_eq!(crop_at(1000, 1000, 1000, 500, (0.5, 0.0)), (0, 0, 1000, 500));
+        assert_eq!(crop_at(1000, 1000, 1000, 500, (0.5, 1.0)), (0, 500, 1000, 500));
+        assert_eq!(crop_at(1000, 1000, 1000, 500, (0.5, 0.5)), (0, 250, 1000, 500));
+        // Nothing overflows sideways, so the horizontal focus changes nothing.
+        assert_eq!(crop_at(1000, 1000, 1000, 500, (0.0, 0.5)), crop_at(1000, 1000, 1000, 500, (1.0, 0.5)));
     }
 }

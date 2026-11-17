@@ -11,6 +11,8 @@ use std::rc::Rc;
 
 const SPAN: i64 = 1_400_000;
 
+pub use kit::wallfocus::Focus;
+
 fn state_file() -> PathBuf {
     theme::state_dir().join("wallpaper")
 }
@@ -114,12 +116,12 @@ pub fn thumbnail(path: &str) -> Option<gdk::Texture> {
     Some(gdk::MemoryTexture::new(pixbuf.width(), pixbuf.height(), format, &pixbuf.read_pixel_bytes(), pixbuf.rowstride() as usize).upcast())
 }
 
-pub fn decode(path: &str, w: i32, h: i32) -> Option<gdk::Texture> {
-    decode_all(path, &[(w, h)]).into_iter().next().and_then(|(_, t)| t)
+pub fn decode(path: &str, w: i32, h: i32, focus: Focus) -> Option<gdk::Texture> {
+    decode_all(path, &[(w, h)], focus).into_iter().next().and_then(|(_, t)| t)
 }
 
-pub fn decode_all(path: &str, sizes: &[(i32, i32)]) -> Vec<((i32, i32), Option<gdk::Texture>)> {
-    let tag = |(w, h): (i32, i32)| format!("screen-{w}x{h}");
+pub fn decode_all(path: &str, sizes: &[(i32, i32)], focus: Focus) -> Vec<((i32, i32), Option<gdk::Texture>)> {
+    let tag = |(w, h): (i32, i32)| format!("screen-{w}x{h}{}", kit::wallfocus::tag(focus));
     let mut out: Vec<((i32, i32), Option<gdk::Texture>)> = sizes.iter().map(|&s| (s, crate::stash::get(path, &tag(s)).filter(|t| (t.width(), t.height()) == s))).collect();
     let missing: Vec<(i32, i32)> = out.iter().filter(|(_, t)| t.is_none()).map(|(s, _)| *s).collect();
     if missing.is_empty() {
@@ -127,7 +129,7 @@ pub fn decode_all(path: &str, sizes: &[(i32, i32)]) -> Vec<((i32, i32), Option<g
     }
     if let Some(master) = crate::stash::master(path, &missing) {
         for (size, slot) in out.iter_mut().filter(|(_, t)| t.is_none()) {
-            if let Some(pb) = crate::stash::cover(&master, size.0, size.1) {
+            if let Some(pb) = crate::stash::cover_at(&master, size.0, size.1, focus) {
                 let t = crate::stash::texture(&pb);
                 crate::stash::put(path, &tag(*size), t.clone());
                 *slot = Some(t);
@@ -258,6 +260,10 @@ struct Frame {
     region: Rect,
     span_size: Option<(i32, i32)>,
     luma: std::sync::Arc<Vec<f32>>,
+    /// Which part of the image the crop kept (see `kit::wallfocus`).
+    focus: Focus,
+    /// What this screen shows, small and soft, for the lock screen and the app grid to lie on.
+    blur: Option<gdk::Texture>,
 }
 
 impl Frame {
@@ -475,46 +481,101 @@ struct Render {
     path: String,
     size: (i32, i32),
     view: Rect,
+    focus: Focus,
 }
 
 fn decode_frames(requests: Vec<Render>, layout: Layout, b: Rect, global: String, live: Vec<Frame>) -> Vec<(String, Frame)> {
-    render_frames(requests, layout, b, global, |path, size| {
-        if let Some(frame) = live.iter().find(|f| f.path == path &&
+    render_frames(requests, layout, b, global, |path, size, focus| {
+        if let Some(frame) = live.iter().find(|f| f.path == path && f.focus == focus &&
             if layout == Layout::Span { f.span_size == Some(size) }
             else { f.span_size.is_none() && (f.texture.width(), f.texture.height()) == size }) {
             return Some(frame.texture.clone());
         }
-        if layout == Layout::Span { crate::stash::master(path, &[size]).and_then(|pb| crate::stash::cover(&pb, size.0, size.1)).map(|pb| crate::stash::texture(&pb)) }
-        else { decode(path, size.0, size.1) }
+        if layout == Layout::Span { crate::stash::master(path, &[size]).and_then(|pb| crate::stash::cover_at(&pb, size.0, size.1, focus)).map(|pb| crate::stash::texture(&pb)) }
+        else { decode(path, size.0, size.1, focus) }
     })
 }
 
-fn render_frames(requests: Vec<Render>, layout: Layout, b: Rect, global: String, mut decode: impl FnMut(&str, (i32, i32)) -> Option<gdk::Texture>) -> Vec<(String, Frame)> {
+fn render_frames(requests: Vec<Render>, layout: Layout, b: Rect, global: String, mut decode: impl FnMut(&str, (i32, i32), Focus) -> Option<gdk::Texture>) -> Vec<(String, Frame)> {
     let mut decoded = HashMap::new();
-    let mut get = |path: &str, size| decoded.entry((path.to_string(), size)).or_insert_with(|| decode(path, size)).clone();
+    let key = |f: Focus| ((f.0 * 100.0).round() as i32, (f.1 * 100.0).round() as i32);
+    let mut get = |path: &str, size, focus: Focus| decoded.entry((path.to_string(), size, key(focus))).or_insert_with(|| decode(path, size, focus)).clone();
     let mut maps: HashMap<usize, std::sync::Arc<Vec<f32>>> = HashMap::new();
+    let mut pixels: HashMap<usize, Pixbuf> = HashMap::new();
     let mut out = Vec::new();
-    for Render { output, mut path, size, view } in requests {
-        let mut texture = get(&path, size);
+    for Render { output, mut path, size, view, focus } in requests {
+        let mut texture = get(&path, size, focus);
         if texture.is_none() && path != global {
             path = global.clone();
-            texture = get(&path, size);
+            texture = get(&path, size, focus);
         }
         if let Some(texture) = texture {
             let crop = cover_crop((texture.width() as f64, texture.height() as f64), if layout == Layout::Span { (b.w, b.h) } else { (size.0 as f64, size.1 as f64) });
             let region = if layout == Layout::Span { crop.sub(view) } else { crop };
+            let whole = pixels.entry(texture.as_ptr() as usize).or_insert_with(|| bgra(&texture)).clone();
             let luma = maps.entry(texture.as_ptr() as usize).or_insert_with(|| {
-                let mut downloader = gdk::TextureDownloader::new(&texture);
-                downloader.set_format(gdk::MemoryFormat::B8g8r8a8);
-                let (bytes, stride) = downloader.download_bytes();
-                let pb = Pixbuf::from_bytes(&bytes, gtk::gdk_pixbuf::Colorspace::Rgb, true, 8, texture.width(), texture.height(), stride as i32);
-                let small = pb.scale_simple(128, 72, gtk::gdk_pixbuf::InterpType::Bilinear).unwrap();
+                let small = whole.scale_simple(128, 72, gtk::gdk_pixbuf::InterpType::Bilinear).unwrap();
                 std::sync::Arc::new(small.read_pixel_bytes().chunks_exact(4).map(|p| luminance(p[0], p[1], p[2]) as f32).collect())
             }).clone();
-            out.push((output, Frame { texture, path, region, luma, span_size: (layout == Layout::Span).then_some(size) }));
+            let aspect = if layout == Layout::Span { (view.w * b.w) / (view.h * b.h).max(f64::EPSILON) } else { size.0 as f64 / size.1.max(1) as f64 };
+            let mut frame = Frame { texture, path, region, luma, span_size: (layout == Layout::Span).then_some(size), focus, blur: None };
+            frame.blur = soften(&whole, frame.region_for(aspect * 1000.0, 1000.0), aspect);
+            out.push((output, frame));
         }
     }
     out
+}
+
+/// The texture's pixels in blue-green-red-alpha order, which is how the rest of this reads them.
+fn bgra(texture: &gdk::Texture) -> Pixbuf {
+    let mut downloader = gdk::TextureDownloader::new(texture);
+    downloader.set_format(gdk::MemoryFormat::B8g8r8a8);
+    let (bytes, stride) = downloader.download_bytes();
+    Pixbuf::from_bytes(&bytes, gtk::gdk_pixbuf::Colorspace::Rgb, true, 8, texture.width(), texture.height(), stride as i32)
+}
+
+/// How wide the soft copy of a wallpaper is: blurring this few pixels costs next to nothing, and
+/// drawing it larger only smooths it further.
+const SOFT_W: i32 = 480;
+/// Each of the three box passes reaches this far; together they stand in for a Gaussian blur of
+/// about 14 px at `SOFT_W`, the look the app grid has always had.
+const SOFT_REACH: usize = 7;
+
+/// The part of `pixels` that `region` (fractions of it) shows, scaled to `SOFT_W` across at the
+/// screen's `aspect` and blurred, as a texture. The blur clamps at the edges, so they don't darken.
+fn soften(pixels: &Pixbuf, region: Rect, aspect: f64) -> Option<gdk::Texture> {
+    let (pw, ph) = (pixels.width() as f64, pixels.height() as f64);
+    let (x, y) = ((region.x * pw).floor().clamp(0.0, pw - 1.0), (region.y * ph).floor().clamp(0.0, ph - 1.0));
+    let (w, h) = ((region.w * pw).round().clamp(1.0, pw - x), (region.h * ph).round().clamp(1.0, ph - y));
+    let size = (SOFT_W, ((SOFT_W as f64 / aspect.max(0.1)).round() as i32).clamp(16, 2 * SOFT_W));
+    let small = pixels.new_subpixbuf(x as i32, y as i32, w as i32, h as i32).scale_simple(size.0, size.1, gtk::gdk_pixbuf::InterpType::Bilinear)?;
+    let stride = small.rowstride() as usize;
+    let mut data = small.read_pixel_bytes().to_vec();
+    let mut scratch = data.clone();
+    for _ in 0..3 {
+        box_pass(&data, &mut scratch, size.0 as usize, size.1 as usize, stride, SOFT_REACH, true);
+        box_pass(&scratch, &mut data, size.0 as usize, size.1 as usize, stride, SOFT_REACH, false);
+    }
+    Some(gdk::MemoryTexture::new(size.0, size.1, gdk::MemoryFormat::B8g8r8a8, &glib::Bytes::from_owned(data), stride).upcast())
+}
+
+/// One box blur of four-byte pixels along rows (`across`) or columns, reaching `reach` pixels each
+/// way and repeating the edge pixel past the image.
+fn box_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, stride: usize, reach: usize, across: bool) {
+    let (n, lines) = if across { (w, h) } else { (h, w) };
+    let at = |line: usize, i: usize, c: usize| if across { line * stride + i * 4 + c } else { i * stride + line * 4 + c };
+    let width = (2 * reach + 1) as u32;
+    for line in 0..lines {
+        for c in 0..4 {
+            let mut sum: u32 = (0..=2 * reach).map(|k| src[at(line, (k as isize - reach as isize).clamp(0, n as isize - 1) as usize, c)] as u32).sum();
+            for i in 0..n {
+                dst[at(line, i, c)] = ((sum + width / 2) / width) as u8;
+                let out = i.saturating_sub(reach);
+                let inn = (i + reach + 1).min(n - 1);
+                sum = sum + src[at(line, inn, c)] as u32 - src[at(line, out, c)] as u32;
+            }
+        }
+    }
 }
 
 struct Screen {
@@ -618,7 +679,7 @@ impl Wallpapers {
         let prefs = kit::prefs::read();
         let changed = {
             let before = self.prefs.borrow();
-            ["wallpaper_layout", "wallpapers"].iter().any(|key| before.get(*key) != prefs.get(*key))
+            ["wallpaper_layout", "wallpapers", kit::wallfocus::KEY].iter().any(|key| before.get(*key) != prefs.get(*key))
         };
         *self.prefs.borrow_mut() = prefs;
         if changed {
@@ -694,6 +755,17 @@ impl Wallpapers {
         }).collect()
     }
 
+    /// What `output` shows now, small and blurred: the picture the lock screen and the app grid
+    /// lie on. It is made when the wallpaper is, off the main thread, from the very crop the
+    /// screen displays, so on a spanning wallpaper each screen blurs its own part. It stays the
+    /// same texture until the screen's wallpaper changes.
+    pub fn blurred(&self, output: &str) -> Option<gdk::Texture> {
+        let screens = self.screens();
+        let screen = screens.iter().find(|s| s.monitor.borrow().output == output).or(screens.first())?;
+        let frame = screen.canvas.imp().scene.borrow().new.clone()?;
+        frame.blur
+    }
+
     pub fn texture(&self, output: &str) -> Option<gdk::Texture> {
         let screens = self.screens();
         let screen = screens.iter().find(|s| s.monitor.borrow().output == output).or(screens.first())?;
@@ -762,7 +834,8 @@ impl Wallpapers {
         for (monitor, region) in monitors.iter().zip(regions) {
             let path = if layout == Layout::Span { previews.values().next() } else { previews.get(&monitor.output) };
             let path = path.cloned().unwrap_or_else(|| image_for(layout, &prefs, &monitor.output, &global).to_string());
-            requests.push(Render { output: monitor.output.clone(), path, size: if layout == Layout::Span { span_size } else { monitor.pixels() }, view: region });
+            let focus = kit::wallfocus::read(&prefs, if layout == Layout::Span { kit::wallfocus::SPAN } else { &monitor.output });
+            requests.push(Render { output: monitor.output.clone(), path, size: if layout == Layout::Span { span_size } else { monitor.pixels() }, view: region, focus });
         }
         // Reuse live frames as well as the disk cache. A span keeps one shared texture,
         // including while changing geometry or previewing on multiple outputs.
@@ -782,8 +855,8 @@ impl Wallpapers {
             for (output, frame) in frames {
                 if let Some(screen) = screens.iter().find(|s| s.monitor.borrow().output == output) {
                     let before = screen.canvas.imp().scene.borrow().new.clone();
-                    if before.as_ref().is_some_and(|f| f.path == frame.path && f.region == frame.region && f.span_size == frame.span_size && f.texture.width() == frame.texture.width() && f.texture.height() == frame.texture.height()) { continue; }
-                    let geometry_changed = before.as_ref().is_some_and(|f| f.path == frame.path && (f.region != frame.region || f.span_size != frame.span_size));
+                    if before.as_ref().is_some_and(|f| f.path == frame.path && f.region == frame.region && f.span_size == frame.span_size && f.focus == frame.focus && f.texture.width() == frame.texture.width() && f.texture.height() == frame.texture.height()) { continue; }
+                    let geometry_changed = before.as_ref().is_some_and(|f| f.path == frame.path && (f.region != frame.region || f.span_size != frame.span_size || f.focus != frame.focus));
                     if let Some(ms) = fade.or(geometry_changed.then_some(420)) { screen.canvas.swap(frame, ms); } else { screen.canvas.show(frame); }
                 }
             }
@@ -1025,9 +1098,9 @@ mod tests {
         let path = "/no-file-needed.png".to_string();
         let texture: gdk::Texture = gdk::MemoryTexture::new(80, 40, gdk::MemoryFormat::R8g8b8a8, &glib::Bytes::from_owned(vec![255u8; 80 * 40 * 4]), 80 * 4).upcast();
         let monitors = [monitor("left", 0.0, 0.0, 40.0, 40.0, 1.0), monitor("right", 40.0, 0.0, 40.0, 40.0, 1.0)];
-        let requests = monitors.iter().zip(span_regions(&monitors)).map(|(m, view)| Render { output: m.output.clone(), path: path.clone(), size: (80, 40), view }).collect();
+        let requests = monitors.iter().zip(span_regions(&monitors)).map(|(m, view)| Render { output: m.output.clone(), path: path.clone(), size: (80, 40), view, focus: kit::wallfocus::CENTER }).collect();
         let mut decodes = 0;
-        let decoded = render_frames(requests, Layout::Span, bounds(&monitors), path.clone(), |_, _| {
+        let decoded = render_frames(requests, Layout::Span, bounds(&monitors), path.clone(), |_, _, _| {
             decodes += 1;
             Some(texture.clone())
         });
@@ -1036,14 +1109,14 @@ mod tests {
         assert_eq!(decoded[0].1.texture.as_ptr(), decoded[1].1.texture.as_ptr());
         close(decoded[0].1.region.x + decoded[0].1.region.w, decoded[1].1.region.x);
         // A cancelled preview can reuse the previous frame even if the file has gone away.
-        let restored = decode_frames(vec![Render { output: "left".into(), path: path.clone(), size: (80, 40), view: span_regions(&monitors)[0] }], Layout::Span, bounds(&monitors), path, vec![decoded[0].1.clone()]);
+        let restored = decode_frames(vec![Render { output: "left".into(), path: path.clone(), size: (80, 40), view: span_regions(&monitors)[0], focus: kit::wallfocus::CENTER }], Layout::Span, bounds(&monitors), path, vec![decoded[0].1.clone()]);
         assert_eq!(restored[0].1.texture.as_ptr(), decoded[0].1.texture.as_ptr());
     }
 
     #[test]
     fn old_frame_covers_a_resized_output_without_distortion() {
         let texture = gdk::MemoryTexture::new(80, 40, gdk::MemoryFormat::R8g8b8a8, &glib::Bytes::from_owned(vec![255u8; 80 * 40 * 4]), 80 * 4).upcast();
-        let frame = Frame { texture, luma: Default::default(), path: "image".into(), region: Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }, span_size: None };
+        let frame = Frame { texture, luma: Default::default(), path: "image".into(), region: Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }, span_size: None, focus: kit::wallfocus::CENTER, blur: None };
         assert_eq!(frame.region_for(40.0, 40.0), Rect { x: 0.25, y: 0.0, w: 0.5, h: 1.0 });
         let fit = frame.fit(40.0, 40.0, 1.0);
         close(fit.width() as f64 / fit.height() as f64, 2.0);
@@ -1053,7 +1126,7 @@ mod tests {
     #[test]
     fn transition_keeps_the_previous_crop_until_the_new_region_is_warm() {
         let texture = gdk::MemoryTexture::new(2, 1, gdk::MemoryFormat::R8g8b8a8, &glib::Bytes::from_owned(vec![255u8; 8]), 8).upcast();
-        let old = Frame { texture, luma: Default::default(), path: "image".into(), region: Rect { x: 0.0, y: 0.0, w: 0.5, h: 1.0 }, span_size: Some((2, 1)) };
+        let old = Frame { texture, luma: Default::default(), path: "image".into(), region: Rect { x: 0.0, y: 0.0, w: 0.5, h: 1.0 }, span_size: Some((2, 1)), focus: kit::wallfocus::CENTER, blur: None };
         let new = Frame { region: Rect { x: 0.5, ..old.region }, ..old.clone() };
         let mut scene = Scene { new: Some(old.clone()), prime: Some(new.clone()), ..Scene::default() };
         scene.step(100);
@@ -1100,4 +1173,66 @@ mod tests {
         assert!(listed(&dir.join("missing")).is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn a_crop_with_a_focus_comes_from_the_decode_not_a_second_centring() {
+        // The decode already keeps the part the focus points at, so the frame's own crop of it
+        // is the whole texture however the focus is set.
+        let texture: gdk::Texture = gdk::MemoryTexture::new(80, 40, gdk::MemoryFormat::R8g8b8a8, &glib::Bytes::from_owned(vec![255u8; 80 * 40 * 4]), 80 * 4).upcast();
+        let monitors = [monitor("a", 0.0, 0.0, 80.0, 40.0, 1.0)];
+        let mut asked = Vec::new();
+        let frames = render_frames(vec![Render { output: "a".into(), path: "p".into(), size: (80, 40), view: span_regions(&monitors)[0], focus: (0.5, 0.0) }], Layout::Same, bounds(&monitors), "p".into(), |_, _, focus| {
+            asked.push(focus);
+            Some(texture.clone())
+        });
+        assert_eq!(asked, [(0.5, 0.0)]);
+        assert_eq!(frames[0].1.focus, (0.5, 0.0));
+        assert_eq!(frames[0].1.region, Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
+    }
+
+    #[test]
+    fn a_live_frame_is_not_reused_for_another_focus() {
+        let texture: gdk::Texture = gdk::MemoryTexture::new(80, 40, gdk::MemoryFormat::R8g8b8a8, &glib::Bytes::from_owned(vec![255u8; 80 * 40 * 4]), 80 * 4).upcast();
+        let live = Frame { texture: texture.clone(), luma: Default::default(), path: "/gone.png".into(), region: Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }, span_size: None, focus: kit::wallfocus::CENTER, blur: None };
+        let monitors = [monitor("a", 0.0, 0.0, 80.0, 40.0, 1.0)];
+        let request = |focus| vec![Render { output: "a".into(), path: "/gone.png".into(), size: (80, 40), view: span_regions(&monitors)[0], focus }];
+        // The same focus reuses the frame even though the file is gone ...
+        let same = decode_frames(request(kit::wallfocus::CENTER), Layout::Same, bounds(&monitors), "/gone.png".into(), vec![live.clone()]);
+        assert_eq!(same.len(), 1);
+        assert_eq!(same[0].1.texture.as_ptr(), texture.as_ptr());
+        // ... a new one does not: it needs a decode, and there is no file to decode.
+        assert!(decode_frames(request((0.5, 0.0)), Layout::Same, bounds(&monitors), "/gone.png".into(), vec![live]).is_empty());
+    }
+
+    #[test]
+    fn the_soft_copy_keeps_a_flat_color_and_spreads_an_edge() {
+        let (w, h, stride) = (24usize, 6usize, 24 * 4);
+        let flat = vec![200u8; stride * h];
+        let mut out = vec![0u8; flat.len()];
+        box_pass(&flat, &mut out, w, h, stride, 3, true);
+        assert!(out.iter().all(|v| *v == 200), "a flat image doesn't darken at its edges");
+        // Black on the left half, white on the right: the middle goes grey, the far ends stay put.
+        let mut edge = vec![0u8; stride * h];
+        for y in 0..h { for x in w / 2..w { for c in 0..4 { edge[y * stride + x * 4 + c] = 255; } } }
+        box_pass(&edge, &mut out, w, h, stride, 3, true);
+        assert_eq!(out[0], 0);
+        assert_eq!(out[(w - 1) * 4], 255);
+        let middle = out[(w / 2) * 4];
+        assert!(middle > 0 && middle < 255);
+        // Down a column the same image is unchanged, as every row is the same.
+        let mut tall = vec![0u8; stride * h];
+        box_pass(&edge, &mut tall, w, h, stride, 3, false);
+        assert_eq!(tall, edge);
+    }
+
+    #[test]
+    fn softening_gives_the_screens_shape_and_a_texture() {
+        let pb = Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, true, 8, 320, 180).unwrap();
+        pb.fill(0x336699ff);
+        let soft = soften(&pb, Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }, 16.0 / 9.0).unwrap();
+        assert_eq!((soft.width(), soft.height()), (SOFT_W, 270));
+        // A tall screen gets a tall copy.
+        let tall = soften(&pb, Rect { x: 0.25, y: 0.0, w: 0.5, h: 1.0 }, 0.5625).unwrap();
+        assert_eq!((tall.width(), tall.height()), (SOFT_W, 853));
+    }
+
 }

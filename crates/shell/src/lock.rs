@@ -426,21 +426,6 @@ fn avatar() -> Option<gdk::Texture> {
         .find_map(|p| gdk::Texture::from_filename(p).ok())
 }
 
-fn blurred(paint: &Paint, texture: &gdk::Texture, w: f64, h: f64) -> Option<gdk::Texture> {
-    let renderer = paint.native()?.renderer()?;
-    let (qw, qh) = ((w / 4.0).ceil().max(1.0), (h / 4.0).ceil().max(1.0));
-    let (tw, th) = (texture.width() as f64, texture.height() as f64);
-    let scale = (qw / tw).max(qh / th);
-    let (dw, dh) = (tw * scale, th * scale);
-    let pad = 20.0;
-    let snap = gtk::Snapshot::new();
-    snap.push_blur(9.0);
-    snap.append_texture(texture, &graphene::Rect::new(((qw - dw) / 2.0 - pad) as f32, ((qh - dh) / 2.0 - pad) as f32, (dw + 2.0 * pad) as f32, (dh + 2.0 * pad) as f32));
-    snap.pop();
-    let node = snap.to_node()?;
-    Some(renderer.render_texture(&node, Some(&graphene::Rect::new(0.0, 0.0, qw as f32, qh as f32))))
-}
-
 fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64) -> Sheet {
     let window = gtk::Window::new();
     window.add_css_class("digit-lock");
@@ -456,15 +441,16 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64) 
         }
     }
     let output = monitor.connector().map(|c| c.to_string()).unwrap_or_default();
-    let source = app.wallpapers.texture(&output);
-    let back: Rc<RefCell<Option<gdk::Texture>>> = Rc::new(RefCell::new(None));
+    // With effects on, the wallpaper's soft copy that this screen shows, the one the app grid
+    // lies on too (see `Wallpapers::blurred`); with them off, the sharp wallpaper as it is.
+    let effects_off = kit::effects::reduced();
+    let source = if effects_off { app.wallpapers.texture(&output) } else { app.wallpapers.blurred(&output) };
     let start = glib::monotonic_time();
     let paint = Paint::new(-1, -1);
     paint.set_hexpand(true);
     paint.set_vexpand(true);
     {
         let weak = paint.downgrade();
-        let back = back.clone();
         let cfg = app.cfg.clone();
         paint.on_draw(move |s| {
             let Some(p) = weak.upgrade() else { return };
@@ -474,17 +460,11 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64) 
             }
             let full = graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
             s.append_color(&gdk::RGBA::BLACK, &full);
-            let effects = kit::effects::reduced();
-            if !effects && back.borrow().is_none() {
-                if let Some(t) = source.as_ref() {
-                    *back.borrow_mut() = blurred(&p, t, w, h);
-                }
-            }
+            let effects = effects_off;
             let now = p.frame_clock().map(|c| c.frame_time()).unwrap_or_else(glib::monotonic_time);
             let fade = if kit::motion::reduced() { 1.0 } else { ((now - start) as f64 / 380_000.0).clamp(0.0, 1.0) };
             let fade = fade * fade * (3.0 - 2.0 * fade);
-            let back = back.borrow();
-            if let Some(t) = if effects { source.as_ref() } else { back.as_ref() } {
+            if let Some(t) = source.as_ref() {
                 s.push_opacity(fade);
                 s.append_texture(t, &full);
                 s.pop();
