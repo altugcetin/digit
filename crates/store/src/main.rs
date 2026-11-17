@@ -1,7 +1,9 @@
+mod appimage;
 mod appstream;
 mod arch;
 mod aur;
 mod catalog;
+mod confirm;
 mod flatpak;
 mod native;
 mod pages;
@@ -608,6 +610,7 @@ flowbox > flowboxchild:hover, flowbox > flowboxchild:selected, flowbox > flowbox
 .shot {{ border-radius: var(--r-ctl); background: @d_field; }}
 .about {{ font-size: 14px; color: {main}; }}
 .verified {{ color: {accent}; }}
+window.install-sheet {{ background: transparent; }}
 "#,
         base = kit::style::css()
     )
@@ -620,8 +623,12 @@ fn install_files() {
     let (d, _, _) = kit::pixel::path("s", cell, ox, oy);
     let svg = format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4aa3ff"/><stop offset="1" stop-color="#0a64e0"/></linearGradient></defs><rect width="128" height="128" rx="30" fill="url(#g)"/><path d="{d}" fill="#ffffff"/></svg>"##);
     let data = glib::user_data_dir();
+    // The full path, as Files' service file has: an app started by D-Bus may not have
+    // ~/.local/bin on its PATH. A build run from the source tree keeps the plain name.
+    let exe = std::fs::read_link("/proc/self/exe").ok().filter(|e| e.file_name().is_some_and(|n| n == "digit-store") && !e.components().any(|c| c.as_os_str() == "target"));
+    let exec = exe.map_or_else(|| "digit-store".to_string(), |e| format!("\"{}\"", e.to_string_lossy()));
     let desktop = format!(
-        "[Desktop Entry]\nType=Application\nName=Digit Store\nGenericName=Software Store\nComment=Find, get and update apps from Flathub\nKeywords=Software;Store;App Store;Apps;Flathub;Flatpak;Install;Uninstall;Update;Updates;Program;\nExec=digit-store %U\nIcon={APP_ID}\nCategories=System;PackageManager;\nMimeType=x-scheme-handler/appstream;application/vnd.flatpak.ref;\nStartupNotify=true\n"
+        "[Desktop Entry]\nType=Application\nName=Digit Store\nGenericName=Software Store\nComment=Find, get and update apps from Flathub\nKeywords=Software;Store;App Store;Apps;Flathub;Flatpak;Install;Uninstall;Update;Updates;Program;\nExec={exec} %U\nIcon={APP_ID}\nCategories=System;PackageManager;\nMimeType=x-scheme-handler/appstream;application/vnd.flatpak.ref;application/vnd.flatpak;application/vnd.appimage;application/x-iso9660-appimage;\nStartupNotify=true\n"
     );
     let mut icon_changed = false;
     for (path, body) in [(data.join(format!("icons/hicolor/scalable/apps/{APP_ID}.svg")), svg), (data.join(format!("applications/{APP_ID}.desktop")), desktop)] {
@@ -641,7 +648,7 @@ fn install_files() {
         let argv: [&std::ffi::OsStr; 5] = ["gtk4-update-icon-cache".as_ref(), "-q".as_ref(), "-t".as_ref(), "-f".as_ref(), theme.as_os_str()];
         let _ = gio::Subprocess::newv(&argv, gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE);
     }
-    for mime in ["x-scheme-handler/appstream", "application/vnd.flatpak.ref"] {
+    for mime in ["x-scheme-handler/appstream", "application/vnd.flatpak.ref", "application/vnd.flatpak", "application/vnd.appimage", "application/x-iso9660-appimage"] {
         let current = gio::AppInfo::default_for_type(mime, false).and_then(|a| a.id()).map(|s| s.to_string());
         if current.as_deref() != Some("dev.digit.Store.desktop") {
             if let Some(info) = gio_unix::DesktopAppInfo::new("dev.digit.Store.desktop") {
@@ -1027,12 +1034,17 @@ fn main() -> glib::ExitCode {
     });
     app.connect_command_line(|app, cmd| {
         let arg = cmd.arguments().get(1).and_then(|a| a.to_str().map(str::to_string));
+        // A file to install opens the install sheet over the screen, not the Store window.
+        if let Some(path) = arg.as_deref().and_then(confirm::file) {
+            confirm::show(app, path);
+            return glib::ExitCode::SUCCESS;
+        }
         let page = arg.as_deref().map(target).unwrap_or(Page::Discover);
         let s = store().unwrap_or_else(|| build(app));
         if let Page::Search(q) = &page {
             s.search.set_text(q);
         }
-        if s.catalog.borrow().is_some() || matches!(page, Page::Search(_) | Page::Yours | Page::Sources) && s.can_search() {
+        if s.catalog.borrow().is_some() || matches!(page, Page::Problem(_)) || matches!(page, Page::Search(_) | Page::Yours | Page::Sources) && s.can_search() {
             s.open(page);
         } else {
             *s.pending.borrow_mut() = Some(page);

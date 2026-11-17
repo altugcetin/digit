@@ -116,8 +116,19 @@ pub async fn run(id: &str, job: Job, progress: impl Fn(Option<f64>), cancel: &gi
         Job::Remove(system) => vec!["uninstall", "--noninteractive", "-y", scope(system), id],
         Job::Update(system) => vec!["update", "--noninteractive", "-y", scope(system), id],
     };
+    stream(args.iter().map(std::ffi::OsStr::new).collect(), progress, cancel).await
+}
+
+/// Installs a `.flatpak` bundle file for the user, which needs no password.
+pub async fn install_bundle(path: &std::path::Path, progress: impl Fn(Option<f64>), cancel: &gio::Cancellable) -> Result<(), String> {
+    let args: Vec<&std::ffi::OsStr> = vec!["install".as_ref(), "--user".as_ref(), "--noninteractive".as_ref(), "-y".as_ref(), "--bundle".as_ref(), path.as_os_str()];
+    stream(args, progress, cancel).await
+}
+
+/// Runs flatpak with `args`, reading percentages from its output, and stops it when cancelled.
+async fn stream(args: Vec<&std::ffi::OsStr>, progress: impl Fn(Option<f64>), cancel: &gio::Cancellable) -> Result<(), String> {
     let mut argv: Vec<&std::ffi::OsStr> = vec!["flatpak".as_ref()];
-    argv.extend(args.iter().map(|a| std::ffi::OsStr::new(*a)));
+    argv.extend(args);
     let p = gio::Subprocess::newv(&argv, gio::SubprocessFlags::STDOUT_PIPE | gio::SubprocessFlags::STDERR_MERGE).map_err(|e| e.to_string())?;
     let stop = cancel.connect_cancelled_local({
         let p = p.clone();
