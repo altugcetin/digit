@@ -173,8 +173,25 @@ async fn load(conn: &zbus::Connection, key: &str) -> Option<Item> {
     }
     let menu = map.get("Menu").and_then(|v| v.downcast_ref::<zbus::zvariant::ObjectPath>().ok()).map(|p| p.to_string()).filter(|p| p != "/");
     let is_menu = map.get("ItemIsMenu").and_then(|v| v.downcast_ref::<bool>().ok()).unwrap_or(false);
-    let title = map.get("ToolTip").and_then(|v| v.try_clone().ok()).and_then(|v| <(String, Vec<(i32, i32, Vec<u8>)>, String, String)>::try_from(v).ok()).map(|t| t.2).filter(|t| !t.is_empty()).unwrap_or_else(|| string(&map, "Title"));
-    Some(Item { key: key.to_string(), bus, owner, path, id: string(&map, "Id"), title: title.chars().take(64).collect(), icon, menu, is_menu, status })
+    let title = title_of(map.get("ToolTip").and_then(|v| v.try_clone().ok()), string(&map, "Title"));
+    Some(Item { key: key.to_string(), bus, owner, path, id: string(&map, "Id"), title, icon, menu, is_menu, status })
+}
+
+/// The text an item shows on hover: its tooltip's title, or else its own title.
+fn title_of(tooltip: Option<OwnedValue>, title: String) -> String {
+    let tip = tooltip.and_then(|v| <(String, Vec<(i32, i32, Vec<u8>)>, String, String)>::try_from(v).ok()).map(|t| t.2).filter(|t| !t.is_empty());
+    tip.unwrap_or(title).chars().take(64).collect()
+}
+
+/// Reads only an item's title, for the tooltip and title updates some apps (download progress,
+/// for one) send every second: reloading the whole item would decode its icon each time.
+async fn load_title(conn: &zbus::Connection, key: &str) -> Option<String> {
+    let (bus, path) = split(key);
+    let props = zbus::fdo::PropertiesProxy::builder(conn).destination(bus).ok()?.path(path).ok()?.cache_properties(zbus::proxy::CacheProperties::No).build().await.ok()?;
+    let iface = zbus::names::InterfaceName::try_from(ITEM).ok()?;
+    let tooltip = within(900, props.get(iface.clone(), "ToolTip")).await.and_then(|r| r.ok());
+    let title = within(900, props.get(iface, "Title")).await.and_then(|r| r.ok()).and_then(|v| String::try_from(v).ok()).unwrap_or_default();
+    Some(title_of(tooltip, title))
 }
 
 fn publish(app: &App, list: &[Item]) {
@@ -292,7 +309,19 @@ async fn watch(weak: &Weak<App>) {
             (ITEM, m) if m.starts_with("New") => {
                 glib::timeout_future(Duration::from_millis(120)).await;
                 let keys: Vec<String> = items.iter().filter(|i| i.owner == sender || i.bus == sender).map(|i| i.key.clone()).collect();
+                let text_only = matches!(m, "NewToolTip" | "NewTitle");
                 for k in keys {
+                    if text_only {
+                        // Only the text moved: keep the icon, and leave the bar alone if it reads the same.
+                        if let Some(title) = load_title(&conn, &k).await
+                            && let Some(slot) = items.iter_mut().find(|i| i.key == k)
+                            && slot.title != title
+                        {
+                            slot.title = title;
+                            changed = true;
+                        }
+                        continue;
+                    }
                     if let Some(fresh) = load(&conn, &k).await {
                         if let Some(slot) = items.iter_mut().find(|i| i.key == k) {
                             *slot = fresh;
