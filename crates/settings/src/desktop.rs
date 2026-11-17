@@ -1278,6 +1278,7 @@ fn corners_picker(card: &gtk::Box, t: &toml::Table) {
 fn screen_edges(body: &gtk::Box, t: &toml::Table) {
     let edge = section(body, "Hot corners");
     corners_picker(&edge, t);
+    toggle(&edge, "ads_click", "Control Center by its button", "Clicking the bar button opens Control Center in the corner beside it. Its hot corner and shortcut still use the corner above", "control_follows_button", prefs::get_bool(t, "control_follows_button", true));
     toggle(&edge, "fullscreen", "Over fullscreen apps", "Let the dock edge and screen corners open panels while an app or game is fullscreen. Spotlight always opens", "fullscreen_edges", prefs::get_bool(&t, "fullscreen_edges", false));
 }
 

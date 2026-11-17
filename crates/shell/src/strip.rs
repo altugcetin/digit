@@ -288,6 +288,18 @@ impl Strip {
         self.imp().hot.get()
     }
 
+    /// Where a panel under the bar starts so the pill above it keeps the same space below as
+    /// above: the pill's bottom plus its top gap, in screen pixels for a bar at the screen top.
+    pub fn under_pill(&self) -> Option<f64> {
+        let (top, bottom) = self.imp().pill_y.get();
+        if bottom <= top {
+            return None;
+        }
+        let root = self.root()?;
+        let at = |y: f64| self.compute_point(&root, &gtk::graphene::Point::new(0.0, y as f32)).map(|p| p.y() as f64);
+        Some((at(bottom)? + at(top)?).round())
+    }
+
     pub fn held(&self) -> Option<Zone> {
         self.imp().held.get()
     }
@@ -437,6 +449,7 @@ impl Strip {
         let reach = space.max(band);
         let ph = (space - 2.0 * MIN_GAP).min(PILL_TALL);
         let gap = ((space - ph) / 2.0).round();
+        imp.pill_y.set((mid - ph / 2.0, mid + ph / 2.0));
         let pill = |s: &gtk::Snapshot, zone: Zone, x: f64, width: f64| {
             if held == Some(zone) {
                 draw::fill(s, &draw::round(x, mid - ph / 2.0, width, ph, ph / 2.0), ink_main.alpha(0.22));
@@ -619,6 +632,8 @@ mod imp {
         pub(super) zones: RefCell<Vec<(super::Zone, (f64, f64, f64, f64))>>,
         pub(super) hot: Cell<Option<super::Zone>>,
         pub(super) held: Cell<Option<super::Zone>>,
+        /// The top and bottom of the bar's pills, as last drawn.
+        pub(super) pill_y: Cell<(f64, f64)>,
         pub(super) titles: RefCell<(String, Vec<&'static str>)>,
         pub(super) logo: RefCell<Option<(i32, Option<gtk::IconPaintable>)>>,
         pub(super) icon: RefCell<Option<(String, Option<gdk::Paintable>)>>,

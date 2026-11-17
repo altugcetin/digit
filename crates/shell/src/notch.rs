@@ -616,7 +616,9 @@ impl Notch {
                         false
                     }
                     Zone::Date => {
-                        crate::datepop::show(&app, monitor, origin + target.zone_end(zone).unwrap_or(left), below);
+                        // Docked under a notch, the panel keeps the pill's own gap below it.
+                        let y = if app.floating() { below } else { target.under_pill().unwrap_or(below) };
+                        crate::datepop::show(&app, monitor, origin + target.zone_end(zone).unwrap_or(left), y);
                         false
                     }
                     Zone::Tray(i) => {
@@ -695,7 +697,27 @@ impl Notch {
                 }
                 match zone {
                     Some(z) if menu_zone(Some(z)) || matches!(z, Zone::Tray(_) | Zone::Date | Zone::Spaces) => open_menu(z, button),
-                    Some(Zone::Status) => crate::control::toggle(&app),
+                    Some(Zone::Status) => {
+                        // Beside the button: the same origin and bar bottom the menus use.
+                        let (below, screen_w, origin) = {
+                            let v = notch.0.borrow();
+                            let screen_w = v.monitor.geometry().width() as f64;
+                            (v.band(App::now()) + 5.0, screen_w, (screen_w - v.window.width() as f64) / 2.0)
+                        };
+                        // A card lines up with the bar's right end, as far right as the screen allows.
+                        let right = screen_w - origin.max(0.0);
+                        target.hold(Some(Zone::Status));
+                        let held = target.downgrade();
+                        let below = if app.floating() { below } else { target.under_pill().unwrap_or(below) };
+                        crate::control::toggle_from(&app, right, below, screen_w, move || {
+                            if let Some(held) = held.upgrade() && held.held() == Some(Zone::Status) {
+                                held.hold(None);
+                            }
+                        });
+                        if !app.control.borrow().as_ref().is_some_and(|c| c.is_open()) {
+                            target.hold(None);
+                        }
+                    }
                     _ => {}
                 }
             });

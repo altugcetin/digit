@@ -163,6 +163,53 @@ pub fn slab(snapshot: &gtk::Snapshot, corner: Corner, rect: Rect, radius: f64, f
     snapshot.restore();
 }
 
+/// The corners a hanging panel rounds: only those away from the screen edge, and on a full
+/// bar not the top one, which sits flat against it.
+fn hang_corners(left: bool, bar: bool, radius: f64) -> [graphene::Size; 4] {
+    let (z, r) = (graphene::Size::zero(), graphene::Size::new(radius as f32, radius as f32));
+    let top = if bar { z } else { r };
+    // top-left, top-right, bottom-right, bottom-left
+    if left { [z, top, r, z] } else { [top, z, z, r] }
+}
+
+pub fn hang_clip(rect: Rect, left: bool, bar: bool, radius: f64) -> gsk::RoundedRect {
+    let [a, b, c, d] = hang_corners(left, bar, radius);
+    gsk::RoundedRect::new(graphene::Rect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32), a, b, c, d)
+}
+
+/// A panel hanging from the top bar against the screen's side edge, as the calendar does:
+/// flat against a full bar with a cove into the side edge below it, or under a notch with
+/// coves above and below, the top-edge notch shape turned a quarter.
+pub fn hang(snapshot: &gtk::Snapshot, rect: Rect, left: bool, bar: bool, radius: f64, fillet: f64, color: Rgb) {
+    snapshot.save();
+    // Draw as if on the right side; mirror for the left.
+    snapshot.translate(&graphene::Point::new(rect.x as f32, rect.y as f32));
+    if left {
+        snapshot.translate(&graphene::Point::new(rect.w as f32, 0.0));
+        snapshot.scale(-1.0, 1.0);
+    }
+    let (w, h) = (rect.w as f32, rect.h as f32);
+    if bar {
+        let local = Rect { x: 0.0, y: 0.0, ..rect };
+        let body = hang_clip(local, false, true, radius);
+        let c = (fillet as f32).min(h / 2.0);
+        let cove = gsk::PathBuilder::new();
+        cove.move_to(w - c, h - 1.0);
+        cove.line_to(w, h - 1.0);
+        cove.line_to(w, h + c);
+        cove.svg_arc_to(c, c, 0.0, false, false, w - c, h);
+        cove.close();
+        draw::slab(snapshot, &(body, Some(cove.to_path())), color);
+    } else {
+        snapshot.translate(&graphene::Point::new(w, -(fillet as f32)));
+        snapshot.rotate(90.0);
+        if let Some(parts) = kit::shape::docked_parts(rect.h / 2.0 + fillet, 0.0, rect.h, rect.w, radius, fillet) {
+            draw::slab(snapshot, &parts, color);
+        }
+    }
+    snapshot.restore();
+}
+
 /// A newly mapped Overlay panel can be above the persistent screen-corner masks.
 /// Redraw the mask at its attached physical corner, outside the animated slab.
 pub fn screen_mask(snapshot: &gtk::Snapshot, app: &App, corner: Corner, surface: (f64, f64), margins: [i32; 4]) {
