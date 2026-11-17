@@ -218,6 +218,7 @@ fn run() {
     night::start(&app);
     sni::start(&app);
     weather::start(&app);
+    draw::set_raster(app.prefs.borrow().desktop_raster);
     desk::apply(&app);
     deskicons::apply(&app);
     batterywidget::apply(&app);

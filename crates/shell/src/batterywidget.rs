@@ -123,7 +123,7 @@ pub fn apply(app: &Rc<App>) {
     let a = Rc::downgrade(app);
     paint.on_draw(move |s| {
         let (Some(p), Some(app)) = (weak.upgrade(), a.upgrade()) else { return };
-        draw(s, &p, &app, &output, left, top);
+        crate::draw::rasterized(|| draw(s, &p, &app, &output, left, top));
     });
     window.set_child(Some(&paint));
     window.connect_realize(|w| {

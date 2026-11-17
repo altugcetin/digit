@@ -103,6 +103,8 @@ pub struct Config {
     pub desktop_battery_levels: bool,
     pub desktop_media_controls: bool,
     pub desktop_clock_bg: bool,
+    /// Draws the desktop's text through cairo (see `draw::rasterized`). Off unless asked for.
+    pub desktop_raster: bool,
     pub desktop_battery_bg: bool,
     pub desktop_media_bg: bool,
     pub desktop_weather_bg: bool,
@@ -225,6 +227,7 @@ impl Default for Config {
             desktop_battery_levels: true,
             desktop_media_controls: false,
             desktop_clock_bg: false,
+            desktop_raster: false,
             desktop_battery_bg: false,
             desktop_media_bg: false,
             desktop_weather_bg: false,
@@ -301,6 +304,8 @@ pub struct Prefs {
     pub desktop_battery_levels: bool,
     pub desktop_media_controls: bool,
     pub desktop_clock_bg: bool,
+    /// Draws the desktop's text through cairo (see `draw::rasterized`). Off unless asked for.
+    pub desktop_raster: bool,
     pub desktop_battery_bg: bool,
     pub desktop_media_bg: bool,
     pub desktop_weather_bg: bool,
@@ -389,6 +394,7 @@ impl From<&Config> for Prefs {
             desktop_battery_levels: c.desktop_battery_levels,
             desktop_media_controls: c.desktop_media_controls,
             desktop_clock_bg: c.desktop_clock_bg,
+            desktop_raster: c.desktop_raster,
             desktop_battery_bg: c.desktop_battery_bg,
             desktop_media_bg: c.desktop_media_bg,
             desktop_weather_bg: c.desktop_weather_bg,
