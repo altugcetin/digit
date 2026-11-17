@@ -182,6 +182,7 @@ impl Choice {
 
 fn choice_value(key: &str, value: &str) -> toml::Value {
     if key == "spaces_always" { toml::Value::Integer(value.parse::<i64>().unwrap_or(0).clamp(0, 10)) }
+    else if key == "wallpaper_every" { toml::Value::Integer(value.parse::<i64>().unwrap_or(0).clamp(0, 10_080)) }
     else { toml::Value::String(value.to_string()) }
 }
 
@@ -644,6 +645,7 @@ pub fn sections(page: &str) -> &'static [Section] {
         "appearance" => &[shell_look, app_look, roundness, window_buttons, app_themes, effects],
         "dock" => &[dock],
         "notch" => &[notch, menu_bar, workspaces, screen_edges],
+        "wallpaper" => &[crate::wallpaper::screens_section, crate::wallpaper::source],
         "desktop" => &[desktop],
         "spotlight" => &[search, scopes, clipboard],
         "compositor" => &[session],
@@ -1398,45 +1400,9 @@ pub fn night_light(body: &gtk::Box, t: &toml::Table) {
 
 fn desktop(body: &gtk::Box, t: &toml::Table) {
     let desk = section(body, "Desktop");
-    let default = glib::user_special_dir(glib::UserDirectory::Pictures).unwrap_or_else(|| glib::home_dir().join("Pictures")).join("Wallpapers");
-    let (row, end) = ui::row(Some("folder"), "Wallpaper folder", "Leave empty to use Pictures and its wallpaper folders");
-    let entry = gtk::Entry::new();
-    entry.set_text(&prefs::get_str(t, "wall_dir", ""));
-    entry.set_width_chars(22);
-    entry.set_hexpand(true);
-    entry.set_placeholder_text(Some(&default.display().to_string()));
-    ui::bind_entry(&entry, |text| {
-        screenshot_folder(text)?;
-        if !text.is_empty() && std::fs::read_dir(kit::prefs::home(text)).is_err() {
-            return Err("Choose a readable folder".into());
-        }
-        Ok(())
-    }, |text| save("wall_dir", toml::Value::String(text.into())));
-    end.append(&entry);
-    let pickb = ui::button("Choose…", "");
-    let target = entry.downgrade();
-    pickb.connect_clicked(move |b| {
-        let Some(entry) = target.upgrade() else { return };
-        let path = if entry.text().trim().is_empty() { default.clone() } else { kit::prefs::home(entry.text().trim()) };
-        let target = target.clone();
-        ui::choose_folder(ui::root(b), &path, move |path| {
-            if let Some(entry) = target.upgrade() {
-                entry.set_text(&path.display().to_string());
-                entry.emit_activate();
-            }
-        });
-    });
-    end.append(&pickb);
-    desk.append(&row);
     desk_widgets(&desk, t);
     field(&desk, "location_on", "Weather city", "Shown in Control Center, under the desktop clock and in the Weather widget. The city name goes to open-meteo.com over HTTPS; leave empty to keep weather off", "weather_city", &prefs::get_str(t, "weather_city", ""), "Istanbul", |_| true);
     choice(&desk, "device_thermostat", "Units", "", "weather_unit", &[("celsius", "°C"), ("fahrenheit", "°F")], &prefs::get_str(t, "weather_unit", "celsius"));
-    if gtk::gdk::Display::default().is_some_and(|d| d.monitors().n_items() > 1) {
-        const LAYOUTS: [(&str, &str); 3] = [("same", "Same on each"), ("span", "Span across"), ("separate", "One per screen")];
-        let current = prefs::get_str(t, "wallpaper_layout", "same");
-        let items = LAYOUTS.iter().map(|(v, name)| (*name, kit::pictures::wallpapers(v).upcast())).collect();
-        tiles(&desk, "wallpaper", "Wallpaper on several screens", "Change it from the wallpaper picker", items, LAYOUTS.iter().position(|l| l.0 == current).unwrap_or(0), |i| save("wallpaper_layout", toml::Value::String(LAYOUTS[i].0.into())));
-    }
     toggle(&desk, "folder", "Desktop icons", "Show what's in your Desktop folder on the wallpaper", "desktop_icons", prefs::get_bool(t, "desktop_icons", true));
 }
 
@@ -2114,7 +2080,7 @@ fn recording_shortcuts(body: &gtk::Box, _: &toml::Table) {
     shortcuts.append(&row);
 }
 
-fn screenshot_folder(text: &str) -> Result<(), String> {
+pub(crate) fn screenshot_folder(text: &str) -> Result<(), String> {
     if text.is_empty() { return Ok(()); }
     let path = kit::prefs::home(text);
     if !path.is_absolute() || text.chars().any(char::is_control) {
