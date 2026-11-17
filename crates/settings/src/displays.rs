@@ -34,6 +34,18 @@ struct Out {
     on: bool,
     /// 10 bits per color channel (Hyprland's `bitdepth = 10`).
     ten_bit: bool,
+    /// HDR: off, in full screen (Hyprland's `cm_auto_hdr`) or always (`cm = "hdr"`).
+    hdr: Hdr,
+    /// What SDR content looks like while the display is always in HDR.
+    sdr_brightness: f64,
+    sdr_saturation: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Hdr {
+    Off,
+    FullScreen,
+    Always,
 }
 
 impl Out {
@@ -96,6 +108,9 @@ fn read() -> (Wm, Vec<Out>) {
                             flip: t.starts_with("Flipped"),
                             on,
                             ten_bit: false,
+                            hdr: Hdr::Off,
+                            sdr_brightness: 1.0,
+                            sdr_saturation: 1.0,
                         })
                     })
                     .collect()
@@ -106,6 +121,7 @@ fn read() -> (Wm, Vec<Out>) {
     }
     if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
         let Some(v) = run(&["hyprctl", "-j", "monitors", "all"]).and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { return (Wm::Hypr, Vec::new()) };
+        let full_screen_hdr = crate::prefs::get_bool(&crate::prefs::read(), "hdr_fullscreen", false);
         let mut outs: Vec<Out> = v
             .as_array()
             .map(|a| {
@@ -146,6 +162,14 @@ fn read() -> (Wm, Vec<Out>) {
                             on: !o.get("disabled").and_then(Value::as_bool).unwrap_or(false),
                             // Formats such as XRGB2101010 carry 10 bits a channel.
                             ten_bit: o.get("currentFormat").and_then(Value::as_str).is_some_and(|f| f.contains("2101010")),
+                            // Full screen is one switch for every display in 10-bit color.
+                            hdr: match o.get("colorManagementPreset").and_then(Value::as_str) {
+                                Some(p) if p.starts_with("hdr") => Hdr::Always,
+                                _ if full_screen_hdr => Hdr::FullScreen,
+                                _ => Hdr::Off,
+                            },
+                            sdr_brightness: o.get("sdrBrightness").and_then(Value::as_f64).unwrap_or(1.0),
+                            sdr_saturation: o.get("sdrSaturation").and_then(Value::as_f64).unwrap_or(1.0),
                         })
                     })
                     .collect()
@@ -216,6 +240,11 @@ fn hypr_lua(outs: &[Out], old: &str) -> String {
             }
             if o.ten_bit {
                 props.push("    bitdepth = 10".into());
+                if o.hdr == Hdr::Always {
+                    props.push("    cm = \"hdr\"".into());
+                    props.push(format!("    sdrbrightness = {}", trim(o.sdr_brightness)));
+                    props.push(format!("    sdrsaturation = {}", trim(o.sdr_saturation)));
+                }
             }
         } else {
             props.push("    disabled = true".into());
@@ -810,6 +839,50 @@ pub fn build() -> gtk::Widget {
                 });
                 end.append(&sw);
                 detail.append(&row);
+                // HDR needs the display already running in 10-bit color: wide color on 8 bits
+                // bands, and Hyprland warns about it.
+                let ready = st.borrow().saved.iter().any(|s| s.name == o.name && s.on && s.ten_bit);
+                let (row, end) = ui::row(Some("contrast"), "HDR", if ready {
+                    "In full screen: games and videos that ask for it switch the display while they're full screen"
+                } else {
+                    "Turn on 10-bit color above and keep it first"
+                });
+                let at = if ready { o.hdr as u32 } else { 0 };
+                let pick = kit::ui::dropdown(&["Off", "In full screen", "Always"], at);
+                let (s2, r2) = (st.clone(), refill.clone());
+                pick.connect_selected_notify(move |p| {
+                    {
+                        let mut s = s2.borrow_mut();
+                        let i = s.pick;
+                        s.outs[i].hdr = [Hdr::Off, Hdr::FullScreen, Hdr::Always][p.selected() as usize % 3];
+                    }
+                    if let Some(f) = r2.borrow().clone() {
+                        glib::idle_add_local_once(move || f());
+                    }
+                });
+                end.append(&pick);
+                row.set_sensitive(ready);
+                detail.append(&row);
+                if ready && o.hdr == Hdr::Always {
+                    for (icon, title, sub, value, set) in [
+                        ("brightness_6", "SDR brightness", "How bright apps and the desktop look in HDR", o.sdr_brightness, (|o: &mut Out, v| o.sdr_brightness = v) as fn(&mut Out, f64)),
+                        ("palette", "SDR saturation", "How vivid their colors look in HDR", o.sdr_saturation, |o: &mut Out, v| o.sdr_saturation = v),
+                    ] {
+                        let (row, end) = ui::row(Some(icon), title, sub);
+                        let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.5, 2.0, 0.05);
+                        scale.set_value(value);
+                        scale.set_draw_value(false);
+                        scale.set_size_request(240, -1);
+                        let s2 = st.clone();
+                        scale.connect_value_changed(move |sc| {
+                            let mut s = s2.borrow_mut();
+                            let i = s.pick;
+                            set(&mut s.outs[i], (sc.value() * 20.0).round() / 20.0);
+                        });
+                        end.append(&scale);
+                        detail.append(&row);
+                    }
+                }
             }
         })
     };
@@ -870,10 +943,8 @@ pub fn build() -> gtk::Widget {
             f2();
         });
     }
-    // The Color card, refilled once kept settings change which displays are in 10-bit color.
-    let color: Rc<RefCell<Option<gtk::Box>>> = Rc::default();
     let finish = {
-        let (s2, a2, f2, bar, apply, color) = (st.clone(), area.clone(), fill.clone(), bar.clone(), apply.clone(), color.clone());
+        let (s2, a2, f2, bar, apply) = (st.clone(), area.clone(), fill.clone(), bar.clone(), apply.clone());
         Rc::new(move |keep: bool| {
             let previous = REVERT.with(|r| r.borrow_mut().take());
             drop(previous);
@@ -889,11 +960,12 @@ pub fn build() -> gtk::Widget {
             if keep {
                 match persist(wm, &outs) {
                     Ok(msg) => {
-                        let ten_bit = outs.iter().any(|o| o.on && o.ten_bit);
-                        s2.borrow_mut().saved = outs;
-                        if let Some(card) = color.borrow().as_ref() {
-                            hdr_row(card, ten_bit);
+                        // Full screen HDR is one Hyprland switch; never left on without 10-bit.
+                        let full = outs.iter().any(|o| o.on && o.ten_bit && o.hdr == Hdr::FullScreen);
+                        if wm == Wm::Hypr && full != crate::prefs::get_bool(&crate::prefs::read(), "hdr_fullscreen", false) {
+                            crate::desktop::save("hdr_fullscreen", toml::Value::Boolean(full));
                         }
+                        s2.borrow_mut().saved = outs;
                         ui::done(&msg);
                     }
                     Err(e) => ui::fail(&e),
@@ -973,31 +1045,8 @@ pub fn build() -> gtk::Widget {
             s2.borrow_mut().pending = Some(id);
         });
     }
-    if wm == Wm::Hypr {
-        let card = crate::desktop::section(&body, "Color");
-        hdr_row(&card, st.borrow().saved.iter().any(|o| o.on && o.ten_bit));
-        *color.borrow_mut() = Some(card);
-    }
     crate::desktop::night_light(&body, &crate::prefs::read());
     scroll.upcast()
-}
-
-/// Whether full-screen apps may switch a display to HDR or wide color. Only offered with a
-/// display in 10-bit color: wide color on 8 bits bands, and Hyprland warns about it.
-fn hdr_row(card: &gtk::Box, ten_bit: bool) {
-    kit::ui::clear(card);
-    let key = "hdr_fullscreen";
-    let mut on = crate::prefs::get_bool(&crate::prefs::read(), key, false);
-    if on && !ten_bit {
-        // No display is in 10-bit color any more: don't leave the switching on behind it.
-        on = !crate::desktop::save(key, toml::Value::Boolean(false));
-    }
-    let row = crate::desktop::toggle(card, "hdr_on", "HDR and wide color in full screen", if ten_bit {
-        "Games and videos that ask for it switch the display while they're full screen"
-    } else {
-        "Turn on 10-bit color for a display above first"
-    }, key, on);
-    row.set_sensitive(ten_bit);
 }
 
 #[cfg(test)]
@@ -1019,12 +1068,15 @@ mod tests {
     }
 
     #[test]
-    fn a_display_in_10_bit_color_is_written_with_its_bit_depth() {
-        let out = |name: &str, ten_bit: bool| Out { name: name.into(), label: String::new(), modes: Vec::new(), mode: Mode { w: 2560, h: 1440, mhz: 165000 }, x: 0, y: 0, scale: 1.0, turn: 0, flip: false, on: true, ten_bit };
-        let lua = hypr_lua(&[out("DP-2", true), out("HDMI-A-1", false)], "");
+    fn bit_depth_and_hdr_are_written_only_for_a_display_in_10_bit_color() {
+        let out = |name: &str, ten_bit: bool, hdr: Hdr| Out { name: name.into(), label: String::new(), modes: Vec::new(), mode: Mode { w: 2560, h: 1440, mhz: 165000 }, x: 0, y: 0, scale: 1.0, turn: 0, flip: false, on: true, ten_bit, hdr, sdr_brightness: 1.2, sdr_saturation: 0.9 };
+        let lua = hypr_lua(&[out("DP-2", true, Hdr::Always), out("DP-3", true, Hdr::FullScreen), out("HDMI-A-1", false, Hdr::Always)], "");
         let block = |name: &str| lua.split("hl.monitor(").find(|b| b.contains(&format!("\"{name}\""))).unwrap().to_string();
         assert!(block("DP-2").contains("bitdepth = 10"));
-        assert!(!block("HDMI-A-1").contains("bitdepth"));
+        assert!(block("DP-2").contains("cm = \"hdr\"") && block("DP-2").contains("sdrbrightness = 1.2") && block("DP-2").contains("sdrsaturation = 0.9"));
+        // Full screen HDR is Hyprland's cm_auto_hdr, not a monitor setting.
+        assert!(block("DP-3").contains("bitdepth = 10") && !block("DP-3").contains("cm ="));
+        assert!(!block("HDMI-A-1").contains("bitdepth") && !block("HDMI-A-1").contains("cm ="));
     }
 
     #[test]
