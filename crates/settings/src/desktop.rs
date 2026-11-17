@@ -1404,6 +1404,7 @@ fn desktop(body: &gtk::Box, t: &toml::Table) {
     field(&desk, "location_on", "Weather city", "Shown in Control Center, under the desktop clock and in the Weather widget. The city name goes to open-meteo.com over HTTPS; leave empty to keep weather off", "weather_city", &prefs::get_str(t, "weather_city", ""), "Istanbul", |_| true);
     choice(&desk, "device_thermostat", "Units", "", "weather_unit", &[("celsius", "°C"), ("fahrenheit", "°F")], &prefs::get_str(t, "weather_unit", "celsius"));
     toggle(&desk, "folder", "Desktop icons", "Show what's in your Desktop folder on the wallpaper", "desktop_icons", prefs::get_bool(t, "desktop_icons", true));
+    toggle(&desk, "text_fields", "Draw widget text another way", "Can fix text that now and then disappears from the clock and the widgets, on some graphics setups. Leave it off unless that happens", "desktop_raster", prefs::get_bool(t, "desktop_raster", false));
 }
 
 type Rect = (f64, f64, f64, f64);

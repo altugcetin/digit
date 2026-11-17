@@ -90,10 +90,10 @@ fn resolve_renderer(env: &str) -> String {
 /// Picks the renderer for a digit program (see [`renderer`]) and sets it up. Call it first thing
 /// in `main`, before GTK starts or any thread does.
 ///
-/// On NVIDIA, GTK's OpenGL renderer opens the driver through its GLES API, which loses glyphs:
-/// text and icon fonts go missing on surfaces that redraw rarely, like the desktop clock and the
-/// battery widget (GTK issue 6216). Desktop OpenGL draws them correctly, so GLES is turned off
-/// there.
+/// On NVIDIA, GTK's OpenGL renderer is kept on desktop OpenGL rather than its GLES API: glyphs
+/// went missing on rarely redrawn surfaces there. (GTK issue 6216 was the original GLES glyph
+/// bug and is fixed since 4.14; the desktop surfaces also avoid the glyph cache, see
+/// `draw::rasterized` in the shell.)
 pub fn select(env: &str) -> String {
     let r = renderer(env);
     let gles_off = matches!(r.as_str(), "gl" | "ngl") && drivers() == ["nvidia"];

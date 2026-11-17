@@ -199,7 +199,7 @@ pub fn apply(app: &Rc<App>) {
         let (weak, a, out) = (paint.downgrade(), Rc::downgrade(app), output.clone());
         paint.on_draw(move |s| {
             let (Some(p), Some(app)) = (weak.upgrade(), a.upgrade()) else { return };
-            draw(s, &p, &app, kind, &out, top);
+            crate::draw::rasterized(|| draw(s, &p, &app, kind, &out, top));
         });
         if kind == Kind::Media {
             let click = gtk::GestureClick::new();

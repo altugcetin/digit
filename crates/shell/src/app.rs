@@ -693,7 +693,10 @@ impl App {
         if (&before.weather_city, &before.weather_unit) != (&next.weather_city, &next.weather_unit) {
             crate::weather::start(self);
         }
-        if before.desktop_widget != next.desktop_widget {
+        if before.desktop_raster != next.desktop_raster {
+            crate::draw::set_raster(next.desktop_raster);
+        }
+        if before.desktop_widget != next.desktop_widget || before.desktop_raster != next.desktop_raster {
             crate::desk::apply(self);
         }
         crate::deskicons::apply(self);

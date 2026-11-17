@@ -128,7 +128,7 @@ pub fn apply(app: &Rc<App>) {
         let output = name.clone();
         paint.on_draw(move |s| {
             let (Some(p), Some(app)) = (weak.upgrade(), a.upgrade()) else { return };
-            draw_desk(s, &p, &app, &output, center);
+            draw::rasterized(|| draw_desk(s, &p, &app, &output, center));
         });
         window.set_child(Some(&paint));
         window.connect_realize(|w| {

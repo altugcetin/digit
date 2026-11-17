@@ -1,5 +1,5 @@
 use crate::config::Config;
-use gtk::{gdk, graphene, gsk, pango, prelude::*};
+use gtk::{gdk, glib, graphene, gsk, pango, prelude::*};
 use kit::palette::Rgb;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -16,7 +16,47 @@ struct Key {
 }
 
 thread_local! {
-    static LAYOUTS: RefCell<HashMap<Key, pango::Layout>> = RefCell::new(HashMap::new());
+    /// Layouts by widget address, each with that widget held weakly: a new widget can land on
+    /// a dead one's address, and must not get layouts made from the dead one's Pango context.
+    static LAYOUTS: RefCell<HashMap<Key, (glib::WeakRef<gtk::Widget>, pango::Layout)>> = RefCell::new(HashMap::new());
+    static RASTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+static RASTER_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turns the cairo path of [`rasterized`] on or off: the "Draw desktop text with cairo" setting.
+pub fn set_raster(on: bool) {
+    RASTER_ON.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Runs `draw`, with its text and icons rasterized by cairo instead of GSK's glyph cache when the
+/// setting is on (it is off by default).
+///
+/// For surfaces that redraw rarely, like the desktop clock and widgets: with GTK's OpenGL
+/// renderer on NVIDIA, a frame sometimes draws with glyphs missing (cause unknown; it doesn't
+/// happen with Vulkan), and such a frame stays on screen until the next redraw, up to a minute
+/// later. A cairo node is drawn on the CPU and uploaded as a plain texture, so it never touches
+/// the renderer's glyph atlas.
+pub fn rasterized(draw: impl FnOnce()) {
+    let was = RASTER.with(|r| r.replace(RASTER_ON.load(std::sync::atomic::Ordering::Relaxed)));
+    draw();
+    RASTER.with(|r| r.set(was));
+}
+
+/// Draws `l` at the snapshot's origin, through cairo inside [`rasterized`].
+fn put(s: &gtk::Snapshot, l: &pango::Layout, color: Rgb) {
+    if !RASTER.with(|r| r.get()) {
+        s.append_layout(l, &color.rgba());
+        return;
+    }
+    let (ink, logical) = l.pixel_extents();
+    let x0 = ink.x().min(logical.x()) - 2;
+    let y0 = ink.y().min(logical.y()) - 2;
+    let x1 = (ink.x() + ink.width()).max(logical.x() + logical.width()) + 2;
+    let y1 = (ink.y() + ink.height()).max(logical.y() + logical.height()) + 2;
+    let cr = s.append_cairo(&graphene::Rect::new(x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32));
+    cr.set_source_rgba(color.r, color.g, color.b, color.a);
+    kit::paint::show(&cr, l);
 }
 
 fn face_key(face: Face) -> (u8, i32) {
@@ -41,7 +81,9 @@ fn cached(widget: &impl IsA<gtk::Widget>, cfg: &Config, text: &str, px: f64, fac
             _ => 2,
         },
     };
-    if let Some(l) = LAYOUTS.with(|c| c.borrow().get(&key).cloned()) {
+    let widget = widget.as_ref();
+    let hit = LAYOUTS.with(|c| c.borrow().get(&key).filter(|(owner, _)| owner.upgrade().as_ref() == Some(widget)).map(|(_, l)| l.clone()));
+    if let Some(l) = hit {
         return l;
     }
     let l = layout(widget, cfg, text, px, face);
@@ -56,7 +98,7 @@ fn cached(widget: &impl IsA<gtk::Widget>, cfg: &Config, text: &str, px: f64, fac
         if c.len() >= 768 {
             c.clear();
         }
-        c.insert(key, l.clone());
+        c.insert(key, (widget.downgrade(), l.clone()));
     });
     l
 }
@@ -143,7 +185,7 @@ pub fn text(s: &gtk::Snapshot, widget: &impl IsA<gtk::Widget>, cfg: &Config, tex
     let h = l.pixel_extents().1.height() as f64;
     s.save();
     s.translate(&graphene::Point::new(x.round() as f32, (mid - h / 2.0).round() as f32));
-    s.append_layout(&l, &color.rgba());
+    put(s, &l, color);
     s.restore();
 }
 
@@ -156,7 +198,7 @@ pub fn icon(s: &gtk::Snapshot, widget: &impl IsA<gtk::Widget>, cfg: &Config, nam
         (cx - ink.x() as f64 - ink.width() as f64 / 2.0).round() as f32,
         (mid - ink.y() as f64 - ink.height() as f64 / 2.0).round() as f32,
     ));
-    s.append_layout(&l, &color.rgba());
+    put(s, &l, color);
     s.restore();
 }
 
