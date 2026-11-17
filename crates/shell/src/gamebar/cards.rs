@@ -348,18 +348,20 @@ pub fn draw(st: &State, s: &gtk::Snapshot, kind: Kind, pal: &Palette, w: f64, h:
             ink.text(&line, 13.0, Face::Number(540), color, PAD + 2.0, HEAD + 6.0, w - 2.0 * PAD, left);
             let replay = status.is_some_and(|s| s.mode == Mode::Replay);
             let taping = status.is_some_and(|s| s.mode == Mode::Record || s.taping);
+            let running = status.is_some();
             for it in &items {
                 let Hit::Rec(r) = it.hit else { continue };
                 match r {
                     Rec::Region | Rec::Screen | Rec::Record | Rec::Save => {
-                        let live = r != Rec::Save || replay;
+                        // Region and Screen start a recording, so they rest while one runs.
+                        let live = match r { Rec::Save => replay, Rec::Region | Rec::Screen => !running, _ => true };
                         let on = r == Rec::Record && taping;
                         let glow = if live && ink.hot(it.hit) { 0.07 } else { 0.0 };
                         let back = if on { RED.alpha(0.2 + glow) } else { pal.tile(0.07 + glow) };
                         draw::fill(s, &draw::round(it.x, it.y, it.w, it.h, 20.0 * st.app.round()), back);
                         let (glyph, label) = match r {
-                            Rec::Region => ("screenshot_region", "Region"),
-                            Rec::Screen => ("screenshot_monitor", "Screen"),
+                            Rec::Region => ("crop_free", "Region"),
+                            Rec::Screen => ("desktop_windows", "Screen"),
                             Rec::Record if on => ("stop", "Stop"),
                             Rec::Record => ("radio_button_checked", "Record"),
                             _ => ("fast_rewind", "Save clip"),
