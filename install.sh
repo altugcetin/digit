@@ -318,13 +318,13 @@ package_lists() {
     case $FAMILY in
         suse)
             build=(gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel wayland-devel)
-            run_pkgs=(wtype curl upower polkit flatpak playerctl breeze6-style adw-gtk3 adw-gtk3-dark gpu-screen-recorder cava) ;;
+            run_pkgs=(wtype curl upower polkit flatpak playerctl breeze6-style adw-gtk3 adw-gtk3-dark gpu-screen-recorder cava slurp squashfs-tools libfuse2) ;;
         fedora)
             build=(gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel wayland-devel)
-            run_pkgs=(wtype curl upower polkit flatpak playerctl plasma-breeze-qt6 plasma-breeze-common adw-gtk3-theme gpu-screen-recorder cava) ;;
+            run_pkgs=(wtype curl upower polkit flatpak playerctl plasma-breeze-qt6 plasma-breeze-common adw-gtk3-theme gpu-screen-recorder cava slurp squashfs-tools fuse-libs) ;;
         arch)
             build=(base-devel pkgconf gtk4 gtk4-layer-shell wayland)
-            run_pkgs=(wtype curl upower polkit flatpak playerctl breeze adw-gtk-theme gpu-screen-recorder cava archlinux-appstream-data) ;;
+            run_pkgs=(wtype curl upower polkit flatpak playerctl breeze adw-gtk-theme gpu-screen-recorder cava archlinux-appstream-data slurp squashfs-tools fuse2) ;;
     esac
     if ! installed_pkg qt6ct-kde; then
         if [ "$FAMILY" = fedora ] && ! installed_pkg qt6ct && dnf -q repoquery --available qt6ct-kde 2>/dev/null | grep -q '^qt6ct-kde'; then
