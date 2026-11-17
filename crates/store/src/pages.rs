@@ -17,6 +17,56 @@ pub fn build(s: &Rc<Store>, page: &Page) -> gtk::Widget {
     }
 }
 
+/// An app's picture from a file, or a plain tile when there is none.
+fn file_icon(icon: Option<&std::path::Path>, fallback: &str) -> gtk::Widget {
+    match icon {
+        Some(p) => {
+            let image = gtk::Image::from_file(p);
+            image.set_pixel_size(52);
+            image.set_valign(gtk::Align::Center);
+            image.upcast()
+        }
+        None => {
+            let tile = ui::tile(fallback);
+            tile.add_css_class("app");
+            tile.set_valign(gtk::Align::Center);
+            tile.upcast()
+        }
+    }
+}
+
+/// AppImages installed from files: open or remove each.
+fn appimages(s: &Rc<Store>, b: &gtk::Box) {
+    let list = crate::appimage::list();
+    if list.is_empty() {
+        return;
+    }
+    b.append(&ui::heading(&format!("AppImages · {}", list.len())));
+    let card = ui::card();
+    for app in list {
+        let sub = if app.comment.is_empty() { app.file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() } else { app.comment.clone() };
+        let (row, actions) = ui::row(None, &app.name, &sub);
+        row.add_css_class("lockup");
+        row.prepend(&file_icon(app.icon.as_deref(), "deployed_code"));
+        let remove = ui::button("Remove", "");
+        let (it, weak) = (app.clone(), Rc::downgrade(s));
+        remove.connect_clicked(move |_| {
+            let Some(s) = weak.upgrade() else { return };
+            match crate::appimage::remove(&it) {
+                Ok(()) => s.note(&format!("{} removed", it.name), false),
+                Err(e) => s.note(&format!("{}: {e}", it.name), true),
+            }
+            s.refresh();
+        });
+        actions.append(&remove);
+        let open = ui::button("Open", "accent");
+        open.connect_clicked(move |_| crate::appimage::launch(&app));
+        actions.append(&open);
+        card.append(&row);
+    }
+    b.append(&card);
+}
+
 fn scroller(body: &gtk::Box) -> gtk::Widget {
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
@@ -1140,7 +1190,7 @@ fn app_page(s: &Rc<Store>, id: &str) -> gtk::Widget {
 }
 
 fn yours(s: &Rc<Store>) -> gtk::Widget {
-    let (scroll, b) = ui::page("Yours", "Apps you got from Flatpak and your system's packages. Flatpak apps installed for you need no password.");
+    let (scroll, b) = ui::page("Yours", "Apps you got from Flatpak, AppImages you installed and your system's packages. Flatpak apps installed for you need no password.");
     let cat = s.catalog.borrow().clone();
     let installed = s.installed.borrow().clone();
     let updates = s.updates.borrow().clone();
@@ -1167,6 +1217,7 @@ fn yours(s: &Rc<Store>) -> gtk::Widget {
         card.append(&lockup(s, &entry(id)));
     }
     b.append(&card);
+    appimages(s, &b);
     // System packages that are apps, as Settings > Apps lists them; libraries and tools stay out.
     if let Some(arch) = s.arch.borrow().clone() {
         let installed = s.arch_installed.borrow();

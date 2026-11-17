@@ -245,6 +245,12 @@ pub async fn install(ids: &[String], flags: u64, progress: impl Fn(Progress)) ->
     run("InstallPackages", &(flags, ids.to_vec()), progress).await
 }
 
+/// Installs local package files (.rpm, .deb) with their dependencies from the repositories.
+/// Polkit asks for the password; the files themselves are usually unsigned, so trust is not required.
+pub async fn install_files(paths: &[String], progress: impl Fn(Progress)) -> Result<Vec<Pkg>, String> {
+    run("InstallFiles", &(0u64, paths.to_vec()), progress).await
+}
+
 pub async fn update(ids: &[String], simulate: bool, progress: impl Fn(Progress)) -> Result<Vec<Pkg>, String> {
     let flags = ONLY_TRUSTED | if simulate { SIMULATE } else { 0 };
     run("UpdatePackages", &(flags, ids.to_vec()), progress).await
