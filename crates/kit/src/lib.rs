@@ -27,6 +27,7 @@ pub mod pictures;
 pub mod pixel;
 pub mod pk;
 pub mod prefs;
+pub mod wallfocus;
 pub mod recent;
 pub mod trash;
 pub mod scroll;

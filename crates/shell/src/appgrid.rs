@@ -160,7 +160,7 @@ struct State {
     /// What the icons in `art` were drawn for (style, theme, size), to redraw them when it changes.
     art_key: String,
     wanted: bool,
-    /// The wallpaper, blurred once (see `blurred`); drawn as it is every frame.
+    /// The wallpaper this screen shows, blurred (see `Wallpapers::blurred`); drawn as it is every frame.
     backdrop: Option<gdk::Texture>,
     /// Items still easing to their places, which keeps frames coming.
     moving: bool,
@@ -182,30 +182,17 @@ type Shared = Rc<RefCell<State>>;
 
 thread_local! {
     static ONE: RefCell<Option<Shared>> = const { RefCell::new(None) };
-    /// Kept between openings: the blurred wallpaper (by its path) and the icons (by what they
-    /// were drawn for), so the grid opens at once, its icons already there.
-    static BLURRED: RefCell<Option<(String, gdk::Texture)>> = const { RefCell::new(None) };
+    /// Kept between openings: the icons (by what they were drawn for), so the grid opens at
+    /// once, its icons already there.
     static ICONS: RefCell<(String, HashMap<String, gdk::Texture>)> = RefCell::new(Default::default());
 }
 
-/// The wallpaper `path` blurred, rendered once at a small size by `paint`'s renderer and kept:
-/// drawing it scaled up costs nothing, where blurring the whole screen every frame did.
-fn blurred(paint: &Paint, path: &str) -> Option<gdk::Texture> {
-    if let Some(t) = BLURRED.with(|b| b.borrow().as_ref().filter(|(p, _)| p == path).map(|(_, t)| t.clone())) {
-        return Some(t);
-    }
-    let thumb = crate::wallpaper::thumbnail(path)?;
-    let renderer = paint.native()?.renderer()?;
-    let (w, h) = (480.0_f32, 480.0 * thumb.height() as f32 / thumb.width().max(1) as f32);
-    let snap = gtk::Snapshot::new();
-    snap.push_blur(14.0);
-    // A little past the edges, so the blur doesn't darken them.
-    snap.append_texture(&thumb, &graphene::Rect::new(-24.0, -24.0, w + 48.0, h + 48.0));
-    snap.pop();
-    let node = snap.to_node()?;
-    let tex = renderer.render_texture(&node, Some(&graphene::Rect::new(0.0, 0.0, w, h)));
-    BLURRED.with(|b| *b.borrow_mut() = Some((path.to_string(), tex.clone())));
-    Some(tex)
+/// The soft copy of the wallpaper the grid's screen shows, as that screen shows it (so a
+/// wallpaper stretched over two screens is blurred in the part each has). It is the same
+/// texture the lock screen uses, made once with the wallpaper.
+fn blurred(app: &App) -> Option<gdk::Texture> {
+    let output = crate::batterywidget::monitor().and_then(|m| m.connector()).map(|c| c.to_string()).unwrap_or_default();
+    app.wallpapers.blurred(&output)
 }
 
 /// The grid's measures on a screen `w` by `h`.
@@ -950,8 +937,7 @@ fn kick(st: &Shared) {
         let now = clock.frame_time();
         w.queue_draw();
         if s.open && s.backdrop.is_none() {
-            let paint = s.paint.clone();
-            s.backdrop = crate::wallpaper::current().and_then(|p| blurred(&paint, &p));
+            s.backdrop = blurred(&s.app);
         }
         s.drag_step(now);
         let t = s.fade.value(now).clamp(0.0, 1.0);
