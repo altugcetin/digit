@@ -222,6 +222,8 @@ struct View {
     /// With GTK 4.23.3 and newer, which owns the surface's blur: a pane under the menu bar's band.
     panes: blur::Frost,
     ticking: bool,
+    /// How many characters the call's clock had when the island was last sized for it.
+    call_len: Cell<usize>,
     /// Fraction of the track under the pointer while the progress bar is being dragged.
     scrub: Option<f64>,
     fill: Tween,
@@ -343,6 +345,7 @@ impl Notch {
             frost: Vec::new(),
             panes,
             ticking: false,
+            call_len: Cell::new(0),
             scrub: None,
             fill: Tween::still(1.0),
             timed: true,
@@ -799,10 +802,19 @@ impl Notch {
     }
 
     pub fn redraw(&self) {
-        let v = self.0.borrow();
-        v.canvas.queue_draw();
-        if let Some(st) = &v.strip {
-            st.queue_draw();
+        let resize = {
+            let v = self.0.borrow();
+            v.canvas.queue_draw();
+            if let Some(st) = &v.strip {
+                st.queue_draw();
+            }
+            // The call's clock gains a digit (9:59 to 10:00, 59:59 to 1:00:00): the island is
+            // sized again, or the time runs out of it.
+            let len = if v.app.call.borrow().is_some() { v.call_time(App::now()).len() } else { 0 };
+            len > 0 && v.call_len.replace(len) != len
+        };
+        if resize {
+            self.refresh();
         }
     }
 
