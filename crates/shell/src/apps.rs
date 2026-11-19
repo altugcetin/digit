@@ -99,6 +99,13 @@ impl Apps {
             return None;
         }
         let key = app_id.to_ascii_lowercase();
+        // A Steam game's window class is its number; its shortcut starts it by that number.
+        if let Some(n) = kit::gamescope::steam_id(&key) {
+            let run = format!("rungameid/{n}");
+            if let Some(i) = self.list().iter().position(|e| e.info.commandline().is_some_and(|c| c.to_string_lossy().contains(&run))) {
+                return Some(i);
+            }
+        }
         let tail = key.rsplit('.').next().unwrap_or(&key).to_string();
         let list = self.list();
         let stem = |e: &Entry| e.id.to_ascii_lowercase().trim_end_matches(".desktop").to_string();
@@ -124,6 +131,9 @@ impl Apps {
 }
 
 pub fn pretty(app_id: &str) -> String {
+    if let Some(name) = kit::gamescope::steam_id(app_id).and_then(kit::gamescope::steam_name) {
+        return name;
+    }
     let tail = app_id.rsplit('.').next().unwrap_or(app_id).replace(['-', '_'], " ");
     let mut chars = tail.chars();
     match chars.next() {

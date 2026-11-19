@@ -78,7 +78,11 @@ pub fn dock_icon(theme: &gtk::IconTheme, icon: Option<&gio::Icon>, app_id: &str,
     let paintable = match icon {
         Some(icon) => theme.lookup_by_gicon(icon, key.px, key.scale, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty()),
         None if !app_id.is_empty() && theme.has_icon(app_id) => theme.lookup_icon(app_id, &[], key.px, key.scale, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty()),
-        None => return None,
+        // Steam installs a game's icon under its number, not under its window class.
+        None => {
+            let name = kit::gamescope::steam_id(app_id).map(|n| format!("steam_icon_{n}")).filter(|n| theme.has_icon(n))?;
+            theme.lookup_icon(&name, &[], key.px, key.scale, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty())
+        }
     };
     Some(paintable.upcast())
 }

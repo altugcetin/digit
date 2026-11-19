@@ -12,6 +12,7 @@ pub mod distro;
 pub mod drag;
 pub mod effects;
 pub mod folder;
+pub mod gamescope;
 pub mod fuzzy;
 pub mod guard;
 pub mod hyprconf;
