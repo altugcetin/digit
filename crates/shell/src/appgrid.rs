@@ -871,8 +871,24 @@ fn fill_art(st: &Shared) {
         if let Ok(mut s) = st.try_borrow_mut() {
             s.art_pending = false;
         }
-        let (paint, app, ids, px) = {
+        // What the icons are drawn for: the style, the icon theme and the screen's scale, and not
+        // the size, which moves with the dock and would draw them again at every opening. When it
+        // has changed since they were drawn, they are all drawn again: this comes before looking
+        // for the missing ones, or icons of the old style, none of them missing, would stay.
+        let (paint, app, px) = {
             let Ok(s) = st.try_borrow() else { return };
+            (s.paint.clone(), s.app.clone(), s.grid().icon.round() as i32)
+        };
+        let style = crate::art::Style::parse(&app.prefs.borrow().dock.icons);
+        let scale = paint.scale_factor().max(1);
+        let active = gtk::Settings::default().and_then(|s| s.gtk_icon_theme_name()).unwrap_or_else(|| "Adwaita".into());
+        let art_key = format!("{style:?} {active} {scale}");
+        let ids = {
+            let Ok(mut s) = st.try_borrow_mut() else { return };
+            if s.art_key != art_key {
+                s.art.clear();
+                s.art_key = art_key;
+            }
             let g = s.grid();
             let page = s.page.target().max(0.0) as usize;
             let around = (page * g.per_page()).saturating_sub(g.per_page());
@@ -887,22 +903,12 @@ fn fill_art(st: &Shared) {
             ids.dedup();
             // A few at a time between frames, so the opening keeps moving while they're drawn.
             ids.truncate(8);
-            (s.paint.clone(), s.app.clone(), ids, g.icon.round() as i32)
+            ids
         };
         if ids.is_empty() || paint.native().and_then(|n| n.renderer()).is_none() {
             return;
         }
-        let style = crate::art::Style::parse(&app.prefs.borrow().dock.icons);
-        let scale = paint.scale_factor().max(1);
-        let active = gtk::Settings::default().and_then(|s| s.gtk_icon_theme_name()).unwrap_or_else(|| "Adwaita".into());
         let key = crate::icons::DockKey::new(style, &active, px, scale);
-        let art_key = format!("{style:?} {active} {px} {scale}");
-        if let Ok(mut s) = st.try_borrow_mut()
-            && s.art_key != art_key
-        {
-            s.art.clear();
-            s.art_key = art_key;
-        }
         let Some(display) = gdk::Display::default() else { return };
         let theme = crate::icons::dock_theme(&display, &key);
         let list = app.apps.list();
@@ -911,7 +917,12 @@ fn fill_art(st: &Shared) {
             let entry = list.iter().find(|e| e.id == id);
             let icon = crate::icons::dock_icon(&theme, entry.and_then(|e| e.icon.as_ref()), &id, &key);
             let name = entry.map_or(id.as_str(), |e| e.name.as_str());
-            let tex = crate::art::texture(&paint, &id, icon.as_ref(), name, px as f64, style, accent, &app.cfg.font);
+            // The original icons are drawn as they are; a missing one gets a plain tile.
+            let tex = match (style, icon.as_ref()) {
+                (crate::art::Style::Native, Some(p)) => kit::art::plain(&paint, &id, p, px as f64),
+                (crate::art::Style::Native, None) => crate::art::texture(&paint, &id, None, name, px as f64, crate::art::Style::Graphite, accent, &app.cfg.font),
+                _ => crate::art::texture(&paint, &id, icon.as_ref(), name, px as f64, style, accent, &app.cfg.font),
+            };
             if let (Some(tex), Ok(mut s)) = (tex, st.try_borrow_mut()) {
                 s.art.insert(id, tex);
             }
