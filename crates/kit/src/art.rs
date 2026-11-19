@@ -293,6 +293,34 @@ fn compose(s: &gtk::Snapshot, icon: Option<&gdk::Paintable>, look: Look, size: f
     s.append_stroke(&path, &stroke, &white.alpha(if style == Style::Light { 0.25 } else { 0.10 }).rgba());
 }
 
+/// The icon as it is, with no tile or restyling, drawn at `px` (for the screen's scale) into a
+/// texture: for the places that keep textures rather than drawing a paintable each frame. Kept
+/// like the styled ones, so asking again costs nothing.
+pub fn plain(widget: &impl IsA<gtk::Widget>, key: &str, icon: &gdk::Paintable, px: f64) -> Option<gdk::Texture> {
+    let size = (px * widget.scale_factor().max(1) as f64).ceil();
+    let id = cache_key(key, &source_of(icon), "", Style::Native, size as i32, Rgb::new(0.0, 0.0, 0.0));
+    if let Some(t) = CACHE.with(|c| c.borrow().get(&id).cloned()) {
+        return Some(t);
+    }
+    let tex = render(&cpu()?, size, |s| icon.snapshot(s, size, size))?;
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() > CACHED {
+            c.clear();
+        }
+        c.insert(id, tex.clone());
+    });
+    Some(tex)
+}
+
+/// Which file an icon came from; other paintables go by object identity.
+fn source_of(p: &gdk::Paintable) -> String {
+    p.downcast_ref::<gtk::IconPaintable>().and_then(|p| p.file()).map(|f| f.uri().to_string()).unwrap_or_else(|| format!("{:p}", p.as_ptr()))
+}
+
+/// Textures kept, enough for a long list of apps.
+const CACHED: usize = 400;
+
 #[allow(clippy::too_many_arguments)]
 /// `font` is the family a missing icon's monogram is set in.
 pub fn texture(widget: &impl IsA<gtk::Widget>, key: &str, icon: Option<&gdk::Paintable>, name: &str, px: f64, style: Style, accent: Rgb, font: &str) -> Option<gdk::Texture> {
@@ -304,10 +332,7 @@ pub fn texture(widget: &impl IsA<gtk::Widget>, key: &str, icon: Option<&gdk::Pai
     let size = (px * scale as f64).ceil();
     // File identity separates analysis and textures if the resolved artwork
     // changes. Non-file paintables use object identity instead of sharing a slot.
-    let source = icon.map(|p| {
-        p.downcast_ref::<gtk::IconPaintable>().and_then(|p| p.file()).map(|f| f.uri().to_string())
-            .unwrap_or_else(|| format!("{:p}", p.as_ptr()))
-    }).unwrap_or_default();
+    let source = icon.map(source_of).unwrap_or_default();
     let id = cache_key(key, &source, name, style, size as i32, accent);
     let look_id = (key.to_owned(), source);
     if let Some(t) = CACHE.with(|c| c.borrow().get(&id).cloned()) {
@@ -339,7 +364,7 @@ pub fn texture(widget: &impl IsA<gtk::Widget>, key: &str, icon: Option<&gdk::Pai
     let tex = render(&renderer, size, |s| compose(s, icon, look, size, style, accent, layout))?;
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
-        if c.len() > 160 {
+        if c.len() > CACHED {
             c.clear();
         }
         c.insert(id, tex.clone());
