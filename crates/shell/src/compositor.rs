@@ -52,7 +52,7 @@ fn running_of(w: &Value) -> Option<Running> {
     Some(Running {
         minimized: false,
         id: w.get("id")?.as_u64()?,
-        app_id: w.get("app_id").and_then(Value::as_str).unwrap_or_default().to_string(),
+        app_id: kit::gamescope::real_id(w.get("app_id").and_then(Value::as_str).unwrap_or_default(), w.get("pid").and_then(Value::as_u64).map(|p| p as u32)),
         focused: w.get("is_focused").and_then(Value::as_bool).unwrap_or(false),
         stamp: w.get("focus_timestamp").and_then(|t| Some(t.get("secs")?.as_u64()? * 1_000_000_000 + t.get("nanos")?.as_u64()?)).unwrap_or(0),
     })

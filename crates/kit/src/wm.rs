@@ -220,6 +220,10 @@ pub fn windows() -> Vec<Win> {
         }
         Wm::Other => Vec::new(),
     };
+    // A game under gamescope goes by its own name, not gamescope's.
+    for w in out.iter_mut().filter(|w| crate::gamescope::is_gamescope(&w.app_id)) {
+        w.app_id = crate::gamescope::real_id(&w.app_id, w.pid);
+    }
     out.sort_by(|a, b| b.stamp.cmp(&a.stamp));
     out
 }
