@@ -91,8 +91,8 @@ fn build_page(name: &str) -> gtk::Widget {
         "screentime" => screentime::build(),
         "appearance" => desktop::build(name, "Appearance", "How digit and its apps look. Changes apply right away."),
         "dock" => desktop::build(name, "Dock", ""),
-        "notch" => desktop::build(name, "Notch and menu bar", "The notch, the bar beside it, the panels they open and the screen corners."),
-        "desktop" => desktop::build(name, "Desktop", "The wallpaper, and what sits on it, behind your windows."),
+        "notch" => desktop::build(name, "Notch and menu bar", "The notch, the bar beside it and the panels they open."),
+        "desktop" => desktop::build(name, "Desktop", "The wallpaper, what sits on it behind your windows, and what the screen corners open."),
         "spotlight" => desktop::build(name, "Spotlight", &match kit::keybinds::shown("launcher") {
             Some(k) => format!("{k} searches apps, files, settings and the web."),
             None => "Searches apps, files, settings and the web.".into(),

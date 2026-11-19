@@ -300,14 +300,16 @@ fn settings_controls_and_dialogs() {
     enabled.set_active(true);
     assert!(logo_row.is_sensitive());
 
-    let corner = |name: &str| {
-        let row = widgets(&notch_page).into_iter().filter_map(|w| w.downcast::<gtk::Label>().ok()).find(|l| l.text() == name).unwrap().parent().unwrap().parent().unwrap();
-        widgets(&row).into_iter().find_map(|w| w.downcast::<gtk::DropDown>().ok()).unwrap()
-    };
-    let (top_left, top_right) = (corner("Top left corner"), corner("Top right corner"));
-    assert_eq!((top_left.selected(), top_right.selected()), (1, 0));
-    top_right.set_selected(1);
-    assert_eq!(top_left.selected(), 0, "a panel lives in one corner, so its old corner clears");
+    // The hot corners are four buttons on a picture of a screen, top left first; each opens a menu.
+    let desktop_page = desktop::build("desktop", "Desktop", "");
+    let corners: Vec<gtk::Label> = widgets(&desktop_page).into_iter().filter_map(|w| w.downcast::<gtk::MenuButton>().ok()).filter_map(|b| b.child()?.downcast::<gtk::Label>().ok()).filter(|l| ["Nothing", "Workspaces", "Control Center"].contains(&l.text().as_str())).collect();
+    assert_eq!(corners.len(), 4);
+    let (top_left, top_right) = (corners[0].clone(), corners[1].clone());
+    assert_eq!((top_left.text().as_str(), top_right.text().as_str()), ("Workspaces", "Nothing"));
+    let menu = top_right.ancestor(gtk::MenuButton::static_type()).and_downcast::<gtk::MenuButton>().unwrap().popover().unwrap();
+    let choose = widgets(&menu).into_iter().filter_map(|w| w.downcast::<gtk::Button>().ok()).find(|b| b.label().as_deref() == Some("Workspaces")).unwrap();
+    choose.emit_clicked();
+    assert_eq!(top_left.text(), "Nothing", "a panel lives in one corner, so its old corner clears");
     assert_eq!(prefs::get_str(&prefs::read(), "corner_top_right", ""), "workspaces");
     assert_eq!(prefs::get_str(&prefs::read(), "corner_top_left", ""), "none");
 

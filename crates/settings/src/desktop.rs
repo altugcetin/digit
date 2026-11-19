@@ -644,8 +644,8 @@ pub fn sections(page: &str) -> &'static [Section] {
     match page {
         "appearance" => &[shell_look, app_look, roundness, window_buttons, app_themes, effects],
         "dock" => &[dock],
-        "notch" => &[notch, menu_bar, workspaces, screen_edges],
-        "desktop" => &[crate::wallpaper::section_for, desktop],
+        "notch" => &[notch, menu_bar, workspaces],
+        "desktop" => &[crate::wallpaper::section_for, desktop, screen_edges],
         "spotlight" => &[search, scopes, clipboard],
         "compositor" => &[session],
         "displays" => &[night_light],
@@ -1237,43 +1237,70 @@ fn workspaces(body: &gtk::Box, t: &toml::Table) {
     choice(&card, "push_pin", "Always show", "Workspaces listed in the Workspaces panel even when empty", "spaces_always", &[("0", "Used only"), ("2", "1–2"), ("3", "1–3"), ("4", "1–4"), ("5", "1–5"), ("6", "1–6"), ("7", "1–7"), ("8", "1–8"), ("9", "1–9"), ("10", "1–10")], &always);
 }
 
-/// What each screen corner opens. A panel opens from its corner and lives in one corner at
-/// most, so choosing it for another clears the old one, and the rows show that right away.
+/// What each screen corner opens, set on a picture of a screen: each corner is a button that
+/// opens a menu. A panel opens from its corner and lives in one corner at most, so choosing it
+/// for another clears the old one, and the buttons show that right away.
 fn corners_picker(card: &gtk::Box, t: &toml::Table) {
     use kit::corners::{self, Corner, Panel};
     const PANELS: [(Panel, &str); 3] = [(Panel::None, "Nothing"), (Panel::Workspaces, "Workspaces"), (Panel::Control, "Control Center")];
-    const ROWS: [(Corner, &str, &str); 4] = [
-        (Corner::TopLeft, "north_west", "Top left corner"),
-        (Corner::TopRight, "north_east", "Top right corner"),
-        (Corner::BottomLeft, "south_west", "Bottom left corner"),
-        (Corner::BottomRight, "south_east", "Bottom right corner"),
-    ];
-    let at = |panel: Panel| PANELS.iter().position(|p| p.0 == panel).unwrap_or(0) as u32;
-    let labels: Vec<&str> = PANELS.iter().map(|p| p.1).collect();
+    let name_of = |panel: Panel| PANELS.iter().find(|p| p.0 == panel).map_or("Nothing", |p| p.1);
+    let screen = gtk::Overlay::new();
+    screen.set_halign(gtk::Align::Center);
+    screen.set_margin_top(12);
+    screen.set_margin_bottom(12);
+    let picture = gtk::DrawingArea::new();
+    picture.set_content_width(440);
+    picture.set_content_height(248);
+    picture.set_draw_func(|_, cr, w, h| {
+        let (w, h) = (w as f64, h as f64);
+        cr.set_source_rgb(0.1, 0.1, 0.13);
+        kit::paint::rounded(cr, 0.0, 0.0, w, h, 14.0);
+        let _ = cr.fill();
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+        kit::paint::rounded(cr, (w - w * 0.22) / 2.0, -h * 0.06, w * 0.22, h * 0.12, h * 0.04);
+        let _ = cr.fill();
+    });
+    screen.set_child(Some(&picture));
+    let buttons: Rc<std::cell::RefCell<Vec<gtk::Label>>> = Rc::default();
     let now = corners::read(t);
-    let picks: Rc<std::cell::RefCell<Vec<gtk::DropDown>>> = Rc::default();
-    let syncing = Rc::new(Cell::new(false));
-    for (corner, icon, title) in ROWS {
-        let (row, end) = ui::row(Some(icon), title, "");
-        let slot = Corner::ALL.iter().position(|c| *c == corner).unwrap_or(0);
-        let pick = ui::dropdown(&labels, at(now[slot]));
-        let (picks2, syncing) = (picks.clone(), syncing.clone());
-        pick.connect_selected_notify(move |p| {
-            if syncing.get() { return; }
-            let panel = PANELS.get(p.selected() as usize).map_or(Panel::None, |p| p.0);
-            let next = corners::assign(corners::read(&prefs::read()), corner, panel);
-            // A failed save shows what is really stored again.
-            let shown = if save_many(&corners::values(&next)) { next } else { corners::read(&prefs::read()) };
-            syncing.set(true);
-            for (pick, panel) in picks2.borrow().iter().zip(shown) {
-                pick.set_selected(at(panel));
-            }
-            syncing.set(false);
-        });
-        end.append(&pick);
-        card.append(&row);
-        picks.borrow_mut().push(pick);
+    for (slot, corner) in Corner::ALL.into_iter().enumerate() {
+        let button = gtk::MenuButton::new();
+        button.add_css_class("pill");
+        button.set_always_show_arrow(false);
+        button.set_halign(if corner.is_left() { gtk::Align::Start } else { gtk::Align::End });
+        button.set_valign(if corner.is_top() { gtk::Align::Start } else { gtk::Align::End });
+        button.set_margin_start(10);
+        button.set_margin_end(10);
+        button.set_margin_top(10);
+        button.set_margin_bottom(10);
+        let label = gtk::Label::new(Some(name_of(now[slot])));
+        button.set_child(Some(&label));
+        buttons.borrow_mut().push(label);
+        let pop = gtk::Popover::new();
+        pop.add_css_class("menu-pop");
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        list.add_css_class("pop-menu");
+        for (panel, name) in PANELS {
+            let item = gtk::Button::with_label(name);
+            item.add_css_class("pop-item");
+            if let Some(l) = item.child().and_downcast::<gtk::Label>() { l.set_xalign(0.0); }
+            let (buttons, pop) = (buttons.clone(), pop.downgrade());
+            item.connect_clicked(move |_| {
+                let next = corners::assign(corners::read(&prefs::read()), corner, panel);
+                // A failed save shows what is really stored again.
+                let shown = if save_many(&corners::values(&next)) { next } else { corners::read(&prefs::read()) };
+                for (label, panel) in buttons.borrow().iter().zip(shown) {
+                    label.set_text(name_of(panel));
+                }
+                if let Some(pop) = pop.upgrade() { pop.popdown(); }
+            });
+            list.append(&item);
+        }
+        pop.set_child(Some(&list));
+        button.set_popover(Some(&pop));
+        screen.add_overlay(&button);
     }
+    card.append(&screen);
 }
 
 fn screen_edges(body: &gtk::Box, t: &toml::Table) {
