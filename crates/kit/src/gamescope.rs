@@ -170,6 +170,13 @@ mod tests {
     #[test]
     fn a_running_process_is_read_from_proc() {
         let mut child = std::process::Command::new("sleep").arg("5").env("SteamAppId", "4242").spawn().unwrap();
+        // Until the child has exec'd, /proc shows this test's own environment.
+        for _ in 0..100 {
+            if steam_app(&read(&format!("/proc/{}/environ", child.id()))).is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let found = resolve(child.id());
         let _ = child.kill();
         let _ = child.wait();
