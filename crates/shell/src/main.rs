@@ -61,6 +61,7 @@ mod privacy;
 mod prism;
 mod providers;
 mod quit;
+mod screentime;
 mod session;
 mod share;
 mod sni;
@@ -216,6 +217,7 @@ fn run() {
         }
     });
     idle::start(&app);
+    screentime::start(&app);
     night::start(&app);
     sni::start(&app);
     weather::start(&app);

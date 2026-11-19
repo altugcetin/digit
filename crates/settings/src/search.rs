@@ -31,6 +31,7 @@ fn page_words(page: &str) -> &'static str {
         "keyboard" => "shortcuts keybinds hotkeys keys typing layout repeat caps",
         "mouse" => "pointer trackpad touchpad scroll natural tap click gesture swipe speed",
         "recording" => "record video screen capture replay stream gpu",
+        "screentime" => "screen time usage hours apps focus tracking history digital wellbeing",
         "compositor" => "hyprland niri compositor gaps layout tiling",
         _ => "",
     }

@@ -14,6 +14,7 @@ mod overview;
 mod pk;
 mod prefs;
 mod rules;
+mod screentime;
 mod search;
 mod style;
 mod system;
@@ -29,7 +30,7 @@ use gtk::{gio, glib, prelude::*};
 use std::cell::RefCell;
 
 /// Sidebar pages: id, name, icon and the group they're listed under.
-pub(crate) const PAGES: [(&str, &str, &str, &str); 20] = [
+pub(crate) const PAGES: [(&str, &str, &str, &str); 21] = [
     ("wifi", "Wi-Fi", "wifi", "Connections"),
     ("bluetooth", "Bluetooth", "bluetooth", "Connections"),
     ("appearance", "Appearance", "palette", "Personalize"),
@@ -45,6 +46,7 @@ pub(crate) const PAGES: [(&str, &str, &str, &str); 20] = [
     ("power", "Lock and power", "power_settings_new", "System"),
     ("screenshots", "Screenshots", "screenshot_region", "System"),
     ("recording", "Recording", "radio_button_checked", "System"),
+    ("screentime", "Screen Time", "hourglass_top", "System"),
     ("files", "Files", "folder", "System"),
     ("apps", "Apps", "apps", "System"),
     ("updates", "Updates", "system_update_alt", "System"),
@@ -86,6 +88,7 @@ fn build_page(name: &str) -> gtk::Widget {
         "mouse" => compositor::mouse_page(),
         "compositor" => compositor::build(),
         "rules" => rules::build(),
+        "screentime" => screentime::build(),
         "appearance" => desktop::build(name, "Appearance", "How digit and its apps look. Changes apply right away."),
         "dock" => desktop::build(name, "Dock", ""),
         "notch" => desktop::build(name, "Notch and menu bar", "The notch, the bar beside it, the panels they open and the screen corners."),
