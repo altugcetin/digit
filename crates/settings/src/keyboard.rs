@@ -496,6 +496,7 @@ fn record(anchor: &gtk::Widget, current: &str, clear: Option<&str>, done: impl F
         });
         modifiers.append(&chip);
     }
+    modifiers.set_homogeneous(true);
     form.append(&modifiers);
     let direction = {
         let state = state.clone();
@@ -506,6 +507,15 @@ fn record(anchor: &gtk::Widget, current: &str, clear: Option<&str>, done: impl F
             true
         })
     };
+    // Both rows fill the popover evenly instead of leaving the buttons bunched at one side.
+    direction.set_homogeneous(true);
+    for bar in [&modifiers, &direction] {
+        let mut child = bar.first_child();
+        while let Some(c) = child {
+            c.set_hexpand(true);
+            child = c.next_sibling();
+        }
+    }
     form.append(&direction);
     let hint = ui::text("Hold the modifiers and turn the wheel", "sub");
     hint.set_xalign(0.0);
