@@ -45,13 +45,15 @@ enum Mode {
     Calc,
     Web,
     Clip,
+    Emoji,
 }
 
-const MODES: [(Mode, &str, &str, &str); 5] = [
+const MODES: [(Mode, &str, &str, &str); 6] = [
     (Mode::Apps, "apps", "Search applications", "Applications"),
     (Mode::Windows, "select_window", "Search windows", "Windows"),
     (Mode::Calc, "calculate", "Calculate", "Calculator"),
     (Mode::Clip, "content_paste", "Search your clipboard", "Clipboard"),
+    (Mode::Emoji, "mood", "Search emoji", "Emoji"),
     (Mode::Web, "travel_explore", "Search the web", "Web search"),
 ];
 
@@ -63,6 +65,7 @@ enum Kind {
     Run,
     Web,
     Clip,
+    Emoji,
     Color,
     Found(u16),
     Scope,
@@ -79,6 +82,7 @@ impl Kind {
             Kind::Run => "Command",
             Kind::Web => "Web",
             Kind::Clip => "Clipboard",
+            Kind::Emoji => "Emoji",
             Kind::Color => "Color",
             Kind::Found(_) => "Results",
             Kind::Scope => "Search in apps",
@@ -92,6 +96,7 @@ enum Act {
     App(usize),
     Window(u64),
     Copy(String),
+    Emoji(String),
     Open(String),
     Run(String),
     Image(Rc<crate::clip::Clip>),
@@ -313,7 +318,7 @@ struct State {
     // The selection pill, measured from the top of the list so it scrolls with the rows.
     pill_y: Tween,
     pill_h: Tween,
-    glow: [Tween; 5],
+    glow: [Tween; MODES.len()],
     hovered: Option<usize>,
     tip: Tween,
     tip_at: usize,
@@ -540,7 +545,7 @@ impl Launcher {
             scroll: Tween::still(0.0),
             pill_y: Tween::still(0.0),
             pill_h: Tween::still(ROW),
-            glow: [Tween::still(0.0); 5],
+            glow: [Tween::still(0.0); MODES.len()],
             hovered: None,
             tip: Tween::still(0.0),
             tip_at: 0,
@@ -1071,6 +1076,7 @@ impl Launcher {
                     '=' => Some(Mode::Calc),
                     '?' => Some(Mode::Web),
                     '"' => Some(Mode::Clip),
+                    ':' => Some(Mode::Emoji),
                     _ => None,
                 };
                 if let Some(m) = prefixed {
@@ -1078,6 +1084,11 @@ impl Launcher {
                     query = raw[c.len_utf8()..].trim().to_string();
                 }
             }
+        }
+        // "emo …" searches emoji, like the colon does.
+        if mode == Mode::All && let Some(rest) = ["emo ", "emoji "].iter().find_map(|k| raw.trim_start().strip_prefix(k)) {
+            mode = Mode::Emoji;
+            query = rest.trim().to_string();
         }
         let run = mode == Mode::All && raw.starts_with('$');
         if run {
@@ -1094,6 +1105,11 @@ impl Launcher {
         let mut clips = Vec::new();
         let mut colors = Vec::new();
         if mode == Mode::Clip { clip_items(&mut clips, &mut colors, &query); }
+        let emoji: Vec<Item> = if mode == Mode::Emoji {
+            crate::emoji::find(&query, 200).into_iter().map(|(text, name, score)| Item { kind: Kind::Emoji, act: Act::Emoji(text.clone()), title: name, detail: "Copy".into(), look: Look::Glyph(text), score }).collect()
+        } else {
+            Vec::new()
+        };
         let mut s = self.0.borrow_mut();
         let apps = s.app.apps.list();
         let mut items: Vec<Item> = Vec::new();
@@ -1246,6 +1262,8 @@ impl Launcher {
         }
         if mode == Mode::Clip {
             items = clips;
+        } else if mode == Mode::Emoji {
+            items = emoji;
         } else if !query.is_empty() && matches!(mode, Mode::All | Mode::Calc) {
             if let Some(c) = kit::color::parse(&query) {
                 color_items(&mut items, c, &query, 2100);
@@ -1514,6 +1532,12 @@ impl Launcher {
                 });
             }
             Act::Copy(text) => {
+                if let Some(display) = gdk::Display::default() {
+                    display.clipboard().set_text(&text);
+                }
+            }
+            Act::Emoji(text) => {
+                crate::emoji::remember(&text);
                 if let Some(display) = gdk::Display::default() {
                     display.clipboard().set_text(&text);
                 }

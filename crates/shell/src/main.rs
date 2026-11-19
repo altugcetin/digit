@@ -28,6 +28,7 @@ mod deskicons;
 mod devices;
 mod dock;
 mod draw;
+mod emoji;
 mod free;
 mod gamebar;
 mod gpu;
