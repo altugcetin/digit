@@ -108,7 +108,7 @@ enum Act {
     Spawn(Vec<String>),
 }
 
-const PAGES: [(&str, &str, &str, &str, &str); 18] = [
+const PAGES: [(&str, &str, &str, &str, &str); 19] = [
     ("wifi", "Wi-Fi", "Settings", "wifi", "wifi wi-fi wireless wlan network internet hotspot password ssid"),
     ("bluetooth", "Bluetooth", "Settings", "bluetooth", "bluetooth pair pairing headphones headset mouse keyboard controller adapter blueman"),
     ("displays", "Displays", "Settings", "monitor", "display displays monitor monitors screen resolution refresh rate hz scale rotation arrange"),
@@ -127,6 +127,7 @@ const PAGES: [(&str, &str, &str, &str, &str); 18] = [
     ("power", "Lock and power", "Settings", "power_settings_new", "lock power idle sleep suspend screen off"),
     ("screenshots", "Screenshots", "Settings", "screenshot_region", "screenshot screenshots capture print folder format"),
     ("recording", "Recording", "Settings", "radio_button_checked", "record recording video screen capture replay stream gpu"),
+    ("screentime", "Screen Time", "Settings", "hourglass_top", "screen time usage hours apps focus tracking history wellbeing"),
 ];
 
 /// An instance's name as typed: folder-style names use _ and - between words.

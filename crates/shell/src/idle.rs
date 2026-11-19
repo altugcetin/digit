@@ -21,6 +21,8 @@ enum Step {
     Lock,
     Off,
     Sleep,
+    /// Nobody has touched anything for a while; screen time stops counting.
+    Away,
 }
 
 #[derive(Default)]
@@ -40,7 +42,11 @@ struct Idle {
     off: bool,
 }
 
+/// How long without input before screen time stops counting.
+const AWAY: u32 = 120;
+
 thread_local! {
+    static AWAY_NOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static IDLE: RefCell<Option<Idle>> = const { RefCell::new(None) };
 }
 
@@ -68,6 +74,11 @@ pub fn start(app: &Rc<App>) {
     sleep_watch(Rc::downgrade(app));
 }
 
+/// Nobody is at the computer: it has sat idle a couple of minutes, or it is locked.
+pub fn away() -> bool {
+    AWAY_NOW.with(|a| a.get()) || crate::lock::active()
+}
+
 pub fn apply(app: &App) {
     let prefs = app.prefs.borrow();
     let mins = |m: f64| if m > 0.0 { (m * 60.0).round().max(30.0) as u32 } else { 0 };
@@ -85,10 +96,11 @@ pub fn apply(app: &App) {
         for n in idle.notes.drain(..) {
             n.destroy();
         }
+        AWAY_NOW.with(|a| a.set(false));
         idle.plan = plan;
         let (lock, off, sleep) = plan;
         let first = [lock, off].into_iter().filter(|t| *t > 0).min();
-        let mut wants: Vec<(Step, u32)> = Vec::new();
+        let mut wants: Vec<(Step, u32)> = vec![(Step::Away, AWAY)];
         if let Some(f) = first.filter(|f| *f > DIM + 20) {
             wants.push((Step::Dim, f - DIM));
         }
@@ -157,6 +169,7 @@ fn act(app: &Rc<App>, step: Step, idled: bool) {
                 let _ = m.call_method("Suspend", &(false,)).await;
             });
         }
+        (Step::Away, idled) => AWAY_NOW.with(|a| a.set(idled)),
         (Step::Off, false) => {
             let was_off = IDLE.with(|i| i.borrow_mut().as_mut().map(|s| std::mem::replace(&mut s.off, false)).unwrap_or(false));
             if was_off && kit::wm::which() != kit::wm::Wm::Niri {
