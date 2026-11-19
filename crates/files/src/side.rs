@@ -247,12 +247,19 @@ impl Side {
         l.set_hexpand(true);
         l.set_ellipsize(pango::EllipsizeMode::End);
         l.set_xalign(0.0);
-        match target {
-            Target::File(f) if usage => {
+        // Mounted drives show how full they are, whichever way they were listed.
+        let place = match target {
+            Target::File(f) => Some(f.clone()),
+            Target::Mount(m) => Some(m.root()),
+            Target::Volume(v) => v.get_mount().map(|m| m.root()),
+            Target::Connect => None,
+        };
+        match place.filter(|f| usage && f.is_native()) {
+            Some(f) => {
                 let col = gtk::Box::new(gtk::Orientation::Vertical, 3);
                 col.set_hexpand(true);
                 col.append(&l);
-                col.append(&fullness(f));
+                col.append(&fullness(&f));
                 b.append(&col);
             }
             _ => b.append(&l),
