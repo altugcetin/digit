@@ -1459,7 +1459,7 @@ struct DeskWidget {
 /// The four corners, each stored under its own name.
 const CORNERS_ONLY: &[(&str, &str)] = &[("top_left", "top_left"), ("top_right", "top_right"), ("bottom_left", "bottom_left"), ("bottom_right", "bottom_right")];
 
-const WIDGETS: [DeskWidget; 5] = [
+const WIDGETS: [DeskWidget; 6] = [
     DeskWidget {
         id: "clock",
         name: "Clock",
@@ -1486,6 +1486,7 @@ const WIDGETS: [DeskWidget; 5] = [
     },
     DeskWidget { id: "weather", name: "Weather", key: "desktop_weather", places: CORNERS_ONLY, draw: draw_weather, options: &[("desktop_weather_bg", "Background", false)] },
     DeskWidget { id: "system", name: "System", key: "desktop_system", places: CORNERS_ONLY, draw: draw_system, options: &[("desktop_system_bg", "Background", false)] },
+    DeskWidget { id: "screentime", name: "Screen Time", key: "desktop_screentime", places: CORNERS_ONLY, draw: draw_screentime, options: &[("desktop_screentime_bg", "Background", false)] },
 ];
 
 /// Whether each widget sits on a card, from its "_bg" option.
@@ -1726,6 +1727,30 @@ fn draw_weather(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
     let rx = x + rw * 0.3 + ext.width() as f64 + rw * 0.06;
     blob(cr, rx, cy - rh * 0.1, rw * 0.22, rh * 0.06, 0.85 * alpha);
     blob(cr, rx, cy + rh * 0.04, rw * 0.16, rh * 0.05, 0.55 * alpha);
+}
+
+fn draw_screentime(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
+    // A badge and the total, columns over the day and a list of apps at the right.
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.2 * alpha);
+    cr.arc(x + rw * 0.1, y + rh * 0.24, rh * 0.11, 0.0, std::f64::consts::TAU);
+    let _ = cr.fill();
+    blob(cr, x + rw * 0.2, y + rh * 0.17, rw * 0.2, rh * 0.1, 0.95 * alpha);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.22 * alpha);
+    for i in 0..3 {
+        cr.rectangle(x + rw * 0.05, y + rh * (0.5 + 0.22 * i as f64), rw * 0.6, 1.0);
+        let _ = cr.fill();
+    }
+    for (i, level) in [0.0, 0.1, 0.5, 0.8, 0.3, 0.0, 0.4, 0.6, 0.2].iter().enumerate() {
+        let bh = rh * 0.4 * level;
+        cr.set_source_rgba(0.04, 0.52, 1.0, alpha);
+        kit::paint::rounded(cr, x + rw * (0.07 + 0.06 * i as f64), y + rh * 0.94 - bh, rw * 0.035, bh.max(0.0), 1.0);
+        let _ = cr.fill();
+    }
+    for i in 0..4 {
+        let ry = y + rh * (0.12 + 0.24 * i as f64);
+        blob(cr, x + rw * 0.76, ry, rw * 0.06, rh * 0.12, 0.8 * alpha);
+        blob(cr, x + rw * 0.85, ry + rh * 0.03, rw * 0.1, rh * 0.05, 0.5 * alpha);
+    }
 }
 
 fn draw_system(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
