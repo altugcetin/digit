@@ -96,6 +96,7 @@ pub struct Config {
     pub desktop_media: String,
     pub desktop_weather: String,
     pub desktop_system: String,
+    pub desktop_screentime: String,
     /// What each desktop widget shows: the clock's date and weather, the batteries' levels and
     /// the media controls; and whether each sits on a card of its own.
     pub desktop_clock_date: bool,
@@ -111,6 +112,7 @@ pub struct Config {
     pub desktop_media_bg: bool,
     pub desktop_weather_bg: bool,
     pub desktop_system_bg: bool,
+    pub desktop_screentime_bg: bool,
     /// Rounded screen corners: on/off, whether they follow the app roundness, and the radius
     /// used when they don't. Older configs only had the radius, where 0 meant off.
     pub screen_round: Option<bool>,
@@ -224,6 +226,7 @@ impl Default for Config {
             desktop_media: "off".into(),
             desktop_weather: "off".into(),
             desktop_system: "off".into(),
+            desktop_screentime: "off".into(),
             desktop_clock_date: true,
             desktop_clock_weather: true,
             desktop_battery_levels: true,
@@ -235,6 +238,7 @@ impl Default for Config {
             desktop_media_bg: false,
             desktop_weather_bg: false,
             desktop_system_bg: false,
+            desktop_screentime_bg: false,
             screen_round: None,
             screen_round_follow: None,
             screen_corners: 0.0,
@@ -300,6 +304,7 @@ pub struct Prefs {
     pub desktop_media: String,
     pub desktop_weather: String,
     pub desktop_system: String,
+    pub desktop_screentime: String,
     /// What each desktop widget shows: the clock's date and weather, the batteries' levels and
     /// the media controls; and whether each sits on a card of its own.
     pub desktop_clock_date: bool,
@@ -315,6 +320,7 @@ pub struct Prefs {
     pub desktop_media_bg: bool,
     pub desktop_weather_bg: bool,
     pub desktop_system_bg: bool,
+    pub desktop_screentime_bg: bool,
     /// The screen-corner radius in pixels, already resolved from on/off and roundness; 0 is off.
     pub screen_corners: f64,
     pub tray: bool,
@@ -394,6 +400,7 @@ impl From<&Config> for Prefs {
             desktop_media: c.desktop_media.clone(),
             desktop_weather: c.desktop_weather.clone(),
             desktop_system: c.desktop_system.clone(),
+            desktop_screentime: c.desktop_screentime.clone(),
             desktop_clock_date: c.desktop_clock_date,
             desktop_clock_weather: c.desktop_clock_weather,
             desktop_battery_levels: c.desktop_battery_levels,
@@ -405,6 +412,7 @@ impl From<&Config> for Prefs {
             desktop_media_bg: c.desktop_media_bg,
             desktop_weather_bg: c.desktop_weather_bg,
             desktop_system_bg: c.desktop_system_bg,
+            desktop_screentime_bg: c.desktop_screentime_bg,
             screen_corners: screen_radius(c),
             tray: c.tray,
             mic_guard: c.mic_guard,

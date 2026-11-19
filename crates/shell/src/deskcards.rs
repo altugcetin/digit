@@ -67,10 +67,11 @@ pub enum Kind {
     Media,
     Weather,
     System,
+    ScreenTime,
 }
 
 impl Kind {
-    const ALL: [Kind; 3] = [Kind::Media, Kind::Weather, Kind::System];
+    const ALL: [Kind; 4] = [Kind::Media, Kind::Weather, Kind::System, Kind::ScreenTime];
 
     /// The corner it's in ("top_left"…), or "off", and whether it has a card.
     fn place(self, p: &crate::config::Prefs) -> (String, bool) {
@@ -78,6 +79,7 @@ impl Kind {
             Kind::Media => (p.desktop_media.clone(), p.desktop_media_bg),
             Kind::Weather => (p.desktop_weather.clone(), p.desktop_weather_bg),
             Kind::System => (p.desktop_system.clone(), p.desktop_system_bg),
+            Kind::ScreenTime => (p.desktop_screentime.clone(), p.desktop_screentime_bg),
         }
     }
 
@@ -87,6 +89,7 @@ impl Kind {
             Kind::Media => (MEDIA_W, ART),
             Kind::Weather => (300.0, 64.0),
             Kind::System => (4.0 * CELL, 100.0),
+            Kind::ScreenTime => (SHOT_W, 150.0),
         }
     }
 }
@@ -117,6 +120,11 @@ pub fn changed() {
 /// Redraws what's playing, after a track or its state changed.
 pub fn media_changed() {
     CARDS.with(|c| c.borrow().iter().filter(|c| c.kind == Kind::Media).for_each(|c| c.paint.queue_draw()));
+}
+
+/// Redraws the Screen Time widget, after time was counted.
+pub fn screentime_changed() {
+    CARDS.with(|c| c.borrow().iter().filter(|c| c.kind == Kind::ScreenTime).for_each(|c| c.paint.queue_draw()));
 }
 
 /// The dock started or stopped keeping room: widgets in its corners move.
@@ -299,7 +307,7 @@ fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, kind: Kind, output: &str, top: 
     let drawn = match kind {
         Kind::Media => app.media.borrow().present(glib::monotonic_time()),
         Kind::Weather => app.weather.borrow().is_some(),
-        Kind::System => true,
+        Kind::System | Kind::ScreenTime => true,
     };
     // Only the media buttons take clicks, and only while they're there.
     if let Some(surface) = p.root().and_then(|r| r.surface()) {
@@ -325,6 +333,7 @@ fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, kind: Kind, output: &str, top: 
         Kind::Media => media(s, p, app, look.ink, controls),
         Kind::Weather => weather(s, p, app, look.ink),
         Kind::System => system(s, p, app, look.ink),
+        Kind::ScreenTime => screentime(s, p, app, look.ink, look.card.is_some()),
     }
     if look.shade.is_some() {
         s.pop();
@@ -410,6 +419,83 @@ fn system(s: &gtk::Snapshot, p: &Paint, app: &App, ink: Rgb) {
         draw::icon(s, p, cfg, glyph, 19.0, false, ink, cx, cy);
         draw::text(s, p, cfg, value, 13.0, Face::Number(560), ink, cx - CELL / 2.0 + 3.0, cy + 39.0, CELL - 6.0, pango::Alignment::Center);
         draw::text(s, p, cfg, name, 11.5, Face::Text(450), ink.alpha(0.72), cx - CELL / 2.0 + 3.0, cy + 56.0, CELL - 6.0, pango::Alignment::Center);
+    }
+}
+
+/// The widget's width, and how much of it the list of apps takes at the right.
+const SHOT_W: f64 = 440.0;
+const SHOT_SIDE: f64 = 132.0;
+
+/// "29m", "1h 5m".
+fn short(secs: u64) -> String {
+    let m = secs / 60;
+    if m >= 60 { format!("{}h {}m", m / 60, m % 60) } else { format!("{m}m") }
+}
+
+/// Screen Time as macOS draws it: today's total over the hours of the day, each hour a column
+/// stacked by app, and at the right a panel with the apps that had the most time.
+fn screentime(s: &gtk::Snapshot, p: &Paint, app: &App, ink: Rgb, with_card: bool) {
+    let cfg = &app.cfg;
+    let sum = crate::screentime::summary();
+    let left = pango::Alignment::Left;
+    let (x, y) = (AIR, AIR);
+    let (w, h) = Kind::ScreenTime.size();
+    let main_w = w - SHOT_SIDE;
+    // The panel at the right reaches the card's edges.
+    if with_card {
+        let edge = draw::round(x - CARD_PAD, y - CARD_PAD, w + 2.0 * CARD_PAD, h + 2.0 * CARD_PAD, crate::metrics::scaled(24.0, app.round(), h + 2.0 * CARD_PAD));
+        s.push_rounded_clip(&edge);
+        draw::fill(s, &draw::round(x + main_w, y - CARD_PAD, SHOT_SIDE + CARD_PAD, h + 2.0 * CARD_PAD, 0.0), ink.alpha(0.09));
+        s.pop();
+    }
+    // The header: a round badge and the total.
+    draw::fill(s, &draw::round(x, y, 40.0, 40.0, 20.0), ink.alpha(0.14));
+    draw::icon(s, p, cfg, "hourglass_top", 22.0, true, ink.alpha(0.9), x + 20.0, y + 20.0);
+    draw::text(s, p, cfg, &short(sum.total), 30.0, Face::Text(500), ink.alpha(0.96), x + 52.0, y + 20.0, main_w - 52.0, left);
+    // The chart: 24 columns with lines at 0, 30 and 60 minutes and at every sixth hour.
+    let (cx0, cx1) = (x, x + main_w - 42.0);
+    let (top, base) = (y + 56.0, y + h - 24.0);
+    let tall = base - top;
+    let line = ink.alpha(0.22);
+    for (i, label) in ["60m", "30m", "0m"].iter().enumerate() {
+        let ly = top + tall * i as f64 / 2.0;
+        draw::fill(s, &draw::round(cx0, ly - 0.5, cx1 - cx0, 1.0, 0.0), line);
+        draw::text(s, p, cfg, label, 11.5, Face::Number(450), ink.alpha(0.6), cx1 + 8.0, ly, 34.0, left);
+    }
+    let col = (cx1 - cx0) / 24.0;
+    for (i, label) in ["12 AM", "6 AM", "12 PM", "6 PM"].iter().enumerate() {
+        let vx = cx0 + col * 6.0 * i as f64;
+        let mut dy = top;
+        while dy < base {
+            draw::fill(s, &draw::round(vx - 0.5, dy, 1.0, 3.0, 0.0), line);
+            dy += 6.0;
+        }
+        draw::text(s, p, cfg, label, 11.5, Face::Text(450), ink.alpha(0.6), vx + 4.0, base + 13.0, 60.0, left);
+    }
+    let tints = [Rgb::new(0.04, 0.52, 1.0), Rgb::new(0.35, 0.68, 0.8), Rgb::new(1.0, 0.62, 0.04), ink.alpha(0.4)];
+    for hour in 0..24 {
+        let mut at = base;
+        for (series, tint) in sum.hours.iter().zip(&tints) {
+            if series[hour] == 0 {
+                continue;
+            }
+            // Even a minute shows: a sliver under two pixels would vanish.
+            let part = (tall * series[hour] as f64 / 3600.0).max(2.0).min(at - top);
+            draw::fill(s, &draw::round(cx0 + col * hour as f64 + col * 0.2, at - part, col * 0.6, part, 1.5), *tint);
+            at -= part;
+        }
+    }
+    // The apps with the most time.
+    for (i, (id, name, secs)) in sum.top.iter().enumerate() {
+        let row = y + (h / 4.0) * (i as f64 + 0.5);
+        let ix = x + main_w + 18.0;
+        let id = id.trim_end_matches(".desktop");
+        let scale = p.scale_factor().max(1);
+        match draw::app_icon(&app.apps, id, 28 * scale, scale) {
+            Some(icon) => draw::paintable(s, &icon, ix, row - 14.0, 28.0),
+            None => draw::monogram(s, p, cfg, name, ix, row - 14.0, 28.0, ink.alpha(0.14), ink),
+        }
+        draw::text(s, p, cfg, &short(*secs), 13.5, Face::Number(450), ink.alpha(0.62), ix + 38.0, row, SHOT_SIDE - 60.0, left);
     }
 }
 

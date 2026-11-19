@@ -14,6 +14,9 @@ pub const KEY: &str = "screen_time";
 pub struct Use {
     pub secs: u64,
     pub name: String,
+    /// Seconds in each hour of the day (24 entries), once any were counted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hours: Vec<u64>,
 }
 
 /// Day (`2026-11-19`) → app id → time.
@@ -50,10 +53,12 @@ pub fn clear() {
     let _ = std::fs::remove_file(file());
 }
 
-/// Adds `secs` to `app` on `day`.
-pub fn add(log: &mut Log, day: &str, app: &str, name: &str, secs: u64) {
+/// Adds `secs` to `app` on `day`, in `hour` (0–23) of it.
+pub fn add(log: &mut Log, day: &str, app: &str, name: &str, hour: usize, secs: u64) {
     let e = log.entry(day.to_string()).or_default().entry(app.to_string()).or_default();
     e.secs += secs;
+    e.hours.resize(24, 0);
+    e.hours[hour.min(23)] += secs;
     if e.name != name && !name.is_empty() {
         e.name = name.to_string();
     }
@@ -99,15 +104,17 @@ mod tests {
     #[test]
     fn time_adds_up_per_day_and_app() {
         let mut log = Log::new();
-        add(&mut log, "2026-11-19", "firefox", "Firefox", 600);
-        add(&mut log, "2026-11-19", "firefox", "Firefox", 60);
-        add(&mut log, "2026-11-19", "kitty", "Kitty", 90);
-        add(&mut log, "2026-11-18", "kitty", "Kitty", 30);
+        add(&mut log, "2026-11-19", "firefox", "Firefox", 9, 600);
+        add(&mut log, "2026-11-19", "firefox", "Firefox", 9, 60);
+        add(&mut log, "2026-11-19", "kitty", "Kitty", 10, 90);
+        add(&mut log, "2026-11-18", "kitty", "Kitty", 10, 30);
         assert_eq!(log["2026-11-19"]["firefox"].secs, 660);
         assert_eq!(total(&log["2026-11-19"]), 750);
         let top = top(log.values());
         assert_eq!(top[0].0, "firefox");
         assert_eq!(top[1].1.secs, 120);
+        assert_eq!(log["2026-11-19"]["firefox"].hours[9], 660);
+        assert_eq!(log["2026-11-19"]["kitty"].hours.iter().sum::<u64>(), 90);
     }
 
     #[test]
