@@ -664,9 +664,7 @@ impl Picker {
 
     fn open(&self) {
         let output = compositor::focused_output();
-        let display = gdk::Display::default();
-        let monitors: Vec<gdk::Monitor> = display.map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect()).unwrap_or_default();
-        let monitor = monitors.iter().find(|m| output.as_deref().is_some_and(|o| m.connector().as_deref() == Some(o))).or(monitors.first()).cloned();
+        let monitor = crate::screens::for_output(output.as_deref());
         let (window, canvas, app) = { let s = self.0.borrow(); (s.window.clone(), s.canvas.clone(), s.app.clone()) };
         let size = monitor.as_ref().map(|m| (m.geometry().width() as f64, BAND)).unwrap_or((1920.0, BAND));
         let output = monitor.as_ref().and_then(|m| m.connector()).map(|c| c.to_string()).unwrap_or_default();

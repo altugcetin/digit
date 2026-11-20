@@ -171,9 +171,8 @@ fn show(st: &Shared, by: i32) {
         s.open = true;
         s.fade.go(1.0, glib::monotonic_time(), 160, motion::STANDARD);
         if !s.window.is_visible() {
-            if let Some(display) = gdk::Display::default() {
-                let monitors: Vec<gdk::Monitor> = display.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect();
-                let monitor = monitors.iter().find(|m| output.as_deref().is_some_and(|o| m.connector().as_deref() == Some(o))).or(monitors.first()).cloned();
+            {
+                let monitor = crate::screens::for_output(output.as_deref());
                 s.window.set_monitor(monitor.as_ref());
             }
         }

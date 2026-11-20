@@ -250,9 +250,7 @@ pub fn toggle(app: &Rc<App>) {
         return;
     }
     let output = kit::wm::focused_output();
-    let display = gdk::Display::default();
-    let monitors: Vec<gdk::Monitor> = display.map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect()).unwrap_or_default();
-    let monitor = monitors.iter().find(|m| output.as_deref().is_some_and(|o| m.connector().as_deref() == Some(o))).or(monitors.first()).cloned();
+    let monitor = crate::screens::for_output(output.as_deref());
     let window = gtk::Window::new();
     window.init_layer_shell();
     window.set_layer(Layer::Overlay);

@@ -599,9 +599,7 @@ impl Control {
     fn open_on(&self, output: Option<String>) {
         {
             let mut s = self.0.borrow_mut();
-            let display = gdk::Display::default();
-            let monitors: Vec<gdk::Monitor> = display.map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect()).unwrap_or_default();
-            let monitor = monitors.iter().find(|m| output.as_deref().is_some_and(|o| m.connector().as_deref() == Some(o))).or(monitors.first()).cloned();
+            let monitor = crate::screens::for_output(output.as_deref());
             s.screen = monitor.as_ref().map(|m| (m.geometry().width() as f64, m.geometry().height() as f64)).unwrap_or((1920.0, 1080.0));
             if !s.window.is_visible() {
                 s.window.set_monitor(monitor.as_ref());

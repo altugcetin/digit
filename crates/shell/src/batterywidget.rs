@@ -80,25 +80,14 @@ fn clear() {
     }
 }
 
-/// The primary display, or the first one.
-pub(crate) fn monitor() -> Option<gdk::Monitor> {
-    let primary = kit::prefs::text(&kit::prefs::read(), "primary_monitor", "");
-    let all: Vec<gdk::Monitor> = gdk::Display::default()?.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect();
-    all.iter().find(|m| m.connector().is_some_and(|c| c == primary)).or(all.first()).cloned()
-}
-
-/// The main screen's connector.
-pub(crate) fn primary_output() -> String {
-    monitor().and_then(|m| m.connector()).map(|c| c.to_string()).unwrap_or_default()
-}
-
 /// Where each desktop widget sits on the screen `output`, in `kit::deskwidget::WIDGETS` order.
 pub(crate) fn places(app: &App, output: &str) -> [String; 6] {
-    app.prefs.borrow().places_on(output, output == primary_output())
+    let primary = app.primary_name();
+    app.prefs.borrow().places_on(output, output == primary)
 }
 
 pub fn apply(app: &Rc<App>) {
-    let monitors: Vec<gdk::Monitor> = gdk::Display::default().map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect()).unwrap_or_default();
+    let monitors = kit::screens::all();
     // Where the batteries go on each screen, and what moves them there.
     let wanted: Vec<(gdk::Monitor, String, String, i32, [i32; 3])> = monitors
         .into_iter()

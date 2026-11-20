@@ -263,6 +263,7 @@ impl App {
     pub fn new(cfg: Config, blur: Option<blur::Blur>) -> Rc<Self> {
         let frosted = blur.as_ref().is_some_and(|b| b.able()) && !kit::effects::reduced();
         let prefs = crate::config::Prefs::from(&cfg);
+        crate::screens::set_chosen(&prefs.primary_monitor);
         let first = Self::palette_for(&cfg, &cfg.surface, &cfg.ui_accent, Roles::default(), frosted, prefs.wide(&cfg));
         let app = Rc::new(Self {
             blur,
@@ -542,6 +543,16 @@ impl App {
         ISLAND_LIFT
     }
 
+    /// The main screen (see `kit::screens::primary`).
+    pub fn primary(&self) -> Option<gtk::gdk::Monitor> {
+        crate::screens::main()
+    }
+
+    /// The main screen's connector, or "" with no screen.
+    pub fn primary_name(&self) -> String {
+        crate::screens::main_name()
+    }
+
     pub fn reserve(&self) -> i32 {
         if self.wide() {
             self.header() as i32
@@ -627,6 +638,7 @@ impl App {
         // Whatever a change rebuilds (dock icons, themes, panels) leaves freed memory behind;
         // hand it back once things have settled.
         kit::app::trim_later(2500);
+        crate::screens::set_chosen(&next.primary_monitor);
         let before = self.prefs.replace(next.clone());
         kit::appearance::apply_gtk();
         kit::motion::refresh();
@@ -700,7 +712,13 @@ impl App {
         if before.desktop_raster != next.desktop_raster {
             crate::draw::set_raster(next.desktop_raster);
         }
-        if before.desktop_widget != next.desktop_widget || before.desktop_screens != next.desktop_screens || before.desktop_raster != next.desktop_raster {
+        let primary_moved = before.primary_monitor != next.primary_monitor;
+        if primary_moved {
+            // The dock moves to the new main screen.
+            crate::dock::primary_changed(self);
+        }
+        // The clock follows each screen's places, which depend on which is the main one.
+        if primary_moved || before.desktop_widget != next.desktop_widget || before.desktop_screens != next.desktop_screens || before.desktop_raster != next.desktop_raster {
             crate::desk::apply(self);
         }
         crate::deskicons::apply(self);

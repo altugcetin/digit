@@ -264,9 +264,7 @@ async fn region() -> Option<String> {
 }
 
 fn monitors() -> Vec<String> {
-    gtk::gdk::Display::default()
-        .map(|d| d.monitors().iter::<gtk::gdk::Monitor>().filter_map(Result::ok).filter_map(|m| m.connector().map(|c| c.to_string())).collect())
-        .unwrap_or_default()
+    kit::screens::all().iter().filter_map(|m| m.connector().map(|c| c.to_string())).collect()
 }
 
 /// What to record: `pick` overrides the Recorder setting ("region" or "monitor").

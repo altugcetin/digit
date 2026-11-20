@@ -191,8 +191,7 @@ thread_local! {
 /// wallpaper stretched over two screens is blurred in the part each has). It is the same
 /// texture the lock screen uses, made once with the wallpaper.
 fn blurred(app: &App) -> Option<gdk::Texture> {
-    let output = crate::batterywidget::monitor().and_then(|m| m.connector()).map(|c| c.to_string()).unwrap_or_default();
-    app.wallpapers.blurred(&output)
+    app.wallpapers.blurred(&app.primary_name())
 }
 
 /// The grid's measures on a screen `w` by `h`.
@@ -327,7 +326,7 @@ fn build(app: &Rc<App>) -> Shared {
         window.set_anchor(e, true);
     }
     window.add_css_class("digit");
-    let monitor = crate::batterywidget::monitor();
+    let monitor = app.primary();
     if let Some(m) = &monitor {
         window.set_monitor(Some(m));
     }
@@ -1351,7 +1350,7 @@ fn context_menu(st: &Shared, x: f64, y: f64) {
         }
         None => return,
     };
-    crate::popmenu::show(&app, crate::batterywidget::monitor(), x, y, "", rows);
+    crate::popmenu::show(&app, app.primary(), x, y, "", rows);
 }
 
 fn keep_in_dock(st: &Shared, id: &str) {

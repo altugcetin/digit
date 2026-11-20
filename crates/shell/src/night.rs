@@ -149,8 +149,7 @@ pub fn apply(app: &App) {
             *slot = connect();
         }
         let Some(night) = slot.as_mut() else { return };
-        let Some(display) = gdk::Display::default() else { return };
-        let monitors: Vec<gdk::Monitor> = display.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect();
+        let monitors = kit::screens::all();
         let names: Vec<String> = monitors.iter().filter_map(|m| m.connector().map(|c| c.to_string())).collect();
         night.controls.retain(|(name, c, _)| {
             let keep = names.contains(name);

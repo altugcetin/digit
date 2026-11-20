@@ -12,8 +12,7 @@ thread_local! {
 
 pub fn apply(app: &App) {
     let r = app.prefs.borrow().screen_corners.clamp(0.0, 40.0).round() as i32;
-    let Some(display) = gdk::Display::default() else { return };
-    let monitors: Vec<gdk::Monitor> = display.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect();
+    let monitors = kit::screens::all();
     if SHOWN.with(Cell::get) == (r, monitors.len()) {
         return;
     }

@@ -43,10 +43,9 @@ struct Sheet {
     main: Rc<Cell<bool>>,
 }
 
-/// Whether `monitor` is the main screen: the primary display, or the first one.
-fn is_main(monitor: &gdk::Monitor) -> bool {
-    let primary = crate::batterywidget::monitor().and_then(|m| m.connector());
-    primary.is_none() || monitor.connector() == primary
+/// Whether `monitor` is the main screen (see `kit::screens::primary`).
+fn is_main(app: &App, monitor: &gdk::Monitor) -> bool {
+    app.primary().is_none_or(|m| m == *monitor)
 }
 
 /// Makes `face` the one with the clock and the password, as when the main screen goes away.
@@ -199,7 +198,7 @@ pub fn lock(app: &Rc<App>) -> bool {
             }
         });
         // One screen holds the password: the main one, unless another took it while it was gone.
-        let main = is_main(&monitor) && main_face().is_none();
+        let main = is_main(&a, &monitor) && main_face().is_none();
         let face = build(&a, &monitor, false, generation, main);
         unsafe {
             ffi::gtk_session_lock_instance_assign_window_to_monitor(inst.as_ptr(), face.window.to_glib_none().0, monitor.to_glib_none().0);
@@ -254,15 +253,14 @@ pub fn preview(app: &Rc<App>, output: Option<&str>) {
         return;
     }
     style(app);
-    let Some(display) = gdk::Display::default() else { return };
     let generation = next_generation();
     STATE.with(|s| *s.borrow_mut() = Some(State { generation, mode: Mode::Preview, faces: Vec::new(), busy: false, locked: true, clock: None }));
-    for m in display.monitors().iter::<gdk::Monitor>().filter_map(Result::ok) {
+    for m in kit::screens::all() {
         if output.is_some_and(|o| m.connector().as_deref() != Some(o)) {
             continue;
         }
         // A preview of one screen shows that screen as the main one would look.
-        let face = build(app, &m, true, generation, output.is_some() || is_main(&m));
+        let face = build(app, &m, true, generation, output.is_some() || is_main(app, &m));
         face.window.present();
         STATE.with(|s| {
             if let Some(st) = s.borrow_mut().as_mut() {

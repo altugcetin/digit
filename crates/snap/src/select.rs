@@ -151,10 +151,7 @@ pub fn open(app: &gtk::Application, shots: Vec<Shot>, pick: bool) {
         }
         window.set_exclusive_zone(-1);
         window.set_keyboard_mode(KeyboardMode::Exclusive);
-        if let Some(d) = gdk::Display::default() {
-            let m = d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).find(|m| m.connector().is_some_and(|c| c == shot.name));
-            window.set_monitor(m.as_ref());
-        }
+        window.set_monitor(kit::screens::by_name(&shot.name).as_ref());
         let area: Canvas = glib::Object::new();
         *area.imp().overlay.borrow_mut() = Rc::downgrade(&ov);
         area.imp().screen.set(i);

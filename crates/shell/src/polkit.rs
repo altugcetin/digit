@@ -404,8 +404,7 @@ fn show(request: &Request, id: u64) -> Option<Dialog> {
     window.set_keyboard_mode(KeyboardMode::Exclusive);
     window.add_css_class("digit-auth");
     let output = crate::compositor::focused_output();
-    let monitors: Vec<gdk::Monitor> = display.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect();
-    window.set_monitor(monitors.iter().find(|m| output.as_deref().is_some_and(|o| m.connector().as_deref() == Some(o))).or(monitors.first()));
+    window.set_monitor(crate::screens::for_output(output.as_deref()).as_ref());
     let card = gtk::Box::new(gtk::Orientation::Vertical, 10);
     card.add_css_class("auth-card");
     card.set_halign(gtk::Align::Center);

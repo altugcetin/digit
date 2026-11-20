@@ -217,7 +217,7 @@ pub(crate) fn rects(app: &App, output: &str, screen: (i32, i32)) -> Vec<CardRect
 
 pub fn apply(app: &Rc<App>) {
     APP.with(|a| *a.borrow_mut() = Rc::downgrade(app));
-    let monitors: Vec<gdk::Monitor> = gdk::Display::default().map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect()).unwrap_or_default();
+    let monitors = kit::screens::all();
     // Every widget that is out, on each screen whose places have it.
     let mut places: Vec<(gdk::Monitor, String, Kind, String)> = Vec::new();
     let mut key = format!("{}", app.reserve());

@@ -1,6 +1,6 @@
 use crate::app::App;
 use crate::compositor;
-use gtk::{gdk, gio, glib, prelude::*};
+use gtk::{gio, glib, prelude::*};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -77,13 +77,13 @@ fn window(id: u64) -> Option<Value> {
 }
 
 fn widest() -> f64 {
-    gdk::Display::default().map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).map(|m| m.geometry().width() as f64).fold(0.0, f64::max)).unwrap_or(1920.0)
+    let widest = kit::screens::all().iter().map(|m| m.geometry().width() as f64).fold(0.0, f64::max);
+    if widest > 0.0 { widest } else { 1920.0 }
 }
 
 fn screen() -> (f64, f64) {
     let output = compositor::focused_output();
-    let monitors: Vec<gdk::Monitor> = gdk::Display::default().map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect()).unwrap_or_default();
-    let m = monitors.iter().find(|m| output.as_deref().is_some_and(|o| m.connector().as_deref() == Some(o))).or(monitors.first());
+    let m = crate::screens::for_output(output.as_deref());
     m.map_or((1920.0, 1080.0), |m| (m.geometry().width() as f64, m.geometry().height() as f64))
 }
 

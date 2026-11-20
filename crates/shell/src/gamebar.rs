@@ -419,8 +419,7 @@ fn build(app: &Rc<App>) -> Shared {
 
 fn monitor() -> Option<gdk::Monitor> {
     let output = compositor::focused_output();
-    let monitors: Vec<gdk::Monitor> = gdk::Display::default().map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect()).unwrap_or_default();
-    monitors.iter().find(|m| output.as_deref().is_some_and(|o| m.connector().as_deref() == Some(o))).or(monitors.first()).cloned()
+    crate::screens::for_output(output.as_deref())
 }
 
 fn present(st: &Shared) {

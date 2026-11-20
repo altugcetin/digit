@@ -33,9 +33,8 @@ pub fn play(app: &Rc<App>) {
     if !kit::motion::enabled(app.cfg.intro) {
         return;
     }
-    let Some(display) = gdk::Display::default() else { return };
     let start = glib::monotonic_time();
-    for monitor in display.monitors().iter::<gdk::Monitor>().filter_map(Result::ok) {
+    for monitor in kit::screens::all() {
         cover(app, &monitor, start);
     }
 }

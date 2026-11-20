@@ -829,14 +829,12 @@ impl Launcher {
                 s.files_folder = focused.and_then(|(_, title)| title).filter(|t| !t.is_empty());
                 s.windows = windows;
                 s.prism = instances;
-                if let Some(display) = gdk::Display::default() {
-                    let monitors: Vec<gdk::Monitor> = display.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect();
-                    let monitor = monitors.iter().find(|m| output.as_deref().is_some_and(|o| m.connector().as_deref() == Some(o))).or(monitors.first());
-                    if let Some(m) = monitor {
+                {
+                    if let Some(m) = crate::screens::for_output(output.as_deref()) {
                         let top = (m.geometry().height() as f64 * 0.22 - PAD).max(0.0) as i32;
                         s.window.set_margin(Edge::Top, top);
-                        s.window.set_monitor(Some(m));
-                        if let Some(scrim) = &s.scrim { scrim.set_monitor(Some(m)); }
+                        s.window.set_monitor(Some(&m));
+                        if let Some(scrim) = &s.scrim { scrim.set_monitor(Some(&m)); }
                     }
                 }
             }
