@@ -88,6 +88,34 @@ pub fn values(assignment: &[Panel; 4]) -> Vec<(&'static str, toml::Value)> {
     Corner::ALL.into_iter().zip(assignment).map(|(c, p)| (c.key(), toml::Value::String(p.value().into()))).collect()
 }
 
+/// The setting that holds the screens that have corners of their own: a table of tables, by
+/// connector, each with the same four keys as the shared corners.
+pub const MONITORS: &str = "monitor_corners";
+
+/// The corners of the screen `output`: its own when it has them, the shared ones otherwise.
+pub fn read_on(prefs: &toml::Table, output: &str) -> [Panel; 4] {
+    match own(prefs).and_then(|t| t.get(output)).and_then(toml::Value::as_table) {
+        Some(table) => read(table),
+        None => read(prefs),
+    }
+}
+
+/// The screens with corners of their own, and what each has.
+pub fn monitors(prefs: &toml::Table) -> Vec<(String, [Panel; 4])> {
+    own(prefs).map(|t| t.iter().filter_map(|(k, v)| Some((k.clone(), read(v.as_table()?)))).collect()).unwrap_or_default()
+}
+
+fn own(prefs: &toml::Table) -> Option<&toml::Table> {
+    prefs.get(MONITORS).and_then(toml::Value::as_table)
+}
+
+/// The value of [`MONITORS`] once `output` has `assignment` for its own, the other screens kept.
+pub fn with_monitor(prefs: &toml::Table, output: &str, assignment: &[Panel; 4]) -> toml::Value {
+    let mut all = own(prefs).cloned().unwrap_or_default();
+    all.insert(output.to_string(), toml::Value::Table(values(assignment).into_iter().map(|(k, v)| (k.to_string(), v)).collect()));
+    toml::Value::Table(all)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +139,19 @@ mod tests {
         assert_eq!(read(&prefs), [Workspaces, None, Control, None]);
         let prefs = "corner_top_left = 'control'\ncorner_top_right = 'control'\ncorner_bottom_left = 'workspaces'".parse().unwrap();
         assert_eq!(read(&prefs), [Control, None, Workspaces, None]);
+    }
+
+    #[test]
+    fn a_screen_keeps_corners_of_its_own_and_the_rest_share_theirs() {
+        let shared: toml::Table = "corner_top_left = 'control'\ncorner_bottom_right = 'none'".parse().unwrap();
+        assert_eq!(read_on(&shared, "HDMI-A-1"), [Control, None, None, None]);
+        let mut prefs = shared.clone();
+        prefs.insert(MONITORS.into(), with_monitor(&prefs, "HDMI-A-1", &[None, Workspaces, None, Control]));
+        assert_eq!(read_on(&prefs, "HDMI-A-1"), [None, Workspaces, None, Control]);
+        assert_eq!(read_on(&prefs, "DP-2"), [Control, None, None, None]);
+        prefs.insert(MONITORS.into(), with_monitor(&prefs, "DP-2", &[Workspaces, None, None, None]));
+        assert_eq!(read_on(&prefs, "HDMI-A-1"), [None, Workspaces, None, Control], "another screen's corners stay");
+        assert_eq!(monitors(&prefs).len(), 2);
     }
 
     #[test]

@@ -49,6 +49,8 @@ pub struct Config {
     pub corner_top_right: String,
     pub corner_bottom_left: String,
     pub corner_bottom_right: String,
+    /// Screens with hot corners of their own (see `kit::corners::read_on`).
+    pub monitor_corners: toml::Table,
     pub icon_theme: Option<String>,
     pub hover: bool,
     pub intro: bool,
@@ -188,6 +190,7 @@ impl Default for Config {
             corner_top_right: "none".into(),
             corner_bottom_left: "none".into(),
             corner_bottom_right: "control".into(),
+            monitor_corners: toml::Table::new(),
             icon_theme: None,
             hover: true,
             intro: true,
@@ -283,6 +286,8 @@ pub struct Prefs {
     pub surface: String,
     pub hover: bool,
     pub corners: [kit::corners::Panel; 4],
+    /// The screens whose hot corners are their own, by connector.
+    pub monitor_corners: std::collections::BTreeMap<String, [kit::corners::Panel; 4]>,
     pub icon_theme: Option<String>,
     pub style: String,
     /// Extra space the shell reserves under the floating island when the compositor's own gap is
@@ -390,6 +395,7 @@ impl From<&Config> for Prefs {
                 ("corner_bottom_left".into(), toml::Value::String(c.corner_bottom_left.clone())),
                 ("corner_bottom_right".into(), toml::Value::String(c.corner_bottom_right.clone())),
             ].into_iter().collect()),
+            monitor_corners: kit::corners::monitors(&[(kit::corners::MONITORS.to_string(), toml::Value::Table(c.monitor_corners.clone()))].into_iter().collect()).into_iter().collect(),
             icon_theme: c.icon_theme.clone(),
             style: c.notch_style.clone(),
             under: under_island(c.hypr_gaps_in, c.hypr_gaps_out, kit::wm::which() == kit::wm::Wm::Niri),
@@ -463,6 +469,11 @@ pub const VOICE: [&str; 24] = [
 ];
 
 impl Prefs {
+    /// The hot corners of the screen `output`: its own, or the shared ones.
+    pub fn corners_on(&self, output: &str) -> [kit::corners::Panel; 4] {
+        self.monitor_corners.get(output).copied().unwrap_or(self.corners)
+    }
+
     pub fn wide(&self, cfg: &Config) -> bool {
         cfg.dock == Dock::Screen && self.style == "bar"
     }

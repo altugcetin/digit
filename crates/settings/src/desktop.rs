@@ -1239,11 +1239,28 @@ fn workspaces(body: &gtk::Box, t: &toml::Table) {
 
 /// What each screen corner opens, set on a picture of a screen: each corner is a button that
 /// opens a menu. A panel opens from its corner and lives in one corner at most, so choosing it
-/// for another clears the old one, and the buttons show that right away.
+/// for another clears the old one, and the buttons show that right away. With several screens,
+/// each has corners of its own, picked above the picture.
 fn corners_picker(card: &gtk::Box, t: &toml::Table) {
     use kit::corners::{self, Corner, Panel};
     const PANELS: [(Panel, &str); 3] = [(Panel::None, "Nothing"), (Panel::Workspaces, "Workspaces"), (Panel::Control, "Control Center")];
     let name_of = |panel: Panel| PANELS.iter().find(|p| p.0 == panel).map_or("Nothing", |p| p.1);
+    let screens: Vec<String> = gtk::gdk::Display::default()
+        .map(|d| d.monitors().iter::<gtk::gdk::Monitor>().filter_map(Result::ok).filter_map(|m| m.connector().map(|c| c.to_string())).collect())
+        .unwrap_or_default();
+    // One screen keeps the shared corners; with more, the one being set, the main one first.
+    let picked: Rc<std::cell::RefCell<Option<String>>> = Rc::default();
+    if screens.len() > 1 {
+        let main = prefs::get_str(t, "primary_monitor", "");
+        *picked.borrow_mut() = Some(screens.iter().find(|s| **s == main).unwrap_or(&screens[0]).clone());
+    }
+    let read_now = {
+        let picked = picked.clone();
+        move |prefs: &toml::Table| match picked.borrow().as_deref() {
+            Some(output) => corners::read_on(prefs, output),
+            None => corners::read(prefs),
+        }
+    };
     let screen = gtk::Overlay::new();
     screen.set_halign(gtk::Align::Center);
     screen.set_margin_top(12);
@@ -1262,7 +1279,7 @@ fn corners_picker(card: &gtk::Box, t: &toml::Table) {
     });
     screen.set_child(Some(&picture));
     let buttons: Rc<std::cell::RefCell<Vec<gtk::Label>>> = Rc::default();
-    let now = corners::read(t);
+    let now = read_now(t);
     for (slot, corner) in Corner::ALL.into_iter().enumerate() {
         let button = gtk::MenuButton::new();
         button.add_css_class("pill");
@@ -1284,11 +1301,16 @@ fn corners_picker(card: &gtk::Box, t: &toml::Table) {
             let item = gtk::Button::with_label(name);
             item.add_css_class("pop-item");
             if let Some(l) = item.child().and_downcast::<gtk::Label>() { l.set_xalign(0.0); }
-            let (buttons, pop) = (buttons.clone(), pop.downgrade());
+            let (buttons, pop, picked, read_now) = (buttons.clone(), pop.downgrade(), picked.clone(), read_now.clone());
             item.connect_clicked(move |_| {
-                let next = corners::assign(corners::read(&prefs::read()), corner, panel);
+                let stored = prefs::read();
+                let next = corners::assign(read_now(&stored), corner, panel);
+                let saved = match picked.borrow().as_deref() {
+                    Some(output) => save(corners::MONITORS, corners::with_monitor(&stored, output, &next)),
+                    None => save_many(&corners::values(&next)),
+                };
                 // A failed save shows what is really stored again.
-                let shown = if save_many(&corners::values(&next)) { next } else { corners::read(&prefs::read()) };
+                let shown = if saved { next } else { read_now(&prefs::read()) };
                 for (label, panel) in buttons.borrow().iter().zip(shown) {
                     label.set_text(name_of(panel));
                 }
@@ -1299,6 +1321,20 @@ fn corners_picker(card: &gtk::Box, t: &toml::Table) {
         pop.set_child(Some(&list));
         button.set_popover(Some(&pop));
         screen.add_overlay(&button);
+    }
+    if let Some(at) = picked.borrow().as_ref().and_then(|p| screens.iter().position(|s| s == p)) {
+        let (row, end) = ui::row(Some("monitor"), "Screen", "Each screen has corners of its own");
+        let labels: Vec<&str> = screens.iter().map(String::as_str).collect();
+        let (picked, buttons, screens) = (picked.clone(), buttons.clone(), screens.clone());
+        end.append(&ui::segmented(&labels, at, move |i| {
+            *picked.borrow_mut() = Some(screens[i].clone());
+            let now = read_now(&prefs::read());
+            for (label, panel) in buttons.borrow().iter().zip(now) {
+                label.set_text(name_of(panel));
+            }
+            true
+        }));
+        card.append(&row);
     }
     card.append(&screen);
 }

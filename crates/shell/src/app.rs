@@ -721,15 +721,16 @@ impl App {
         if before.icon_theme != next.icon_theme {
             crate::icons::theme(next.icon_theme.as_deref());
         }
-        if before.dock != next.dock || before.icon_theme != next.icon_theme || before.corners != next.corners {
+        let corners_moved = before.corners != next.corners || before.monitor_corners != next.monitor_corners;
+        if before.dock != next.dock || before.icon_theme != next.icon_theme || corners_moved {
             crate::dock::apply(self);
         }
-        if before.corners != next.corners {
+        if corners_moved {
             for notch in self.notches.borrow().iter() {
                 notch.refresh_corners();
             }
         }
-        if before.corners != next.corners || restyle || rounding || before.fullscreen_edges != next.fullscreen_edges
+        if corners_moved || restyle || rounding || before.fullscreen_edges != next.fullscreen_edges
             || before.screen_corners != next.screen_corners || before.ui_surface != next.ui_surface || before.ui_accent != next.ui_accent {
             crate::panel_corner::refresh(self);
         }

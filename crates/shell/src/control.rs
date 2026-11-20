@@ -356,7 +356,7 @@ impl Control {
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
         window.set_namespace(Some("digit-control"));
-        panel_corner::anchor(&window, panel_corner::selected(app, Panel::Control));
+        panel_corner::anchor(&window, panel_corner::selected(app, Panel::Control, ""));
         window.set_exclusive_zone(-1);
         window.set_keyboard_mode(KeyboardMode::None);
         window.add_css_class("digit");
@@ -369,7 +369,7 @@ impl Control {
             open: false,
             max_h: 600.0,
             screen: (1920.0, 1080.0),
-            corner: panel_corner::selected(app, Panel::Control),
+            corner: panel_corner::selected(app, Panel::Control, ""),
             mount: Mount::Corner,
             on_close: None,
             margins: [0; 4],
@@ -930,7 +930,9 @@ impl State {
     fn reposition(&mut self) {
         match self.mount {
             Mount::Corner => {
-                self.corner = panel_corner::selected(&self.app, Panel::Control);
+                // The corner it has on the screen it opens on.
+                let output = self.window.monitor().and_then(|m| m.connector()).map(|c| c.to_string()).unwrap_or_default();
+                self.corner = panel_corner::selected(&self.app, Panel::Control, &output);
                 self.margins = panel_corner::position(&self.window, self.corner);
                 self.max_h = max_height(self.screen.1);
             }

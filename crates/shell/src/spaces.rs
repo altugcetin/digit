@@ -204,7 +204,7 @@ fn build(app: &Rc<App>) -> Shared {
     window.init_layer_shell();
     window.set_layer(Layer::Overlay);
     window.set_namespace(Some("digit-spaces"));
-    panel_corner::anchor(&window, panel_corner::selected(app, Panel::Workspaces));
+    panel_corner::anchor(&window, panel_corner::selected(app, Panel::Workspaces, ""));
     window.set_exclusive_zone(-1);
     window.set_keyboard_mode(KeyboardMode::None);
     window.add_css_class("digit");
@@ -216,7 +216,7 @@ fn build(app: &Rc<App>) -> Shared {
         window: window.clone(),
         paint: paint.clone(),
         output: String::new(),
-        corner: panel_corner::selected(app, Panel::Workspaces),
+        corner: panel_corner::selected(app, Panel::Workspaces, ""),
         margins: [0; 4],
         open: false,
         cursor: None,
@@ -610,7 +610,8 @@ fn kick(st: &Shared) {
 
 impl State {
     fn reposition(&mut self) {
-        self.corner = panel_corner::selected(&self.app, Panel::Workspaces);
+        // The corner it has on the screen it opens on.
+        self.corner = panel_corner::selected(&self.app, Panel::Workspaces, &self.output);
         self.margins = panel_corner::position(&self.window, self.corner);
         let (w, h) = (SURFACE_W as i32, SURFACE_H as i32);
         self.window.set_default_size(w, h);
