@@ -41,12 +41,15 @@ pub fn envelope(corner: Corner, rect: Rect, surface: (f64, f64), fillet: f64) ->
     Rect { x, y, w: (right - x).max(0.0), h: (bottom - y).max(0.0) }
 }
 
-pub fn selected(app: &App, panel: Panel) -> Corner {
-    corner_for(&app.prefs.borrow().corners, panel)
+/// The corner `panel` opens in on the screen `output`: where that screen has it, else where the
+/// shared corners have it (as when it's opened by its shortcut on a screen without it).
+pub fn selected(app: &App, panel: Panel, output: &str) -> Corner {
+    let prefs = app.prefs.borrow();
+    corner_for(&prefs.corners_on(output), &prefs.corners, panel)
 }
 
-fn corner_for(assignment: &[Panel; 4], panel: Panel) -> Corner {
-    corners::corner_of(assignment, panel).unwrap_or(match panel {
+fn corner_for(own: &[Panel; 4], shared: &[Panel; 4], panel: Panel) -> Corner {
+    corners::corner_of(own, panel).or_else(|| corners::corner_of(shared, panel)).unwrap_or(match panel {
         Panel::Control => Corner::BottomRight,
         _ => Corner::TopLeft,
     })
@@ -81,7 +84,7 @@ pub fn refresh(app: &App) {
 }
 
 pub fn activate(app: &Rc<App>, output: &str, corner: Corner) -> bool {
-    let panel = app.prefs.borrow().corners[Corner::ALL.iter().position(|c| *c == corner).unwrap()];
+    let panel = app.prefs.borrow().corners_on(output)[Corner::ALL.iter().position(|c| *c == corner).unwrap()];
     if panel == Panel::None || (panel == Panel::Workspaces && !app.cfg.outputs.is_empty() && !app.cfg.outputs.iter().any(|o| o == output)) {
         return false;
     }
@@ -96,8 +99,8 @@ pub fn activate(app: &Rc<App>, output: &str, corner: Corner) -> bool {
 }
 
 pub fn triggers(app: &Rc<App>, monitor: &gdk::Monitor) -> Vec<gtk::Window> {
-    let assignment = app.prefs.borrow().corners;
     let output = monitor.connector().map(|c| c.to_string()).unwrap_or_default();
+    let assignment = app.prefs.borrow().corners_on(&output);
     let spaces_output = app.cfg.outputs.is_empty() || app.cfg.outputs.contains(&output);
     Corner::ALL
         .into_iter()
@@ -237,13 +240,19 @@ mod tests {
     #[test]
     fn shortcuts_use_assignments_or_the_original_default_corner() {
         let empty = [Panel::None; 4];
-        assert_eq!(corner_for(&empty, Panel::Workspaces), Corner::TopLeft);
-        assert_eq!(corner_for(&empty, Panel::Control), Corner::BottomRight);
+        assert_eq!(corner_for(&empty, &empty, Panel::Workspaces), Corner::TopLeft);
+        assert_eq!(corner_for(&empty, &empty, Panel::Control), Corner::BottomRight);
         for corner in Corner::ALL {
             for panel in [Panel::Workspaces, Panel::Control] {
-                assert_eq!(corner_for(&corners::assign(empty, corner, panel), panel), corner);
+                assert_eq!(corner_for(&corners::assign(empty, corner, panel), &empty, panel), corner);
+                // A screen without it opens it where the shared corners have it.
+                assert_eq!(corner_for(&empty, &corners::assign(empty, corner, panel), panel), corner);
             }
         }
+        // A screen's own corner wins over the shared one.
+        let own = corners::assign(empty, Corner::TopRight, Panel::Control);
+        let shared = corners::assign(empty, Corner::BottomLeft, Panel::Control);
+        assert_eq!(corner_for(&own, &shared, Panel::Control), Corner::TopRight);
     }
 
     #[test]
