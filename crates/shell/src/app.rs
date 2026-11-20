@@ -381,6 +381,10 @@ impl App {
         for n in notches {
             n.refresh();
         }
+        // A desktop widget in the accent color takes the new one.
+        crate::desk::changed(self);
+        crate::batterywidget::changed();
+        crate::deskcards::changed();
         self.redraw();
     }
 

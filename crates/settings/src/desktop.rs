@@ -1454,6 +1454,8 @@ struct DeskWidget {
     /// What can be turned on or off for it, offered when its spot is clicked: setting, name and
     /// default. Its "_bg" setting puts it on a card.
     options: &'static [(&'static str, &'static str, bool)],
+    /// The name its color goes under (see `kit::deskwidget`).
+    ink: &'static str,
 }
 
 /// The four corners, each stored under its own name.
@@ -1467,6 +1469,7 @@ const WIDGETS: [DeskWidget; 6] = [
         places: &[("top_left", "left"), ("top_center", "center")],
         draw: draw_clock,
         options: &[("desktop_clock_date", "Date", true), ("desktop_clock_weather", "Weather", true), ("desktop_clock_bg", "Background", false)],
+        ink: "clock",
     },
     DeskWidget {
         id: "batteries",
@@ -1475,6 +1478,7 @@ const WIDGETS: [DeskWidget; 6] = [
         places: CORNERS_ONLY,
         draw: draw_batteries,
         options: &[("desktop_battery_levels", "Levels", true), ("desktop_battery_bg", "Background", false)],
+        ink: "battery",
     },
     DeskWidget {
         id: "media",
@@ -1483,10 +1487,11 @@ const WIDGETS: [DeskWidget; 6] = [
         places: CORNERS_ONLY,
         draw: draw_media,
         options: &[("desktop_media_controls", "Player controls", false), ("desktop_media_bg", "Background", false)],
+        ink: "media",
     },
-    DeskWidget { id: "weather", name: "Weather", key: "desktop_weather", places: CORNERS_ONLY, draw: draw_weather, options: &[("desktop_weather_bg", "Background", false)] },
-    DeskWidget { id: "system", name: "System", key: "desktop_system", places: CORNERS_ONLY, draw: draw_system, options: &[("desktop_system_bg", "Background", false)] },
-    DeskWidget { id: "screentime", name: "Screen Time", key: "desktop_screentime", places: CORNERS_ONLY, draw: draw_screentime, options: &[("desktop_screentime_bg", "Background", false)] },
+    DeskWidget { id: "weather", name: "Weather", key: "desktop_weather", places: CORNERS_ONLY, draw: draw_weather, options: &[("desktop_weather_bg", "Background", false)], ink: "weather" },
+    DeskWidget { id: "system", name: "System", key: "desktop_system", places: CORNERS_ONLY, draw: draw_system, options: &[("desktop_system_bg", "Background", false)], ink: "system" },
+    DeskWidget { id: "screentime", name: "Screen Time", key: "desktop_screentime", places: CORNERS_ONLY, draw: draw_screentime, options: &[("desktop_screentime_bg", "Background", false)], ink: "screentime" },
 ];
 
 /// Whether each widget sits on a card, from its "_bg" option.
@@ -1578,6 +1583,18 @@ pub(crate) fn widget_overlay(t: &toml::Table) -> crate::wallpaper::Overlay {
                     group.add_action(&action);
                 }
             }
+            // Each widget's color, picked from the same menu.
+            for w in &WIDGETS {
+                let key = kit::deskwidget::key(w.ink);
+                let now = prefs::get_str(&t, &key, "auto");
+                let action = gio::SimpleAction::new_stateful(&format!("ink-{}", w.ink), Some(glib::VariantTy::STRING), &now.to_variant());
+                action.connect_activate(move |action, param| {
+                    let Some(value) = param.and_then(|p| p.get::<String>()) else { return };
+                    if !save(&key, toml::Value::String(value.clone())) { return; }
+                    action.set_state(&value.to_variant());
+                });
+                group.add_action(&action);
+            }
             area.insert_action_group("desk", Some(&group));
         })
     };
@@ -1618,7 +1635,7 @@ pub(crate) fn widget_overlay(t: &toml::Table) -> crate::wallpaper::Overlay {
                 list.append(&item);
             }
             both.append(&list);
-            if let Some(wd) = WIDGETS.iter().find(|wd| wd.id == here).filter(|wd| !wd.options.is_empty()) {
+            if let Some(wd) = WIDGETS.iter().find(|wd| wd.id == here) {
                 both.append(&gtk::Separator::new(gtk::Orientation::Vertical));
                 let panel = gtk::Box::new(gtk::Orientation::Vertical, 2);
                 panel.add_css_class("pop-panel");
@@ -1630,6 +1647,22 @@ pub(crate) fn widget_overlay(t: &toml::Table) -> crate::wallpaper::Overlay {
                 for (key, name, _) in wd.options {
                     let check = gtk::CheckButton::with_label(name);
                     check.set_action_name(Some(&format!("desk.{}", option_action(key))));
+                    panel.append(&check);
+                }
+                // Automatic follows the wallpaper; the others hold whatever is behind.
+                let color = gtk::Label::new(Some("Color"));
+                color.add_css_class("heading");
+                color.set_xalign(0.0);
+                panel.append(&color);
+                let mut first: Option<gtk::CheckButton> = None;
+                for (value, name) in kit::deskwidget::CHOICES {
+                    let check = gtk::CheckButton::with_label(name);
+                    check.set_action_name(Some(&format!("desk.ink-{}", wd.ink)));
+                    check.set_action_target_value(Some(&value.to_variant()));
+                    match &first {
+                        Some(f) => check.set_group(Some(f)),
+                        None => first = Some(check.clone()),
+                    }
                     panel.append(&check);
                 }
                 both.append(&panel);
@@ -2192,6 +2225,14 @@ mod tests {
 #[cfg(test)]
 mod reduction_tests {
     use super::*;
+
+    #[test]
+    fn every_desktop_widget_has_a_color_the_shell_reads() {
+        for w in &WIDGETS {
+            assert!(kit::deskwidget::WIDGETS.contains(&w.ink), "{}", w.id);
+        }
+        assert_eq!(WIDGETS.len(), kit::deskwidget::WIDGETS.len());
+    }
 
     #[test]
     fn each_child_is_controlled_only_by_its_own_master() {
