@@ -102,14 +102,20 @@ fn wipe(buf: &mut [u8]) {
     std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
 }
 
+/// This account's name, from the account database only: never from the environment, which the
+/// caller controls.
 fn user() -> Option<CString> {
-    unsafe {
-        let pw = libc::getpwuid(libc::getuid());
-        if pw.is_null() || (*pw).pw_name.is_null() {
-            return None;
-        }
-        Some(CStr::from_ptr((*pw).pw_name).to_owned())
+    let mut buf = vec![0 as libc::c_char; 4096];
+    // SAFETY: an all-zero passwd is a valid value for getpwuid_r to fill in.
+    let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut out: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: every pointer is to a live local, and `buf.len()` is the buffer's real size.
+    let rc = unsafe { libc::getpwuid_r(libc::getuid(), &mut pw, buf.as_mut_ptr(), buf.len(), &mut out) };
+    if rc != 0 || out.is_null() || pw.pw_name.is_null() {
+        return None;
     }
+    // SAFETY: on success pw_name points to a NUL-terminated string inside `buf`, which is alive.
+    Some(unsafe { CStr::from_ptr(pw.pw_name) }.to_owned())
 }
 
 pub fn service() -> &'static CStr {

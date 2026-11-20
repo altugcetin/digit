@@ -445,10 +445,7 @@ fn submit(entry: &gtk::PasswordEntry, generation: u64) {
 }
 
 fn avatar() -> Option<gdk::Texture> {
-    let user = unsafe {
-        let pw = libc::getpwuid(libc::getuid());
-        if pw.is_null() || (*pw).pw_name.is_null() { String::new() } else { std::ffi::CStr::from_ptr((*pw).pw_name).to_string_lossy().into_owned() }
-    };
+    let user = glib::user_name().to_string_lossy().into_owned();
     let home = glib::home_dir();
     [home.join(".face"), home.join(".face.icon"), std::path::PathBuf::from(format!("/var/lib/AccountsService/icons/{user}"))]
         .into_iter()
