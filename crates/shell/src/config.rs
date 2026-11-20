@@ -99,6 +99,8 @@ pub struct Config {
     pub desktop_weather: String,
     pub desktop_system: String,
     pub desktop_screentime: String,
+    /// Widget places on screens other than the main one (see `kit::deskwidget`).
+    pub desktop_screens: toml::Table,
     /// What each desktop widget shows: the clock's date and weather, the batteries' levels and
     /// the media controls; and whether each sits on a card of its own.
     pub desktop_clock_date: bool,
@@ -237,6 +239,7 @@ impl Default for Config {
             desktop_weather: "off".into(),
             desktop_system: "off".into(),
             desktop_screentime: "off".into(),
+            desktop_screens: toml::Table::new(),
             desktop_clock_date: true,
             desktop_clock_weather: true,
             desktop_battery_levels: true,
@@ -323,6 +326,7 @@ pub struct Prefs {
     pub desktop_weather: String,
     pub desktop_system: String,
     pub desktop_screentime: String,
+    pub desktop_screens: toml::Table,
     /// What each desktop widget shows: the clock's date and weather, the batteries' levels and
     /// the media controls; and whether each sits on a card of its own.
     pub desktop_clock_date: bool,
@@ -426,6 +430,7 @@ impl From<&Config> for Prefs {
             desktop_weather: c.desktop_weather.clone(),
             desktop_system: c.desktop_system.clone(),
             desktop_screentime: c.desktop_screentime.clone(),
+            desktop_screens: c.desktop_screens.clone(),
             desktop_clock_date: c.desktop_clock_date,
             desktop_clock_weather: c.desktop_clock_weather,
             desktop_battery_levels: c.desktop_battery_levels,
@@ -469,6 +474,12 @@ pub const VOICE: [&str; 24] = [
 ];
 
 impl Prefs {
+    /// Where each desktop widget sits on the screen `output` (see `kit::deskwidget::places`).
+    pub fn places_on(&self, output: &str, primary: bool) -> [String; 6] {
+        let main = [&self.desktop_widget, &self.desktop_battery, &self.desktop_media, &self.desktop_weather, &self.desktop_system, &self.desktop_screentime].map(|p| p.clone());
+        kit::deskwidget::places_from(&main, &self.desktop_screens, output, primary)
+    }
+
     /// The hot corners of the screen `output`: its own, or the shared ones.
     pub fn corners_on(&self, output: &str) -> [kit::corners::Panel; 4] {
         self.monitor_corners.get(output).copied().unwrap_or(self.corners)

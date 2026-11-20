@@ -60,22 +60,19 @@ pub(crate) fn card_rect(placement: &str, device_count: usize, screen: (i32, i32)
 }
 
 thread_local! {
-    static WIDGET: RefCell<Option<(gtk::Window, Paint)>> = const { RefCell::new(None) };
-    static SHOWN_AT: RefCell<(String, String)> = const { RefCell::new((String::new(), String::new())) };
+    /// One on each screen whose places have it.
+    static WIDGETS: RefCell<Vec<(gtk::Window, Paint)>> = const { RefCell::new(Vec::new()) };
+    static SHOWN_AT: RefCell<String> = const { RefCell::new(String::new()) };
     static TIMER: RefCell<Option<glib::SourceId>> = const { RefCell::new(None) };
 }
 
 /// A device's level changed.
 pub fn changed() {
-    WIDGET.with(|w| {
-        if let Some((_, paint)) = w.borrow().as_ref() {
-            paint.queue_draw();
-        }
-    });
+    WIDGETS.with(|w| w.borrow().iter().for_each(|(_, paint)| paint.queue_draw()));
 }
 
 fn clear() {
-    if let Some((window, _)) = WIDGET.with(|w| w.borrow_mut().take()) {
+    for (window, _) in WIDGETS.with(|w| std::mem::take(&mut *w.borrow_mut())) {
         window.destroy();
     }
     if let Some(id) = TIMER.with(|t| t.borrow_mut().take()) {
@@ -90,49 +87,73 @@ pub(crate) fn monitor() -> Option<gdk::Monitor> {
     all.iter().find(|m| m.connector().is_some_and(|c| c == primary)).or(all.first()).cloned()
 }
 
+/// The main screen's connector.
+pub(crate) fn primary_output() -> String {
+    monitor().and_then(|m| m.connector()).map(|c| c.to_string()).unwrap_or_default()
+}
+
+/// Where each desktop widget sits on the screen `output`, in `kit::deskwidget::WIDGETS` order.
+pub(crate) fn places(app: &App, output: &str) -> [String; 6] {
+    app.prefs.borrow().places_on(output, output == primary_output())
+}
+
 pub fn apply(app: &Rc<App>) {
-    let place = app.prefs.borrow().desktop_battery.clone();
-    let clock = crate::desk::room(app);
-    let target = monitor();
-    let output = target.as_ref().and_then(|m| m.connector()).map(|c| c.to_string()).unwrap_or_default();
-    let dock = crate::dock::room(&output);
-    let key = (format!("{place} {clock} {} {dock:?}", app.reserve()), output.clone());
-    if SHOWN_AT.with(|s| *s.borrow() == key) && WIDGET.with(|w| w.borrow().is_some()) {
-        // Same place: options (levels, the card) only need a redraw.
+    let monitors: Vec<gdk::Monitor> = gdk::Display::default().map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect()).unwrap_or_default();
+    // Where the batteries go on each screen, and what moves them there.
+    let wanted: Vec<(gdk::Monitor, String, String, i32, [i32; 3])> = monitors
+        .into_iter()
+        .filter_map(|m| {
+            let output = m.connector()?.to_string();
+            let place = places(app, &output)[1].clone();
+            let (clock, dock) = (crate::desk::room(app, &output), crate::dock::room(&output));
+            Some((m, output, place, clock, dock))
+        })
+        .filter(|(_, _, place, _, _)| !matches!(place.as_str(), "" | "off"))
+        .collect();
+    let key = format!("{} {}", app.reserve(), wanted.iter().map(|(_, o, p, c, d)| format!("{o}:{p}:{c}:{d:?}")).collect::<Vec<_>>().join(" "));
+    if SHOWN_AT.with(|s| *s.borrow() == key) && WIDGETS.with(|w| w.borrow().len()) == wanted.len() {
+        // Same places: options (levels, the card) only need a redraw.
         changed();
         return;
     }
     clear();
     SHOWN_AT.with(|s| *s.borrow_mut() = key);
-    let Some(m) = target.filter(|_| !matches!(place.as_str(), "" | "off") && app.cfg.wallpaper) else { return };
-    let (top, left) = (place.starts_with("top"), place.ends_with("left"));
-    let window = gtk::Window::new();
-    window.init_layer_shell();
-    window.set_layer(Layer::Bottom);
-    window.set_namespace(Some("digit-desktop"));
-    window.set_keyboard_mode(KeyboardMode::None);
-    window.set_exclusive_zone(-1);
-    window.set_monitor(Some(&m));
-    window.add_css_class("digit");
-    window.set_anchor(if top { Edge::Top } else { Edge::Bottom }, true);
-    window.set_anchor(if left { Edge::Left } else { Edge::Right }, true);
-    window.set_margin(if top { Edge::Top } else { Edge::Bottom }, surface_margin(top, left, app.reserve(), clock, dock[2]));
-    window.set_margin(if left { Edge::Left } else { Edge::Right }, if left { dock[0] } else { dock[1] });
-    let paint = Paint::new(SURFACE_W as i32, SURFACE_H as i32);
-    let weak = paint.downgrade();
-    let a = Rc::downgrade(app);
-    paint.on_draw(move |s| {
-        let (Some(p), Some(app)) = (weak.upgrade(), a.upgrade()) else { return };
-        crate::draw::rasterized(|| draw(s, &p, &app, &output, left, top));
-    });
-    window.set_child(Some(&paint));
-    window.connect_realize(|w| {
-        if let Some(surface) = w.surface() {
-            surface.set_input_region(Some(&cairo::Region::create()));
-        }
-    });
-    window.present();
-    WIDGET.with(|w| *w.borrow_mut() = Some((window, paint)));
+    if !app.cfg.wallpaper {
+        return;
+    }
+    for (m, output, place, clock, dock) in wanted {
+        let (top, left) = (place.starts_with("top"), place.ends_with("left"));
+        let window = gtk::Window::new();
+        window.init_layer_shell();
+        window.set_layer(Layer::Bottom);
+        window.set_namespace(Some("digit-desktop"));
+        window.set_keyboard_mode(KeyboardMode::None);
+        window.set_exclusive_zone(-1);
+        window.set_monitor(Some(&m));
+        window.add_css_class("digit");
+        window.set_anchor(if top { Edge::Top } else { Edge::Bottom }, true);
+        window.set_anchor(if left { Edge::Left } else { Edge::Right }, true);
+        window.set_margin(if top { Edge::Top } else { Edge::Bottom }, surface_margin(top, left, app.reserve(), clock, dock[2]));
+        window.set_margin(if left { Edge::Left } else { Edge::Right }, if left { dock[0] } else { dock[1] });
+        let paint = Paint::new(SURFACE_W as i32, SURFACE_H as i32);
+        let weak = paint.downgrade();
+        let a = Rc::downgrade(app);
+        paint.on_draw(move |s| {
+            let (Some(p), Some(app)) = (weak.upgrade(), a.upgrade()) else { return };
+            crate::draw::rasterized(|| draw(s, &p, &app, &output, left, top));
+        });
+        window.set_child(Some(&paint));
+        window.connect_realize(|w| {
+            if let Some(surface) = w.surface() {
+                surface.set_input_region(Some(&cairo::Region::create()));
+            }
+        });
+        window.present();
+        WIDGETS.with(|w| w.borrow_mut().push((window, paint)));
+    }
+    if WIDGETS.with(|w| w.borrow().is_empty()) {
+        return;
+    }
     // The phone's level and the palette have no signal of their own here.
     let id = glib::timeout_add_local(Duration::from_secs(30), || {
         changed();

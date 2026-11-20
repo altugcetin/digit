@@ -58,7 +58,8 @@ struct Grid {
     top: i32,
     /// Where desktop widgets sit (the clock, the batteries and the corner widgets), which
     /// icons keep out of.
-    reserved: [Option<Rect>; 5],
+    /// Where the desktop widgets on this screen sit: the clock, the batteries and the four cards.
+    reserved: [Option<Rect>; 6],
 }
 impl Grid {
     fn new(width: i32, height: i32, top: i32) -> Self {
@@ -69,7 +70,7 @@ impl Grid {
             width,
             height,
             top,
-            reserved: [None; 5],
+            reserved: [None; 6],
         }
     }
     fn clamp(self, p: FreePos) -> FreePos {
@@ -1304,11 +1305,13 @@ impl Desktop {
         let mut ordered: Vec<_> = self.items.iter().map(|i| &i.data).collect();
         ordered.sort_by_cached_key(|data| (data.label.to_lowercase(), data.name.clone()));
         let names: Vec<_> = ordered.into_iter().map(|data| data.name.clone()).collect();
-        self.grid.reserved = [None; 5];
-        if let Some(app) = self.app.upgrade().filter(|app| self.primary && app.cfg.wallpaper) {
+        self.grid.reserved = [None; 6];
+        // Every screen keeps its icons clear of the widgets its own places put there.
+        if let Some(app) = self.app.upgrade().filter(|app| app.cfg.wallpaper) {
             let screen = (self.geometry.0, self.geometry.1);
-            let battery = crate::batterywidget::card_rect(&app.prefs.borrow().desktop_battery, crate::batterywidget::SHOWN, screen, app.reserve(), crate::desk::room(&app), crate::dock::room(&self.output));
-            let clock = crate::desk::rect(&app, screen);
+            let places = crate::batterywidget::places(&app, &self.output);
+            let battery = crate::batterywidget::card_rect(&places[1], crate::batterywidget::SHOWN, screen, app.reserve(), crate::desk::room(&app, &self.output), crate::dock::room(&self.output));
+            let clock = crate::desk::rect(&app, &self.output, screen);
             let all = clock.into_iter().chain(battery).chain(crate::deskcards::rects(&app, &self.output, screen));
             for (slot, r) in self.grid.reserved.iter_mut().zip(all) {
                 *slot = Some(Rect { x: r.x, y: r.y, w: r.w, h: r.h });

@@ -27,10 +27,15 @@ fn height(date: bool, weather: bool) -> f64 {
     TIME_H + if date { DATE_H } else { 0.0 } + if weather { WEATHER_H } else { 0.0 }
 }
 
-/// How far a widget at the top left sits under the clock there: below it and its card. 0 while
-/// the clock isn't at the left.
-pub fn room(app: &App) -> i32 {
-    if app.prefs.borrow().desktop_widget != "left" {
+/// The clock's place on the screen `output`: "left", "center" or "off".
+fn mode_on(app: &App, output: &str) -> String {
+    crate::batterywidget::places(app, output)[0].clone()
+}
+
+/// How far a widget at the top left of the screen `output` sits under the clock there: below it
+/// and its card. 0 while the clock isn't at the left.
+pub fn room(app: &App, output: &str) -> i32 {
+    if mode_on(app, output) != "left" {
         return 0;
     }
     let (date, weather) = rows(app);
@@ -38,10 +43,10 @@ pub fn room(app: &App) -> i32 {
     (height(date, weather) + card + 8.0).round() as i32
 }
 
-/// Where the clock sits on a screen `screen` big, for desktop icons to keep out of: the
-/// column its lines can fill, as tall as what it shows, with its card when it has one.
-pub(crate) fn rect(app: &App, screen: (i32, i32)) -> Option<crate::batterywidget::CardRect> {
-    let mode = app.prefs.borrow().desktop_widget.clone();
+/// Where the clock sits on the screen `output`, `screen` big, for desktop icons to keep out of:
+/// the column its lines can fill, as tall as what it shows, with its card when it has one.
+pub(crate) fn rect(app: &App, output: &str, screen: (i32, i32)) -> Option<crate::batterywidget::CardRect> {
+    let mode = mode_on(app, output);
     if mode == "off" || mode.is_empty() || !app.cfg.wallpaper {
         return None;
     }
@@ -88,23 +93,31 @@ fn tick() {
 }
 
 pub fn apply(app: &Rc<App>) {
-    let mode = app.prefs.borrow().desktop_widget.clone();
-    let same = MODE.with(|m| *m.borrow() == mode);
     let Some(display) = gdk::Display::default() else { return };
     let monitors: Vec<gdk::Monitor> = display.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect();
-    let names: Vec<String> = monitors.iter().filter_map(|m| m.connector().map(|c| c.to_string())).collect();
-    let current: Vec<String> = DESKS.with(|d| d.borrow().iter().map(|(n, _, _)| n.clone()).collect());
-    if same && current == names {
+    // Each screen has the clock where its own places put it.
+    let modes: Vec<(gdk::Monitor, String, String)> = monitors
+        .into_iter()
+        .filter_map(|m| {
+            let name = m.connector()?.to_string();
+            let mode = mode_on(app, &name);
+            Some((m, name, mode))
+        })
+        .collect();
+    let key = modes.iter().map(|(_, n, m)| format!("{n}={m}")).collect::<Vec<_>>().join(" ");
+    if MODE.with(|m| *m.borrow() == key) {
         return;
     }
     clear();
-    MODE.with(|m| *m.borrow_mut() = mode.clone());
-    if mode == "off" || mode.is_empty() || !app.cfg.wallpaper {
+    MODE.with(|m| *m.borrow_mut() = key);
+    if !app.cfg.wallpaper {
         return;
     }
     let top = app.reserve() + 36;
-    for m in monitors {
-        let Some(name) = m.connector().map(|c| c.to_string()) else { continue };
+    for (m, name, mode) in modes {
+        if mode == "off" || mode.is_empty() {
+            continue;
+        }
         let window = gtk::Window::new();
         window.init_layer_shell();
         window.set_layer(Layer::Bottom);

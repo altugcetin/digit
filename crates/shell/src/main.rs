@@ -409,8 +409,12 @@ fn watch_config(app: &Rc<App>) {
                 if before[6..] != next[6..] { theming::cursor_changed(); }
                 app.apply_prefs(config::Prefs::from(&config::load()));
                 let next = kit::prefs::text(&kit::prefs::read(), "primary_monitor", "");
-                if primary.replace(next.clone()) != next && kit::setup::installed() {
-                    dock::primary_changed(&app);
+                if primary.replace(next.clone()) != next {
+                    // The clock follows each screen's places, which depend on which is the main one.
+                    desk::apply(&app);
+                    if kit::setup::installed() {
+                        dock::primary_changed(&app);
+                    }
                 }
             }
         });

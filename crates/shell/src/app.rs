@@ -700,7 +700,7 @@ impl App {
         if before.desktop_raster != next.desktop_raster {
             crate::draw::set_raster(next.desktop_raster);
         }
-        if before.desktop_widget != next.desktop_widget || before.desktop_raster != next.desktop_raster {
+        if before.desktop_widget != next.desktop_widget || before.desktop_screens != next.desktop_screens || before.desktop_raster != next.desktop_raster {
             crate::desk::apply(self);
         }
         crate::deskicons::apply(self);

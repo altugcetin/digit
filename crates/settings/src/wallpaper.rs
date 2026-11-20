@@ -119,8 +119,8 @@ fn set_shared(path: PathBuf, then: impl FnOnce() + 'static) {
     });
 }
 
-/// What draws over the wallpaper on the small screen of the primary display, and takes its clicks:
-/// the desktop widgets (see `desktop::widget_overlay`).
+/// What draws over the wallpaper on a screen's small map, and takes its clicks: the desktop
+/// widgets on that screen (see `desktop::DeskWidgets`).
 pub(crate) struct Overlay {
     /// Draws in a box of the given size, with the pointer's spot highlighted.
     pub draw: DrawFn,
@@ -146,7 +146,7 @@ struct Own {
 }
 
 /// A small screen: the picture as the screen shows it, which the pointer drags to choose what
-/// stays in view and zooms by its corner, with the widgets over it on the primary screen.
+/// stays in view and zooms by its corner, with each screen's widgets over its part.
 ///
 /// The widgets own it through their handlers, and it holds them only weakly, so it lives as long
 /// as they do and no longer.
@@ -162,9 +162,8 @@ struct Map {
     key: String,
     /// Where the screens divide a spanning picture, as fractions of its width and height.
     parts: Vec<Part>,
-    /// Where the overlay's box sits on the map, as fractions.
-    spot: Part,
-    overlay: Option<Overlay>,
+    /// The widgets of each screen on the map, each over its box there (as fractions).
+    overlays: Vec<(Overlay, Part)>,
     asked: Cell<u64>,
     moved: Cell<bool>,
     /// The drag began on the corner handle: it zooms instead of moving the picture.
@@ -180,7 +179,7 @@ fn on_handle(x: f64, y: f64, w: f64, h: f64) -> bool {
 }
 
 impl Map {
-    fn new(key: &str, aspect: f64, parts: Vec<Part>, overlay: Option<(Overlay, Part)>, focus: Focus) -> (Rc<Self>, gtk::Widget, gtk::Label) {
+    fn new(key: &str, aspect: f64, parts: Vec<Part>, overlays: Vec<(Overlay, Part)>, focus: Focus) -> (Rc<Self>, gtk::Widget, gtk::Label) {
         let area = gtk::DrawingArea::new();
         area.add_css_class("desk-map");
         area.set_overflow(gtk::Overflow::Hidden);
@@ -196,12 +195,8 @@ impl Map {
         let note = ui::text("", "dim");
         note.set_wrap(true);
         note.set_xalign(0.0);
-        let (overlay, spot) = match overlay {
-            Some((o, p)) => (Some(o), p),
-            None => (None, (0.0, 0.0, 1.0, 1.0)),
-        };
-        if let Some(o) = &overlay { (o.install)(&area); }
-        let map = Rc::new(Self { area: area.downgrade(), note: note.downgrade(), pixels: RefCell::new(None), covered: RefCell::new(None), path: RefCell::new(None), focus: Cell::new(focus), key: key.into(), parts, spot, overlay, asked: Cell::new(0), moved: Cell::new(false), zooming: Cell::new(false) });
+        for (o, _) in &overlays { (o.install)(&area); }
+        let map = Rc::new(Self { area: area.downgrade(), note: note.downgrade(), pixels: RefCell::new(None), covered: RefCell::new(None), path: RefCell::new(None), focus: Cell::new(focus), key: key.into(), parts, overlays, asked: Cell::new(0), moved: Cell::new(false), zooming: Cell::new(false) });
         let owner = map.clone();
         area.set_draw_func(move |_, cr, w, h| owner.draw(cr, w as f64, h as f64));
         let drag = gtk::GestureDrag::new();
@@ -246,10 +241,15 @@ impl Map {
         let m = map.clone();
         click.connect_released(move |g, _, x, y| {
             if m.moved.get() { return; }
-            let (Some(o), Some(area)) = (m.overlay.as_ref(), g.widget().and_downcast::<gtk::DrawingArea>()) else { return };
+            let Some(area) = g.widget().and_downcast::<gtk::DrawingArea>() else { return };
             let (w, h) = (area.width() as f64, area.height() as f64);
-            let (bx, by, bw, bh) = (m.spot.0 * w, m.spot.1 * h, m.spot.2 * w, m.spot.3 * h);
-            if x >= bx && x <= bx + bw && y >= by && y <= by + bh { (o.click)(&area, (bx, by), (bw, bh), (x - bx, y - by)); }
+            for (o, spot) in &m.overlays {
+                let (bx, by, bw, bh) = (spot.0 * w, spot.1 * h, spot.2 * w, spot.3 * h);
+                if x >= bx && x <= bx + bw && y >= by && y <= by + bh {
+                    (o.click)(&area, (bx, by), (bw, bh), (x - bx, y - by));
+                    return;
+                }
+            }
         });
         area.add_controller(click);
         let motion = gtk::EventControllerMotion::new();
@@ -270,25 +270,18 @@ impl Map {
     fn pointer(&self, c: &gtk::EventControllerMotion, at: Option<(f64, f64)>) {
         let Some(area) = c.widget().and_downcast::<gtk::DrawingArea>() else { return };
         let (w, h) = (area.width() as f64, area.height() as f64);
-        if self.pixels.borrow().is_some() && at.is_some_and(|(x, y)| on_handle(x, y, w, h)) {
-            // Off whatever spot was lit on the way here.
-            if let Some(o) = self.overlay.as_ref() && (o.moved)(None, self.spot.2 * w, self.spot.3 * h).0 {
-                area.queue_draw();
-            }
-            area.set_cursor_from_name(Some("nwse-resize"));
-            return;
+        // On the zoom handle, no spot is lit.
+        let handle = self.pixels.borrow().is_some() && at.is_some_and(|(x, y)| on_handle(x, y, w, h));
+        let mut over = false;
+        for (o, spot) in &self.overlays {
+            let (bx, by, bw, bh) = (spot.0 * w, spot.1 * h, spot.2 * w, spot.3 * h);
+            let local = at.filter(|(x, y)| !handle && *x >= bx && *x <= bx + bw && *y >= by && *y <= by + bh).map(|(x, y)| (x - bx, y - by));
+            let (redraw, here) = (o.moved)(local, bw, bh);
+            if redraw { area.queue_draw(); }
+            over |= here;
         }
-        let Some(o) = self.overlay.as_ref() else {
-            let (over_x, over_y) = self.overflow();
-            area.set_cursor_from_name(Some(if over_x >= 1.0 || over_y >= 1.0 { "grab" } else { "default" }));
-            return;
-        };
-        let (bx, by, bw, bh) = (self.spot.0 * w, self.spot.1 * h, self.spot.2 * w, self.spot.3 * h);
-        let local = at.filter(|(x, y)| *x >= bx && *x <= bx + bw && *y >= by && *y <= by + bh).map(|(x, y)| (x - bx, y - by));
-        let (redraw, over) = (o.moved)(local, bw, bh);
-        if redraw { area.queue_draw(); }
         let (over_x, over_y) = self.overflow();
-        area.set_cursor_from_name(Some(if over { "pointer" } else if over_x >= 1.0 || over_y >= 1.0 { "grab" } else { "default" }));
+        area.set_cursor_from_name(Some(if handle { "nwse-resize" } else if over { "pointer" } else if over_x >= 1.0 || over_y >= 1.0 { "grab" } else { "default" }));
     }
 
     /// How far the picture, scaled to cover the frame and zoomed, runs past it sideways and up
@@ -399,9 +392,9 @@ impl Map {
             }
             cr.set_dash(&[], 0.0);
         }
-        if let Some(o) = &self.overlay {
+        for (o, spot) in &self.overlays {
             cr.save().ok();
-            let (bx, by, bw, bh) = (self.spot.0 * w, self.spot.1 * h, self.spot.2 * w, self.spot.3 * h);
+            let (bx, by, bw, bh) = (spot.0 * w, spot.1 * h, spot.2 * w, spot.3 * h);
             cr.rectangle(bx, by, bw, bh);
             cr.clip();
             cr.translate(bx, by);
@@ -585,7 +578,8 @@ fn fill(holder: &gtk::Box) {
         });
         shown
     };
-    let overlay = || crate::desktop::widget_overlay(&t);
+    // Every screen's map has its widgets; the main screen's places are the widgets' own settings.
+    let widgets = crate::desktop::DeskWidgets::new(&t, &found[primary].output);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 14);
     row.set_homogeneous(true);
     row.set_margin_start(16);
@@ -596,19 +590,20 @@ fn fill(holder: &gtk::Box) {
             let (w, h, parts) = span_of(&found);
             let shown = shared(&card, "Picture on all screens");
             card.append(&hint);
-            let (map, frame, note) = Map::new(wallfocus::SPAN, w / h, parts.clone(), Some((overlay(), parts[primary])), wallfocus::read(&t, wallfocus::SPAN));
+            let overlays = found.iter().zip(&parts).map(|(screen, part)| (widgets.overlay(&t, &screen.output), *part)).collect();
+            let (map, frame, note) = Map::new(wallfocus::SPAN, w / h, parts.clone(), overlays, wallfocus::read(&t, wallfocus::SPAN));
             map.load(shown);
             row.append(&block(&map, &frame, &note, &format!("{} screens", found.len()), if found.len() > 1 { 0.7 } else { 0.5 }, None));
         }
         "separate" => {
             card.append(&hint);
-            for (i, screen) in found.iter().enumerate() {
+            for screen in &found {
                 let shown = picture(&t, layout, &screen.output);
                 let (refill, output) = (again(holder), screen.output.clone());
                 let own: Rc<dyn Fn(PathBuf)> = Rc::new(move |p| {
                     if set_own(&output, &p) { refill(); }
                 });
-                let (map, frame, note) = Map::new(&screen.output, screen.w / screen.h, Vec::new(), (i == primary).then(|| (overlay(), (0.0, 0.0, 1.0, 1.0))), wallfocus::read(&t, &screen.output));
+                let (map, frame, note) = Map::new(&screen.output, screen.w / screen.h, Vec::new(), vec![(widgets.overlay(&t, &screen.output), (0.0, 0.0, 1.0, 1.0))], wallfocus::read(&t, &screen.output));
                 map.load(shown.clone());
                 row.append(&block(&map, &frame, &note, &screen.output, if found.len() > 1 { 0.9 } else { 0.5 }, Some(Own { current: shown, start: start.clone(), picked: own })));
             }
@@ -616,8 +611,8 @@ fn fill(holder: &gtk::Box) {
         _ => {
             let shown = shared(&card, if found.len() > 1 { "Picture on all screens" } else { "Picture" });
             card.append(&hint);
-            for (i, screen) in found.iter().enumerate() {
-                let (map, frame, note) = Map::new(&screen.output, screen.w / screen.h, Vec::new(), (i == primary).then(|| (overlay(), (0.0, 0.0, 1.0, 1.0))), wallfocus::read(&t, &screen.output));
+            for screen in &found {
+                let (map, frame, note) = Map::new(&screen.output, screen.w / screen.h, Vec::new(), vec![(widgets.overlay(&t, &screen.output), (0.0, 0.0, 1.0, 1.0))], wallfocus::read(&t, &screen.output));
                 map.load(shown.clone());
                 row.append(&block(&map, &frame, &note, &screen.output, if found.len() > 1 { 0.9 } else { 0.5 }, None));
             }
