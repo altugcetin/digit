@@ -377,9 +377,7 @@ fn cards(path: &str, want: &[&'static str], sf: f64) -> Vec<(&'static str, gdk::
         }
     }
     drop(master);
-    unsafe {
-        libc::malloc_trim(0);
-    }
+    kit::app::trim();
     out
 }
 

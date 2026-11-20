@@ -56,10 +56,12 @@ fn ramp(size: u32, kelvin: f64) -> Option<OwnedFd> {
             bytes.extend_from_slice(&v.to_ne_bytes());
         }
     }
+    // SAFETY: a static NUL-terminated name and flags; returns a new descriptor or -1.
     let fd = unsafe { libc::memfd_create(c"digit-gamma".as_ptr(), libc::MFD_CLOEXEC) };
     if fd < 0 {
         return None;
     }
+    // SAFETY: `fd` is the new descriptor just created, owned by nothing else.
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
     let mut file = std::fs::File::from(owned);
     file.write_all(&bytes).ok()?;

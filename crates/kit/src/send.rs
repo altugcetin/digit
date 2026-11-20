@@ -77,6 +77,7 @@ pub fn info(fingerprint: &str) -> Value {
 }
 
 fn bind() -> Option<UdpSocket> {
+    // SAFETY: plain socket calls on a descriptor created here; every pointer is to a local of the size passed, and the descriptor is closed on failure or handed to UdpSocket, which then owns it.
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
         if fd < 0 {
@@ -173,6 +174,7 @@ pub async fn kde_send(id: &str, files: &[PathBuf]) -> bool {
 fn curl() -> Command {
     let mut c = Command::new("curl");
     c.args(["-sk", "--connect-timeout", "5", "--speed-limit", "1", "--speed-time", "30"]).stderr(Stdio::null());
+    // SAFETY: the closure only calls prctl, which is async-signal-safe, between fork and exec.
     unsafe {
         c.pre_exec(|| {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);

@@ -134,9 +134,7 @@ pub fn decode_all(path: &str, sizes: &[(i32, i32)], focus: Focus) -> Vec<((i32, 
             }
         }
     }
-    unsafe {
-        libc::malloc_trim(0);
-    }
+    kit::app::trim();
     out
 }
 

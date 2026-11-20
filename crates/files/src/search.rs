@@ -155,12 +155,14 @@ fn byte_attribute(info: &gio::FileInfo, name: &str) -> Option<CString> {
     // panics for valid Unix filenames containing non-UTF-8 bytes. Copy the raw
     // value instead. GFileInfo owns this NUL-terminated string, and remains
     // alive and unmodified until the copy is complete.
+    // SAFETY: `info` is a live GFileInfo and `name` a NUL-terminated string; the getter only reads, and returns a pointer it keeps owning.
     let value = unsafe {
         gio::ffi::g_file_info_get_attribute_byte_string(info.to_glib_none().0, name.as_ptr())
     };
     if value.is_null() {
         None
     } else {
+        // SAFETY: non-null, the value is a NUL-terminated string owned by `info`, which is alive and unchanged until it is copied here.
         Some(unsafe { CStr::from_ptr(value) }.to_owned())
     }
 }

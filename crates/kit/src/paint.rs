@@ -8,6 +8,7 @@ unsafe extern "C" {
 }
 
 pub fn layout(cr: &cairo::Context, text: &str, font: &str) -> pango::Layout {
+    // SAFETY: `cr` is a live cairo context; pango_cairo_create_layout returns a new layout with a reference we take over.
     let l: pango::Layout = unsafe { glib::translate::from_glib_full(pango_cairo_create_layout(cr.to_raw_none())) };
     l.set_text(text);
     l.set_font_description(Some(&pango::FontDescription::from_string(font)));
@@ -15,10 +16,12 @@ pub fn layout(cr: &cairo::Context, text: &str, font: &str) -> pango::Layout {
 }
 
 pub fn show(cr: &cairo::Context, l: &pango::Layout) {
+    // SAFETY: both pointers come from live, borrowed objects and are only used for the duration of the call.
     unsafe { pango_cairo_show_layout(cr.to_raw_none(), glib::translate::ToGlibPtr::to_glib_none(l).0) }
 }
 
 pub fn path(cr: &cairo::Context, l: &pango::Layout) {
+    // SAFETY: both pointers come from live, borrowed objects and are only used for the duration of the call.
     unsafe { pango_cairo_layout_path(cr.to_raw_none(), glib::translate::ToGlibPtr::to_glib_none(l).0) }
 }
 

@@ -33,6 +33,7 @@ fn local_mounts() -> Vec<LocalMount> {
     // The safe MountEntry binding requires GLib 2.84. Use GIO's older API here
     // to retain the project's GTK 4.18 / GLib 2.80 minimum. Copy all values
     // before freeing each owned entry and then its list container.
+    // SAFETY: g_unix_mounts_get returns a list we own; each entry is read only while alive, freed once, and the list after its entries.
     unsafe {
         let list = gio_unix::ffi::g_unix_mounts_get(std::ptr::null_mut());
         let mut link = list;

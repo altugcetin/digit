@@ -128,9 +128,7 @@ pub(crate) fn show(name: &str) {
         }
         if stack.child_by_name(name).is_none() {
             stack.add_named(&build_page(name), Some(name));
-            glib::timeout_add_local_once(std::time::Duration::from_millis(1500), || unsafe {
-                libc::malloc_trim(0);
-            });
+            kit::app::trim_later(1500);
         }
         stack.set_visible_child_name(name);
         let keep = name.to_string();
@@ -147,9 +145,7 @@ pub(crate) fn show(name: &str) {
                 }
             }
             if gone {
-                glib::timeout_add_local_once(std::time::Duration::from_millis(300), || unsafe {
-                    libc::malloc_trim(0);
-                });
+                kit::app::trim_later(300);
             }
         });
         let mut child = list.first_child();
@@ -701,11 +697,7 @@ fn main() -> glib::ExitCode {
             }
         };
     }
-    kit::effects::select("DIGIT_SETTINGS_RENDERER");
-    unsafe {
-        libc::mallopt(libc::M_MMAP_THRESHOLD, 256 * 1024);
-        libc::mallopt(libc::M_ARENA_MAX, 2);
-    }
+    kit::app::lean("DIGIT_SETTINGS_RENDERER");
     install();
     let app = gtk::Application::new(Some(APP_ID), gio::ApplicationFlags::HANDLES_COMMAND_LINE);
     app.connect_startup(|_| gtk::Window::set_default_icon_name(APP_ID));

@@ -116,26 +116,35 @@ pub fn controls(window: &impl IsA<gtk::Window>, app_id: &'static str) -> gtk::Bo
     bar
 }
 
-pub fn trim_later(ms: u64) {
-    glib::timeout_add_local_once(std::time::Duration::from_millis(ms), || {
-        unsafe extern "C" {
-            fn malloc_trim(pad: usize) -> i32;
-        }
-        unsafe {
-            malloc_trim(0);
-        }
-    });
+/// Hands memory freed by a big teardown back to the system now; glibc keeps it otherwise.
+pub fn trim() {
+    // SAFETY: malloc_trim only walks the allocator's own free lists, under its own locks, and
+    // may be called from any thread at any time.
+    unsafe {
+        libc::malloc_trim(0);
+    }
 }
 
+/// [`trim`], once what is being torn down has settled.
+pub fn trim_later(ms: u64) {
+    glib::timeout_add_local_once(std::time::Duration::from_millis(ms), trim);
+}
+
+/// Keeps the allocator lean: large blocks go straight back to the system and at most two
+/// arenas are kept. Call it first thing in `main`.
+pub fn tune_malloc() {
+    // SAFETY: mallopt takes plain integers, both parameters are ones glibc knows, and it is
+    // called at start, before GTK or any other thread allocates.
+    unsafe {
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 256 * 1024);
+        libc::mallopt(libc::M_ARENA_MAX, 2);
+    }
+}
+
+/// The renderer `env` picks, and [`tune_malloc`]: the start of every Digit app.
 pub fn lean(env: &str) {
     crate::effects::select(env);
-    unsafe extern "C" {
-        fn mallopt(param: i32, value: i32) -> i32;
-    }
-    unsafe {
-        mallopt(-3, 256 * 1024);
-        mallopt(-8, 2);
-    }
+    tune_malloc();
 }
 
 pub fn replace(ids: &[&str], by: &str, marker: &str) {
