@@ -1,6 +1,7 @@
 use crate::app::App;
 use gio_unix::DesktopAppInfo;
 use gtk::{gio, glib, prelude::*};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::rc::Rc;
 use std::time::Duration;
@@ -71,6 +72,21 @@ fn sandboxed(id: &str) -> Vec<u32> {
     pids().filter(|p| std::fs::read_to_string(format!("/proc/{p}/cgroup")).is_ok_and(|c| c.contains(&mark))).collect()
 }
 
+/// A handle on process `pid` that keeps meaning that process after it exits, so a signal sent
+/// through it never reaches another process given the same number since.
+fn hold(pid: u32) -> Option<(u32, OwnedFd)> {
+    // SAFETY: pidfd_open takes a pid and flags, borrows nothing, and returns a new descriptor or -1.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    // SAFETY: a non-negative result is a descriptor that was just opened and nothing else owns.
+    (fd >= 0).then(|| (pid, unsafe { OwnedFd::from_raw_fd(fd as i32) }))
+}
+
+/// Asks the process behind `fd` to quit. A process that is gone already gets nothing.
+fn terminate(fd: &OwnedFd) {
+    // SAFETY: `fd` is an open pidfd; a null siginfo with no flags is the plain kill(2) equivalent.
+    unsafe { libc::syscall(libc::SYS_pidfd_send_signal, fd.as_raw_fd(), libc::SIGTERM, std::ptr::null::<libc::siginfo_t>(), 0) };
+}
+
 pub fn running(app: &App, key: &str) -> bool {
     let t = target(app, key);
     match (&t.flatpak, &t.exe) {
@@ -84,9 +100,10 @@ pub fn quit(app: &Rc<App>, key: &str, windows: Vec<u64>) {
     let t = target(app, key);
     glib::spawn_future_local(async move {
         let ids = windows.clone();
-        let owners: Vec<u32> = gio::spawn_blocking(move || {
+        // Held from the start: by the time they are signalled the numbers may belong to others.
+        let owners: Vec<(u32, OwnedFd)> = gio::spawn_blocking(move || {
             let all = kit::wm::windows();
-            let owners: Vec<u32> = all.iter().filter(|w| ids.contains(&w.id)).filter_map(|w| w.pid).collect();
+            let owners: Vec<(u32, OwnedFd)> = all.iter().filter(|w| ids.contains(&w.id)).filter_map(|w| w.pid).filter_map(hold).collect();
             for id in ids {
                 kit::wm::close(id);
             }
@@ -97,7 +114,7 @@ pub fn quit(app: &Rc<App>, key: &str, windows: Vec<u64>) {
         glib::timeout_future(Duration::from_millis(1200)).await;
         let probe = t.clone();
         let _ = gio::spawn_blocking(move || {
-            let left = kit::wm::windows().iter().any(|w| probe.ids.contains(&w.app_id.to_lowercase()) || w.pid.is_some_and(|p| owners.contains(&p)));
+            let left = kit::wm::windows().iter().any(|w| probe.ids.contains(&w.app_id.to_lowercase()) || w.pid.is_some_and(|p| owners.iter().any(|(o, _)| *o == p)));
             if left {
                 return;
             }
@@ -107,18 +124,33 @@ pub fn quit(app: &Rc<App>, key: &str, windows: Vec<u64>) {
                 }
                 return;
             }
-            let mut victims: Vec<u32> = owners.into_iter().filter(|p| mine(*p) && !protected(*p)).collect();
-            if victims.is_empty() {
-                if let Some(x) = &probe.exe {
-                    victims = named(x);
-                }
+            let mut victims: Vec<(u32, OwnedFd)> = owners.into_iter().filter(|(p, _)| mine(*p) && !protected(*p)).collect();
+            if victims.is_empty()
+                && let Some(x) = &probe.exe
+            {
+                victims = named(x).into_iter().filter_map(hold).collect();
             }
-            for pid in victims {
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGTERM);
-                }
+            for (_, fd) in &victims {
+                terminate(fd);
             }
         })
         .await;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn a_held_process_gets_the_signal_and_a_gone_one_nothing() {
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let (pid, fd) = hold(child.id()).expect("pidfd_open");
+        assert_eq!(pid, child.id());
+        terminate(&fd);
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM));
+        // Reaped: its number may be anyone's now, but the handle still means the old process.
+        terminate(&fd);
+    }
 }
