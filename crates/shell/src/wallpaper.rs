@@ -127,7 +127,9 @@ pub fn decode_all(path: &str, sizes: &[(i32, i32)], focus: Focus) -> Vec<((i32, 
     if missing.is_empty() {
         return out;
     }
-    if let Some(master) = crate::stash::master(path, &missing) {
+    // Zoomed in, a smaller part of the picture fills the screen: read it larger to stay sharp.
+    let zoomed: Vec<(i32, i32)> = missing.iter().map(|&(w, h)| ((w as f64 * focus.2).round() as i32, (h as f64 * focus.2).round() as i32)).collect();
+    if let Some(master) = crate::stash::master(path, &zoomed) {
         for (size, slot) in out.iter_mut().filter(|(_, t)| t.is_none()) {
             if let Some(pb) = crate::stash::cover_at(&master, size.0, size.1, focus) {
                 let t = crate::stash::texture(&pb);
@@ -491,14 +493,14 @@ fn decode_frames(requests: Vec<Render>, layout: Layout, b: Rect, global: String,
             else { f.span_size.is_none() && (f.texture.width(), f.texture.height()) == size }) {
             return Some(frame.texture.clone());
         }
-        if layout == Layout::Span { crate::stash::master(path, &[size]).and_then(|pb| crate::stash::cover_at(&pb, size.0, size.1, focus)).map(|pb| crate::stash::texture(&pb)) }
+        if layout == Layout::Span { crate::stash::master(path, &[((size.0 as f64 * focus.2).round() as i32, (size.1 as f64 * focus.2).round() as i32)]).and_then(|pb| crate::stash::cover_at(&pb, size.0, size.1, focus)).map(|pb| crate::stash::texture(&pb)) }
         else { decode(path, size.0, size.1, focus) }
     })
 }
 
 fn render_frames(requests: Vec<Render>, layout: Layout, b: Rect, global: String, mut decode: impl FnMut(&str, (i32, i32), Focus) -> Option<gdk::Texture>) -> Vec<(String, Frame)> {
     let mut decoded = HashMap::new();
-    let key = |f: Focus| ((f.0 * 100.0).round() as i32, (f.1 * 100.0).round() as i32);
+    let key = |f: Focus| ((f.0 * 100.0).round() as i32, (f.1 * 100.0).round() as i32, (f.2 * 100.0).round() as i32);
     let mut get = |path: &str, size, focus: Focus| decoded.entry((path.to_string(), size, key(focus))).or_insert_with(|| decode(path, size, focus)).clone();
     let mut maps: HashMap<usize, std::sync::Arc<Vec<f32>>> = HashMap::new();
     let mut pixels: HashMap<usize, Pixbuf> = HashMap::new();
@@ -1180,12 +1182,12 @@ mod tests {
         let texture: gdk::Texture = gdk::MemoryTexture::new(80, 40, gdk::MemoryFormat::R8g8b8a8, &glib::Bytes::from_owned(vec![255u8; 80 * 40 * 4]), 80 * 4).upcast();
         let monitors = [monitor("a", 0.0, 0.0, 80.0, 40.0, 1.0)];
         let mut asked = Vec::new();
-        let frames = render_frames(vec![Render { output: "a".into(), path: "p".into(), size: (80, 40), view: span_regions(&monitors)[0], focus: (0.5, 0.0) }], Layout::Same, bounds(&monitors), "p".into(), |_, _, focus| {
+        let frames = render_frames(vec![Render { output: "a".into(), path: "p".into(), size: (80, 40), view: span_regions(&monitors)[0], focus: (0.5, 0.0, 1.0) }], Layout::Same, bounds(&monitors), "p".into(), |_, _, focus| {
             asked.push(focus);
             Some(texture.clone())
         });
-        assert_eq!(asked, [(0.5, 0.0)]);
-        assert_eq!(frames[0].1.focus, (0.5, 0.0));
+        assert_eq!(asked, [(0.5, 0.0, 1.0)]);
+        assert_eq!(frames[0].1.focus, (0.5, 0.0, 1.0));
         assert_eq!(frames[0].1.region, Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
     }
 
@@ -1200,7 +1202,7 @@ mod tests {
         assert_eq!(same.len(), 1);
         assert_eq!(same[0].1.texture.as_ptr(), texture.as_ptr());
         // ... a new one does not: it needs a decode, and there is no file to decode.
-        assert!(decode_frames(request((0.5, 0.0)), Layout::Same, bounds(&monitors), "/gone.png".into(), vec![live]).is_empty());
+        assert!(decode_frames(request((0.5, 0.0, 1.0)), Layout::Same, bounds(&monitors), "/gone.png".into(), vec![live]).is_empty());
     }
 
     #[test]
