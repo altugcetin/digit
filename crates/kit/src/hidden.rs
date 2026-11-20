@@ -42,6 +42,20 @@ pub fn change(t: &toml::Table, id: &str, hide: bool) -> Vec<(&'static str, toml:
     vec![("apps_hidden", arr(hidden)), ("apps_shown", arr(shown))]
 }
 
+/// Hides or shows app `id`, in one locked change of the settings.
+pub fn save(id: &str, hide: bool) -> Result<(), String> {
+    crate::prefs::edit(|t| {
+        let mut changed = false;
+        for (key, value) in change(t, id, hide) {
+            if t.get(key) != Some(&value) {
+                t.insert(key.to_string(), value);
+                changed = true;
+            }
+        }
+        changed
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

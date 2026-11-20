@@ -93,6 +93,31 @@ pub fn unset(key: &str) -> Result<(), String> {
     update(|table| table.remove(key).is_some())
 }
 
+/// Changes the settings in one locked read and write: `change` gets the file as it is now and
+/// says whether it changed it. Use it, not `read` then `set`, whenever the new value is made from
+/// the old one, or a change another program made in between is lost.
+pub fn edit(change: impl FnOnce(&mut toml::Table) -> bool) -> Result<(), String> {
+    update(change)
+}
+
+/// Changes the table under `key` (such as the wallpaper of each screen) as [`edit`] does. A
+/// table left empty removes the key.
+pub fn update_table(key: &str, change: impl FnOnce(&mut toml::Table)) -> Result<(), String> {
+    update(|prefs| {
+        let mut table = prefs.get(key).and_then(toml::Value::as_table).cloned().unwrap_or_default();
+        change(&mut table);
+        let next = (!table.is_empty()).then_some(toml::Value::Table(table));
+        if prefs.get(key) == next.as_ref() {
+            return false;
+        }
+        match next {
+            Some(value) => prefs.insert(key.to_string(), value),
+            None => prefs.remove(key),
+        };
+        true
+    })
+}
+
 fn update(change: impl FnOnce(&mut toml::Table) -> bool) -> Result<(), String> {
     let file = path();
     if let Some(dir) = file.parent() {
@@ -129,6 +154,11 @@ mod tests {
                     barrier.wait();
                     for value in 0..8 {
                         set(&format!("key_{i}"), value.into()).unwrap();
+                        // Every writer's entry in one shared table survives the others'.
+                        update_table("screens", |t| {
+                            t.insert(format!("screen_{i}"), value.into());
+                        })
+                        .unwrap();
                     }
                 })
             }).collect();
@@ -138,7 +168,11 @@ mod tests {
             let table = read();
             for i in 0..16 {
                 assert_eq!(table.get(&format!("key_{i}")).and_then(toml::Value::as_integer), Some(7));
+                assert_eq!(table.get("screens").and_then(|t| t.get(format!("screen_{i}"))).and_then(toml::Value::as_integer), Some(7));
             }
+            // A table left empty goes.
+            update_table("screens", toml::Table::clear).unwrap();
+            assert!(!read().contains_key("screens"));
             unset("key_0").unwrap();
             assert!(!read().contains_key("key_0"));
             assert_eq!(read().len(), 15);

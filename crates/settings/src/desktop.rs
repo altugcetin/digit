@@ -19,6 +19,11 @@ fn apply_compositor() {
     });
 }
 
+/// Whether a save went through; a failed one is shown.
+pub(crate) fn saved(result: Result<(), String>) -> bool {
+    result.map_err(|e| ui::fail(&format!("Could not save: {e}"))).is_ok()
+}
+
 pub(crate) fn save_many(values: &[(&str, toml::Value)]) -> bool {
     if let Err(e) = prefs::set_many(values) {
         ui::fail(&format!("Could not save: {e}"));
@@ -1304,7 +1309,7 @@ fn corners_picker(card: &gtk::Box, t: &toml::Table) {
                 let stored = prefs::read();
                 let next = corners::assign(read_now(&stored), corner, panel);
                 let saved = match picked.borrow().as_deref() {
-                    Some(output) => save(corners::MONITORS, corners::with_monitor(&stored, output, &next)),
+                    Some(output) => saved(corners::save_monitor(output, &next)),
                     None => save_many(&corners::values(&next)),
                 };
                 // A failed save shows what is really stored again.
@@ -1640,7 +1645,7 @@ impl DeskWidgets {
                     let values: Vec<(&str, toml::Value)> = kit::deskwidget::WIDGETS.iter().zip(next.iter()).map(|(w, v)| (kit::deskwidget::place_key(w), toml::Value::String(v.clone()))).collect();
                     save_many(&values)
                 } else {
-                    save(kit::deskwidget::SCREENS, kit::deskwidget::with_screen(&prefs::read(), &output, &next))
+                    saved(kit::deskwidget::save_screen(&output, &next))
                 };
                 if !saved { return; }
                 places.borrow_mut().insert(output.clone(), next);

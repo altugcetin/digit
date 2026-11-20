@@ -135,7 +135,7 @@ fn load(list: Rc<gtk::Box>, search: gtk::SearchEntry) {
             let sw = gtk::Switch::new();
             sw.set_valign(gtk::Align::Center);
             sw.set_tooltip_text(Some("Show in the app grid and Spotlight"));
-            ui::bind_switch(&sw, shown, move |on| crate::desktop::save_many(&kit::hidden::change(&prefs::read(), &id, !on)));
+            ui::bind_switch(&sw, shown, move |on| crate::desktop::saved(kit::hidden::save(&id, !on)));
             end.append(&sw);
             list.append(&row);
         }

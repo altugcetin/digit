@@ -87,9 +87,9 @@ fn start_dir(t: &toml::Table) -> PathBuf {
 /// Sets the picture of `output` ("one per screen"), keeping the choices of screens that are not
 /// plugged in now.
 fn set_own(output: &str, path: &Path) -> bool {
-    let mut table = kit::prefs::read().get("wallpapers").and_then(toml::Value::as_table).cloned().unwrap_or_default();
-    table.insert(output.into(), toml::Value::String(path.to_string_lossy().into_owned()));
-    save("wallpapers", toml::Value::Table(table))
+    crate::desktop::saved(kit::prefs::update_table("wallpapers", |table| {
+        table.insert(output.into(), toml::Value::String(path.to_string_lossy().into_owned()));
+    }))
 }
 
 /// The `digit` program: beside this one first, since a desktop launch may not have
