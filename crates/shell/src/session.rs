@@ -91,18 +91,12 @@ fn uptime() -> String {
     }
 }
 
+/// The user's full name from the account, or the login name when the account has none. GLib
+/// reads it once with the thread-safe calls (unlike `getpwuid`), and names a missing one
+/// "Unknown".
 pub fn real_name() -> String {
-    unsafe {
-        let pw = libc::getpwuid(libc::getuid());
-        if pw.is_null() {
-            return String::new();
-        }
-        let gecos = if (*pw).pw_gecos.is_null() { String::new() } else { std::ffi::CStr::from_ptr((*pw).pw_gecos).to_string_lossy().split(',').next().unwrap_or("").trim().to_string() };
-        if !gecos.is_empty() {
-            return gecos;
-        }
-        if (*pw).pw_name.is_null() { String::new() } else { std::ffi::CStr::from_ptr((*pw).pw_name).to_string_lossy().into_owned() }
-    }
+    let real = glib::real_name().to_string_lossy().trim().to_string();
+    if real.is_empty() || real == "Unknown" { glib::user_name().to_string_lossy().into_owned() } else { real }
 }
 
 impl Menu {
