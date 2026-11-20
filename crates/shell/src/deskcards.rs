@@ -100,14 +100,20 @@ pub enum Kind {
 impl Kind {
     const ALL: [Kind; 4] = [Kind::Media, Kind::Weather, Kind::System, Kind::ScreenTime];
 
-    /// The corner it's in ("top_left"…), or "off", and whether it has a card.
-    fn place(self, p: &crate::config::Prefs) -> (String, bool) {
+    /// Whether it has a card.
+    fn backed(self, p: &crate::config::Prefs) -> bool {
         match self {
-            Kind::Media => (p.desktop_media.clone(), p.desktop_media_bg),
-            Kind::Weather => (p.desktop_weather.clone(), p.desktop_weather_bg),
-            Kind::System => (p.desktop_system.clone(), p.desktop_system_bg),
-            Kind::ScreenTime => (p.desktop_screentime.clone(), p.desktop_screentime_bg),
+            Kind::Media => p.desktop_media_bg,
+            Kind::Weather => p.desktop_weather_bg,
+            Kind::System => p.desktop_system_bg,
+            Kind::ScreenTime => p.desktop_screentime_bg,
         }
+    }
+
+    /// The corner it's in on the screen `output` ("top_left"…), or "off".
+    fn place_on(self, app: &App, output: &str) -> String {
+        let i = kit::deskwidget::WIDGETS.iter().position(|w| *w == self.name()).unwrap_or(0);
+        crate::batterywidget::places(app, output)[i].clone()
     }
 
     /// The name its settings go under.
@@ -180,10 +186,10 @@ fn clear() {
     }
 }
 
-/// How far from the top a widget in a top corner starts: under the bar, and under the clock
-/// when both are at the top left.
-fn top_margin(app: &App, left: bool) -> i32 {
-    app.reserve() + if left { crate::desk::room(app) } else { 0 }
+/// How far from the top a widget in a top corner of the screen `output` starts: under the bar,
+/// and under the clock when both are at the top left.
+fn top_margin(app: &App, output: &str, left: bool) -> i32 {
+    app.reserve() + if left { crate::desk::room(app, output) } else { 0 }
 }
 
 /// Where the widgets that are out sit on a screen `screen` big, in its coordinates: their
@@ -194,7 +200,7 @@ pub(crate) fn rects(app: &App, output: &str, screen: (i32, i32)) -> Vec<CardRect
     Kind::ALL
         .iter()
         .filter_map(|k| {
-            let (place, backed) = k.place(&prefs);
+            let (place, backed) = (k.place_on(app, output), k.backed(&prefs));
             if matches!(place.as_str(), "" | "off") {
                 return None;
             }
@@ -202,7 +208,7 @@ pub(crate) fn rects(app: &App, output: &str, screen: (i32, i32)) -> Vec<CardRect
             let (w, h) = k.size();
             let (side, bottom) = dock_margins(output, top, left);
             let x = if left { side as f64 + AIR } else { screen.0 as f64 - side as f64 - AIR - w };
-            let y = if top { top_margin(app, left) as f64 + AIR } else { screen.1 as f64 - bottom as f64 - AIR - h };
+            let y = if top { top_margin(app, output, left) as f64 + AIR } else { screen.1 as f64 - bottom as f64 - AIR - h };
             let pad = if backed { CARD_PAD } else { 0.0 };
             Some(CardRect { x: x - pad, y: y - pad, w: w + 2.0 * pad, h: h + 2.0 * pad })
         })
@@ -211,20 +217,32 @@ pub(crate) fn rects(app: &App, output: &str, screen: (i32, i32)) -> Vec<CardRect
 
 pub fn apply(app: &Rc<App>) {
     APP.with(|a| *a.borrow_mut() = Rc::downgrade(app));
-    let target = crate::batterywidget::monitor();
-    let output = target.as_ref().and_then(|m| m.connector()).map(|c| c.to_string()).unwrap_or_default();
-    let prefs = app.prefs.borrow().clone();
-    let places: Vec<(Kind, String)> = Kind::ALL.iter().map(|k| (*k, k.place(&prefs).0)).filter(|(_, p)| !matches!(p.as_str(), "" | "off")).collect();
-    let key = format!("{places:?} {output} {} {} {:?}", app.reserve(), crate::desk::room(app), crate::dock::room(&output));
-    if SHOWN.with(|s| *s.borrow() == key) && CARDS.with(|c| !c.borrow().is_empty()) == !places.is_empty() {
+    let monitors: Vec<gdk::Monitor> = gdk::Display::default().map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect()).unwrap_or_default();
+    // Every widget that is out, on each screen whose places have it.
+    let mut places: Vec<(gdk::Monitor, String, Kind, String)> = Vec::new();
+    let mut key = format!("{}", app.reserve());
+    for m in monitors {
+        let Some(output) = m.connector().map(|c| c.to_string()) else { continue };
+        key.push_str(&format!(" {output}:{}:{:?}", crate::desk::room(app, &output), crate::dock::room(&output)));
+        for kind in Kind::ALL {
+            let place = kind.place_on(app, &output);
+            if !matches!(place.as_str(), "" | "off") {
+                key.push_str(&format!(":{kind:?}={place}"));
+                places.push((m.clone(), output.clone(), kind, place));
+            }
+        }
+    }
+    if SHOWN.with(|s| *s.borrow() == key) && CARDS.with(|c| c.borrow().len()) == places.len() {
         // Same places: options (cards, controls) only need a redraw.
         changed();
         return;
     }
     clear();
     SHOWN.with(|s| *s.borrow_mut() = key);
-    let Some(m) = target.filter(|_| app.cfg.wallpaper) else { return };
-    for (kind, place) in places {
+    if !app.cfg.wallpaper {
+        return;
+    }
+    for (m, output, kind, place) in places {
         let (top, left) = (place.starts_with("top"), place.ends_with("left"));
         let (w, h) = kind.size();
         let window = gtk::Window::new();
@@ -239,7 +257,7 @@ pub fn apply(app: &Rc<App>) {
         window.set_anchor(if left { Edge::Left } else { Edge::Right }, true);
         let (side, bottom) = dock_margins(&output, top, left);
         window.set_margin(if left { Edge::Left } else { Edge::Right }, side);
-        window.set_margin(if top { Edge::Top } else { Edge::Bottom }, if top { top_margin(app, left) } else { bottom });
+        window.set_margin(if top { Edge::Top } else { Edge::Bottom }, if top { top_margin(app, &output, left) } else { bottom });
         let paint = Paint::new((w + 2.0 * AIR) as i32, (h + 2.0 * AIR) as i32);
         let (weak, a, out) = (paint.downgrade(), Rc::downgrade(app), output.clone());
         paint.on_draw(move |s| {
@@ -338,7 +356,7 @@ fn mmss(seconds: f64) -> String {
 fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, kind: Kind, output: &str, top: bool) {
     let (with_card, controls) = {
         let prefs = app.prefs.borrow();
-        (kind.place(&prefs).1, prefs.desktop_media_controls)
+        (kind.backed(&prefs), prefs.desktop_media_controls)
     };
     let look = look(app, output, top, with_card, kind.name());
     let drawn = match kind {
