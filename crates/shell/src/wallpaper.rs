@@ -244,7 +244,7 @@ fn connector_choices(prefs: &toml::Table, changes: impl IntoIterator<Item = (Str
 
 pub fn theme_source<'a>(layout: Layout, prefs: &'a toml::Table, monitors: &[Monitor], global: &'a str) -> &'a str {
     let primary = prefs.get("primary_monitor").and_then(toml::Value::as_str).unwrap_or("");
-    let monitor = monitors.iter().find(|m| m.output == primary).or(monitors.first());
+    let monitor = kit::screens::pick(monitors, primary, |m| m.output.clone(), |m| m.rect.x == 0.0 && m.rect.y == 0.0);
     monitor.map_or(global, |m| image_for(layout, prefs, &m.output, global))
 }
 
@@ -888,8 +888,8 @@ pub fn watch_layout(app: &Rc<crate::app::App>) {
             let positions = gio::spawn_blocking(kit::wm::outputs).await.unwrap_or_default();
             pending.set(false);
             if positions.is_empty() && kit::wm::which() != kit::wm::Wm::Other { return; }
-            let (Some(app), Some(display)) = (weak.upgrade(), gdk::Display::default()) else { return };
-            let monitors = display.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect::<Vec<_>>();
+            let Some(app) = weak.upgrade() else { return };
+            let monitors = kit::screens::all();
             let before = app.wallpapers.monitors();
             let theme = app.wallpapers.theme_image();
             app.wallpapers.place_at(&monitors, &positions);

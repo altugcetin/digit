@@ -61,6 +61,7 @@ mod privacy;
 mod prism;
 mod providers;
 mod quit;
+mod screens;
 mod screentime;
 mod session;
 mod share;
@@ -172,7 +173,7 @@ fn run() {
             app.wallpapers.set(path);
         }
     }
-    place(&app, &display);
+    place(&app);
     let (scheme, image) = (app.cfg.scheme.clone(), app.wallpapers.theme_image());
     glib::spawn_future_local(async move {
         let _ = gio::spawn_blocking(move || theming::refresh(None, &scheme, image, false)).await;
@@ -183,8 +184,8 @@ fn run() {
     let monitors = display.monitors();
     let weak = Rc::downgrade(&app);
     monitors.connect_items_changed(move |_, _, _, _| {
-        if let (Some(app), Some(display)) = (weak.upgrade(), gdk::Display::default()) {
-            place(&app, &display);
+        if let Some(app) = weak.upgrade() {
+            place(&app);
             let later = std::rc::Rc::downgrade(&app);
             glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
                 if let Some(app) = later.upgrade() {
@@ -301,8 +302,8 @@ fn watch_monitor(app: &Rc<App>, monitor: &gdk::Monitor) {
             let (weak, pending, output) = (weak.clone(), pending.clone(), m.connector().map(|c| c.to_string()).unwrap_or_default());
             glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
                 if pending.get() == generation {
-                    if let (Some(app), Some(display)) = (weak.upgrade(), gdk::Display::default()) {
-                        reshape(&app, &display, &output);
+                    if let Some(app) = weak.upgrade() {
+                        reshape(&app, &output);
                     }
                 }
             });
@@ -310,7 +311,7 @@ fn watch_monitor(app: &Rc<App>, monitor: &gdk::Monitor) {
     }
 }
 
-fn reshape(app: &Rc<App>, display: &gdk::Display, output: &str) {
+fn reshape(app: &Rc<App>, output: &str) {
     let stale: Vec<notch::Notch> = {
         let mut list = app.notches.borrow_mut();
         let (drop, keep): (Vec<_>, Vec<_>) = list.drain(..).partition(|n| n.output() == output);
@@ -320,7 +321,7 @@ fn reshape(app: &Rc<App>, display: &gdk::Display, output: &str) {
     for n in stale {
         n.destroy();
     }
-    place(app, display);
+    place(app);
     dock::apply(app);
     night::apply(app);
     desk::apply(app);
@@ -330,8 +331,8 @@ fn reshape(app: &Rc<App>, display: &gdk::Display, output: &str) {
     corners::apply(app);
 }
 
-fn place(app: &Rc<App>, display: &gdk::Display) {
-    let monitors: Vec<gdk::Monitor> = display.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect();
+fn place(app: &Rc<App>) {
+    let monitors = kit::screens::all();
     for m in &monitors {
         watch_monitor(app, m);
     }
@@ -386,7 +387,6 @@ fn watch_config(app: &Rc<App>) {
     let Ok(monitor) = dir.monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE) else { return };
     let weak = Rc::downgrade(app);
     let pending = Rc::new(std::cell::Cell::new(false));
-    let primary = Rc::new(std::cell::RefCell::new(kit::prefs::text(&kit::prefs::read(), "primary_monitor", "")));
     monitor.connect_changed(move |_, file, other, _| {
         let ours = |f: &gio::File| f.basename().is_some_and(|b| b.as_os_str() == "config.toml");
         if !ours(file) && !other.is_some_and(ours) {
@@ -397,7 +397,6 @@ fn watch_config(app: &Rc<App>) {
         }
         let weak = weak.clone();
         let pending = pending.clone();
-        let primary = primary.clone();
         let themes = themes.clone();
         glib::timeout_add_local_once(std::time::Duration::from_millis(90), move || {
             pending.set(false);
@@ -408,14 +407,6 @@ fn watch_config(app: &Rc<App>) {
                 if before[..6] != next[..6] { theming::changed(before[5] != next[5]); }
                 if before[6..] != next[6..] { theming::cursor_changed(); }
                 app.apply_prefs(config::Prefs::from(&config::load()));
-                let next = kit::prefs::text(&kit::prefs::read(), "primary_monitor", "");
-                if primary.replace(next.clone()) != next {
-                    // The clock follows each screen's places, which depend on which is the main one.
-                    desk::apply(&app);
-                    if kit::setup::installed() {
-                        dock::primary_changed(&app);
-                    }
-                }
             }
         });
     });

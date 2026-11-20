@@ -80,8 +80,7 @@ pub fn niri_gap() -> f64 {
 
 pub fn working_area(app: &App) -> (f64, f64) {
     let output = compositor::focused_output();
-    let monitors: Vec<gdk::Monitor> = gdk::Display::default().map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect()).unwrap_or_default();
-    let m = monitors.iter().find(|m| output.as_deref().is_some_and(|o| m.connector().as_deref() == Some(o))).or(monitors.first());
+    let m = crate::screens::for_output(output.as_deref());
     let (w, h) = m.map_or((1920.0, 1080.0), |m| (m.geometry().width() as f64, m.geometry().height() as f64));
     let top = app.reserve().max(0) as f64;
     let dock = app.prefs.borrow().dock.clone();
@@ -198,8 +197,7 @@ pub fn toggle(app: &Rc<App>) {
     window.add_css_class("digit");
     window.set_default_size(W as i32, H as i32);
     let output = compositor::focused_output();
-    let monitors: Vec<gdk::Monitor> = gdk::Display::default().map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect()).unwrap_or_default();
-    window.set_monitor(monitors.iter().find(|m| output.as_deref().is_some_and(|o| m.connector().as_deref() == Some(o))).or(monitors.first()));
+    window.set_monitor(crate::screens::for_output(output.as_deref()).as_ref());
     let paint = Paint::new(W as i32, H as i32);
     window.set_child(Some(&paint));
     let mut fade = Tween::still(0.0);

@@ -193,9 +193,8 @@ fn dim(on: bool) {
     if crate::lock::active() {
         return;
     }
-    let Some(display) = gdk::Display::default() else { return };
     let mut made = Vec::new();
-    for m in display.monitors().iter::<gdk::Monitor>().filter_map(Result::ok) {
+    for m in kit::screens::all() {
         let window = gtk::Window::new();
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);

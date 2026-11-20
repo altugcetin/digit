@@ -24,6 +24,8 @@ pub struct Config {
     pub clock: String,
     pub date: String,
     pub outputs: Vec<String>,
+    /// The screen chosen as the main one in Settings, or "" (see `kit::screens::primary`).
+    pub primary_monitor: String,
     pub glass: f64,
     pub scheme: String,
     pub surface: String,
@@ -169,6 +171,7 @@ impl Default for Config {
             clock: "%H:%M".into(),
             date: "%a %-d %b".into(),
             outputs: Vec::new(),
+            primary_monitor: String::new(),
             glass: 0.0,
             scheme: "content".into(),
             surface: "black".into(),
@@ -289,6 +292,7 @@ pub struct Prefs {
     pub surface: String,
     pub hover: bool,
     pub corners: [kit::corners::Panel; 4],
+    pub primary_monitor: String,
     /// The screens whose hot corners are their own, by connector.
     pub monitor_corners: std::collections::BTreeMap<String, [kit::corners::Panel; 4]>,
     pub icon_theme: Option<String>,
@@ -399,6 +403,7 @@ impl From<&Config> for Prefs {
                 ("corner_bottom_left".into(), toml::Value::String(c.corner_bottom_left.clone())),
                 ("corner_bottom_right".into(), toml::Value::String(c.corner_bottom_right.clone())),
             ].into_iter().collect()),
+            primary_monitor: c.primary_monitor.clone(),
             monitor_corners: kit::corners::monitors(&[(kit::corners::MONITORS.to_string(), toml::Value::Table(c.monitor_corners.clone()))].into_iter().collect()).into_iter().collect(),
             icon_theme: c.icon_theme.clone(),
             style: c.notch_style.clone(),

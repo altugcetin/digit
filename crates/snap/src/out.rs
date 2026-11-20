@@ -283,10 +283,7 @@ pub fn pin(app: &gtk::Application, tex: gdk::Texture, output: &str, x: i32, y: i
     win.set_anchor(Edge::Top, true);
     win.set_anchor(Edge::Left, true);
     win.set_exclusive_zone(-1);
-    if let Some(d) = gdk::Display::default() {
-        let m = d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).find(|m| m.connector().is_some_and(|c| c == output));
-        win.set_monitor(m.as_ref());
-    }
+    win.set_monitor(kit::screens::by_name(output).as_ref());
     let max = 560.0f64;
     let k = (max / w.max(h) as f64).min(1.0);
     let (pw, ph) = ((w as f64 * k).round() as i32, (h as f64 * k).round() as i32);

@@ -425,8 +425,7 @@ fn load(st: &Shared) {
 fn show(st: &Shared, output: Option<String>) {
     {
         let mut s = st.borrow_mut();
-        let monitors: Vec<gdk::Monitor> = gdk::Display::default().map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect()).unwrap_or_default();
-        let monitor = monitors.iter().find(|m| output.as_deref().is_some_and(|o| m.connector().as_deref() == Some(o))).or(monitors.first()).cloned();
+        let monitor = crate::screens::for_output(output.as_deref());
         s.output = monitor.as_ref().and_then(|m| m.connector()).map(|c| c.to_string()).unwrap_or_default();
         if !s.window.is_visible() {
             s.window.set_monitor(monitor.as_ref());

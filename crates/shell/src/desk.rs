@@ -93,8 +93,7 @@ fn tick() {
 }
 
 pub fn apply(app: &Rc<App>) {
-    let Some(display) = gdk::Display::default() else { return };
-    let monitors: Vec<gdk::Monitor> = display.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect();
+    let monitors = kit::screens::all();
     // Each screen has the clock where its own places put it.
     let modes: Vec<(gdk::Monitor, String, String)> = monitors
         .into_iter()

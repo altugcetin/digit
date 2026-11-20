@@ -1,7 +1,7 @@
 use gtk::{gdk, prelude::*};
 
 pub fn scale() -> i32 {
-    gdk::Display::default().map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).map(|m| m.scale_factor()).max().unwrap_or(1)).unwrap_or(1).max(1)
+    kit::screens::all().iter().map(|m| m.scale_factor()).max().unwrap_or(1).max(1)
 }
 
 pub fn fit(w: i32, h: i32, px: i32) -> Option<(i32, i32)> {

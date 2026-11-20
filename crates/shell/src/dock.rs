@@ -238,16 +238,9 @@ fn save_pins(pins: &[String]) {
     }
 }
 
-fn monitor_for(output: Option<&str>) -> Option<gdk::Monitor> {
-    let monitors: Vec<gdk::Monitor> = gdk::Display::default()?.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).collect();
-    let primary = if kit::setup::installed() { kit::prefs::text(&kit::prefs::read(), "primary_monitor", "") } else { String::new() };
-    monitors
-        .iter()
-        .find(|m| output.is_some_and(|o| m.connector().as_deref() == Some(o)))
-        .or_else(|| monitors.iter().find(|m| m.connector().as_deref() == Some(primary.as_str())))
-        .or_else(|| monitors.iter().find(|m| m.geometry().x() == 0 && m.geometry().y() == 0))
-        .or(monitors.first())
-        .cloned()
+/// The screen `output` when it is plugged in, else the main one.
+fn monitor_for(app: &App, output: Option<&str>) -> Option<gdk::Monitor> {
+    output.and_then(kit::screens::by_name).or_else(|| app.primary())
 }
 
 /// How far the always-shown dock keeps windows off the left, right and bottom edges of
@@ -584,7 +577,7 @@ pub fn apply(app: &Rc<App>) {
     };
     let geo = Geo::from(&prefs);
     let prefer = if prefs.output.is_none() { PREFER.with(|p| p.borrow().clone()) } else { None };
-    let monitor = monitor_for(prefs.output.as_deref().or(prefer.as_deref()));
+    let monitor = monitor_for(app, prefs.output.as_deref().or(prefer.as_deref()));
     let output = monitor.as_ref().and_then(|m| m.connector()).map(|c| c.to_string()).unwrap_or_default();
     let old = current();
     let Some(mode) = mode else {
@@ -617,9 +610,7 @@ pub fn apply(app: &Rc<App>) {
                 st.borrow_mut().edge = Some(edge);
             }
             if prefs.output.is_none() {
-                let others: Vec<gdk::Monitor> = gdk::Display::default()
-                    .map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).filter(|m| m.connector().as_deref() != Some(output.as_str())).collect())
-                    .unwrap_or_default();
+                let others: Vec<gdk::Monitor> = kit::screens::all().into_iter().filter(|m| m.connector().as_deref() != Some(output.as_str())).collect();
                 let triggers: Vec<gtk::Window> = others.iter().map(|m| trigger(app, m, geo.side)).collect();
                 st.borrow_mut().triggers = triggers;
             }
@@ -653,11 +644,10 @@ pub fn apply(app: &Rc<App>) {
     // offered Control Center on its other outputs; keep that scope at any corner.
     let triggers = std::mem::take(&mut st.borrow_mut().panel_triggers);
     for trigger in triggers { trigger.destroy(); }
-    let extra: Vec<gdk::Monitor> = gdk::Display::default()
-        .map(|d| d.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).filter(|m| {
-            let name = m.connector().map(|c| c.to_string()).unwrap_or_default();
-            !app.cfg.outputs.is_empty() && !app.cfg.outputs.contains(&name) && (prefs.output.is_none() || name == output)
-        }).collect()).unwrap_or_default();
+    let extra: Vec<gdk::Monitor> = kit::screens::all().into_iter().filter(|m| {
+        let name = kit::screens::name(m);
+        !app.cfg.outputs.is_empty() && !app.cfg.outputs.contains(&name) && (prefs.output.is_none() || name == output)
+    }).collect();
     let triggers = extra.iter().flat_map(|m| crate::panel_corner::triggers(app, m)).collect();
     st.borrow_mut().panel_triggers = triggers;
     watch_trash(&st);

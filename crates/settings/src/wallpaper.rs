@@ -554,9 +554,10 @@ fn fill(holder: &gtk::Box) {
     // screen" still decides which key and which picture it uses.
     let layout = layout_of(&t);
     let start = start_dir(&t);
+    // The main screen, as the shell picks it (see `kit::screens::pick`).
     let primary = {
         let wanted = prefs::get_str(&t, "primary_monitor", "");
-        found.iter().position(|s| s.output == wanted).unwrap_or(0)
+        kit::screens::pick(&found, &wanted, |s| s.output.clone(), |s| s.x == 0.0 && s.y == 0.0).and_then(|p| found.iter().position(|s| s.output == p.output)).unwrap_or(0)
     };
     let again = |holder: &gtk::Box| {
         let weak = holder.downgrade();

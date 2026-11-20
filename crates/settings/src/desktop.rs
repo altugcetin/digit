@@ -1245,13 +1245,11 @@ fn corners_picker(card: &gtk::Box, t: &toml::Table) {
     use kit::corners::{self, Corner, Panel};
     const PANELS: [(Panel, &str); 3] = [(Panel::None, "Nothing"), (Panel::Workspaces, "Workspaces"), (Panel::Control, "Control Center")];
     let name_of = |panel: Panel| PANELS.iter().find(|p| p.0 == panel).map_or("Nothing", |p| p.1);
-    let screens: Vec<String> = gtk::gdk::Display::default()
-        .map(|d| d.monitors().iter::<gtk::gdk::Monitor>().filter_map(Result::ok).filter_map(|m| m.connector().map(|c| c.to_string())).collect())
-        .unwrap_or_default();
+    let screens: Vec<String> = kit::screens::all().iter().filter_map(|m| m.connector().map(|c| c.to_string())).collect();
     // One screen keeps the shared corners; with more, the one being set, the main one first.
     let picked: Rc<std::cell::RefCell<Option<String>>> = Rc::default();
     if screens.len() > 1 {
-        let main = prefs::get_str(t, "primary_monitor", "");
+        let main = kit::screens::primary(&prefs::get_str(t, "primary_monitor", "")).map(|m| kit::screens::name(&m)).unwrap_or_default();
         *picked.borrow_mut() = Some(screens.iter().find(|s| **s == main).unwrap_or(&screens[0]).clone());
     }
     let read_now = {
@@ -2064,8 +2062,8 @@ fn needs(body: &gtk::Box, need: &kit::optional::Need, what_for: &str) -> bool {
 fn recording_capture(body: &gtk::Box, t: &toml::Table) {
     let cap = section(body, "Capture");
     let mut targets = vec![("monitor".to_string(), "The focused screen".to_string())];
-    if let Some(display) = gtk::gdk::Display::default() {
-        for monitor in display.monitors().iter::<gtk::gdk::Monitor>().filter_map(Result::ok) {
+    {
+        for monitor in kit::screens::all() {
             if let Some(connector) = monitor.connector() {
                 let g = monitor.geometry();
                 targets.push((connector.to_string(), format!("Screen {connector} · {}×{}", g.width() * monitor.scale_factor(), g.height() * monitor.scale_factor())));
@@ -2079,7 +2077,7 @@ fn recording_capture(body: &gtk::Box, t: &toml::Table) {
     // Only the rates a screen here can show, and the one chosen even if it's no longer one.
     const RATES: [(&str, &str); 6] = [("30", "30 fps"), ("60", "60 fps"), ("120", "120 fps"), ("144", "144 fps"), ("165", "165 fps"), ("240", "240 fps")];
     let fps = prefs::get_str(t, "rec_fps", "60");
-    let fastest = gtk::gdk::Display::default().map_or(60, |d| d.monitors().iter::<gtk::gdk::Monitor>().filter_map(Result::ok).map(|m| (m.refresh_rate() + 999) / 1000).max().unwrap_or(60));
+    let fastest = Some(kit::screens::all()).map_or(60, |all| all.iter().map(|m| (m.refresh_rate() + 999) / 1000).max().unwrap_or(60));
     let rates: Vec<(&str, &str)> = RATES.iter().copied().filter(|(v, _)| *v == fps || v.parse::<i32>().is_ok_and(|r| r <= 60 || r <= fastest)).collect();
     choice(&cap, "speed", "Frame rate", "", "rec_fps", &rates, &fps);
     choice(&cap, "high_quality", "Quality", "", "rec_quality", &[("medium", "Medium"), ("high", "High"), ("very_high", "Very high"), ("ultra", "Ultra")], &prefs::get_str(t, "rec_quality", "very_high"));

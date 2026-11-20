@@ -996,25 +996,9 @@ fn destroy_surface(d: &Rc<RefCell<Desktop>>) {
 
 pub fn apply(app: &Rc<App>) {
     let enabled = app.prefs.borrow().desktop_icons;
-    let monitors: Vec<_> = gdk::Display::default()
-        .map(|d| {
-            d.monitors()
-                .iter::<gdk::Monitor>()
-                .filter_map(Result::ok)
-                .collect()
-        })
-        .unwrap_or_default();
-    let preferred = kit::prefs::text(&kit::prefs::read(), "primary_monitor", "");
-    let names: Vec<_> = monitors
-        .iter()
-        .map(|m| m.connector().map(|c| c.to_string()).unwrap_or_default())
-        .collect();
-    let primary = names
-        .iter()
-        .find(|n| **n == preferred)
-        .or(names.first())
-        .cloned()
-        .unwrap_or_default();
+    let monitors = kit::screens::all();
+    let names: Vec<_> = monitors.iter().map(kit::screens::name).collect();
+    let primary = app.primary_name();
     let current = surfaces();
     if current.iter().any(|d| d.try_borrow_mut().is_err()) {
         let app = app.clone();

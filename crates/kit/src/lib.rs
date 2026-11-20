@@ -32,6 +32,7 @@ pub mod wallfocus;
 pub mod recent;
 pub mod trash;
 pub mod screentime;
+pub mod screens;
 pub mod deskwidget;
 pub mod scroll;
 pub mod search;
