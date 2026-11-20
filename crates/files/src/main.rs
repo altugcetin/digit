@@ -1719,7 +1719,8 @@ const BUS_XML: &str = r#"<node><interface name="org.freedesktop.FileManager1">
 
 fn serve(app: &gtk::Application) {
     let app = app.clone();
-    let id = gio::bus_own_name(
+    // Owned for as long as Files runs: the id has no drop that would let the name go.
+    let _owner = gio::bus_own_name(
         gio::BusType::Session,
         "org.freedesktop.FileManager1",
         gio::BusNameOwnerFlags::NONE,
@@ -1751,7 +1752,6 @@ fn serve(app: &gtk::Application) {
         |_, _| {},
         |_, _| {},
     );
-    std::mem::forget(id);
 }
 
 fn files_rc() -> Option<Rc<Files>> {
