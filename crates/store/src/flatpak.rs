@@ -125,6 +125,36 @@ pub async fn install_bundle(path: &std::path::Path, progress: impl Fn(Option<f64
     stream(args, progress, cancel).await
 }
 
+/// Output split into lines at `\r` (progress redrawn in place) or `\n`, across reads: a line a
+/// read cut in two waits for the rest, so "4" then "5%" reads 45%, not 5%.
+#[derive(Default)]
+struct Lines(Vec<u8>);
+
+impl Lines {
+    fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+        self.0.extend_from_slice(bytes);
+        let mut out = Vec::new();
+        while let Some(end) = self.0.iter().position(|b| matches!(b, b'\r' | b'\n')) {
+            let line: Vec<u8> = self.0.drain(..=end).collect();
+            out.push(String::from_utf8_lossy(&line[..end]).into_owned());
+        }
+        out
+    }
+
+    /// What is left at the end, when the output stops without a last line break.
+    fn rest(&mut self) -> Vec<String> {
+        let rest = std::mem::take(&mut self.0);
+        if rest.is_empty() { Vec::new() } else { vec![String::from_utf8_lossy(&rest).into_owned()] }
+    }
+}
+
+/// The percentage a progress line ends with ("Installing 3/7… 45%"), as a fraction.
+fn percent(line: &str) -> Option<f64> {
+    let i = line.rfind('%')?;
+    let digits: String = line[..i].chars().rev().take_while(|c| c.is_ascii_digit()).collect::<Vec<_>>().into_iter().rev().collect();
+    digits.parse::<u32>().ok().filter(|v| *v <= 100).map(|v| v as f64 / 100.0)
+}
+
 /// Runs flatpak with `args`, reading percentages from its output, and stops it when cancelled.
 async fn stream(args: Vec<&std::ffi::OsStr>, progress: impl Fn(Option<f64>), cancel: &gio::Cancellable) -> Result<(), String> {
     let mut argv: Vec<&std::ffi::OsStr> = vec!["flatpak".as_ref()];
@@ -141,30 +171,24 @@ async fn stream(args: Vec<&std::ffi::OsStr>, progress: impl Fn(Option<f64>), can
     });
     let stream = p.stdout_pipe().ok_or("no output")?;
     let mut tail = String::new();
+    let mut lines = Lines::default();
     loop {
         let chunk = stream.read_bytes_future(4096, glib::Priority::DEFAULT).await.map_err(|e| e.to_string())?;
-        if chunk.is_empty() {
-            break;
+        let done = chunk.is_empty();
+        let read = if done { lines.rest() } else { lines.push(&chunk) };
+        if let Some(last) = read.iter().filter_map(|l| percent(l)).next_back() {
+            progress(Some(last));
         }
-        let text = String::from_utf8_lossy(&chunk);
-        let mut last = None;
-        for piece in text.split(['\r', '\n']) {
-            if let Some(i) = piece.rfind('%') {
-                let digits: String = piece[..i].chars().rev().take_while(|c| c.is_ascii_digit()).collect::<Vec<_>>().into_iter().rev().collect();
-                if let Ok(v) = digits.parse::<u32>() {
-                    if v <= 100 {
-                        last = Some(v as f64 / 100.0);
-                    }
-                }
-            }
+        for line in read {
+            tail.push_str(&line);
+            tail.push('\n');
         }
-        if last.is_some() {
-            progress(last);
-        }
-        tail.push_str(&text);
         if tail.len() > 4096 {
             let cut = tail.floor_char_boundary(tail.len() - 2048);
             tail = tail[cut..].to_string();
+        }
+        if done {
+            break;
         }
     }
     p.wait_future().await.map_err(|e| e.to_string())?;
@@ -179,5 +203,28 @@ async fn stream(args: Vec<&std::ffi::OsStr>, progress: impl Fn(Option<f64>), can
     } else {
         let line = tail.lines().rev().map(str::trim).find(|l| l.starts_with("error:") || l.starts_with("Error:")).unwrap_or("flatpak failed").to_string();
         Err(line)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_split_across_reads_reads_whole() {
+        let mut lines = Lines::default();
+        assert!(lines.push("Installing… 4".as_bytes()).is_empty());
+        let read = lines.push("5%\rInstalling… 6".as_bytes());
+        assert_eq!(read.iter().filter_map(|l| percent(l)).next_back(), Some(0.45));
+        // A character cut between reads comes out whole.
+        let snow = "☃".as_bytes();
+        assert!(lines.push(&snow[..1]).is_empty());
+        let read = lines.push(&[&snow[1..], b" 70%\n"].concat());
+        assert!(read[0].ends_with("☃ 70%"), "{read:?}");
+        assert!(lines.push(b"error: no space").is_empty());
+        assert_eq!(lines.rest(), ["error: no space"]);
+        assert_eq!(percent("100%"), Some(1.0));
+        assert_eq!(percent("150%"), None);
+        assert_eq!(percent("no number"), None);
     }
 }
