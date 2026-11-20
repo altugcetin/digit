@@ -175,42 +175,60 @@ pub fn shrink(infos: Vec<gio::FileInfo>) {
         let Some(src) = file_of(&info).and_then(|f| f.path()) else { continue };
         let Some(dir) = src.parent().map(Path::to_path_buf) else { continue };
         let ext = src.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-        let argv: Vec<String> = match family(&info) {
+        // The tool's arguments and the new file, named here rather than found again in them: a
+        // source already called "… (smaller)" would be taken for it.
+        let (argv, out): (Vec<String>, PathBuf) = match family(&info) {
             Family::Image => {
-                let target = if matches!(ext.as_str(), "png" | "webp" | "avif" | "jxl") { ext.clone() } else { "jpg".into() };
+                let target = if matches!(ext.as_str(), "png" | "webp" | "avif" | "jxl" | "gif") { ext.clone() } else { "jpg".into() };
                 let Some(out) = out_path(&src, &target, " (smaller)") else { continue };
-                let mut a = vec!["magick".into(), s(&src), "-auto-orient".into(), "-strip".into(), "-resize".into(), "2560x2560>".into()];
-                if target == "png" {
-                    a.extend(["-define".into(), "png:compression-level=9".into(), "-define".into(), "png:compression-filter=5".into()]);
+                let mut a = vec!["magick".into(), s(&src)];
+                if target == "gif" {
+                    // Every frame, resized whole and then stored as what changed: a GIF stays
+                    // moving instead of turning into a JPEG per frame.
+                    a.extend(["-coalesce".into(), "-resize".into(), "1280x1280>".into(), "-layers".into(), "Optimize".into()]);
                 } else {
-                    a.extend(["-quality".into(), "78".into()]);
+                    a.extend(["-auto-orient".into(), "-strip".into(), "-resize".into(), "2560x2560>".into()]);
+                    if target == "png" {
+                        a.extend(["-define".into(), "png:compression-level=9".into(), "-define".into(), "png:compression-filter=5".into()]);
+                    } else {
+                        a.extend(["-quality".into(), "78".into()]);
+                    }
                 }
                 a.push(s(&out));
-                a
+                (a, out)
             }
             Family::Video => {
                 let Some(out) = out_path(&src, "mp4", " (smaller)") else { continue };
-                ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i"].iter().map(|x| x.to_string()).chain([s(&src)]).chain(["-vf", "scale='min(1920,iw)':-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"].iter().map(|x| x.to_string())).chain([s(&out)]).collect()
+                let a = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i"].iter().map(|x| x.to_string()).chain([s(&src)]).chain(["-vf", "scale='min(1920,iw)':-2", "-c:v", "libx264", "-preset", "slow", "-crf", "28", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"].iter().map(|x| x.to_string())).chain([s(&out)]).collect();
+                (a, out)
             }
             Family::Pdf => {
                 let Some(out) = out_path(&src, "pdf", " (smaller)") else { continue };
-                vec!["gs".into(), "-sDEVICE=pdfwrite".into(), "-dCompatibilityLevel=1.6".into(), "-dPDFSETTINGS=/ebook".into(), "-dNOPAUSE".into(), "-dQUIET".into(), "-dBATCH".into(), "-dSAFER".into(), format!("-sOutputFile={}", s(&out)), s(&src)]
+                let a = vec!["gs".into(), "-sDEVICE=pdfwrite".into(), "-dCompatibilityLevel=1.6".into(), "-dPDFSETTINGS=/ebook".into(), "-dNOPAUSE".into(), "-dQUIET".into(), "-dBATCH".into(), "-dSAFER".into(), format!("-sOutputFile={}", s(&out)), s(&src)];
+                (a, out)
             }
             _ => continue,
         };
-        let out = argv.iter().rev().find(|a| a.contains(" (smaller)")).map(|a| PathBuf::from(a.trim_start_matches("-sOutputFile="))).unwrap_or_default();
         let before = std::fs::metadata(&src).map(|m| m.len()).unwrap_or(0);
         let o = out.clone();
         ops::run_then("Making smaller", Plan::Run(argv, dir, Some(out)), move || {
-            let after = std::fs::metadata(&o).map(|m| m.len()).unwrap_or(0);
+            let Ok(meta) = std::fs::metadata(&o) else { return };
+            let after = meta.len();
             if after == 0 {
+                // Finished without writing anything: no empty file left behind.
+                let _ = std::fs::remove_file(&o);
+                ops::forget_made(&o);
+                crate::toast("Couldn't make it smaller");
                 return;
             }
             if after >= before {
-                crate::toast("It was already as small as it gets; kept the result anyway");
-            } else {
-                crate::toast(&format!("{} → {} ({}% smaller)", glib::format_size(before), glib::format_size(after), 100 - after * 100 / before.max(1)));
+                // No smaller than what it came from: not worth a second copy.
+                let _ = std::fs::remove_file(&o);
+                ops::forget_made(&o);
+                crate::toast("It was already as small as it gets");
+                return;
             }
+            crate::toast(&format!("{} → {} ({}% smaller)", glib::format_size(before), glib::format_size(after), 100 - after * 100 / before.max(1)));
             crate::select_later(&gio::File::for_path(&o));
         });
     }
