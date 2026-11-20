@@ -48,14 +48,27 @@ pub fn targets(infos: &[gio::FileInfo]) -> Vec<(&'static str, &'static str)> {
     if fams.iter().any(|f| *f != first) {
         return Vec::new();
     }
-    match first {
+    // The format they are all in already isn't offered: that would only make a copy.
+    let same = |ext: &str| infos.iter().all(|i| same_format(&i.name().to_string_lossy(), ext));
+    let all = match first {
         Family::Image if has("magick") || has("ffmpeg") => vec![("PNG", "png"), ("JPEG", "jpg"), ("WebP", "webp"), ("AVIF", "avif"), ("JPEG XL", "jxl"), ("Icon (ICO)", "ico"), ("PDF", "pdf")],
         Family::Video if has("ffmpeg") => vec![("MP4 (H.264)", "mp4"), ("WebM (VP9)", "webm"), ("MKV (AV1)", "mkv"), ("GIF", "gif"), ("MP3 (audio only)", "mp3")],
         Family::Audio if has("ffmpeg") => vec![("MP3", "mp3"), ("Opus", "opus"), ("FLAC", "flac"), ("WAV", "wav"), ("M4A (AAC)", "m4a")],
         Family::Document if has("soffice") => vec![("PDF", "pdf"), ("Word (DOCX)", "docx"), ("OpenDocument (ODT)", "odt")],
-        Family::Pdf if has("pdftoppm") => vec![("PNG pages", "png"), ("JPEG pages", "jpg")],
+        Family::Pdf if has("pdftoppm") => return vec![("PNG pages", "png"), ("JPEG pages", "jpg")],
         _ => Vec::new(),
-    }
+    };
+    all.into_iter().filter(|(_, ext)| !same(ext)).collect()
+}
+
+/// Whether the file `name` is already in the format `ext` names (`.jpeg` is `jpg`).
+fn same_format(name: &str, ext: &str) -> bool {
+    let own = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    let canon = |e: &str| match e {
+        "jpeg" | "jpe" | "jfif" => "jpg".to_string(),
+        e => e.to_string(),
+    };
+    canon(&own) == canon(ext)
 }
 
 fn out_path(src: &Path, ext: &str, suffix: &str) -> Option<PathBuf> {
@@ -78,7 +91,10 @@ pub fn convert(infos: Vec<gio::FileInfo>, ext: &str) {
         let argv: Vec<String> = match fam {
             Family::Image => {
                 let Some(out) = out_path(&src, &ext, "") else { continue };
-                let mut a: Vec<String> = if has("magick") { vec!["magick".into(), s(&src), "-auto-orient".into()] } else { vec!["ffmpeg".into(), "-nostdin".into(), "-y".into(), "-i".into(), s(&src)] };
+                // A moving GIF to a still format: its first frame, not a numbered file per frame.
+                let still = !matches!(ext.as_str(), "gif" | "webp" | "avif" | "pdf");
+                let input = if still && has("magick") { format!("{}[0]", s(&src)) } else { s(&src) };
+                let mut a: Vec<String> = if has("magick") { vec!["magick".into(), input, "-auto-orient".into()] } else { vec!["ffmpeg".into(), "-nostdin".into(), "-y".into(), "-i".into(), s(&src)] };
                 if a[0] == "magick" {
                     match ext.as_str() {
                         "jpg" => a.extend(["-background".into(), "white".into(), "-flatten".into(), "-quality".into(), "90".into()]),
@@ -485,5 +501,18 @@ fn deliver(peer: kit::send::Peer, paths: Vec<PathBuf>) {
                 }
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_is_not_offered_its_own_format() {
+        assert!(same_format("photo.JPEG", "jpg"));
+        assert!(same_format("clip.mkv", "mkv"));
+        assert!(!same_format("photo.png", "jpg"));
+        assert!(!same_format("README", "png"));
     }
 }
