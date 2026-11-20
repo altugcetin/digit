@@ -154,7 +154,7 @@ fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, output: &str, left: bool, top: 
         (prefs.desktop_battery_bg, prefs.desktop_battery_levels)
     };
     // Like the desktop clock, the ink follows the wallpaper behind it, or sits on a card.
-    let look = crate::deskcards::look(app, output, top, with_card);
+    let look = crate::deskcards::look(app, output, top, with_card, "battery");
     let mut pal = app.palette_at(glib::monotonic_time());
     pal.ink_main = look.ink;
     pal.ink_meta = look.ink;

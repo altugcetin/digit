@@ -145,7 +145,7 @@ pub fn apply(app: &Rc<App>) {
 fn draw_desk(s: &gtk::Snapshot, p: &Paint, app: &App, output: &str, center: bool) {
     let cfg = &app.cfg;
     let (date_on, weather_on) = rows(app);
-    let look = crate::deskcards::look(app, output, true, app.prefs.borrow().desktop_clock_bg);
+    let look = crate::deskcards::look(app, output, true, app.prefs.borrow().desktop_clock_bg, "clock");
     let ink = look.ink;
     let dt = glib::DateTime::now_local().ok();
     let time = dt.as_ref().and_then(|d| d.format(&cfg.clock).ok()).map(|s| s.to_string()).unwrap_or_default();

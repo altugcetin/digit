@@ -10,6 +10,7 @@ use crate::paint::Paint;
 use gtk::{cairo, gdk, glib, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use kit::palette::Rgb;
+use kit::deskwidget::Ink;
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
@@ -28,14 +29,40 @@ pub(crate) struct Look {
     pub card: Option<Rgb>,
 }
 
-/// The look over the wallpaper of `output`, at its top (`top`) or anywhere on it.
-pub(crate) fn look(app: &App, output: &str, top: bool, card: bool) -> Look {
-    let luma = app.wallpapers.top_luma(output, if top { 0.32 } else { 1.0 }).unwrap_or(0.0);
-    look_for(luma > 0.42, card, kit::effects::reduced())
+/// The color set for `widget` (see `kit::deskwidget`).
+pub(crate) fn ink_of(app: &App, widget: &str) -> Ink {
+    let p = app.prefs.borrow();
+    Ink::parse(match widget {
+        "clock" => &p.desktop_clock_ink,
+        "battery" => &p.desktop_battery_ink,
+        "media" => &p.desktop_media_ink,
+        "weather" => &p.desktop_weather_ink,
+        "system" => &p.desktop_system_ink,
+        "screentime" => &p.desktop_screentime_ink,
+        _ => "auto",
+    })
 }
 
-fn look_for(light: bool, card: bool, reduced: bool) -> Look {
-    let ink = if light { Rgb::new(0.08, 0.08, 0.1) } else { Rgb::new(1.0, 1.0, 1.0) };
+/// The look over the wallpaper of `output`, at its top (`top`) or anywhere on it, in the color
+/// set for `widget`.
+pub(crate) fn look(app: &App, output: &str, top: bool, card: bool, widget: &str) -> Look {
+    let luma = app.wallpapers.top_luma(output, if top { 0.32 } else { 1.0 }).unwrap_or(0.0);
+    look_for(luma > 0.42, card, kit::effects::reduced(), ink_of(app, widget), app.palette.get().accent)
+}
+
+/// `light`: the wallpaper behind is light. A color that was set holds over it, and the card
+/// and the shadow follow that color instead, so it always reads: white on dark, black on light.
+fn look_for(light: bool, card: bool, reduced: bool, set: Ink, accent: Rgb) -> Look {
+    let light = match set {
+        Ink::White => false,
+        Ink::Black => true,
+        Ink::Auto | Ink::Accent => light,
+    };
+    let ink = match set {
+        Ink::Accent => accent,
+        _ if light => Rgb::new(0.08, 0.08, 0.1),
+        _ => Rgb::new(1.0, 1.0, 1.0),
+    };
     if card {
         // As macOS's widgets: a soft see-through card, light over a light wallpaper and dark
         // over a dark one, the ink on it needing no shadow.
@@ -80,6 +107,16 @@ impl Kind {
             Kind::Weather => (p.desktop_weather.clone(), p.desktop_weather_bg),
             Kind::System => (p.desktop_system.clone(), p.desktop_system_bg),
             Kind::ScreenTime => (p.desktop_screentime.clone(), p.desktop_screentime_bg),
+        }
+    }
+
+    /// The name its settings go under.
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Media => "media",
+            Kind::Weather => "weather",
+            Kind::System => "system",
+            Kind::ScreenTime => "screentime",
         }
     }
 
@@ -303,7 +340,7 @@ fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, kind: Kind, output: &str, top: 
         let prefs = app.prefs.borrow();
         (kind.place(&prefs).1, prefs.desktop_media_controls)
     };
-    let look = look(app, output, top, with_card);
+    let look = look(app, output, top, with_card, kind.name());
     let drawn = match kind {
         Kind::Media => app.media.borrow().present(glib::monotonic_time()),
         Kind::Weather => app.weather.borrow().is_some(),
@@ -521,13 +558,19 @@ mod tests {
     fn cards_fit_in_the_air_around_each_widget() {
         const { assert!(CARD_PAD < AIR) };
         for light in [false, true] {
-            let on = look_for(light, true, false);
+            let on = look_for(light, true, false, Ink::Auto, RED);
             assert!(on.card.is_some() && on.shade.is_none(), "a card's ink needs no shadow");
-            let off = look_for(light, false, false);
+            let off = look_for(light, false, false, Ink::Auto, RED);
             assert!(off.card.is_none() && off.shade.is_some());
-            assert!(look_for(light, false, true).shade.is_none(), "reduced effects drop the shadow");
+            assert!(look_for(light, false, true, Ink::Auto, RED).shade.is_none(), "reduced effects drop the shadow");
             // Dark ink over light, light over dark.
             assert_eq!(on.ink.r > 0.5, !light);
+            // A color that was set holds over any wallpaper, its card the other way round.
+            let white = look_for(light, true, false, Ink::White, RED);
+            assert!(white.ink.r > 0.9 && white.card.is_some_and(|c| c.r < 0.5));
+            let black = look_for(light, true, false, Ink::Black, RED);
+            assert!(black.ink.r < 0.1 && black.card.is_some_and(|c| c.r > 0.5));
+            assert_eq!(look_for(light, false, false, Ink::Accent, RED).ink, RED);
         }
     }
 }
