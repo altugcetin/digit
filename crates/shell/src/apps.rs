@@ -143,7 +143,7 @@ pub fn pretty(app_id: &str) -> String {
 
 pub fn prepare(context: &gio::AppLaunchContext) {
     if kit::setup::installed() {
-        let (theme, size) = kit::cursors::current(&kit::prefs::read());
+        let (theme, size) = kit::cursors::current(&crate::config::table());
         for key in ["XCURSOR_THEME", "HYPRCURSOR_THEME"] {
             if theme.is_empty() { context.unsetenv(key); } else { context.setenv(key, &theme); }
         }

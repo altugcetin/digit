@@ -5,11 +5,11 @@ use gtk::{gdk, gio, glib, prelude::*};
 use std::rc::Rc;
 
 thread_local! {
-    static DIGIT_LOGO: std::cell::Cell<bool> = std::cell::Cell::new(kit::prefs::text(&kit::prefs::read(), "menubar_logo", "distro") == "digit");
+    static DIGIT_LOGO: std::cell::Cell<bool> = std::cell::Cell::new(kit::prefs::text(&crate::config::table(), "menubar_logo", "distro") == "digit");
 }
 
 pub fn prefs_changed(app: &Rc<App>) {
-    let digit = kit::prefs::text(&kit::prefs::read(), "menubar_logo", "distro") == "digit";
+    let digit = kit::prefs::text(&crate::config::table(), "menubar_logo", "distro") == "digit";
     if DIGIT_LOGO.with(|old| old.replace(digit) != digit) {
         app.redraw();
     }
