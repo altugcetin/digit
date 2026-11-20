@@ -49,8 +49,19 @@ pub fn places(prefs: &toml::Table, output: &str, primary: bool) -> [String; 6] {
 /// The value of [`SCREENS`] once the screen `output` has `places`, the other screens kept.
 pub fn with_screen(prefs: &toml::Table, output: &str, places: &[String; 6]) -> toml::Value {
     let mut all = prefs.get(SCREENS).and_then(toml::Value::as_table).cloned().unwrap_or_default();
-    all.insert(output.to_string(), toml::Value::Table(WIDGETS.iter().zip(places).map(|(w, p)| (w.to_string(), toml::Value::String(p.clone()))).collect()));
+    all.insert(output.to_string(), screen_value(places));
     toml::Value::Table(all)
+}
+
+fn screen_value(places: &[String; 6]) -> toml::Value {
+    toml::Value::Table(WIDGETS.iter().zip(places).map(|(w, p)| (w.to_string(), toml::Value::String(p.clone()))).collect())
+}
+
+/// Gives the screen `output` places of its own, the other screens kept.
+pub fn save_screen(output: &str, places: &[String; 6]) -> Result<(), String> {
+    crate::prefs::update_table(SCREENS, |all| {
+        all.insert(output.to_string(), screen_value(places));
+    })
 }
 
 /// Each choice as stored, and as Settings names it.

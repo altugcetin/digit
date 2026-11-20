@@ -1375,7 +1375,7 @@ fn keep_in_dock(st: &Shared, id: &str) {
 }
 
 fn hide(st: &Shared, id: &str) {
-    if let Err(e) = kit::prefs::set_many(&kit::hidden::change(&kit::prefs::read(), id, true)) {
+    if let Err(e) = kit::hidden::save(id, true) {
         eprintln!("digit: {e}");
         return;
     }

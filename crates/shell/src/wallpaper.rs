@@ -236,9 +236,15 @@ pub fn image_for<'a>(layout: Layout, prefs: &'a toml::Table, output: &str, globa
     } else { global }
 }
 
+/// Each screen's own picture set to the given ones, the others (unplugged screens' too) kept.
+fn add_choices(choices: &mut toml::Table, changes: impl IntoIterator<Item = (String, String)>) {
+    for (output, path) in changes { choices.insert(output, toml::Value::String(path)); }
+}
+
+#[cfg(test)]
 fn connector_choices(prefs: &toml::Table, changes: impl IntoIterator<Item = (String, String)>) -> toml::Table {
     let mut choices = prefs.get("wallpapers").and_then(toml::Value::as_table).cloned().unwrap_or_default();
-    for (output, path) in changes { choices.insert(output, toml::Value::String(path)); }
+    add_choices(&mut choices, changes);
     choices
 }
 
@@ -717,9 +723,7 @@ impl Wallpapers {
     pub fn commit(self: &Rc<Self>, path: String, output: &str) -> bool {
         if self.layout() == Layout::Separate {
             if !history(&path) { return false; }
-            let prefs = kit::prefs::read();
-            let choices = connector_choices(&prefs, [(output.to_string(), path)]);
-            if let Err(e) = kit::prefs::set("wallpapers", toml::Value::Table(choices)) {
+            if let Err(e) = kit::prefs::update_table("wallpapers", |t| add_choices(t, [(output.to_string(), path)])) {
                 eprintln!("digit: {e}");
                 return false;
             }
@@ -805,13 +809,11 @@ impl Wallpapers {
         let monitors = self.monitors();
         let choices = rotation_images(images, &self.shown(), if self.layout() == Layout::Separate { monitors.len().max(1) } else { 1 });
         let Some(first) = choices.first() else { return false };
-        if self.layout() == Layout::Separate {
-            let prefs = kit::prefs::read();
-            let table = connector_choices(&prefs, monitors.iter().zip(&choices).map(|(monitor, image)| (monitor.output.clone(), (*image).to_string())));
-            if let Err(e) = kit::prefs::set("wallpapers", toml::Value::Table(table)) {
-                eprintln!("digit: {e}");
-                return false;
-            }
+        if self.layout() == Layout::Separate
+            && let Err(e) = kit::prefs::update_table("wallpapers", |t| add_choices(t, monitors.iter().zip(&choices).map(|(monitor, image)| (monitor.output.clone(), (*image).to_string()))))
+        {
+            eprintln!("digit: {e}");
+            return false;
         }
         if !remember(first) { return false; }
         self.set((*first).to_string());

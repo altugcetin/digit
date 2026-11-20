@@ -37,18 +37,18 @@ pub fn read(prefs: &toml::Table, key: &str) -> Focus {
 /// screens that are unplugged now, are kept.
 pub fn save(key: &str, focus: Focus) -> Result<(), String> {
     let focus = clamp(focus);
-    let mut table = crate::prefs::read().get(KEY).and_then(toml::Value::as_table).cloned().unwrap_or_default();
-    if focus == CENTER {
-        table.remove(key);
-    } else {
-        let mut pair = vec![toml::Value::Float(focus.0), toml::Value::Float(focus.1)];
-        // Only a zoom is written as a third number, so older files read the same.
-        if focus.2 != 1.0 {
-            pair.push(toml::Value::Float(focus.2));
+    crate::prefs::update_table(KEY, |table| {
+        if focus == CENTER {
+            table.remove(key);
+        } else {
+            let mut pair = vec![toml::Value::Float(focus.0), toml::Value::Float(focus.1)];
+            // Only a zoom is written as a third number, so older files read the same.
+            if focus.2 != 1.0 {
+                pair.push(toml::Value::Float(focus.2));
+            }
+            table.insert(key.into(), toml::Value::Array(pair));
         }
-        table.insert(key.into(), toml::Value::Array(pair));
-    }
-    if table.is_empty() { crate::prefs::unset(KEY) } else { crate::prefs::set(KEY, toml::Value::Table(table)) }
+    })
 }
 
 /// The part of an image of `image` size that covers `target`, as fractions of the image:

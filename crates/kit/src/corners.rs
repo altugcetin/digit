@@ -112,8 +112,19 @@ fn own(prefs: &toml::Table) -> Option<&toml::Table> {
 /// The value of [`MONITORS`] once `output` has `assignment` for its own, the other screens kept.
 pub fn with_monitor(prefs: &toml::Table, output: &str, assignment: &[Panel; 4]) -> toml::Value {
     let mut all = own(prefs).cloned().unwrap_or_default();
-    all.insert(output.to_string(), toml::Value::Table(values(assignment).into_iter().map(|(k, v)| (k.to_string(), v)).collect()));
+    all.insert(output.to_string(), monitor_value(assignment));
     toml::Value::Table(all)
+}
+
+fn monitor_value(assignment: &[Panel; 4]) -> toml::Value {
+    toml::Value::Table(values(assignment).into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+}
+
+/// Gives the screen `output` corners of its own, the other screens kept.
+pub fn save_monitor(output: &str, assignment: &[Panel; 4]) -> Result<(), String> {
+    crate::prefs::update_table(MONITORS, |all| {
+        all.insert(output.to_string(), monitor_value(assignment));
+    })
 }
 
 #[cfg(test)]

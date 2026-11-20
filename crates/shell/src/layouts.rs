@@ -156,13 +156,19 @@ pub fn workspace_next(app: &Rc<App>) {
             let id = ws.get("id")?.as_i64()?;
             // Named and special workspaces do not take part in workspace modes.
             if id < 1 { return None; }
-            let prefs = kit::prefs::read();
-            let mut modes = prefs.get("hypr_workspace_layouts").and_then(toml::Value::as_table).cloned().unwrap_or_default();
-            let now = modes.get(&id.to_string()).and_then(toml::Value::as_str)
-                .or_else(|| ws.get("tiledLayout").and_then(Value::as_str)).unwrap_or(kit::hyprconf::tiled_layout(&prefs));
-            let (key, name) = next_tiling_with_prefs(now, &prefs);
-            modes.insert(id.to_string(), toml::Value::String(key.into()));
-            kit::prefs::set("hypr_workspace_layouts", toml::Value::Table(modes)).ok()?;
+            // The next mode is worked out from the stored one in the same locked change.
+            let mut picked = None;
+            kit::prefs::edit(|prefs| {
+                let mut modes = prefs.get("hypr_workspace_layouts").and_then(toml::Value::as_table).cloned().unwrap_or_default();
+                let now = modes.get(&id.to_string()).and_then(toml::Value::as_str)
+                    .or_else(|| ws.get("tiledLayout").and_then(Value::as_str)).unwrap_or(kit::hyprconf::tiled_layout(prefs));
+                let (key, name) = next_tiling_with_prefs(now, prefs);
+                modes.insert(id.to_string(), toml::Value::String(key.into()));
+                prefs.insert("hypr_workspace_layouts".into(), toml::Value::Table(modes));
+                picked = Some((key, name));
+                true
+            }).ok()?;
+            let (key, name) = picked?;
             kit::setup::apply().ok()?;
             Some((key, name))
         })
