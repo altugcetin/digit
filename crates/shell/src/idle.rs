@@ -5,6 +5,7 @@ use gdk4_wayland::prelude::*;
 use gtk::{cairo, gdk, glib, graphene, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::RefCell;
+use std::os::fd::AsRawFd;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
@@ -50,26 +51,22 @@ thread_local! {
     static IDLE: RefCell<Option<Idle>> = const { RefCell::new(None) };
 }
 
-fn seat(display: &gdk::Display) -> Option<WlSeat> {
-    display.default_seat()?.downcast_ref::<gdk4_wayland::WaylandSeat>()?.wl_seat()
-}
-
 pub fn start(app: &Rc<App>) {
-    let Some(display) = gdk::Display::default() else { return };
-    let Some(wl) = display.downcast_ref::<gdk4_wayland::WaylandDisplay>().and_then(|d| d.wl_display()) else { return };
-    let Some(backend) = wl.backend().upgrade() else { return };
-    let conn = Connection::from_backend(backend);
+    // A connection of its own. On GTK's, GTK reads the socket and nothing wakes anyone for
+    // events left in a queue of ours, so it had to be polled; this one's socket wakes the main
+    // loop exactly when the compositor reports idle or activity.
+    let Ok(conn) = Connection::connect_to_env() else { return };
     let Ok((globals, queue)) = registry_queue_init::<Events>(&conn) else { return };
     let qh = queue.handle();
     let Ok(notifier) = globals.bind::<ExtIdleNotifierV1, _, _>(&qh, 1..=1, ()) else { return };
-    let Some(seat) = seat(&display) else { return };
+    let Ok(seat) = globals.bind::<WlSeat, _, _>(&qh, 1..=1, ()) else { return };
+    let fd = conn.backend().poll_fd().as_raw_fd();
     IDLE.with(|i| *i.borrow_mut() = Some(Idle { conn, queue, qh, notifier, seat, notes: Vec::new(), plan: (0, 0, 0), dark: Vec::new(), off: false }));
     apply(app);
     let weak = Rc::downgrade(app);
-    glib::timeout_add_seconds_local(1, move || {
+    glib_unix::unix_fd_add_local(fd, glib::IOCondition::IN | glib::IOCondition::HUP | glib::IOCondition::ERR, move |_, _| {
         let Some(app) = weak.upgrade() else { return glib::ControlFlow::Break };
-        pump(&app);
-        glib::ControlFlow::Continue
+        if pump(&app) { glib::ControlFlow::Continue } else { glib::ControlFlow::Break }
     });
     sleep_watch(Rc::downgrade(app));
 }
@@ -121,17 +118,28 @@ pub fn apply(app: &App) {
     });
 }
 
-fn pump(app: &Rc<App>) {
+/// Reads what the compositor sent and acts on it; false once the connection is gone.
+fn pump(app: &Rc<App>) -> bool {
     let events = IDLE.with(|i| {
         let mut slot = i.borrow_mut();
         let idle = slot.as_mut()?;
+        // None: events are queued already, and only need dispatching.
+        if let Some(guard) = idle.conn.prepare_read() {
+            match guard.read() {
+                Ok(_) => {}
+                Err(wayland_client::backend::WaylandError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => return None,
+            }
+        }
         let mut ev = Events::default();
-        let _ = idle.queue.dispatch_pending(&mut ev);
+        idle.queue.dispatch_pending(&mut ev).ok()?;
         Some(ev.list)
     });
-    for (step, idled) in events.unwrap_or_default() {
+    let Some(events) = events else { return false };
+    for (step, idled) in events {
         act(app, step, idled);
     }
+    true
 }
 
 fn act(app: &Rc<App>, step: Step, idled: bool) {
@@ -293,6 +301,10 @@ fn sleep_watch(weak: Weak<App>) {
 
 impl Dispatch<WlRegistry, GlobalListContents> for Events {
     fn event(_: &mut Self, _: &WlRegistry, _: <WlRegistry as Proxy>::Event, _: &GlobalListContents, _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<WlSeat, ()> for Events {
+    fn event(_: &mut Self, _: &WlSeat, _: <WlSeat as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 }
 
 impl Dispatch<ExtIdleNotifierV1, ()> for Events {
