@@ -734,6 +734,12 @@ impl App {
         if before.call != next.call || before.call_apps != next.call_apps {
             self.spot_call();
         }
+        if before.media != next.media {
+            let players = self.players.borrow().clone();
+            if let Some(p) = players {
+                p.pick();
+            }
+        }
         if before.icon_theme != next.icon_theme {
             crate::icons::theme(next.icon_theme.as_deref());
         }
