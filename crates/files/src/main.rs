@@ -214,10 +214,6 @@ pub fn jobs_done(row: &gtk::Box) {
     }
 }
 
-pub fn jobs_busy() -> bool {
-    files().is_some_and(|f| f.jobs.first_child().is_some())
-}
-
 pub fn refresh_all() {
     for p in panes() {
         if !p.location().is_native() && !ops::is_trash(&p.location()) {

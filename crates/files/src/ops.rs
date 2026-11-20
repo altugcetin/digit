@@ -113,6 +113,13 @@ fn same_fs(a: &gio::File, b: &gio::File) -> bool {
 }
 
 pub fn run(label: &str, plan: Plan) {
+    run_with(label, plan, None);
+}
+
+/// Runs `plan` as a job, and `after` once this job is over (done, failed or cancelled), whatever
+/// other jobs are still going.
+fn run_with(label: &str, plan: Plan, after: Option<Box<dyn FnOnce()>>) {
+    let mut after = after;
     let mut seen = std::collections::HashSet::new();
     let flights = match &plan {
         Plan::Trash(files) => crate::panes().iter().flat_map(|p| p.trash_flights(files)).filter(|flight| seen.insert(flight.uri.clone())).take(3).collect(),
@@ -174,6 +181,9 @@ pub fn run(label: &str, plan: Plan) {
             offer_delete(refused);
         }
         crate::refresh_all();
+        if let Some(after) = after.take() {
+            after();
+        }
         glib::ControlFlow::Break
     });
 }
@@ -1214,19 +1224,9 @@ pub fn extract(files: Vec<gio::File>) {
     }
 }
 
+/// Runs `plan` as a job, then `after` when this job is over.
 pub fn run_then(label: &str, plan: Plan, after: impl FnOnce() + 'static) {
-    run(label, plan);
-    let after = RefCell::new(Some(after));
-    glib::timeout_add_local(Duration::from_millis(300), move || {
-        if crate::jobs_busy() {
-            return glib::ControlFlow::Continue;
-        }
-        let then = after.borrow_mut().take();
-        if let Some(a) = then {
-            a();
-        }
-        glib::ControlFlow::Break
-    });
+    run_with(label, plan, Some(Box::new(after)));
 }
 
 fn flatten(out: &std::path::Path) {
@@ -1581,6 +1581,27 @@ mod tests {
             let expected = std::ffi::OsString::from_vec(b"file\xff (2).txt".to_vec());
             assert_eq!(unique(&file(&dest), &raw).basename().unwrap(), PathBuf::from(expected));
         }
+    }
+
+    #[test]
+    fn a_job_hands_over_when_it_is_done_not_when_every_job_is() {
+        if gtk::init().is_err() {
+            return;
+        }
+        let sh = |script: &str| vec!["sh".to_string(), "-c".to_string(), script.to_string()];
+        let (slow, quick) = (Rc::new(std::cell::Cell::new(false)), Rc::new(std::cell::Cell::new(false)));
+        let s = slow.clone();
+        run_then("Slow", Plan::Run(sh("sleep 3"), std::env::temp_dir(), None), move || s.set(true));
+        let q = quick.clone();
+        run_then("Quick", Plan::Run(sh("true"), std::env::temp_dir(), None), move || q.set(true));
+        let ctx = glib::MainContext::default();
+        let until = std::time::Instant::now() + Duration::from_secs(2);
+        while !quick.get() && std::time::Instant::now() < until {
+            ctx.iteration(false);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(quick.get(), "the quick job's follow-up waited for the slow one");
+        assert!(!slow.get());
     }
 
     #[test]
