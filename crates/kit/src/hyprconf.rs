@@ -48,12 +48,17 @@ fn step(d: keybinds::Dir) -> i8 {
 /// Left and right mean columns in the scrolling layout: the same keys focus or swap whole
 /// columns there, and act on windows everywhere else. Up and down stay as they are.
 fn scrolling(d: keybinds::Dir, tiled: String, column: &str) -> String {
-    let side = match d {
-        keybinds::Dir::Left => "l",
-        keybinds::Dir::Right => "r",
-        _ => return tiled,
-    };
+    let Some(side) = side(d) else { return tiled };
     format!("per_layout({{ default = {tiled}, scrolling = hl.dsp.layout(\"{column} {side}\") }})")
+}
+
+/// The scrolling layout's name for a side: left and right are columns there.
+fn side(d: keybinds::Dir) -> Option<&'static str> {
+    match d {
+        keybinds::Dir::Left => Some("l"),
+        keybinds::Dir::Right => Some("r"),
+        _ => None,
+    }
 }
 
 /// Whether Hyprland can do what this shortcut does.
@@ -79,14 +84,28 @@ fn action(b: &Bind, across: bool) -> Option<String> {
             Win::Maximize => "per_layout({ default = hl.dsp.window.fullscreen({ mode = 1 }), scrolling = column_maximize })".into(),
             Win::Fullscreen => "hl.dsp.window.fullscreen({ mode = 0 })".into(),
             // Toward the workspaces, nothing to focus or move past means the workspace that way.
+            // The window that way is found by digit, on the same workspace only: Hyprland's own
+            // search goes on to a monitor that way, or to a window beside, before a workspace.
             Win::Focus(d) => {
-                let inner = scrolling(*d, format!("hl.dsp.focus({{ direction = \"{}\" }})", d.name()), "focus");
-                if keybinds::crosses(*d, across) { format!("focus_or_workspace({inner}, {})", step(*d)) } else { inner }
+                let cross = keybinds::crosses(*d, across);
+                let tiled = if cross { format!("focus_toward(\"{}\", {})", d.name(), step(*d)) } else { format!("focus_toward(\"{}\")", d.name()) };
+                match side(*d) {
+                    Some(s) => {
+                        let column = format!("hl.dsp.layout(\"focus {s}\")");
+                        let column = if cross { format!("focus_or_workspace({column}, {})", step(*d)) } else { column };
+                        format!("per_layout({{ default = {tiled}, scrolling = {column} }})")
+                    }
+                    None => tiled,
+                }
             }
-            Win::Move(d) => {
-                let inner = scrolling(*d, format!("hl.dsp.window.move({{ direction = \"{}\" }})", d.name()), "swapcol");
-                if keybinds::crosses(*d, across) { format!("move_or_workspace({inner}, {})", step(*d)) } else { inner }
+            Win::Move(d) if keybinds::crosses(*d, across) => {
+                let tiled = format!("move_toward(\"{}\", {})", d.name(), step(*d));
+                match side(*d) {
+                    Some(s) => format!("per_layout({{ default = {tiled}, scrolling = move_or_workspace(hl.dsp.layout(\"swapcol {s}\"), {}) }})", step(*d)),
+                    None => tiled,
+                }
             }
+            Win::Move(d) => scrolling(*d, format!("hl.dsp.window.move({{ direction = \"{}\" }})", d.name()), "swapcol"),
             Win::Workspace(i) => format!("hl.dsp.focus({{ workspace = {i} }})"),
             Win::ToWorkspace(i) => format!("hl.dsp.window.move({{ workspace = {i} }})"),
             // cycle_next doesn't scroll the view, so the scrolling layout steps through columns.
@@ -151,9 +170,9 @@ fn render_keybinds_with(binds: &[Bind], across: bool) -> String {
          -- toggle_special takes.\n\
          local function shown_special()\n    local s = hl.get_active_special_workspace()\n    return s and s.name and (s.name:gsub(\"^special:\", \"\"))\nend\n\n\
          -- The workspace `step` away on this monitor among those in use. Past the last one, a new\n\
-         -- empty one, as the workspace pill offers; nothing before the first. Special workspaces\n\
-         -- have no number and are never stepped to.\n\
-         local function workspace_after(step)\n    local here = hl.get_active_workspace()\n    if not here or not here.id then\n        return nil\n    end\n    local monitor = here.monitor and here.monitor.name\n    local found, empty\n    for _, ws in ipairs(hl.get_workspaces()) do\n        if ws.id and not ws.special and ws.id > 0 and ws.monitor and ws.monitor.name == monitor then\n            if ws.windows == 0 then\n                if ws.id > here.id and (not empty or ws.id < empty) then\n                    empty = ws.id\n                end\n            elseif step > 0 and ws.id > here.id and (not found or ws.id < found) then\n                found = ws.id\n            elseif step < 0 and ws.id < here.id and (not found or ws.id > found) then\n                found = ws.id\n            end\n        end\n    end\n    if found or step < 0 or here.windows == 0 then\n        return found\n    end\n    if empty then\n        return empty\n    end\n    local taken = {}\n    for _, ws in ipairs(hl.get_workspaces()) do\n        if ws.id then\n            taken[ws.id] = true\n        end\n    end\n    local id = here.id + 1\n    while taken[id] do\n        id = id + 1\n    end\n    return id\nend\n\n\
+         -- empty one, as the workspace pill offers, and then `true` as well; nothing before the\n\
+         -- first. Special workspaces have no number and are never stepped to.\n\
+         local function workspace_after(step)\n    local here = hl.get_active_workspace()\n    if not here or not here.id then\n        return nil\n    end\n    local monitor = here.monitor and here.monitor.name\n    local found, empty\n    for _, ws in ipairs(hl.get_workspaces()) do\n        if ws.id and not ws.special and ws.id > 0 and ws.monitor and ws.monitor.name == monitor then\n            if ws.windows == 0 then\n                if ws.id > here.id and (not empty or ws.id < empty) then\n                    empty = ws.id\n                end\n            elseif step > 0 and ws.id > here.id and (not found or ws.id < found) then\n                found = ws.id\n            elseif step < 0 and ws.id < here.id and (not found or ws.id > found) then\n                found = ws.id\n            end\n        end\n    end\n    if found or step < 0 or here.windows == 0 then\n        return found\n    end\n    if empty then\n        return empty, true\n    end\n    local taken = {}\n    for _, ws in ipairs(hl.get_workspaces()) do\n        if ws.id then\n            taken[ws.id] = true\n        end\n    end\n    local id = here.id + 1\n    while taken[id] do\n        id = id + 1\n    end\n    return id, true\nend\n\n\
          -- Over a special workspace these step from the workspace under it, and close it as they go.\n\
          local function step_workspace(step)\n    return function()\n        local id = workspace_after(step)\n        if not id then\n            return\n        end\n        local special = shown_special()\n        if special then\n            hl.dispatch(hl.dsp.workspace.toggle_special(special))\n        end\n        hl.dispatch(hl.dsp.focus({ workspace = id }))\n    end\nend\n\n\
          local function move_step_workspace(step)\n    return function()\n        local id = workspace_after(step)\n        if not id or not hl.get_active_window() then\n            return\n        end\n        local special = shown_special()\n        if special then\n            -- Out of the special workspace, which then closes, and along with the window.\n            hl.dispatch(hl.dsp.window.move({ workspace = id, follow = false }))\n            hl.dispatch(hl.dsp.workspace.toggle_special(special))\n            hl.dispatch(hl.dsp.focus({ workspace = id }))\n        else\n            hl.dispatch(hl.dsp.window.move({ workspace = id }))\n        end\n    end\nend\n\n\
@@ -161,6 +180,23 @@ fn render_keybinds_with(binds: &[Bind], across: bool) -> String {
          local function focus_or_workspace(focus, step)\n    return function()\n        local before = hl.get_active_window()\n        run(focus)\n        local after = hl.get_active_window()\n        if (before and before.address) == (after and after.address) then\n            step_workspace(step)()\n        end\n    end\nend\n\n\
          -- Moves the window that way; at the edge, where it can't go further, to the workspace that way.\n\
          local function move_or_workspace(move, step)\n    return function()\n        local w = hl.get_active_window()\n        if not w then\n            return\n        end\n        local before = string.format(\"%s %s %s\", w.workspace and w.workspace.id or 0, w.at.x, w.at.y)\n        run(move)\n        local now = hl.get_active_window()\n        local after = now and string.format(\"%s %s %s\", now.workspace and now.workspace.id or 0, now.at.x, now.at.y)\n        if now and now.address == w.address and after == before then\n            move_step_workspace(step)()\n        end\n    end\nend\n\n\
+         -- The box a monitor covers in the layout, in the units windows use.\n\
+         local function monitor_box(m)\n    local w, h = m.width / m.scale, m.height / m.scale\n    if m.transform % 2 == 1 then\n        w, h = h, w\n    end\n    return { m.x, m.y, w, h }\nend\n\n\
+         -- Of the boxes in `list` (x, y, width, height and the thing it is), the one that lies `dir`\n\
+         -- of box `a`: past its edge that way, sharing the most of its side first and nearest next.\n\
+         local function nearest(dir, a, list)\n    local best, rank, dist\n    for _, b in ipairs(list) do\n        local across, ahead\n        if dir == \"left\" or dir == \"right\" then\n            across = math.min(a[2] + a[4], b[2] + b[4]) - math.max(a[2], b[2])\n            ahead = dir == \"right\" and b[1] + b[3] / 2 - (a[1] + a[3]) or a[1] - (b[1] + b[3] / 2)\n        else\n            across = math.min(a[1] + a[3], b[1] + b[3]) - math.max(a[1], b[1])\n            ahead = dir == \"down\" and b[2] + b[4] / 2 - (a[2] + a[4]) or a[2] - (b[2] + b[4] / 2)\n        end\n        if ahead > 0 then\n            local r = across > 0 and 0 or 1\n            local d = ahead + math.max(0, -across)\n            if not best or r < rank or (r == rank and d < dist) then\n                best, rank, dist = b.item, r, d\n            end\n        end\n    end\n    return best\nend\n\n\
+         -- The window `dir` of the focused one on its own workspace; never one on another monitor,\n\
+         -- and never one beside it when there is none that way.\n\
+         local function window_toward(dir)\n    local w = hl.get_active_window()\n    if not w or not w.workspace then\n        return nil\n    end\n    local list = {}\n    for _, o in ipairs(hl.get_windows()) do\n        if o.address ~= w.address and o.mapped and not o.hidden and o.workspace and o.workspace.name == w.workspace.name then\n            list[#list + 1] = { o.at.x, o.at.y, o.size.x, o.size.y, item = o }\n        end\n    end\n    return nearest(dir, { w.at.x, w.at.y, w.size.x, w.size.y }, list)\nend\n\n\
+         -- The monitor `dir` of the focused one.\n\
+         local function monitor_toward(dir)\n    local here = hl.get_active_monitor()\n    if not here then\n        return nil\n    end\n    local list = {}\n    for _, m in ipairs(hl.get_monitors()) do\n        if m.name ~= here.name and m.enabled ~= false and not m.is_mirror then\n            local box = monitor_box(m)\n            box.item = m\n            list[#list + 1] = box\n        end\n    end\n    return nearest(dir, monitor_box(here), list)\nend\n\n\
+         -- Focuses the window `dir` on this workspace. With none there and a `step`, a workspace in use\n\
+         -- that way, then the monitor that way, then a new workspace; without one, the monitor that way.\n\
+         local function focus_toward(dir, step)\n    return function()\n        local o = window_toward(dir)\n        if o then\n            hl.dispatch(hl.dsp.focus({ window = \"address:\" .. o.address }))\n            return\n        end\n        local id, fresh\n        if step then\n            id, fresh = workspace_after(step)\n            if id and not fresh then\n                step_workspace(step)()\n                return\n            end\n        end\n        local m = monitor_toward(dir)\n        if m then\n            hl.dispatch(hl.dsp.focus({ monitor = m.name }))\n        elseif id then\n            step_workspace(step)()\n        end\n    end\nend\n\n\
+         -- Moves the window `dir`, past the one there; with none there, to a workspace in use that way,\n\
+         -- then to the monitor that way, then to a new workspace. A floating window moves as Hyprland\n\
+         -- moves it, on to the workspace at the edge.\n\
+         local function move_toward(dir, step)\n    return function()\n        local w = hl.get_active_window()\n        if not w then\n            return\n        end\n        if w.floating then\n            move_or_workspace(hl.dsp.window.move({ direction = dir }), step)()\n            return\n        end\n        if window_toward(dir) then\n            hl.dispatch(hl.dsp.window.move({ direction = dir }))\n            return\n        end\n        local id, fresh = workspace_after(step)\n        if id and not fresh then\n            move_step_workspace(step)()\n            return\n        end\n        local m = monitor_toward(dir)\n        if m then\n            hl.dispatch(hl.dsp.window.move({ monitor = m.name }))\n        elseif id then\n            move_step_workspace(step)()\n        end\n    end\nend\n\n\
          -- Settings lets keys through to itself while you record a new shortcut; Escape leaves.\n\
          hl.define_submap(\"digit-capture\", function()\n    hl.bind(\"ESCAPE\", hl.dsp.submap(\"reset\"))\nend)\n\n",
     );
@@ -715,8 +751,9 @@ mod tests {
         assert!(!rendered.contains("digit-floating"));
         assert!(rendered.contains("hl.dsp.window.float({ action = \"toggle\" })"));
         assert!(rendered.contains("bind(\"SUPER + mouse:272\", hl.dsp.window.drag(), { mouse = true })"));
+        // Toward the workspaces, digit's own helper moves the window; the other way, Hyprland.
         for direction in ["left", "right", "up", "down"] {
-            assert!(rendered.contains(&format!("hl.dsp.window.move({{ direction = \"{direction}\" }})")));
+            assert!(rendered.contains(&format!("hl.dsp.window.move({{ direction = \"{direction}\" }})")) || rendered.contains(&format!("move_toward(\"{direction}\"")));
         }
         assert!(rendered.contains("scrolling = hl.dsp.layout(\"swapcol l\")"));
         for step in ["+1", "-1"] {
@@ -837,18 +874,20 @@ mod tests {
     fn workspaces_are_reached_the_way_they_lie() {
         let binds: Vec<_> = keybinds::defaults().into_iter().filter(|b| b.id.starts_with("focus-") || b.id.starts_with("move-") || b.id.starts_with("workspace-") || b.id.starts_with("to-workspace-")).collect();
         let stacked = render_keybinds_with(&binds, false);
-        assert!(stacked.contains("bind(\"SUPER + SHIFT + DOWN\", move_or_workspace(hl.dsp.window.move({ direction = \"down\" }), 1))"));
-        assert!(stacked.contains("bind(\"SUPER + LEFT\", per_layout({ default = hl.dsp.focus({ direction = \"left\" }), scrolling = hl.dsp.layout(\"focus l\") }))"));
+        assert!(stacked.contains("bind(\"SUPER + SHIFT + DOWN\", move_toward(\"down\", 1))"));
+        assert!(stacked.contains("bind(\"SUPER + LEFT\", per_layout({ default = focus_toward(\"left\"), scrolling = hl.dsp.layout(\"focus l\") }))"));
+        assert!(stacked.contains("bind(\"SUPER + SHIFT + LEFT\", per_layout({ default = hl.dsp.window.move({ direction = \"left\" }), scrolling = hl.dsp.layout(\"swapcol l\") }))"));
         assert!(stacked.contains("bind(\"SUPER + PAGE_DOWN\", step_workspace(1))"));
         assert!(stacked.contains("bind(\"SUPER + SHIFT + PAGE_UP\", move_step_workspace(-1))"));
         let across = render_keybinds_with(&binds, true);
-        assert!(across.contains("bind(\"SUPER + LEFT\", focus_or_workspace(per_layout({ default = hl.dsp.focus({ direction = \"left\" }), scrolling = hl.dsp.layout(\"focus l\") }), -1))"));
-        assert!(across.contains("bind(\"SUPER + UP\", hl.dsp.focus({ direction = \"up\" }))"));
+        assert!(across.contains("bind(\"SUPER + LEFT\", per_layout({ default = focus_toward(\"left\", -1), scrolling = focus_or_workspace(hl.dsp.layout(\"focus l\"), -1) }))"));
+        assert!(across.contains("bind(\"SUPER + SHIFT + RIGHT\", per_layout({ default = move_toward(\"right\", 1), scrolling = move_or_workspace(hl.dsp.layout(\"swapcol r\"), 1) }))"));
+        assert!(across.contains("bind(\"SUPER + UP\", focus_toward(\"up\"))"));
         // Special workspaces have no number: they are skipped, not indexed.
         assert!(stacked.contains("if ws.id then\n            taken[ws.id] = true"));
         assert!(stacked.contains("if ws.id and not ws.special and ws.id > 0"));
         // Every helper the binds call is defined before them.
-        for helper in ["focus_or_workspace", "move_or_workspace", "step_workspace", "move_step_workspace"] {
+        for helper in ["focus_or_workspace", "move_or_workspace", "step_workspace", "move_step_workspace", "focus_toward", "move_toward", "window_toward", "monitor_toward"] {
             assert!(stacked.find(&format!("local function {helper}(")).unwrap() < stacked.find("bind(\"").unwrap(), "{helper}");
         }
     }
@@ -858,7 +897,7 @@ mod tests {
         let binds: Vec<_> = keybinds::defaults().into_iter().filter(|b| matches!(b.id.as_str(), "focus-up" | "workspace-next" | "workspace-prev") || b.id.starts_with("window-")).collect();
         let rendered = render_keybinds_with(&binds, false);
         // The arrows focus, on to the workspace past the last window; the wheel steps workspaces.
-        assert!(rendered.contains("bind(\"SUPER + UP\", focus_or_workspace(hl.dsp.focus({ direction = \"up\" }), -1))"));
+        assert!(rendered.contains("bind(\"SUPER + UP\", focus_toward(\"up\", -1))"));
         assert!(rendered.contains("bind(\"SUPER + mouse_up\", step_workspace(-1))"));
         assert!(rendered.contains("bind(\"SUPER + mouse_down\", step_workspace(1))"));
         assert!(compositor_with(&toml::Table::new(), false, false).contains("binds = { scroll_event_delay = 150 }"));
