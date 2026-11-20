@@ -72,7 +72,7 @@ impl Server {
         expire_timeout: i32,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<u32> {
-        let id = if replaces_id > 0 { replaces_id } else { self.next.fetch_add(1, Ordering::Relaxed) };
+        let id = assign(&self.next, replaces_id);
         let urgency = hints.get("urgency").and_then(|v| u8::try_from(v.try_clone().ok()?).ok()).unwrap_or(1);
         let default = actions.chunks(2).any(|pair| pair[0] == "default");
         let buttons: Vec<(String, String)> = actions
@@ -141,6 +141,18 @@ impl Server {
             if removed { Server::notification_closed(emitter, id, reason).await?; }
         }
         Ok(())
+    }
+}
+
+/// The id a notification gets: the one it replaces, or the next free one. A client may make up
+/// the id it replaces (`notify-send -r 1234`); the ids handed out then move past it, so a later
+/// notification never takes that one's place.
+fn assign(next: &AtomicU32, replaces: u32) -> u32 {
+    if replaces > 0 {
+        next.fetch_max(replaces.saturating_add(1), Ordering::Relaxed);
+        replaces
+    } else {
+        next.fetch_add(1, Ordering::Relaxed)
     }
 }
 
@@ -610,6 +622,16 @@ mod tests {
         assert_eq!(pixel_layout(-1, 2, 8, 4, 16), None);
         assert_eq!(pixel_layout(i32::MAX, i32::MAX, i32::MAX, 4, usize::MAX), None);
         assert_eq!(pixel_layout(4096, 4096, 16384, 4, usize::MAX), None);
+    }
+
+    #[test]
+    fn a_made_up_id_is_never_handed_out_again() {
+        let next = AtomicU32::new(1);
+        assert_eq!(assign(&next, 0), 1);
+        assert_eq!(assign(&next, 5), 5);
+        assert_eq!(assign(&next, 0), 6, "past the id a client chose");
+        assert_eq!(assign(&next, 2), 2);
+        assert_eq!(assign(&next, 0), 7, "an older id doesn't move the count back");
     }
 
     #[test]
