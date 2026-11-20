@@ -62,6 +62,12 @@ fn push_undo(u: Undo) {
     });
 }
 
+/// Takes back the undo of making `path`, once that file is gone again by other means.
+pub fn forget_made(path: &std::path::Path) {
+    let gone = gio::File::for_path(path);
+    UNDO.with(|s| s.borrow_mut().retain(|u| !matches!(u, Undo::Created(files) if files.len() == 1 && files[0].equal(&gone))));
+}
+
 /// Opens each file with its default app; a kind of file with no default asks with Digit's own Open With.
 pub fn open(files: &[gio::File]) {
     let ctx = gdk::Display::default().map(|d| d.app_launch_context());
