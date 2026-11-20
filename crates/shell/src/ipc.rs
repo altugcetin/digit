@@ -9,11 +9,18 @@ pub fn socket() -> PathBuf {
     glib::user_runtime_dir().join("digit.sock")
 }
 
+/// How long `digit msg` waits for the shell's answer before giving up on a shell that hangs.
+const REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub fn send(words: &[String]) -> Result<String, String> {
     let mut stream = UnixStream::connect(socket()).map_err(|_| "digit is not running".to_string())?;
+    stream.set_read_timeout(Some(REPLY_WAIT)).map_err(|e| e.to_string())?;
     writeln!(stream, "{}", serde_json::to_string(words).unwrap_or_default()).map_err(|e| e.to_string())?;
     let mut reply = String::new();
-    BufReader::new(stream).read_line(&mut reply).map_err(|e| e.to_string())?;
+    BufReader::new(stream).read_line(&mut reply).map_err(|e| match e.kind() {
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => "digit is not answering".to_string(),
+        _ => e.to_string(),
+    })?;
     Ok(reply.trim().to_string())
 }
 
