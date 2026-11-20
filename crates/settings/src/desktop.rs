@@ -1203,6 +1203,7 @@ fn notch(body: &gtk::Box, t: &toml::Table) {
         .collect();
     tiles(&notch, "toolbar", "Style", "Notch hugs the top edge, Dynamic Island floats as a pill, Bar spans the whole edge with the app, status and date", items, at, |i| save("notch_style", toml::Value::String(STYLES[i].0.into())));
     choice(&notch, "call", "Call activity", "A live pill with the call timer and voice waveform while an app uses the microphone", "notch_call", &[("voice", "Voice and video apps"), ("any", "Any app using the microphone"), ("off", "Off")], &prefs::get_str(&t, "notch_call", "voice"));
+    media_players(&notch, t);
     toggle(&notch, "mic_off", "Block idle microphone", "Voice apps like Discord can keep listening after a call ends. Digit silences only their microphone stream until a real call starts, then gives it back instantly", "mic_guard", prefs::get_bool(&t, "mic_guard", true));
     toggle(&notch, "touch_app", "Open on hover", "Expand the notch when the pointer rests on it", "hover", prefs::get_bool(&t, "hover", true));
     // One choice for every panel that opens from the notch, the corners and the date.
@@ -1214,6 +1215,25 @@ fn notch(body: &gtk::Box, t: &toml::Table) {
         save_many(&CLOSE.map(|k| (k, toml::Value::String(value.into()))))
     }));
     notch.append(&row);
+}
+
+/// Which media players the notch shows: all, all but a list, or only a list (see `kit::players`).
+fn media_players(card: &gtk::Box, t: &toml::Table) {
+    use kit::players::{ALLOWED, BLOCKED, MODE, MODES};
+    let mode = choice(card, "music_note", "Media players", "Which players the notch and the Now playing widget show", MODE, &MODES, &kit::players::mode(t));
+    for (key, icon, title, sub, on) in [(BLOCKED, "music_off", "Hidden players", "Never shown, even while playing", "block"), (ALLOWED, "playlist_add_check", "Shown players", "Only these show. Leave empty to show all", "allow")] {
+        let (row, end) = ui::row(Some(icon), title, sub);
+        let entry = gtk::Entry::new();
+        entry.set_text(&kit::players::join(&kit::hidden::list(t, key)));
+        entry.set_placeholder_text(Some("spotify, firefox"));
+        entry.set_valign(gtk::Align::Center);
+        entry.set_width_chars(18);
+        entry.set_max_length(256);
+        ui::bind_entry(&entry, |_| Ok(()), move |text| save(key, toml::Value::Array(kit::players::parse(text).into_iter().map(toml::Value::String).collect())));
+        end.append(&entry);
+        card.append(&row);
+        mode.enable_when(&row, move |v| v == on);
+    }
 }
 
 fn menu_bar(body: &gtk::Box, t: &toml::Table) {

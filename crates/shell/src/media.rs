@@ -292,15 +292,16 @@ impl Players {
     }
 
     /// Which player the notch shows, and how long to wait before re-checking a pending takeover.
-    fn choose(inner: &Inner, now: i64) -> (Option<String>, Option<i64>) {
+    fn choose(inner: &Inner, now: i64, filter: &kit::players::Filter) -> (Option<String>, Option<i64>) {
+        // A player the user keeps out of the notch is still watched, just never chosen.
+        let shown = |n: &str, e: &Entry| filter.shows(&[n.trim_start_matches(PREFIX), &e.desktop, &e.app_name]);
+        let entries = || inner.entries.iter().filter(move |(n, e)| shown(n, e));
         let titled = |e: &Entry| !e.track.title.is_empty();
         let is_playing = |e: &Entry| e.track.status == "Playing";
-        let current = inner.active.clone().filter(|n| inner.entries.contains_key(n));
+        let current = inner.active.clone().filter(|n| inner.entries.get(n).is_some_and(|e| shown(n, e)));
         let current_playing = current.as_ref().and_then(|n| inner.entries.get(n).map(|e| (n, e))).filter(|(_, e)| is_playing(e));
         if let Some((cur_name, cur_entry)) = current_playing {
-            let challenger = inner
-                .entries
-                .iter()
+            let challenger = entries()
                 .filter(|(n, e)| *n != cur_name && is_playing(e) && titled(e) && e.track.since > cur_entry.track.since)
                 .max_by_key(|(_, e)| e.track.since);
             return match challenger {
@@ -309,17 +310,13 @@ impl Players {
                 None => (current.clone(), None),
             };
         }
-        let newest_playing = inner
-            .entries
-            .iter()
+        let newest_playing = entries()
             .filter(|(_, e)| is_playing(e) && titled(e))
             .max_by_key(|(_, e)| e.track.since)
             .map(|(n, _)| n.clone());
         let current_titled = current.filter(|n| inner.entries.get(n).is_some_and(titled));
         let paused_recent = || {
-            inner
-                .entries
-                .iter()
+            entries()
                 .filter(|(_, e)| e.track.status == "Paused" && titled(e))
                 .max_by_key(|(_, e)| e.track.since)
                 .map(|(n, _)| n.clone())
@@ -327,12 +324,14 @@ impl Players {
         (newest_playing.or(current_titled).or_else(paused_recent), None)
     }
 
-    fn pick(&self) {
+    /// Chooses the player the notch shows again, after a change of which players may show.
+    pub fn pick(&self) {
         let Some(app) = self.0.borrow().app.upgrade() else { return };
         let now = App::now();
         let (active, track, app_name, desktop, position, position_at, counted, wait) = {
             let mut inner = self.0.borrow_mut();
-            let (active, wait) = Self::choose(&inner, now);
+            let filter = app.prefs.borrow().media.clone();
+            let (active, wait) = Self::choose(&inner, now, &filter);
             inner.active = active.clone();
             let entry = active.as_ref().and_then(|n| inner.entries.get(n));
             let track = entry.map(|e| e.track.clone()).unwrap_or_default();
