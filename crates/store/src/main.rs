@@ -638,8 +638,7 @@ fn install_files() {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let tmp = path.with_extension("new");
-        if std::fs::write(&tmp, &body).is_ok() && std::fs::rename(&tmp, &path).is_ok() && path.extension().is_some_and(|e| e == "svg") {
+        if kit::atomic::write(&path, &body).is_ok() && path.extension().is_some_and(|e| e == "svg") {
             icon_changed = true;
         }
     }
@@ -986,7 +985,6 @@ fn collections(store: &Rc<Store>) {
             continue;
         }
         let me = store.clone();
-        let dir = dir.clone();
         glib::spawn_future_local(async move {
             let url = format!("https://flathub.org/api/v2/collection/{name}?page=1&per_page=40");
             let argv: [&std::ffi::OsStr; 5] = ["curl".as_ref(), "-fsSL".as_ref(), "--max-time".as_ref(), "15".as_ref(), url.as_ref()];
@@ -996,8 +994,7 @@ fn collections(store: &Rc<Store>) {
             if list.is_empty() {
                 return;
             }
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(&file, out.as_str());
+            let _ = kit::atomic::write(&file, out.as_str());
             me.lists.borrow_mut().insert(name.to_string(), list);
             if !REFRESH.with(|r| r.replace(true)) {
                 let me = me.clone();

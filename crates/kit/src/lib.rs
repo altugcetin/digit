@@ -4,6 +4,7 @@ pub mod qt_colors;
 pub mod appearance;
 pub mod cursors;
 pub mod app;
+pub mod atomic;
 pub mod bluez;
 pub mod calc;
 pub mod color;

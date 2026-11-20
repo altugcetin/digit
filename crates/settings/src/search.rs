@@ -142,10 +142,7 @@ fn export(hits: &[Hit]) {
     if let Some(d) = path.parent() {
         let _ = std::fs::create_dir_all(d);
     }
-    let tmp = path.with_extension("json.new");
-    if std::fs::write(&tmp, serde_json::Value::Array(list).to_string()).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    }
+    let _ = kit::atomic::write(&path, serde_json::Value::Array(list).to_string());
 }
 
 /// Builds the index and writes it for Spotlight (`digit-settings --index`).

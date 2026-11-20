@@ -34,8 +34,7 @@ pub fn install(e: &Entry) -> bool {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let tmp = path.with_extension("new");
-        if std::fs::write(&tmp, &body).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+        if crate::atomic::write(&path, &body).is_ok() {
             changed = true;
             icon |= path.extension().is_some_and(|x| x == "svg");
         }
@@ -174,16 +173,12 @@ pub fn replace(ids: &[&str], by: &str, marker: &str) {
             out.push('\n');
         }
         let _ = std::fs::create_dir_all(&apps);
-        let tmp = local.with_extension("new");
-        if std::fs::write(&tmp, &out).is_ok() && std::fs::rename(&tmp, &local).is_ok() {
+        if crate::atomic::write(&local, &out).is_ok() {
             record.push_str(id);
             record.push('\n');
         }
     }
     if record != done {
-        if let Some(dir) = marker.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(&marker, record);
+        let _ = crate::atomic::write(&marker, record);
     }
 }

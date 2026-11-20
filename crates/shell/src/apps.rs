@@ -78,8 +78,7 @@ impl Apps {
             entry.last = now;
         }
         let text = serde_json::to_string(&*self.used.borrow()).unwrap_or_default();
-        let _ = std::fs::create_dir_all(kit::theme::state_dir());
-        let _ = std::fs::write(used_file(), text);
+        let _ = kit::atomic::write(&used_file(), text);
     }
 
     pub fn launch(&self, entry: &Entry) {

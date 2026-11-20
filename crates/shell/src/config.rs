@@ -564,9 +564,8 @@ pub fn edit(cfg: &Config) {
     use gtk::prelude::*;
     let path = dir().join("config.toml");
     if !path.exists() {
-        let _ = std::fs::create_dir_all(dir());
         if let Ok(text) = toml::to_string_pretty(cfg) {
-            let _ = std::fs::write(&path, text);
+            let _ = kit::atomic::write(&path, text);
         }
     }
     let uri = gtk::gio::File::for_path(&path).uri();

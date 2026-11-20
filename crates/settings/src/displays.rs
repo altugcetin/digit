@@ -311,9 +311,7 @@ fn save_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
-    let tmp = path.with_extension("new");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(tmp, path)
+    kit::atomic::write(path, text)
 }
 
 fn persist(wm: Wm, outs: &[Out]) -> Result<String, String> {

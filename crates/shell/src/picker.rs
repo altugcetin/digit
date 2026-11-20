@@ -248,11 +248,7 @@ fn save_colors(colors: &HashMap<String, u8>) {
         })
         .collect();
     let path = colors_file();
-    let _ = std::fs::create_dir_all(kit::theme::state_dir());
-    let tmp = path.with_extension("new");
-    if std::fs::write(&tmp, body).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    }
+    let _ = kit::atomic::write(&path, body);
 }
 
 fn classify(path: &str) -> Option<u8> {

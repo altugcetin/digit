@@ -147,7 +147,7 @@ fn save() {
     let run = ENGINE.with(|e| e.borrow().run.clone());
     match run.and_then(|r| serde_json::to_string(&r).ok()) {
         Some(text) => {
-            let _ = std::fs::write(state_file(), text);
+            let _ = kit::atomic::write(&state_file(), text);
         }
         None => {
             let _ = std::fs::remove_file(state_file());

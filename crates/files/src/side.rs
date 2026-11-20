@@ -62,8 +62,7 @@ pub fn toggle_bookmark(file: &gio::File) {
     if let Some(d) = path.parent() {
         let _ = std::fs::create_dir_all(d);
     }
-    let tmp = path.with_extension("new");
-    if std::fs::write(&tmp, body).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+    if kit::atomic::write(&path, body).is_ok() {
         crate::toast(if had { "Removed from the sidebar" } else { "Added to the sidebar" });
         crate::rebuild_side();
     }

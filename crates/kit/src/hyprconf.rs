@@ -544,9 +544,7 @@ pub(crate) fn write_if_changed(path: &Path, body: &str) -> std::io::Result<bool>
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
-    let tmp = path.with_extension("lua.new");
-    std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, path)?;
+    crate::atomic::write(path, body)?;
     Ok(true)
 }
 

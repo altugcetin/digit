@@ -529,10 +529,7 @@ pub fn load() -> Option<Index> {
         let _ = std::fs::create_dir_all(dir);
     }
     if let Ok(text) = serde_json::to_string(&Cached { stamp, packages: packages.clone() }) {
-        let tmp = cache_file().with_extension("new");
-        if std::fs::write(&tmp, text).is_ok() {
-            let _ = std::fs::rename(tmp, cache_file());
-        }
+        let _ = kit::atomic::write(&cache_file(), text);
     }
     Some(Index::new(packages, detailed))
 }

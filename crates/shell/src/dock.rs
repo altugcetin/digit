@@ -230,12 +230,7 @@ fn load_pins(app: &App) -> Vec<String> {
 }
 
 fn save_pins(pins: &[String]) {
-    let _ = std::fs::create_dir_all(kit::theme::state_dir());
-    let path = pins_path();
-    let tmp = path.with_extension("new");
-    if std::fs::write(&tmp, pins.join("\n") + "\n").is_ok() {
-        let _ = std::fs::rename(tmp, path);
-    }
+    let _ = kit::atomic::write(&pins_path(), pins.join("\n") + "\n");
 }
 
 /// The screen `output` when it is plugged in, else the main one.
@@ -771,8 +766,7 @@ pub fn command(app: &Rc<App>, verb: &str) -> bool {
     let next = if want {
         std::fs::read_to_string(&remembered).ok().map(|s| s.trim().to_string()).filter(|m| matches!(m.as_str(), "on" | "autohide" | "smart")).unwrap_or_else(|| "on".into())
     } else {
-        let _ = std::fs::create_dir_all(kit::theme::state_dir());
-        let _ = std::fs::write(&remembered, &mode);
+        let _ = kit::atomic::write(&remembered, &mode);
         "off".into()
     };
     close_menu();
