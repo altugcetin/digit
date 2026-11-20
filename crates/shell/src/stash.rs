@@ -80,9 +80,11 @@ fn crop_size(pw: i32, ph: i32, w: i32, h: i32) -> (i32, i32, i32, i32) {
 }
 
 fn crop_at(pw: i32, ph: i32, w: i32, h: i32, focus: kit::wallfocus::Focus) -> (i32, i32, i32, i32) {
+    let focus = kit::wallfocus::clamp(focus);
+    // The part that covers the screen, and of that, zoomed in, a smaller part in the same shape.
     let cw = ((ph as f64 * w as f64 / h as f64).round() as i32).clamp(1, pw);
     let ch = ((pw as f64 * h as f64 / w as f64).round() as i32).clamp(1, ph);
-    let focus = kit::wallfocus::clamp(focus);
+    let (cw, ch) = (((cw as f64 / focus.2).round() as i32).max(1), ((ch as f64 / focus.2).round() as i32).max(1));
     (((pw - cw) as f64 * focus.0).floor() as i32, ((ph - ch) as f64 * focus.1).floor() as i32, cw, ch)
 }
 
@@ -139,10 +141,13 @@ mod tests {
     #[test]
     fn cover_keeps_the_part_the_focus_points_at() {
         // A square image on a wide screen overflows up and down: 0 keeps the top, 1 the bottom.
-        assert_eq!(crop_at(1000, 1000, 1000, 500, (0.5, 0.0)), (0, 0, 1000, 500));
-        assert_eq!(crop_at(1000, 1000, 1000, 500, (0.5, 1.0)), (0, 500, 1000, 500));
-        assert_eq!(crop_at(1000, 1000, 1000, 500, (0.5, 0.5)), (0, 250, 1000, 500));
+        assert_eq!(crop_at(1000, 1000, 1000, 500, (0.5, 0.0, 1.0)), (0, 0, 1000, 500));
+        assert_eq!(crop_at(1000, 1000, 1000, 500, (0.5, 1.0, 1.0)), (0, 500, 1000, 500));
+        assert_eq!(crop_at(1000, 1000, 1000, 500, (0.5, 0.5, 1.0)), (0, 250, 1000, 500));
         // Nothing overflows sideways, so the horizontal focus changes nothing.
-        assert_eq!(crop_at(1000, 1000, 1000, 500, (0.0, 0.5)), crop_at(1000, 1000, 1000, 500, (1.0, 0.5)));
+        assert_eq!(crop_at(1000, 1000, 1000, 500, (0.0, 0.5, 1.0)), crop_at(1000, 1000, 1000, 500, (1.0, 0.5, 1.0)));
+        // Zoomed in twice: half of it each way, moved along both by the focus.
+        assert_eq!(crop_at(1000, 1000, 1000, 500, (0.5, 0.5, 2.0)), (250, 375, 500, 250));
+        assert_eq!(crop_at(1000, 1000, 1000, 500, (1.0, 0.0, 2.0)), (500, 0, 500, 250));
     }
 }
