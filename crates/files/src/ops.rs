@@ -611,6 +611,12 @@ fn work(plan: Plan, st: &State, cancel: &gio::Cancellable, flights: Vec<crate::p
                                 if !status.success() {
                                     let err = complaint.and_then(|c| c.join().ok()).flatten();
                                     errors.push(err.unwrap_or_else(|| format!("{} failed", argv[0])));
+                                    // What a tool that gave up had begun writing (often nothing
+                                    // yet: an empty file) goes, as on a cancel. It is always a
+                                    // new name this job made, never something that was there.
+                                    if let Some(m) = &made {
+                                        let _ = remove_tree(&gio::File::for_path(m), &gio::Cancellable::new());
+                                    }
                                 } else if let Some(m) = made {
                                     note(st, |s| s.undo = Some(Undo::Created(vec![gio::File::for_path(m)])));
                                 }
@@ -1569,6 +1575,21 @@ mod tests {
             let expected = std::ffi::OsString::from_vec(b"file\xff (2).txt".to_vec());
             assert_eq!(unique(&file(&dest), &raw).basename().unwrap(), PathBuf::from(expected));
         }
+    }
+
+    #[test]
+    fn a_tool_that_fails_leaves_no_empty_file_but_one_that_works_keeps_its_result() {
+        let t = Scratch::new("failed-tool");
+        let out = t.0.join("out (smaller).pdf");
+        let sh = |script: &str| vec!["sh".to_string(), "-c".to_string(), script.to_string()];
+        let st = state();
+        work(Plan::Run(sh("touch 'out (smaller).pdf'; exit 1"), t.0.clone(), Some(out.clone())), &st, &gio::Cancellable::new(), Vec::new());
+        assert!(!out.exists(), "the empty file a failed tool began stays");
+        assert_eq!(st.0.lock().unwrap().errors.len(), 1);
+        let st = state();
+        work(Plan::Run(sh("printf x > 'out (smaller).pdf'"), t.0.clone(), Some(out.clone())), &st, &gio::Cancellable::new(), Vec::new());
+        assert!(out.exists());
+        assert!(st.0.lock().unwrap().errors.is_empty());
     }
 
     #[test]
