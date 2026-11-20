@@ -35,8 +35,32 @@ struct Sheet {
     window: gtk::Window,
     paint: Paint,
     column: gtk::Box,
+    actions: gtk::Box,
     entry: gtk::PasswordEntry,
     status: gtk::Label,
+    /// The main screen's sheet holds the clock, the password and the buttons; the others show
+    /// only the wallpaper and pass what is typed on them to it.
+    main: Rc<Cell<bool>>,
+}
+
+/// Whether `monitor` is the main screen: the primary display, or the first one.
+fn is_main(monitor: &gdk::Monitor) -> bool {
+    let primary = crate::batterywidget::monitor().and_then(|m| m.connector());
+    primary.is_none() || monitor.connector() == primary
+}
+
+/// Makes `face` the one with the clock and the password, as when the main screen goes away.
+fn promote(face: &Sheet) {
+    face.main.set(true);
+    face.column.set_visible(true);
+    face.actions.set_visible(true);
+    face.paint.queue_draw();
+    face.entry.grab_focus();
+}
+
+/// The main screen's sheet.
+fn main_face() -> Option<Sheet> {
+    STATE.with(|s| s.borrow().as_ref().and_then(|st| st.faces.iter().find(|f| f.main.get()).cloned()))
 }
 
 struct State {
@@ -167,9 +191,16 @@ pub fn lock(app: &Rc<App>) -> bool {
                 let index = st.faces.iter().position(|f| f.monitor == *monitor)?;
                 Some(st.faces.remove(index))
             });
-            if let Some(face) = removed { face.window.destroy(); }
+            if let Some(face) = removed {
+                face.window.destroy();
+                // The password must stay somewhere: another screen takes it.
+                let left = STATE.with(|s| s.borrow().as_ref().and_then(|st| (!st.faces.iter().any(|f| f.main.get())).then(|| st.faces.first().cloned()).flatten()));
+                if let Some(next) = left { promote(&next); }
+            }
         });
-        let face = build(&a, &monitor, false, generation);
+        // One screen holds the password: the main one, unless another took it while it was gone.
+        let main = is_main(&monitor) && main_face().is_none();
+        let face = build(&a, &monitor, false, generation, main);
         unsafe {
             ffi::gtk_session_lock_instance_assign_window_to_monitor(inst.as_ptr(), face.window.to_glib_none().0, monitor.to_glib_none().0);
         }
@@ -230,7 +261,8 @@ pub fn preview(app: &Rc<App>, output: Option<&str>) {
         if output.is_some_and(|o| m.connector().as_deref() != Some(o)) {
             continue;
         }
-        let face = build(app, &m, true, generation);
+        // A preview of one screen shows that screen as the main one would look.
+        let face = build(app, &m, true, generation, output.is_some() || is_main(&m));
         face.window.present();
         STATE.with(|s| {
             if let Some(st) = s.borrow_mut().as_mut() {
@@ -426,7 +458,8 @@ fn avatar() -> Option<gdk::Texture> {
         .find_map(|p| gdk::Texture::from_filename(p).ok())
 }
 
-fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64) -> Sheet {
+fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64, main: bool) -> Sheet {
+    let main = Rc::new(Cell::new(main));
     let window = gtk::Window::new();
     window.add_css_class("digit-lock");
     if preview {
@@ -452,6 +485,7 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64) 
     {
         let weak = paint.downgrade();
         let cfg = app.cfg.clone();
+        let main = main.clone();
         paint.on_draw(move |s| {
             let Some(p) = weak.upgrade() else { return };
             let (w, h) = (p.width() as f64, p.height() as f64);
@@ -476,6 +510,10 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64) 
                 &graphene::Point::new(0.0, h as f32),
                 &[gtk::gsk::ColorStop::new(0.0, gdk::RGBA::new(0.0, 0.0, 0.0, 0.0)), gtk::gsk::ColorStop::new(1.0, gdk::RGBA::new(0.0, 0.0, 0.0, 0.38))],
             );
+            // The other screens show only the wallpaper.
+            if !main.get() {
+                return;
+            }
             let dt = glib::DateTime::now_local().ok();
             let date = dt.as_ref().and_then(|d| d.format("%A, %-d %B").ok()).map(|s| s.to_string()).unwrap_or_default();
             let time = dt.as_ref().and_then(|d| d.format(&cfg.clock).ok()).map(|s| s.to_string()).unwrap_or_default();
@@ -576,13 +614,23 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64) 
         actions.append(&cell);
     }
     overlay.add_overlay(&actions);
+    column.set_visible(main.get());
+    actions.set_visible(main.get());
     window.set_child(Some(&overlay));
     entry.connect_activate(move |e| submit(e, generation));
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     let e = entry.clone();
-    keys.connect_key_pressed(move |_, key, _, _| {
+    let mine = main.clone();
+    keys.connect_key_pressed(move |_, key, _, mods| {
         if !current(generation) { return glib::Propagation::Proceed; }
+        // Typed on a screen without the password: it goes into the main screen's.
+        if !mine.get() {
+            if let Some(m) = main_face() {
+                forward(&m.entry, key, mods, generation);
+            }
+            return glib::Propagation::Stop;
+        }
         if key == gdk::Key::Escape {
             let preview = STATE.with(|s| s.borrow().as_ref().is_some_and(|st| matches!(st.mode, Mode::Preview)));
             if e.text().is_empty() && preview {
@@ -596,19 +644,50 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64) 
     });
     window.add_controller(keys);
     let e = entry.clone();
+    let mine = main.clone();
     window.connect_map(move |_| {
+        if !mine.get() {
+            return;
+        }
         let e = e.clone();
         glib::timeout_add_local_once(Duration::from_millis(60), move || {
             e.grab_focus();
         });
     });
     let e = entry.clone();
+    let mine = main.clone();
     window.connect_is_active_notify(move |w| {
-        if w.is_active() {
+        if w.is_active() && mine.get() {
             e.grab_focus();
         }
     });
-    Sheet { monitor: monitor.clone(), window, paint, column, entry, status }
+    Sheet { monitor: monitor.clone(), window, paint, column, actions, entry, status, main }
+}
+
+/// A key pressed on a screen without the password box, put into `entry` on the main screen:
+/// letters go in, Backspace takes the last one off, Enter tries it and Escape clears it.
+fn forward(entry: &gtk::PasswordEntry, key: gdk::Key, mods: gdk::ModifierType, generation: u64) {
+    if !entry.is_sensitive() {
+        return;
+    }
+    match key {
+        gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::ISO_Enter => submit(entry, generation),
+        gdk::Key::Escape => entry.set_text(""),
+        gdk::Key::BackSpace => {
+            let text = entry.text();
+            let mut chars = text.chars();
+            chars.next_back();
+            entry.set_text(chars.as_str());
+        }
+        _ if !mods.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK | gdk::ModifierType::SUPER_MASK) => {
+            if let Some(c) = key.to_unicode().filter(|c| !c.is_control()) {
+                let mut text = entry.text().to_string();
+                text.push(c);
+                entry.set_text(&text);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
