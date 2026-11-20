@@ -407,6 +407,7 @@ fn watch_config(app: &Rc<App>) {
                 if before[..6] != next[..6] { theming::changed(before[5] != next[5]); }
                 if before[6..] != next[6..] { theming::cursor_changed(); }
                 app.apply_prefs(config::Prefs::from(&config::load()));
+                picker::prefs_changed(&app);
             }
         });
     });

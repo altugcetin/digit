@@ -764,7 +764,8 @@ impl Launcher {
         // lookup below runs on a worker; panel focus must not change its target.
         let focused = app.running.borrow().iter().find(|w| w.focused).map(|w| (w.id, w.app_id.clone()));
         let snapshot = focused.clone();
-        let prism = kit::prefs::flag(&kit::prefs::read(), "spotlight_prism", false);
+        let table = crate::config::table();
+        let prism = kit::prefs::flag(&table, "spotlight_prism", false);
         self.0.borrow_mut().prism_on = prism;
         let pending = gio::spawn_blocking(move || {
             let instances = if prism { crate::prism::instances() } else { Vec::new() };
@@ -775,7 +776,6 @@ impl Launcher {
             };
             (compositor::focused_output(), windows, focused, instances)
         });
-        let table = kit::prefs::read();
         let found_in = providers::discover(&app, &table);
         let scopes = providers::scopes(&app, &table);
         let settings = settings_index();

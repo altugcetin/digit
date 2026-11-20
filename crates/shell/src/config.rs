@@ -580,6 +580,18 @@ pub fn set(key: &str, value: toml::Value) -> Result<(), String> {
 
 thread_local! {
     static LAST: std::cell::RefCell<Config> = std::cell::RefCell::new(Config::default());
+    /// The settings file as last loaded, for the settings `Config` has no field for.
+    static TABLE: std::cell::RefCell<std::rc::Rc<toml::Table>> = std::cell::RefCell::new(std::rc::Rc::new(toml::Table::new()));
+}
+
+/// The settings as the shell last loaded them (see `load`), without reading the file again. Off
+/// the main thread, where nothing is loaded, it reads the file.
+pub fn table() -> std::rc::Rc<toml::Table> {
+    if gtk::glib::MainContext::default().is_owner() {
+        TABLE.with(|t| t.borrow().clone())
+    } else {
+        std::rc::Rc::new(kit::prefs::read())
+    }
 }
 
 fn update(last: &mut Config, text: &str) -> Result<(), toml::de::Error> {
@@ -594,6 +606,8 @@ pub fn load() -> Config {
         if let Ok(text) = std::fs::read_to_string(&path) {
             if let Err(e) = update(&mut last, &text) {
                 eprintln!("digit: {}: {e}", path.display());
+            } else if let Ok(table) = text.parse::<toml::Table>() {
+                TABLE.with(|t| *t.borrow_mut() = std::rc::Rc::new(table));
             }
         }
         last.clone()

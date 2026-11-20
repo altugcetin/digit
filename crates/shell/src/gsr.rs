@@ -77,7 +77,7 @@ pub fn installed() -> bool {
 }
 
 pub fn folder() -> PathBuf {
-    let custom = kit::prefs::text(&kit::prefs::read(), "rec_dir", "");
+    let custom = kit::prefs::text(&crate::config::table(), "rec_dir", "");
     if !custom.is_empty() {
         return kit::prefs::home(&custom);
     }
@@ -269,7 +269,7 @@ fn monitors() -> Vec<String> {
 
 /// What to record: `pick` overrides the Recorder setting ("region" or "monitor").
 async fn target(pick: Option<&str>) -> Option<(String, Option<String>)> {
-    let want = pick.map_or_else(|| kit::prefs::text(&kit::prefs::read(), "rec_target", "monitor"), str::to_string);
+    let want = pick.map_or_else(|| kit::prefs::text(&crate::config::table(), "rec_target", "monitor"), str::to_string);
     let screens = monitors();
     match want.as_str() {
         "region" => Some(("region".into(), Some(region().await?))),
@@ -284,7 +284,7 @@ async fn target(pick: Option<&str>) -> Option<(String, Option<String>)> {
 }
 
 fn argv(mode: Mode, target: &str, region: Option<&str>) -> Result<(Vec<String>, u32), String> {
-    let t = kit::prefs::read();
+    let t = crate::config::table();
     let text = |k: &str, f: &str| kit::prefs::text(&t, k, f);
     let mut a: Vec<String> = vec!["gpu-screen-recorder".into(), "-w".into(), target.into()];
     if let Some(r) = region {

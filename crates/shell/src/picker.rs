@@ -114,16 +114,17 @@ pub fn toggle(app: &Rc<App>) {
 thread_local! {
     static SLIDE_EVERY: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static SLIDES: RefCell<Option<glib::SourceId>> = const { RefCell::new(None) };
-    static WALL_DIR: RefCell<String> = RefCell::new(kit::prefs::text(&kit::prefs::read(), "wall_dir", ""));
-    static PREFS_MONITOR: RefCell<Option<gio::FileMonitor>> = const { RefCell::new(None) };
+    static WALL_DIR: RefCell<String> = RefCell::new(kit::prefs::text(&crate::config::table(), "wall_dir", ""));
 }
 
-/// Reload the selected source in place, keeping the current preview and search.
-fn prefs_changed(app: &Rc<App>) {
+/// The settings changed (called by the shell's watch on them): reload the selected source in
+/// place, keeping the current preview and search.
+pub fn prefs_changed(app: &Rc<App>) {
     if app.wallpapers.prefs_changed() { crate::retheme(app); }
     let picker = app.picker.borrow().clone();
     if let Some(picker) = picker { picker.refresh_layout(); }
-    let dir = kit::prefs::text(&kit::prefs::read(), "wall_dir", "");
+    let table = crate::config::table();
+    let dir = kit::prefs::text(&table, "wall_dir", "");
     let changed = WALL_DIR.with(|old| old.replace(dir.clone()) != dir);
     if changed {
         let picker = app.picker.borrow().clone();
@@ -138,45 +139,18 @@ fn prefs_changed(app: &Rc<App>) {
             }
         }
     }
-    let every = kit::prefs::number(&kit::prefs::read(), "wallpaper_every", 0.0).to_bits();
+    let every = kit::prefs::number(&table, "wallpaper_every", 0.0).to_bits();
     if SLIDE_EVERY.with(|old| old.get() != every) { slideshow(app); }
     crate::menubar::prefs_changed(app);
-}
-
-fn watch_prefs(app: &Rc<App>) {
-    PREFS_MONITOR.with(|slot| {
-        if slot.borrow().is_some() {
-            return;
-        }
-        let Some(dir) = kit::prefs::path().parent().map(std::path::Path::to_path_buf) else { return };
-        let Ok(monitor) = gio::File::for_path(dir).monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE) else { return };
-        let weak = Rc::downgrade(app);
-        let pending = Rc::new(std::cell::Cell::new(false));
-        monitor.connect_changed(move |_, file, other, _| {
-            let ours = |f: &gio::File| f.basename().is_some_and(|b| b.as_os_str() == "config.toml");
-            if (!ours(file) && !other.is_some_and(ours)) || pending.replace(true) {
-                return;
-            }
-            let (weak, pending) = (weak.clone(), pending.clone());
-            glib::timeout_add_local_once(Duration::from_millis(90), move || {
-                pending.set(false);
-                if let Some(app) = weak.upgrade() {
-                    prefs_changed(&app);
-                }
-            });
-        });
-        *slot.borrow_mut() = Some(monitor);
-    });
 }
 
 pub fn slideshow(app: &Rc<App>) {
     // Initialize the folder before the first config change, even if the picker stays closed.
     WALL_DIR.with(|_| {});
-    watch_prefs(app);
     if let Some(id) = SLIDES.with(|s| s.borrow_mut().take()) {
         id.remove();
     }
-    let every = kit::prefs::number(&kit::prefs::read(), "wallpaper_every", 0.0);
+    let every = kit::prefs::number(&crate::config::table(), "wallpaper_every", 0.0);
     SLIDE_EVERY.with(|old| old.set(every.to_bits()));
     if !every.is_finite() || every < 1.0 {
         return;
@@ -678,7 +652,7 @@ impl Picker {
             s.items = Rc::default();
             s.query.clear();
             s.hue = None;
-            s.timer = kit::prefs::number(&kit::prefs::read(), "wallpaper_every", 0.0) >= 1.0;
+            s.timer = kit::prefs::number(&crate::config::table(), "wallpaper_every", 0.0) >= 1.0;
             if s.colors.is_empty() { s.colors = Rc::new(load_colors()); }
             let now = glib::monotonic_time();
             s.fade.go(1.0, now, 220, motion::STANDARD);

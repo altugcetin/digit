@@ -72,8 +72,7 @@ pub fn listed(dir: &std::path::Path) -> Vec<String> {
 
 /// Shared by the picker, slideshow and first-run wallpaper discovery.
 pub fn directories() -> Vec<PathBuf> {
-    let t = kit::prefs::read();
-    let custom = kit::prefs::text(&t, "wall_dir", "");
+    let custom = kit::prefs::text(&crate::config::table(), "wall_dir", "");
     let pictures = glib::user_special_dir(glib::UserDirectory::Pictures).unwrap_or_else(|| glib::home_dir().join("Pictures"));
     search_directories(&custom, pictures)
 }
@@ -670,7 +669,7 @@ impl Wallpapers {
         }
         *self.screens.borrow_mut() = next.clone();
         for screen in old.iter().filter(|s| !next.iter().any(|n| Rc::ptr_eq(s, n))) { screen.window.destroy(); }
-        let prefs = kit::prefs::read();
+        let prefs = (*crate::config::table()).clone();
         if *self.prefs.borrow() != prefs {
             *self.prefs.borrow_mut() = prefs;
             changed = true;
@@ -681,7 +680,7 @@ impl Wallpapers {
     /// Also called after Settings changes, including connector choices and the primary output.
     pub fn prefs_changed(self: &Rc<Self>) -> bool {
         let before = self.theme_image();
-        let prefs = kit::prefs::read();
+        let prefs = (*crate::config::table()).clone();
         let changed = {
             let before = self.prefs.borrow();
             ["wallpaper_layout", "wallpapers", kit::wallfocus::KEY].iter().any(|key| before.get(*key) != prefs.get(*key))
