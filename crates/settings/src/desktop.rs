@@ -625,8 +625,7 @@ fn set_windows(free: bool) -> bool {
     } else {
         ""
     };
-    let tmp = file.with_extension("kdl.new");
-    if std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, &file)).is_err() {
+    if kit::atomic::write(&file, body).is_err() {
         ui::fail("Could not write the window mode");
         return false;
     }

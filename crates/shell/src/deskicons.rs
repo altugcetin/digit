@@ -292,27 +292,7 @@ fn write_positions(path: &Path, positions: &Positions) -> Result<(), String> {
     write_bytes(path, &encode(positions).map_err(|e| e.to_string())?)
 }
 fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-    let parent = path.parent().ok_or("Missing state directory")?;
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let tmp = parent.join(format!(
-        ".desktop-icons-{}-{}.tmp",
-        std::process::id(),
-        glib::random_int()
-    ));
-    let result = (|| -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, path)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result.map_err(|e| e.to_string())
+    kit::atomic::write(path, bytes).map_err(|e| e.to_string())
 }
 
 #[derive(Clone)]

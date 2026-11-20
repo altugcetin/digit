@@ -5,7 +5,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
 };
 
 #[derive(Clone, Copy)]
@@ -163,25 +162,12 @@ fn restore(path: &Path, bytes: Option<&[u8]>) -> io::Result<()> {
         }
     }
 }
+/// As `atomic::write`, leaving a file that already holds `bytes` untouched.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::io::Write;
     if read(path)?.as_deref() == Some(bytes) {
         return Ok(());
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let tmp = path.with_extension(format!("{}.{}.new", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-    let result = (|| {
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-        file.write_all(bytes)?;
-        std::fs::rename(&tmp, path)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(tmp);
-    }
-    result
+    crate::atomic::write(path, bytes)
 }
 
 /// Filesystem discovery is always called on a worker.

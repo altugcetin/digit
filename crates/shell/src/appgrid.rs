@@ -42,11 +42,7 @@ fn load() -> Vec<Slot> {
 
 fn save(slots: &[Slot]) {
     let Ok(text) = serde_json::to_string(slots) else { return };
-    let _ = std::fs::create_dir_all(kit::theme::state_dir());
-    let tmp = path().with_extension("json.new");
-    if std::fs::write(&tmp, text).is_ok() {
-        let _ = std::fs::rename(tmp, path());
-    }
+    let _ = kit::atomic::write(&path(), text);
 }
 
 /// The saved arrangement brought up to date with what's installed (`installed`, in name order):

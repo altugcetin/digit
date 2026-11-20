@@ -1,6 +1,4 @@
-use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 pub fn path() -> PathBuf {
     gtk::glib::user_config_dir().join("digit/config.toml")
@@ -51,24 +49,7 @@ pub fn problem() -> Option<String> {
 
 fn write(table: &toml::Table) -> Result<(), String> {
     let body = toml::to_string_pretty(table).map_err(|e| e.to_string())?;
-    let file = path();
-    if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let (tmp, mut out) = loop {
-        let tmp = file.with_extension(format!("toml.{}.{}.new", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
-            Ok(out) => break (tmp, out),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e.to_string()),
-        }
-    };
-    let result = out.write_all(body.as_bytes()).and_then(|()| std::fs::rename(&tmp, &file));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result.map_err(|e| e.to_string())
+    crate::atomic::write(&path(), body).map_err(|e| e.to_string())
 }
 
 pub fn set(key: &str, value: toml::Value) -> Result<(), String> {

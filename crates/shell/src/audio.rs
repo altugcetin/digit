@@ -605,7 +605,7 @@ fn guarded_save(list: &[(u32, String)]) {
     if list.is_empty() {
         let _ = std::fs::remove_file(guard_file());
     } else {
-        let _ = std::fs::write(guard_file(), text);
+        let _ = kit::atomic::write(&guard_file(), text);
     }
 }
 

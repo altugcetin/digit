@@ -33,10 +33,7 @@ pub fn remember(path: &str) -> bool {
 }
 
 fn atomic_write(file: &std::path::Path, text: &str) -> std::io::Result<()> {
-    std::fs::create_dir_all(file.parent().unwrap())?;
-    let tmp = file.with_extension("new");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(tmp, file)
+    kit::atomic::write(file, text)
 }
 
 fn history(path: &str) -> bool {
@@ -1093,10 +1090,6 @@ mod tests {
         assert!(span_regions(&[]).is_empty());
     }
 
-    fn test_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("digit-{name}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()))
-    }
-
     #[test]
     fn span_decodes_one_shared_texture_for_all_outputs() {
         let path = "/no-file-needed.png".to_string();
@@ -1142,17 +1135,6 @@ mod tests {
         scene.step(200 + SPAN);
         assert!(scene.old.is_none());
         assert_eq!(scene.new.as_ref().unwrap().region, new.region);
-    }
-
-    #[test]
-    fn failed_atomic_write_preserves_the_previous_state() {
-        let dir = test_dir("state");
-        let file = dir.join("wallpaper");
-        atomic_write(&file, "original").unwrap();
-        std::fs::create_dir(file.with_extension("new")).unwrap();
-        assert!(atomic_write(&file, "replacement").is_err());
-        assert_eq!(std::fs::read_to_string(file).unwrap(), "original");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

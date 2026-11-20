@@ -98,10 +98,7 @@ pub fn load() -> Option<Theme> {
 }
 
 pub fn save(theme: &Theme) -> std::io::Result<()> {
-    std::fs::create_dir_all(state_dir())?;
-    let tmp = path().with_extension("json.new");
-    std::fs::write(&tmp, serde_json::to_string_pretty(theme).unwrap_or_default())?;
-    std::fs::rename(tmp, path())
+    crate::atomic::write(&path(), serde_json::to_string_pretty(theme).unwrap_or_default())
 }
 
 fn source_color(image: &Path) -> Option<Argb> {

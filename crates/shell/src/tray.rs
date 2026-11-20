@@ -52,18 +52,7 @@ fn with<R>(f: impl FnOnce(&mut Vec<Item>) -> R) -> R {
 }
 
 fn write_state(path: &std::path::Path, text: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    let parent = path.parent().ok_or_else(|| std::io::Error::other("Missing state directory"))?;
-    std::fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!(".tray-{}.tmp", gtk::glib::uuid_string_random()));
-    let result = (|| {
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, path)
-    })();
-    if result.is_err() { let _ = std::fs::remove_file(&tmp); }
-    result
+    kit::atomic::write(path, text)
 }
 
 fn save(items: &[Item]) {

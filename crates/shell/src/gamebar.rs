@@ -1119,8 +1119,7 @@ impl State {
         }
         let saved = Saved { cards: self.cards.iter().map(|c| Spot { kind: c.kind, x: c.x, y: c.y, open: c.open, pinned: c.pinned, w: c.w, h: c.h }).collect(), crosshair: self.aim };
         if let Ok(text) = serde_json::to_string_pretty(&saved) {
-            let _ = std::fs::create_dir_all(kit::theme::state_dir());
-            let _ = std::fs::write(file(), text);
+            let _ = kit::atomic::write(&file(), text);
         }
     }
 

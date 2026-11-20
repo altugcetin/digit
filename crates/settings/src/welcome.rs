@@ -12,8 +12,7 @@ pub fn marker() -> std::path::PathBuf {
 }
 
 fn finish(window: &gtk::Window) {
-    let _ = std::fs::create_dir_all(kit::theme::state_dir());
-    let _ = std::fs::write(marker(), "1\n");
+    let _ = kit::atomic::write(&marker(), "1\n");
     window.close();
 }
 

@@ -8,11 +8,7 @@ pub fn install(display: &gdk::Display) {
     for (name, bytes) in BUNDLED {
         let path = root.join(format!("{name}.svg"));
         if std::fs::read(&path).ok().as_deref() != Some(*bytes) {
-            let _ = std::fs::create_dir_all(&root);
-            let tmp = root.join(format!(".{name}.svg"));
-            if std::fs::write(&tmp, bytes).is_ok() {
-                let _ = std::fs::rename(&tmp, &path);
-            }
+            let _ = kit::atomic::write(&path, bytes);
         }
     }
     gtk::IconTheme::for_display(display).add_search_path(&root);

@@ -79,8 +79,7 @@ pub fn remember(text: &str) {
     list.retain(|t| t != text);
     list.insert(0, text.to_string());
     list.truncate(RECENT_MAX);
-    let _ = std::fs::create_dir_all(kit::theme::state_dir());
-    let _ = std::fs::write(recent_file(), serde_json::to_string(&list).unwrap_or_default());
+    let _ = kit::atomic::write(&recent_file(), serde_json::to_string(&list).unwrap_or_default());
 }
 
 /// How well `emoji` answers `query` (already folded): every word of the query has to hit, a

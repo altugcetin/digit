@@ -247,8 +247,7 @@ async fn finish(dest: &Path, work: &Path) -> Result<Installed, String> {
     let text = launcher_text(&original, dest, icon.as_deref(), &name);
     std::fs::create_dir_all(launchers()).map_err(|e| e.to_string())?;
     let launcher = launchers().join(format!("appimage-{slug}.desktop"));
-    let tmp = launcher.with_extension("new");
-    std::fs::write(&tmp, &text).and_then(|_| std::fs::rename(&tmp, &launcher)).map_err(|e| e.to_string())?;
+    kit::atomic::write(&launcher, &text).map_err(|e| e.to_string())?;
     Ok(Installed { name, comment: field(&text, "Comment").unwrap_or_default(), icon, file: dest.to_path_buf(), launcher })
 }
 

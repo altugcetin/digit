@@ -1777,11 +1777,7 @@ fn install() {
     let exe = if exe.contains("/target/") { glib::home_dir().join(".local/bin/digit-files").to_string_lossy().into_owned() } else { exe };
     let body = format!("[D-BUS Service]\nName=org.freedesktop.FileManager1\nExec={exe} --service\n");
     if std::fs::read_to_string(&file).ok().as_deref() != Some(body.as_str()) {
-        let _ = std::fs::create_dir_all(&services);
-        let tmp = file.with_extension("new");
-        if std::fs::write(&tmp, &body).is_ok() {
-            let _ = std::fs::rename(&tmp, &file);
-        }
+        let _ = kit::atomic::write(&file, &body);
     }
 }
 

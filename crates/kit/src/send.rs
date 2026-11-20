@@ -54,8 +54,7 @@ pub fn identity() -> String {
         let _ = std::io::Read::read_exact(&mut f, &mut bytes);
     }
     let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    let _ = std::fs::create_dir_all(crate::theme::state_dir());
-    let _ = std::fs::write(&path, &id);
+    let _ = crate::atomic::write(&path, &id);
     id
 }
 
