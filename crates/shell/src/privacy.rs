@@ -82,6 +82,7 @@ fn holders() -> (i64, Vec<u32>) {
 
 fn watch(fd: i32, name: &[u8]) -> Option<i32> {
     let path = CString::new([b"/dev/".as_slice(), name].concat()).ok()?;
+    // SAFETY: `path` is a NUL-terminated string that outlives the call.
     let wd = unsafe { libc::inotify_add_watch(fd, path.as_ptr(), libc::IN_OPEN | libc::IN_CLOSE_WRITE | libc::IN_CLOSE_NOWRITE) };
     (wd >= 0).then_some(wd)
 }
@@ -167,10 +168,12 @@ fn settle(app: &Rc<App>, cam: &Rc<Camera>) {
 }
 
 fn camera(app: &Rc<App>) {
+    // SAFETY: takes only flags and returns a new descriptor or -1.
     let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
     if fd < 0 {
         return;
     }
+    // SAFETY: a static NUL-terminated path on the descriptor just created.
     let dev = unsafe { libc::inotify_add_watch(fd, c"/dev".as_ptr(), libc::IN_CREATE) };
     let mut any = false;
     if let Ok(entries) = std::fs::read_dir("/dev") {
@@ -192,6 +195,7 @@ fn camera(app: &Rc<App>) {
         let mut buf = [0u8; 4096];
         let mut touched = false;
         loop {
+            // SAFETY: reads at most `buf.len()` bytes into `buf`, which is writable and that long.
             let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
             if n <= 0 {
                 break;
@@ -199,6 +203,7 @@ fn camera(app: &Rc<App>) {
             let n = n as usize;
             let mut off = 0;
             while off + head <= n {
+                // SAFETY: `off + head <= n` was checked, so a whole event header lies in the bytes read; read_unaligned copes with its alignment.
                 let ev: libc::inotify_event = unsafe { std::ptr::read_unaligned(buf.as_ptr().add(off).cast()) };
                 let name = &buf[(off + head).min(n)..(off + head + ev.len as usize).min(n)];
                 off += head + ev.len as usize;

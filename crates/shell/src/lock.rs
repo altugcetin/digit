@@ -9,6 +9,7 @@ use kit::palette::Rgb;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
+use kit::secret::wipe;
 
 mod ffi {
     use gtk::glib::ffi::gboolean;
@@ -99,6 +100,7 @@ fn current(generation: u64) -> bool {
 }
 
 pub fn supported() -> bool {
+    // SAFETY: takes nothing and only asks the compositor connection GTK already has.
     unsafe { ffi::gtk_session_lock_is_supported() != 0 }
 }
 
@@ -168,11 +170,13 @@ pub fn lock(app: &Rc<App>) -> bool {
     }
     FALLBACK.with(|f| f.borrow_mut().take());
     style(app);
+    // SAFETY: takes nothing and returns a new object, or null, which is checked below.
     let ptr = unsafe { ffi::gtk_session_lock_instance_new() };
     if ptr.is_null() {
         fallback();
         return false;
     }
+    // SAFETY: `ptr` is the non-null new object above, whose one reference this takes over.
     let instance: glib::Object = unsafe { glib::Object::from_glib_full(ptr) };
     let generation = next_generation();
     STATE.with(|s| *s.borrow_mut() = Some(State { generation, mode: Mode::Real(instance.clone()), faces: Vec::new(), busy: false, locked: false, clock: None }));
@@ -200,6 +204,7 @@ pub fn lock(app: &Rc<App>) -> bool {
         // One screen holds the password: the main one, unless another took it while it was gone.
         let main = is_main(&a, &monitor) && main_face().is_none();
         let face = build(&a, &monitor, false, generation, main);
+        // SAFETY: the instance, window and monitor are live objects borrowed for the call; the lock keeps its own references.
         unsafe {
             ffi::gtk_session_lock_instance_assign_window_to_monitor(inst.as_ptr(), face.window.to_glib_none().0, monitor.to_glib_none().0);
         }
@@ -236,6 +241,7 @@ pub fn lock(app: &Rc<App>) -> bool {
         None
     });
     start_clock();
+    // SAFETY: `ptr` is the live instance, kept alive by `instance` in STATE.
     let ok = unsafe { ffi::gtk_session_lock_instance_lock(ptr) } != 0;
     if !ok && current(generation) && !STATE.with(|s| s.borrow().as_ref().is_some_and(|st| st.locked)) {
         let was = STATE.with(|s| s.borrow_mut().take());
@@ -319,16 +325,12 @@ fn unlock(generation: u64) {
         _ => None,
     });
     match real {
+        // SAFETY: `instance` is a live, owned reference to the lock instance.
         Some(instance) => unsafe { ffi::gtk_session_lock_instance_unlock(instance.as_ptr()) },
         None => finish(generation),
     }
 }
 
-fn wipe(buf: &mut [u8]) {
-    for b in buf.iter_mut() {
-        unsafe { std::ptr::write_volatile(b, 0) };
-    }
-}
 
 async fn verify(bytes: Vec<u8>) -> Option<bool> {
     let argv = [std::ffi::OsStr::new("/proc/self/exe"), std::ffi::OsStr::new("auth")];

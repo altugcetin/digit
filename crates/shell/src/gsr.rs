@@ -252,6 +252,7 @@ async fn ask_run(id: RunId, name: &'static str, data: serde_json::Value) -> Opti
 }
 
 fn signal(id: RunId, sig: i32) -> bool {
+    // SAFETY: kill takes plain integers; the pid was checked just before to still be the recorder this shell started.
     same_run(id, identity()) && alive(id.0) && unsafe { libc::kill(id.0, sig) == 0 }
 }
 

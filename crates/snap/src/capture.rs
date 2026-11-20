@@ -144,6 +144,7 @@ struct Map {
 
 impl Map {
     fn new(len: usize) -> Option<Map> {
+        // SAFETY: the descriptor is created and owned here; the mapping is exactly `len` bytes of it, kept with it in Map and unmapped once in Drop.
         unsafe {
             let raw = libc::memfd_create(c"digit-snap".as_ptr(), libc::MFD_CLOEXEC);
             if raw < 0 {
@@ -162,12 +163,14 @@ impl Map {
     }
 
     fn bytes(&self) -> &[u8] {
+        // SAFETY: `ptr` maps `len` readable bytes for as long as `self` lives; it is read only once the compositor reports the copy is done.
         unsafe { std::slice::from_raw_parts(self.ptr as *const u8, self.len) }
     }
 }
 
 impl Drop for Map {
     fn drop(&mut self) {
+        // SAFETY: unmaps exactly the mapping `new` made, once, as the Map that owns it goes.
         unsafe {
             libc::munmap(self.ptr, self.len);
         }

@@ -34,6 +34,7 @@ pub mod recent;
 pub mod trash;
 pub mod screentime;
 pub mod screens;
+pub mod secret;
 pub mod deskwidget;
 pub mod scroll;
 pub mod search;

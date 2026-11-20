@@ -427,9 +427,7 @@ impl App {
     }
 
     pub fn trim() {
-        glib::timeout_add_local_once(Duration::from_millis(400), || unsafe {
-            libc::malloc_trim(0);
-        });
+        kit::app::trim_later(400);
     }
 
     pub fn set_dnd(&self, on: bool) {

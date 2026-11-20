@@ -1,5 +1,6 @@
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::io::Read;
+use kit::secret::wipe;
 
 const PAM_SUCCESS: c_int = 0;
 const PAM_BUF_ERR: c_int = 5;
@@ -39,6 +40,9 @@ struct Secret {
     sent: bool,
 }
 
+/// # Safety
+/// `replies` is the array calloc made for PAM and `n` how many replies in it were filled; each
+/// is freed once.
 unsafe fn free_all(replies: *mut Response, n: usize) {
     unsafe {
         for j in 0..n {
@@ -51,6 +55,9 @@ unsafe fn free_all(replies: *mut Response, n: usize) {
     }
 }
 
+/// # Safety
+/// PAM calls this with `n` messages and the `data` pointer given to pam_start, our live Secret;
+/// every pointer is checked before use.
 unsafe extern "C" fn converse(n: c_int, msgs: *mut *const Message, out: *mut *mut Response, data: *mut c_void) -> c_int {
     unsafe {
         if n <= 0 || msgs.is_null() || out.is_null() || data.is_null() {
@@ -95,12 +102,6 @@ unsafe extern "C" fn converse(n: c_int, msgs: *mut *const Message, out: *mut *mu
     }
 }
 
-fn wipe(buf: &mut [u8]) {
-    for b in buf.iter_mut() {
-        unsafe { std::ptr::write_volatile(b, 0) };
-    }
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
-}
 
 /// This account's name, from the account database only: never from the environment, which the
 /// caller controls.
@@ -131,6 +132,7 @@ pub fn service() -> &'static CStr {
 
 fn check(password: &CStr) -> c_int {
     let Some(user) = user() else { return 2 };
+    // SAFETY: libpam's functions are looked up by name and cast to their documented signatures; every argument outlives the PAM session, which ends here.
     unsafe {
         let lib = libc::dlopen(c"libpam.so.0".as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
         if lib.is_null() {
@@ -158,6 +160,7 @@ fn check(password: &CStr) -> c_int {
 }
 
 pub fn helper() -> ! {
+    // SAFETY: prctl with these arguments only changes this process's dumpable flag.
     unsafe {
         libc::prctl(libc::PR_SET_DUMPABLE, 0);
     }

@@ -123,6 +123,7 @@ fn outlive_terminal() {
             let file = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("shell.log"));
             let file = file.or_else(|_| std::fs::OpenOptions::new().write(true).open("/dev/null"));
             if let Ok(file) = file {
+                // SAFETY: both are open descriptors; dup2 only makes `fd` (stdout or stderr) point where `file` does.
                 unsafe { libc::dup2(std::os::fd::AsRawFd::as_raw_fd(&file), fd) };
             }
             glib::ControlFlow::Break
@@ -140,14 +141,12 @@ fn run() {
         if !std::env::split_paths(&path).any(|p| p == dir) {
             let joined = std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&path)));
             if let Ok(joined) = joined {
+                // SAFETY: the first thing `run` does, before GTK or any thread that could read the environment.
                 unsafe { std::env::set_var("PATH", joined) };
             }
         }
     }
-    unsafe {
-        libc::mallopt(libc::M_MMAP_THRESHOLD, 256 * 1024);
-        libc::mallopt(libc::M_ARENA_MAX, 2);
-    }
+    kit::app::tune_malloc();
     gpu::prepare();
     gtk::init().expect("digit: no display");
     let css = gtk::CssProvider::new();

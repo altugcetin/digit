@@ -264,6 +264,7 @@ fn take(conn: &Connection, o: &offer::ExtDataControlOfferV1, mimes: &[String]) -
 
 fn slurp(fd: OwnedFd, limit: usize) -> Option<Vec<u8>> {
     let raw = fd.as_raw_fd();
+    // SAFETY: fcntl on a descriptor this function owns, changing only its O_NONBLOCK flag.
     unsafe {
         let flags = libc::fcntl(raw, libc::F_GETFL);
         libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK);
@@ -287,6 +288,7 @@ fn slurp(fd: OwnedFd, limit: usize) -> Option<Vec<u8>> {
                     return None;
                 }
                 let mut p = libc::pollfd { fd: raw, events: libc::POLLIN, revents: 0 };
+                // SAFETY: `p` is one valid pollfd for a descriptor owned here, and the count passed is 1.
                 unsafe { libc::poll(&mut p, 1, left.as_millis().min(i32::MAX as u128) as i32) };
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}

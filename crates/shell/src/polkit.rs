@@ -10,6 +10,7 @@ use std::time::Duration;
 use std::sync::{Arc, Mutex};
 use futures_util::StreamExt;
 use zbus::zvariant::{OwnedValue, Value};
+use kit::secret::wipe;
 
 const PATH: &str = "/dev/digit/PolkitAgent";
 const POLKIT: &str = "org.freedesktop.PolicyKit1";
@@ -59,20 +60,25 @@ async fn from_polkit(conn: &zbus::Connection, header: &zbus::message::Header<'_>
 
 fn name_of(uid: u32) -> Option<String> {
     let mut buf = vec![0 as libc::c_char; 4096];
+    // SAFETY: an all-zero passwd is a valid value for getpwuid_r to fill in.
     let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
     let mut out: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: every pointer is to a live local, and `buf.len()` is the buffer's real size.
     let rc = unsafe { libc::getpwuid_r(uid, &mut pw, buf.as_mut_ptr(), buf.len(), &mut out) };
     if rc != 0 || out.is_null() {
         return None;
     }
+    // SAFETY: on success pw_name points to a NUL-terminated string inside `buf`, which is alive.
     let name = unsafe { std::ffi::CStr::from_ptr(pw.pw_name) }.to_string_lossy().to_string();
     (!name.is_empty() && !name.contains(['\n', '\0'])).then_some(name)
 }
 
 fn members(gid: u32) -> Vec<u32> {
     let mut buf = vec![0 as libc::c_char; 16384];
+    // SAFETY: an all-zero group is a valid value for getgrgid_r to fill in.
     let mut gr: libc::group = unsafe { std::mem::zeroed() };
     let mut out: *mut libc::group = std::ptr::null_mut();
+    // SAFETY: every pointer is to a live local, and `buf.len()` is the buffer's real size.
     let rc = unsafe { libc::getgrgid_r(gid, &mut gr, buf.as_mut_ptr(), buf.len(), &mut out) };
     if rc != 0 || out.is_null() || gr.gr_mem.is_null() {
         return Vec::new();
@@ -82,6 +88,7 @@ fn members(gid: u32) -> Vec<u32> {
     // This runs on zbus's thread, so only the reentrant lookups: getpwnam's
     // static buffer is shared with getpwuid calls on GTK's thread.
     let mut pwbuf = vec![0 as libc::c_char; 4096];
+    // SAFETY: gr_mem is the NULL-terminated member list inside `buf`, alive here; each getpwnam_r gets live locals and the real size of `pwbuf`.
     unsafe {
         while !(*p).is_null() {
             let mut pw: libc::passwd = std::mem::zeroed();
@@ -186,12 +193,6 @@ fn unescape(line: &str) -> String {
     out
 }
 
-fn wipe(secret: &mut [u8]) {
-    for b in secret.iter_mut() {
-        unsafe { std::ptr::write_volatile(b, 0) };
-    }
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
-}
 
 fn converse(reader: &mut dyn BufRead, writer: &mut dyn Write, secret: &mut Vec<u8>) -> (bool, Vec<String>) {
     let mut notes = Vec::new();

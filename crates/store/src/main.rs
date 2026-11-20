@@ -239,9 +239,7 @@ impl Store {
                     stack.remove(&c);
                 }
             }
-            glib::timeout_add_local_once(std::time::Duration::from_millis(400), || unsafe {
-                libc::malloc_trim(0);
-            });
+            kit::app::trim_later(400);
         });
         self.back.set_sensitive(!self.history.borrow().is_empty());
         for (i, t) in self.tabs.iter().enumerate() {
@@ -944,9 +942,7 @@ fn load_with(store: &Rc<Store>, retry: bool) {
             None if glib::find_program_in_path("flatpak").is_none() => me.open(Page::Problem("Digit Store gets apps from Flathub and needs Flatpak. Install the “flatpak” package with your package manager, then open the store again.".into())),
             None => me.open(Page::Problem("Flathub's app catalogue could not be downloaded. Check your internet connection, run “flatpak update --appstream” once, then open the store again.".into())),
         }
-        glib::timeout_add_local_once(std::time::Duration::from_secs(2), || unsafe {
-            libc::malloc_trim(0);
-        });
+        kit::app::trim_later(2000);
     });
 }
 
@@ -1016,11 +1012,7 @@ fn main() -> glib::ExitCode {
         install_files();
         return glib::ExitCode::SUCCESS;
     }
-    kit::effects::select("DIGIT_STORE_RENDERER");
-    unsafe {
-        libc::mallopt(libc::M_MMAP_THRESHOLD, 256 * 1024);
-        libc::mallopt(libc::M_ARENA_MAX, 2);
-    }
+    kit::app::lean("DIGIT_STORE_RENDERER");
     let app = gtk::Application::new(Some(APP_ID), gio::ApplicationFlags::HANDLES_COMMAND_LINE | gio::ApplicationFlags::HANDLES_OPEN);
     app.connect_startup(|_| {
         gtk::Window::set_default_icon_name(APP_ID);

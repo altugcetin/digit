@@ -17,6 +17,7 @@ fn nvidia_vendor() -> Option<String> {
 pub fn prepare() {
     let inherited = INHERITED.map(|key| (key, std::env::var(key).ok()));
     kit::effects::select("DIGIT_RENDERER");
+    // SAFETY: called from main before GTK starts or any thread exists, so nothing reads the environment meanwhile.
     unsafe {
         for (key, value) in &inherited {
             std::env::set_var(format!("DIGIT_CHILD_{key}"), value.as_deref().unwrap_or("\u{1}"));
