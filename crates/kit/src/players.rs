@@ -1,7 +1,10 @@
-//! Which media players the notch may show. `media_filter` is "off" (every player), "block"
-//! (every player except `media_blocked`) or "allow" (only `media_allowed`). Each list keeps its
-//! names while the other mode is chosen. A name matches a player whose desktop entry, bus name
-//! or app name contains it, ignoring case: "firefox" matches "org.mozilla.firefox".
+//! Which media players the notch, the Now playing widget and the media keys may use.
+//! `media_filter` is "off" (every player), "block" (every player except `media_blocked`) or
+//! "allow" (only `media_allowed`). Each list keeps its names while the other mode is chosen.
+//!
+//! A name matches a player whose desktop entry, bus name or app name has it as whole words,
+//! ignoring case: "firefox" matches "org.mozilla.firefox" and "firefox.instance_1_501", but
+//! "fox" matches neither, and "chrome" doesn't match "chromium".
 
 pub const MODE: &str = "media_filter";
 pub const BLOCKED: &str = "media_blocked";
@@ -21,19 +24,39 @@ impl Filter {
     }
 
     pub fn read(t: &toml::Table) -> Self {
-        Self::new(&mode(t), &crate::hidden::list(t, BLOCKED), &crate::hidden::list(t, ALLOWED))
+        Self::new(&mode(t), &crate::prefs::list(t, BLOCKED), &crate::prefs::list(t, ALLOWED))
     }
 
     /// Whether a player known by these names (desktop entry, bus name, app name) may show.
     /// "Only" with an empty list shows every player rather than none.
     pub fn shows(&self, names: &[&str]) -> bool {
-        let hit = |list: &[String]| names.iter().map(|n| n.to_lowercase()).any(|n| list.iter().any(|l| n.contains(l.as_str())));
+        let hit = |list: &[String]| names.iter().any(|n| list.iter().any(|l| names_match(n, l)));
         match self.mode.as_str() {
             "block" => !hit(&self.blocked),
             "allow" => self.allowed.is_empty() || hit(&self.allowed),
             _ => true,
         }
     }
+
+    /// Whether some players may be kept out: a mode is chosen and its list has names.
+    pub fn narrows(&self) -> bool {
+        match self.mode.as_str() {
+            "block" => !self.blocked.is_empty(),
+            "allow" => !self.allowed.is_empty(),
+            _ => false,
+        }
+    }
+}
+
+/// The words of a name: "org.mozilla.firefox" is org, mozilla and firefox.
+fn words(name: &str) -> Vec<String> {
+    name.to_lowercase().split(['.', '_', '-', ' ']).filter(|w| !w.is_empty()).map(str::to_string).collect()
+}
+
+/// Whether the typed name `typed` is whole words of the player name `name`, in a row.
+fn names_match(name: &str, typed: &str) -> bool {
+    let (name, typed) = (words(name), words(typed));
+    !typed.is_empty() && name.windows(typed.len()).any(|w| w == typed.as_slice())
 }
 
 /// The chosen mode, "off" when unset or unknown.
@@ -90,6 +113,27 @@ mod tests {
         assert!(f.shows(&["", "spotify", "Spotify"]));
         assert!(!f.shows(&["org.mozilla.firefox", "firefox", "Firefox"]));
         assert!(Filter::read(&table("media_filter = \"allow\"")).shows(&["firefox"]));
+    }
+
+    #[test]
+    fn a_name_matches_whole_words_only() {
+        let f = Filter::new("block", &["fox".into(), "a".into(), "chrome".into()], &[]);
+        assert!(f.shows(&["org.mozilla.firefox", "firefox.instance_1_501", "Firefox"]));
+        assert!(f.shows(&["spotify", "spotify", "Spotify"]));
+        assert!(f.shows(&["chromium", "chromium.instance42", "Chromium"]));
+        assert!(!f.shows(&["google-chrome", "chrome.instance7", "Google Chrome"]));
+        // Several words in a row, as typed, with any separator.
+        let f = Filter::new("allow", &[], &["mozilla firefox".into()]);
+        assert!(f.shows(&["org.mozilla.firefox", "", ""]));
+        assert!(!f.shows(&["org.mozilla.thunderbird", "", ""]));
+    }
+
+    #[test]
+    fn only_a_mode_with_names_narrows() {
+        assert!(!Filter::read(&table("media_blocked = [\"spotify\"]")).narrows());
+        assert!(!Filter::read(&table("media_filter = \"allow\"")).narrows());
+        assert!(Filter::read(&table("media_filter = \"block\"\nmedia_blocked = [\"spotify\"]")).narrows());
+        assert!(Filter::read(&table("media_filter = \"allow\"\nmedia_allowed = [\"mpv\"]")).narrows());
     }
 
     #[test]

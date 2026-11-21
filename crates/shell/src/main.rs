@@ -421,6 +421,13 @@ fn key_cli(args: &[String]) {
     if audio::Ask::parse(&action).is_some_and(audio::once) {
         return;
     }
+    // A media key the shell didn't take: playerctl's most recent player, as before.
+    if let Some(cmd) = media::Command::from_key(&action) {
+        if let Err(e) = std::process::Command::new("playerctl").arg(cmd.playerctl()).status() {
+            eprintln!("digit: playerctl: {e}");
+        }
+        return;
+    }
     hooks::run("key", &[&action]);
 }
 

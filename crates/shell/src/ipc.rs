@@ -262,6 +262,7 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
                     app.request(Peek::Mode { icon: "nightlight", label: "Night Light", on: !on });
                     "ok".into()
                 }
+                _ if crate::media::Command::from_key(action).is_some() => crate::media::key(app, action).into(),
                 _ if crate::brightness::step(app, action) => "ok".into(),
                 _ if crate::audio::press(app, action) => "ok".into(),
                 _ => "unhandled".into(),

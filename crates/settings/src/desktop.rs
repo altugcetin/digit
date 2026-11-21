@@ -1220,11 +1220,11 @@ fn notch(body: &gtk::Box, t: &toml::Table) {
 /// Which media players the notch shows: all, all but a list, or only a list (see `kit::players`).
 fn media_players(card: &gtk::Box, t: &toml::Table) {
     use kit::players::{ALLOWED, BLOCKED, MODE, MODES};
-    let mode = choice(card, "music_note", "Media players", "Which players the notch and the Now playing widget show", MODE, &MODES, &kit::players::mode(t));
+    let mode = choice(card, "music_note", "Media players", "Which players the notch, the Now playing widget and the media keys use", MODE, &MODES, &kit::players::mode(t));
     for (key, icon, title, sub, on) in [(BLOCKED, "music_off", "Hidden players", "Never shown, even while playing", "block"), (ALLOWED, "playlist_add_check", "Shown players", "Only these show. Leave empty to show all", "allow")] {
         let (row, end) = ui::row(Some(icon), title, sub);
         let entry = gtk::Entry::new();
-        entry.set_text(&kit::players::join(&kit::hidden::list(t, key)));
+        entry.set_text(&kit::players::join(&kit::prefs::list(t, key)));
         entry.set_placeholder_text(Some("spotify, firefox"));
         entry.set_valign(gtk::Align::Center);
         entry.set_width_chars(18);

@@ -44,11 +44,46 @@ trait Root {
     fn desktop_entry(&self) -> zbus::Result<String>;
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Command {
     PlayPause,
     Next,
     Previous,
+}
+
+impl Command {
+    /// The media key's action ("play", "next", "previous"), as `digitctl key` names it.
+    pub fn from_key(action: &str) -> Option<Self> {
+        match action {
+            "play" => Some(Command::PlayPause),
+            "next" => Some(Command::Next),
+            "previous" => Some(Command::Previous),
+            _ => None,
+        }
+    }
+
+    /// The same, as `playerctl` names it.
+    pub fn playerctl(self) -> &'static str {
+        match self {
+            Command::PlayPause => "play-pause",
+            Command::Next => "next",
+            Command::Previous => "previous",
+        }
+    }
+}
+
+/// A media key: the player the notch shows takes it, so the keys and the notch agree on which
+/// player they mean. Without one, `playerctl` takes it as before ("unhandled" sends it there,
+/// see `digit key`), unless some players are kept out: then nothing is played rather than a
+/// player the user keeps out.
+pub fn key(app: &App, action: &str) -> &'static str {
+    let Some(cmd) = Command::from_key(action) else { return "unhandled" };
+    let players = app.players.borrow().clone();
+    if let Some(p) = players.filter(|p| p.active_entry().is_some()) {
+        p.command(cmd);
+        return "ok";
+    }
+    if app.prefs.borrow().media.narrows() { "ok" } else { "unhandled" }
 }
 
 #[derive(Clone, Default)]
@@ -801,6 +836,20 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn media_keys_name_the_same_commands_for_the_shell_and_playerctl() {
+        assert_eq!(Command::from_key("play").map(Command::playerctl), Some("play-pause"));
+        assert_eq!(Command::from_key("next").map(Command::playerctl), Some("next"));
+        assert_eq!(Command::from_key("previous").map(Command::playerctl), Some("previous"));
+        assert_eq!(Command::from_key("volume-up"), None);
+        // The default bindings send these names to the shell.
+        for (id, key) in [("play", "key play"), ("next", "key next"), ("previous", "key previous")] {
+            let bind = kit::keybinds::defaults().into_iter().find(|b| b.id == id).unwrap();
+            assert_eq!(bind.act, kit::keybinds::Act::Ctl(key.into()), "{id}");
+            assert!(Command::from_key(key.trim_start_matches("key ")).is_some());
+        }
+    }
 
     fn track(title: &str, url: &str, length: f64, can_seek: bool) -> Track {
         Track { title: title.into(), url: url.into(), length, can_seek, ..Default::default() }

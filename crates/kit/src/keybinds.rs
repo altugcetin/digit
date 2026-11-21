@@ -236,9 +236,9 @@ pub fn defaults() -> Vec<Bind> {
         bind("workspace-prev", "Workspaces", "Previous workspace", "SUPER + PAGE_UP, SUPER + mouse_up", Act::Window(Win::StepWorkspace(-1)), n, true),
         bind("to-workspace-next", "Workspaces", "Move window to the next workspace", "SUPER + SHIFT + PAGE_DOWN", Act::Window(Win::MoveStepWorkspace(1)), n, true),
         bind("to-workspace-prev", "Workspaces", "Move window to the previous workspace", "SUPER + SHIFT + PAGE_UP", Act::Window(Win::MoveStepWorkspace(-1)), n, true),
-        bind("play", "Media keys", "Play or pause", "XF86AudioPlay, XF86AudioPause", Act::Shell("playerctl play-pause".into()), LOCKED, true),
-        bind("next", "Media keys", "Next track", "XF86AudioNext", Act::Shell("playerctl next".into()), LOCKED, true),
-        bind("previous", "Media keys", "Previous track", "XF86AudioPrev", Act::Shell("playerctl previous".into()), LOCKED, true),
+        bind("play", "Media keys", "Play or pause", "XF86AudioPlay, XF86AudioPause", Act::Ctl("key play".into()), LOCKED, true),
+        bind("next", "Media keys", "Next track", "XF86AudioNext", Act::Ctl("key next".into()), LOCKED, true),
+        bind("previous", "Media keys", "Previous track", "XF86AudioPrev", Act::Ctl("key previous".into()), LOCKED, true),
         bind("mic-mute", "Media keys", "Mute the microphone", "XF86AudioMicMute", Act::Shell("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle".into()), LOCKED, true),
     ];
     for (d, key) in [(Dir::Left, "LEFT"), (Dir::Right, "RIGHT"), (Dir::Up, "UP"), (Dir::Down, "DOWN")] {
