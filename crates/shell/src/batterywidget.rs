@@ -42,21 +42,27 @@ fn surface_margin(top: bool, left: bool, top_margin: i32, clock: i32, dock: i32)
 
 /// Where the batteries sit on a screen `screen` big. `clock` is the room the desktop clock takes
 /// at the top left (see `desk::room`) and `dock` the room the dock keeps on the left, right and
-/// bottom (see `dock::room`).
-pub(crate) fn card_rect(placement: &str, device_count: usize, screen: (i32, i32), top_margin: i32, clock: i32, dock: [i32; 3]) -> Option<CardRect> {
+/// bottom (see `dock::room`). `k` is the size, against as designed: the card grows away from
+/// its corner, the air to the edges staying as it is.
+pub(crate) fn card_rect(placement: &str, device_count: usize, screen: (i32, i32), top_margin: i32, clock: i32, dock: [i32; 3], k: f64) -> Option<CardRect> {
     if matches!(placement, "" | "off") || device_count == 0 {
         return None;
     }
     let (top, left) = (placement.starts_with("top"), placement.ends_with("left"));
     let margin = surface_margin(top, left, top_margin, clock, dock[2]) as f64;
     let side = if left { dock[0] } else { dock[1] } as f64;
-    let w = card_width(device_count);
+    let (w, h) = (card_width(device_count) * k, CARD_H * k);
     Some(CardRect {
         x: if left { side + card_x(true, screen.0 as f64, w) } else { card_x(false, screen.0 as f64 - side, w) },
-        y: if top { margin + AIR } else { screen.1 as f64 - margin - AIR - CARD_H },
+        y: if top { margin + AIR } else { screen.1 as f64 - margin - AIR - h },
         w,
-        h: CARD_H,
+        h,
     })
+}
+
+/// A surface `side` long as designed, with its air around, once its widget is `k` times as big.
+fn grown(side: f64, k: f64) -> f64 {
+    (side - 2.0 * AIR) * k + 2.0 * AIR
 }
 
 thread_local! {
@@ -99,7 +105,8 @@ pub fn apply(app: &Rc<App>) {
         })
         .filter(|(_, _, place, _, _)| !matches!(place.as_str(), "" | "off"))
         .collect();
-    let key = format!("{} {}", app.reserve(), wanted.iter().map(|(_, o, p, c, d)| format!("{o}:{p}:{c}:{d:?}")).collect::<Vec<_>>().join(" "));
+    let k = app.prefs.borrow().size_of("battery");
+    let key = format!("{} {k} {}", app.reserve(), wanted.iter().map(|(_, o, p, c, d)| format!("{o}:{p}:{c}:{d:?}")).collect::<Vec<_>>().join(" "));
     if SHOWN_AT.with(|s| *s.borrow() == key) && WIDGETS.with(|w| w.borrow().len()) == wanted.len() {
         // Same places: options (levels, the card) only need a redraw.
         changed();
@@ -124,12 +131,13 @@ pub fn apply(app: &Rc<App>) {
         window.set_anchor(if left { Edge::Left } else { Edge::Right }, true);
         window.set_margin(if top { Edge::Top } else { Edge::Bottom }, surface_margin(top, left, app.reserve(), clock, dock[2]));
         window.set_margin(if left { Edge::Left } else { Edge::Right }, if left { dock[0] } else { dock[1] });
-        let paint = Paint::new(SURFACE_W as i32, SURFACE_H as i32);
+        let paint = Paint::new(grown(SURFACE_W, k).ceil() as i32, grown(SURFACE_H, k).ceil() as i32);
         let weak = paint.downgrade();
         let a = Rc::downgrade(app);
         paint.on_draw(move |s| {
             let (Some(p), Some(app)) = (weak.upgrade(), a.upgrade()) else { return };
-            crate::draw::rasterized(|| draw(s, &p, &app, &output, left, top));
+            crate::deskcards::sized(s, AIR, k);
+            crate::draw::zoomed(k, || crate::draw::rasterized(|| draw(s, &p, &app, &output, left, top)));
         });
         window.set_child(Some(&paint));
         window.connect_realize(|w| {
@@ -202,27 +210,39 @@ mod tests {
                 ("bottom_left", AIR, 600.0 - AIR - CARD_H),
                 ("bottom_right", 800.0 - AIR - w, 600.0 - AIR - CARD_H),
             ] {
-                assert_eq!(card_rect(placement, count, (800, 600), 26, 0, [0; 3]), Some(CardRect { x, y, w, h: CARD_H }));
+                assert_eq!(card_rect(placement, count, (800, 600), 26, 0, [0; 3], 1.0), Some(CardRect { x, y, w, h: CARD_H }));
             }
         }
-        let normal = card_rect("top_left", SHOWN, (800, 600), 26, 0, [0; 3]).unwrap();
-        let clock = card_rect("top_left", SHOWN, (800, 600), 26, 214, [0; 3]).unwrap();
+        let normal = card_rect("top_left", SHOWN, (800, 600), 26, 0, [0; 3], 1.0).unwrap();
+        let clock = card_rect("top_left", SHOWN, (800, 600), 26, 214, [0; 3], 1.0).unwrap();
         assert_eq!(clock.y, normal.y + 214.0);
         // The clock only pushes the left corner down.
-        assert_eq!(card_rect("top_right", SHOWN, (800, 600), 26, 214, [0; 3]).unwrap().y, normal.y);
-        assert_eq!(card_rect("top_left", 99, (800, 600), 26, 0, [0; 3]), Some(normal));
-        assert!(card_rect("off", SHOWN, (800, 600), 26, 0, [0; 3]).is_none());
-        assert!(card_rect("top_right", 0, (800, 600), 26, 0, [0; 3]).is_none());
+        assert_eq!(card_rect("top_right", SHOWN, (800, 600), 26, 214, [0; 3], 1.0).unwrap().y, normal.y);
+        assert_eq!(card_rect("top_left", 99, (800, 600), 26, 0, [0; 3], 1.0), Some(normal));
+        assert!(card_rect("off", SHOWN, (800, 600), 26, 0, [0; 3], 1.0).is_none());
+        assert!(card_rect("top_right", 0, (800, 600), 26, 0, [0; 3], 1.0).is_none());
     }
 
     #[test]
     fn the_dock_pushes_the_batteries_off_its_edge() {
         let w = card_width(SHOWN);
-        let bottom = card_rect("bottom_left", SHOWN, (800, 600), 26, 0, [0, 0, 70]).unwrap();
+        let bottom = card_rect("bottom_left", SHOWN, (800, 600), 26, 0, [0, 0, 70], 1.0).unwrap();
         assert_eq!(bottom.y, 600.0 - 70.0 - AIR - CARD_H);
-        assert_eq!(card_rect("bottom_right", SHOWN, (800, 600), 26, 0, [0, 60, 0]).unwrap().x, 800.0 - 60.0 - AIR - w);
-        assert_eq!(card_rect("top_left", SHOWN, (800, 600), 26, 0, [60, 0, 0]).unwrap().x, 60.0 + AIR);
+        assert_eq!(card_rect("bottom_right", SHOWN, (800, 600), 26, 0, [0, 60, 0], 1.0).unwrap().x, 800.0 - 60.0 - AIR - w);
+        assert_eq!(card_rect("top_left", SHOWN, (800, 600), 26, 0, [60, 0, 0], 1.0).unwrap().x, 60.0 + AIR);
         // A dock at the bottom leaves the top corners where they were.
-        assert_eq!(card_rect("top_left", SHOWN, (800, 600), 26, 0, [0, 0, 70]).unwrap().y, 26.0 + AIR);
+        assert_eq!(card_rect("top_left", SHOWN, (800, 600), 26, 0, [0, 0, 70], 1.0).unwrap().y, 26.0 + AIR);
+    }
+
+    #[test]
+    fn a_larger_card_grows_away_from_its_corner() {
+        let (one, big) = (card_rect("bottom_right", SHOWN, (800, 600), 26, 0, [0; 3], 1.0).unwrap(), card_rect("bottom_right", SHOWN, (800, 600), 26, 0, [0; 3], 1.5).unwrap());
+        assert_eq!((big.w, big.h), (one.w * 1.5, one.h * 1.5));
+        // The air to the edges stays.
+        assert_eq!((big.x + big.w, big.y + big.h), (one.x + one.w, one.y + one.h));
+        let top = card_rect("top_left", SHOWN, (800, 600), 26, 0, [0; 3], 1.5).unwrap();
+        assert_eq!((top.x, top.y), (AIR, 26.0 + AIR));
+        assert_eq!(grown(SURFACE_W, 1.0), SURFACE_W);
+        assert_eq!(grown(SURFACE_W, 2.0) - 2.0 * AIR, 2.0 * (SURFACE_W - 2.0 * AIR));
     }
 }

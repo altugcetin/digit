@@ -126,6 +126,8 @@ pub struct Config {
     pub desktop_weather_ink: String,
     pub desktop_system_ink: String,
     pub desktop_screentime_ink: String,
+    /// Each widget's size against as designed, by widget (see `kit::deskwidget::SIZES`).
+    pub desktop_sizes: toml::Table,
     /// Rounded screen corners: on/off, whether they follow the app roundness, and the radius
     /// used when they don't. Older configs only had the radius, where 0 meant off.
     pub screen_round: Option<bool>,
@@ -261,6 +263,7 @@ impl Default for Config {
             desktop_weather_ink: "auto".into(),
             desktop_system_ink: "auto".into(),
             desktop_screentime_ink: "auto".into(),
+            desktop_sizes: toml::Table::new(),
             screen_round: None,
             screen_round_follow: None,
             screen_corners: 0.0,
@@ -353,6 +356,7 @@ pub struct Prefs {
     pub desktop_weather_ink: String,
     pub desktop_system_ink: String,
     pub desktop_screentime_ink: String,
+    pub desktop_sizes: toml::Table,
     /// The screen-corner radius in pixels, already resolved from on/off and roundness; 0 is off.
     pub screen_corners: f64,
     pub tray: bool,
@@ -454,6 +458,7 @@ impl From<&Config> for Prefs {
             desktop_weather_ink: c.desktop_weather_ink.clone(),
             desktop_system_ink: c.desktop_system_ink.clone(),
             desktop_screentime_ink: c.desktop_screentime_ink.clone(),
+            desktop_sizes: c.desktop_sizes.clone(),
             screen_corners: screen_radius(c),
             tray: c.tray,
             mic_guard: c.mic_guard,
@@ -483,6 +488,11 @@ impl Prefs {
     pub fn places_on(&self, output: &str, primary: bool) -> [String; 6] {
         let main = [&self.desktop_widget, &self.desktop_battery, &self.desktop_media, &self.desktop_weather, &self.desktop_system, &self.desktop_screentime].map(|p| p.clone());
         kit::deskwidget::places_from(&main, &self.desktop_screens, output, primary)
+    }
+
+    /// How much larger or smaller than as designed `widget` is drawn (see `kit::deskwidget`).
+    pub fn size_of(&self, widget: &str) -> f64 {
+        kit::deskwidget::size_from(&self.desktop_sizes, widget)
     }
 
     /// The hot corners of the screen `output`: its own, or the shared ones.

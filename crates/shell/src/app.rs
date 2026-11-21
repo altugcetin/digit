@@ -716,7 +716,7 @@ impl App {
             crate::dock::primary_changed(self);
         }
         // The clock follows each screen's places, which depend on which is the main one.
-        if primary_moved || before.desktop_widget != next.desktop_widget || before.desktop_screens != next.desktop_screens || before.desktop_raster != next.desktop_raster {
+        if primary_moved || before.desktop_widget != next.desktop_widget || before.desktop_screens != next.desktop_screens || before.desktop_raster != next.desktop_raster || before.desktop_sizes != next.desktop_sizes {
             crate::desk::apply(self);
         }
         crate::deskicons::apply(self);

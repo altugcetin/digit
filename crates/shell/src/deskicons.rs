@@ -1009,7 +1009,7 @@ impl Desktop {
         if let Some(app) = self.app.upgrade().filter(|app| app.cfg.wallpaper) {
             let screen = (self.geometry.0, self.geometry.1);
             let places = crate::batterywidget::places(&app, &self.output);
-            let battery = crate::batterywidget::card_rect(&places[1], crate::batterywidget::SHOWN, screen, app.reserve(), crate::desk::room(&app, &self.output), crate::dock::room(&self.output));
+            let battery = crate::batterywidget::card_rect(&places[1], crate::batterywidget::SHOWN, screen, app.reserve(), crate::desk::room(&app, &self.output), crate::dock::room(&self.output), app.prefs.borrow().size_of("battery"));
             let clock = crate::desk::rect(&app, &self.output, screen);
             let all = clock.into_iter().chain(battery).chain(crate::deskcards::rects(&app, &self.output, screen));
             for (slot, r) in self.grid.reserved.iter_mut().zip(all) {

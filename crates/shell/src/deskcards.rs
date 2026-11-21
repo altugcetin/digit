@@ -82,6 +82,18 @@ pub(crate) fn card(s: &gtk::Snapshot, app: &App, (x, y, w, h): (f64, f64, f64, f
     draw::fill(s, &shape, fill);
 }
 
+/// Draws what follows `k` times as big, growing from the point `air` in from the surface's
+/// corner: the widget's air to the screen's edges stays as it is (see `kit::deskwidget::SIZES`).
+pub(crate) fn sized(s: &gtk::Snapshot, air: f64, k: f64) {
+    if k == 1.0 {
+        return;
+    }
+    let at = gtk::graphene::Point::new(air as f32, air as f32);
+    s.translate(&at);
+    s.scale(k as f32, k as f32);
+    s.translate(&gtk::graphene::Point::new(-at.x(), -at.y()));
+}
+
 /// The dock's room on the left, right and bottom of `output` (see `dock::room`), and the
 /// margins a widget anchored at the `top` or bottom, `left` or right takes from it.
 pub(crate) fn dock_margins(output: &str, top: bool, left: bool) -> (i32, i32) {
@@ -126,7 +138,12 @@ impl Kind {
         }
     }
 
-    /// The size of what it draws, without the air around it.
+    /// How much larger or smaller than as designed it's drawn.
+    fn scale(self, p: &crate::config::Prefs) -> f64 {
+        p.size_of(self.name())
+    }
+
+    /// The size of what it draws, without the air around it, as designed.
     fn size(self) -> (f64, f64) {
         match self {
             Kind::Media => (MEDIA_W, ART),
@@ -205,11 +222,12 @@ pub(crate) fn rects(app: &App, output: &str, screen: (i32, i32)) -> Vec<CardRect
                 return None;
             }
             let (top, left) = (place.starts_with("top"), place.ends_with("left"));
-            let (w, h) = k.size();
+            let scale = k.scale(&prefs);
+            let (w, h) = (k.size().0 * scale, k.size().1 * scale);
             let (side, bottom) = dock_margins(output, top, left);
             let x = if left { side as f64 + AIR } else { screen.0 as f64 - side as f64 - AIR - w };
             let y = if top { top_margin(app, output, left) as f64 + AIR } else { screen.1 as f64 - bottom as f64 - AIR - h };
-            let pad = if backed { CARD_PAD } else { 0.0 };
+            let pad = if backed { CARD_PAD * scale } else { 0.0 };
             Some(CardRect { x: x - pad, y: y - pad, w: w + 2.0 * pad, h: h + 2.0 * pad })
         })
         .collect()
@@ -227,7 +245,7 @@ pub fn apply(app: &Rc<App>) {
         for kind in Kind::ALL {
             let place = kind.place_on(app, &output);
             if !matches!(place.as_str(), "" | "off") {
-                key.push_str(&format!(":{kind:?}={place}"));
+                key.push_str(&format!(":{kind:?}={place}@{}", kind.scale(&app.prefs.borrow())));
                 places.push((m.clone(), output.clone(), kind, place));
             }
         }
@@ -245,6 +263,7 @@ pub fn apply(app: &Rc<App>) {
     for (m, output, kind, place) in places {
         let (top, left) = (place.starts_with("top"), place.ends_with("left"));
         let (w, h) = kind.size();
+        let k = kind.scale(&app.prefs.borrow());
         let window = gtk::Window::new();
         window.init_layer_shell();
         window.set_layer(Layer::Bottom);
@@ -258,11 +277,12 @@ pub fn apply(app: &Rc<App>) {
         let (side, bottom) = dock_margins(&output, top, left);
         window.set_margin(if left { Edge::Left } else { Edge::Right }, side);
         window.set_margin(if top { Edge::Top } else { Edge::Bottom }, if top { top_margin(app, &output, left) } else { bottom });
-        let paint = Paint::new((w + 2.0 * AIR) as i32, (h + 2.0 * AIR) as i32);
+        let paint = Paint::new((w * k + 2.0 * AIR).ceil() as i32, (h * k + 2.0 * AIR).ceil() as i32);
         let (weak, a, out) = (paint.downgrade(), Rc::downgrade(app), output.clone());
         paint.on_draw(move |s| {
             let (Some(p), Some(app)) = (weak.upgrade(), a.upgrade()) else { return };
-            crate::draw::rasterized(|| draw(s, &p, &app, kind, &out, top));
+            sized(s, AIR, k);
+            crate::draw::zoomed(k, || crate::draw::rasterized(|| draw(s, &p, &app, kind, &out, top, k)));
         });
         if kind == Kind::Media {
             let click = gtk::GestureClick::new();
@@ -272,6 +292,7 @@ pub fn apply(app: &Rc<App>) {
                 if !app.prefs.borrow().desktop_media_controls {
                     return;
                 }
+                let (x, y) = (AIR + (x - AIR) / k, AIR + (y - AIR) / k);
                 let Some(cmd) = buttons().into_iter().find(|(_, r)| contains(*r, x, y)).map(|(c, _)| c) else { return };
                 if let Some(p) = app.players.borrow().as_ref() {
                     p.command(cmd);
@@ -353,7 +374,8 @@ fn mmss(seconds: f64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
-fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, kind: Kind, output: &str, top: bool) {
+/// `k`: the size it's drawn at (see [`sized`]), which the buttons' input region follows.
+fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, kind: Kind, output: &str, top: bool, k: f64) {
     let (with_card, controls) = {
         let prefs = app.prefs.borrow();
         (kind.backed(&prefs), prefs.desktop_media_controls)
@@ -369,7 +391,8 @@ fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, kind: Kind, output: &str, top: 
         let region = cairo::Region::create();
         if kind == Kind::Media && drawn && controls {
             for (_, (x, y, w, h)) in buttons() {
-                let _ = region.union_rectangle(&cairo::RectangleInt::new(x as i32, y as i32, w as i32, h as i32));
+                let (x, y) = (AIR + (x - AIR) * k, AIR + (y - AIR) * k);
+                let _ = region.union_rectangle(&cairo::RectangleInt::new(x as i32, y as i32, (w * k).ceil() as i32, (h * k).ceil() as i32));
             }
         }
         surface.set_input_region(Some(&region));
@@ -388,7 +411,7 @@ fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, kind: Kind, output: &str, top: 
         Kind::Media => media(s, p, app, look.ink, controls),
         Kind::Weather => weather(s, p, app, look.ink),
         Kind::System => system(s, p, app, look.ink),
-        Kind::ScreenTime => screentime(s, p, app, look.ink, look.card.is_some()),
+        Kind::ScreenTime => screentime(s, p, app, look.ink, look.card.is_some(), k),
     }
     if look.shade.is_some() {
         s.pop();
@@ -489,7 +512,7 @@ fn short(secs: u64) -> String {
 
 /// Screen Time as macOS draws it: today's total over the hours of the day, each hour a column
 /// stacked by app, and at the right a panel with the apps that had the most time.
-fn screentime(s: &gtk::Snapshot, p: &Paint, app: &App, ink: Rgb, with_card: bool) {
+fn screentime(s: &gtk::Snapshot, p: &Paint, app: &App, ink: Rgb, with_card: bool, k: f64) {
     let cfg = &app.cfg;
     let sum = crate::screentime::summary();
     let left = pango::Alignment::Left;
@@ -545,8 +568,9 @@ fn screentime(s: &gtk::Snapshot, p: &Paint, app: &App, ink: Rgb, with_card: bool
         let row = y + (h / 4.0) * (i as f64 + 0.5);
         let ix = x + main_w + 18.0;
         let id = id.trim_end_matches(".desktop");
+        // Loaded at the size it's drawn at, so a larger widget's icons stay sharp.
         let scale = p.scale_factor().max(1);
-        match draw::app_icon(&app.apps, id, 28 * scale, scale) {
+        match draw::app_icon(&app.apps, id, (28.0 * scale as f64 * k.max(1.0)).ceil() as i32, scale) {
             Some(icon) => draw::paintable(s, &icon, ix, row - 14.0, 28.0),
             None => draw::monogram(s, p, cfg, name, ix, row - 14.0, 28.0, ink.alpha(0.14), ink),
         }

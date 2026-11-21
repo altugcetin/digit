@@ -6,6 +6,9 @@
 //! [`SCREENS`] table by connector; one without them shows the clock where the main screen has
 //! it, and nothing else, as before there were places per screen.
 //!
+//! The size: how much larger or smaller than as designed each widget is drawn, the same on every
+//! screen, in the [`SIZES`] table by widget; one without a size is drawn as designed.
+//!
 //! The color: Automatic follows the wallpaper behind, light over dark and dark over light; the
 //! others hold whatever is behind.
 
@@ -61,6 +64,46 @@ fn screen_value(places: &[String; 6]) -> toml::Value {
 pub fn save_screen(output: &str, places: &[String; 6]) -> Result<(), String> {
     crate::prefs::update_table(SCREENS, |all| {
         all.insert(output.to_string(), screen_value(places));
+    })
+}
+
+/// The table of the widgets' sizes, by widget.
+pub const SIZES: &str = "desktop_sizes";
+
+/// The smallest and the largest a widget can be drawn, against as designed.
+pub const SIZE_RANGE: (f64, f64) = (0.6, 1.6);
+
+/// `k` within [`SIZE_RANGE`], in steps of 5%; as designed when it isn't a number.
+pub fn clamp_size(k: f64) -> f64 {
+    if !k.is_finite() {
+        return 1.0;
+    }
+    (k.clamp(SIZE_RANGE.0, SIZE_RANGE.1) * 20.0).round() / 20.0
+}
+
+/// `widget`'s size in the [`SIZES`] table `sizes`.
+pub fn size_from(sizes: &toml::Table, widget: &str) -> f64 {
+    match sizes.get(widget) {
+        Some(toml::Value::Float(k)) => clamp_size(*k),
+        Some(toml::Value::Integer(k)) => clamp_size(*k as f64),
+        _ => 1.0,
+    }
+}
+
+/// [`size_from`], read from the preferences.
+pub fn size(prefs: &toml::Table, widget: &str) -> f64 {
+    prefs.get(SIZES).and_then(toml::Value::as_table).map_or(1.0, |t| size_from(t, widget))
+}
+
+/// Sets `widget`'s size, the others kept; as designed takes it out of the table.
+pub fn save_size(widget: &str, k: f64) -> Result<(), String> {
+    let k = clamp_size(k);
+    crate::prefs::update_table(SIZES, |all| {
+        if k == 1.0 {
+            all.remove(widget);
+        } else {
+            all.insert(widget.to_string(), toml::Value::Float(k));
+        }
     })
 }
 
@@ -131,5 +174,17 @@ mod tests {
         assert_eq!(read(&prefs, "weather"), Ink::Auto);
         assert!(CHOICES.iter().all(|(v, _)| *v == "auto" || Ink::parse(v) != Ink::Auto));
         assert_eq!(key("screentime"), "desktop_screentime_ink");
+    }
+
+    #[test]
+    fn sizes_stay_in_range_in_steps_and_default_to_as_designed() {
+        let prefs: toml::Table = "[desktop_sizes]\nclock = 1.23\nmedia = 9\nweather = 'big'\nsystem = 0.1".parse().unwrap();
+        assert_eq!(size(&prefs, "clock"), 1.25);
+        assert_eq!(size(&prefs, "media"), SIZE_RANGE.1);
+        assert_eq!(size(&prefs, "weather"), 1.0);
+        assert_eq!(size(&prefs, "system"), SIZE_RANGE.0);
+        assert_eq!(size(&prefs, "battery"), 1.0);
+        assert_eq!(size(&toml::Table::new(), "clock"), 1.0);
+        assert_eq!(clamp_size(f64::NAN), 1.0);
     }
 }
