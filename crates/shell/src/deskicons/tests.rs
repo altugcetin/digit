@@ -538,6 +538,7 @@ fn battery_grid(placement: &str, clock: &str) -> Grid {
         26,
         if clock == "left" { 214 } else { 0 },
         [0; 3],
+        1.0,
     )
     .map(|r| Rect {
         x: r.x,

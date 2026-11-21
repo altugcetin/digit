@@ -27,6 +27,11 @@ fn height(date: bool, weather: bool) -> f64 {
     TIME_H + if date { DATE_H } else { 0.0 } + if weather { WEATHER_H } else { 0.0 }
 }
 
+/// How much larger or smaller than as designed the clock is drawn.
+fn size(app: &App) -> f64 {
+    app.prefs.borrow().size_of("clock")
+}
+
 /// The clock's place on the screen `output`: "left", "center" or "off".
 fn mode_on(app: &App, output: &str) -> String {
     crate::batterywidget::places(app, output)[0].clone()
@@ -40,7 +45,7 @@ pub fn room(app: &App, output: &str) -> i32 {
     }
     let (date, weather) = rows(app);
     let card = if app.prefs.borrow().desktop_clock_bg { PAD } else { 0.0 };
-    (height(date, weather) + card + 8.0).round() as i32
+    ((height(date, weather) + card) * size(app) + 8.0).round() as i32
 }
 
 /// Where the clock sits on the screen `output`, `screen` big, for desktop icons to keep out of:
@@ -51,13 +56,14 @@ pub(crate) fn rect(app: &App, output: &str, screen: (i32, i32)) -> Option<crate:
         return None;
     }
     let (date, weather) = rows(app);
-    let pad = if app.prefs.borrow().desktop_clock_bg { PAD } else { 0.0 };
+    let k = size(app);
+    let pad = if app.prefs.borrow().desktop_clock_bg { PAD * k } else { 0.0 };
     let (x, y) = if mode == "center" {
-        ((screen.0 - W) as f64 / 2.0, (screen.1 as f64 * 0.16).trunc())
+        ((screen.0 as f64 - W as f64 * k) / 2.0, (screen.1 as f64 * 0.16).trunc())
     } else {
         (64.0, (app.reserve() + 36) as f64)
     };
-    Some(crate::batterywidget::CardRect { x: x - pad, y: y - pad, w: W as f64 + 2.0 * pad, h: height(date, weather) + 2.0 * pad })
+    Some(crate::batterywidget::CardRect { x: x - pad, y: y - pad, w: W as f64 * k + 2.0 * pad, h: height(date, weather) * k + 2.0 * pad })
 }
 
 thread_local! {
@@ -103,7 +109,8 @@ pub fn apply(app: &Rc<App>) {
             Some((m, name, mode))
         })
         .collect();
-    let key = modes.iter().map(|(_, n, m)| format!("{n}={m}")).collect::<Vec<_>>().join(" ");
+    let k = size(app);
+    let key = format!("{k} {}", modes.iter().map(|(_, n, m)| format!("{n}={m}")).collect::<Vec<_>>().join(" "));
     if MODE.with(|m| *m.borrow() == key) {
         return;
     }
@@ -126,21 +133,23 @@ pub fn apply(app: &Rc<App>) {
         window.set_monitor(Some(&m));
         window.add_css_class("digit");
         let center = mode == "center";
-        // The surface reaches PAD past the clock on every side, room for its card.
-        let pad = PAD as i32;
+        // The surface reaches PAD past the clock on every side, room for its card; sized, all of
+        // it grows from its corner and the clock stays where it starts.
+        let pad = (PAD * k).round() as i32;
         window.set_anchor(Edge::Top, true);
         if !center {
             window.set_anchor(Edge::Left, true);
             window.set_margin(Edge::Left, 64 - pad);
         }
         window.set_margin(Edge::Top, if center { (m.geometry().height() as f64 * 0.16) as i32 } else { top } - pad);
-        let paint = Paint::new(W + 2 * pad, H + 2 * pad);
+        let paint = Paint::new(((W as f64 + 2.0 * PAD) * k).ceil() as i32, ((H as f64 + 2.0 * PAD) * k).ceil() as i32);
         let weak = paint.downgrade();
         let a = Rc::downgrade(app);
         let output = name.clone();
         paint.on_draw(move |s| {
             let (Some(p), Some(app)) = (weak.upgrade(), a.upgrade()) else { return };
-            draw::rasterized(|| draw_desk(s, &p, &app, &output, center));
+            s.scale(k as f32, k as f32);
+            draw::zoomed(k, || draw::rasterized(|| draw_desk(s, &p, &app, &output, center)));
         });
         window.set_child(Some(&paint));
         window.connect_realize(|w| {

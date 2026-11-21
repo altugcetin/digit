@@ -20,7 +20,22 @@ thread_local! {
     /// a dead one's address, and must not get layouts made from the dead one's Pango context.
     static LAYOUTS: RefCell<HashMap<Key, (glib::WeakRef<gtk::Widget>, pango::Layout)>> = RefCell::new(HashMap::new());
     static RASTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static ZOOM: std::cell::Cell<f64> = const { std::cell::Cell::new(1.0) };
 }
+
+/// Runs `draw` for a surface whose snapshot is scaled by `k` (a desktop widget at its size, see
+/// `deskcards::sized`): text and icons are then laid out at the size they show at and drawn with
+/// the scale undone, since GSK draws glyphs laid out at one size and scaled to another clipped.
+pub fn zoomed(k: f64, draw: impl FnOnce()) {
+    let was = ZOOM.with(|z| z.replace(if k.is_finite() && k > 0.0 { k } else { 1.0 }));
+    draw();
+    ZOOM.with(|z| z.set(was));
+}
+
+fn zoom() -> f64 {
+    ZOOM.with(|z| z.get())
+}
+
 
 static RASTER_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -43,9 +58,13 @@ pub fn rasterized(draw: impl FnOnce()) {
     RASTER.with(|r| r.set(was));
 }
 
-/// Draws `l` at the snapshot's origin, through cairo inside [`rasterized`].
-fn put(s: &gtk::Snapshot, l: &pango::Layout, color: Rgb) {
+/// Draws `l`, laid out `k` times as large as the snapshot's units (see [`zoomed`]), at the
+/// snapshot's origin; through cairo inside [`rasterized`].
+fn put(s: &gtk::Snapshot, l: &pango::Layout, color: Rgb, k: f64) {
     if !RASTER.with(|r| r.get()) {
+        if k != 1.0 {
+            s.scale(1.0 / k as f32, 1.0 / k as f32);
+        }
         s.append_layout(l, &color.rgba());
         return;
     }
@@ -54,7 +73,11 @@ fn put(s: &gtk::Snapshot, l: &pango::Layout, color: Rgb) {
     let y0 = ink.y().min(logical.y()) - 2;
     let x1 = (ink.x() + ink.width()).max(logical.x() + logical.width()) + 2;
     let y1 = (ink.y() + ink.height()).max(logical.y() + logical.height()) + 2;
-    let cr = s.append_cairo(&graphene::Rect::new(x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32));
+    // The scale is undone inside cairo: GL draws nothing of a cairo node under a transform that
+    // undoes the one around it.
+    let k32 = k as f32;
+    let cr = s.append_cairo(&graphene::Rect::new(x0 as f32 / k32, y0 as f32 / k32, (x1 - x0) as f32 / k32, (y1 - y0) as f32 / k32));
+    cr.scale(1.0 / k, 1.0 / k);
     cr.set_source_rgba(color.r, color.g, color.b, color.a);
     kit::paint::show(&cr, l);
 }
@@ -173,7 +196,8 @@ pub fn layout(widget: &impl IsA<gtk::Widget>, cfg: &Config, text: &str, px: f64,
 }
 
 pub fn width(widget: &impl IsA<gtk::Widget>, cfg: &Config, text: &str, px: f64, face: Face) -> f64 {
-    shaped(widget, cfg, text, px, face).pixel_extents().1.width() as f64
+    let k = zoom();
+    shaped(widget, cfg, text, px * k, face).pixel_extents().1.width() as f64 / k
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -181,24 +205,28 @@ pub fn text(s: &gtk::Snapshot, widget: &impl IsA<gtk::Widget>, cfg: &Config, tex
     if width <= 4.0 || text.is_empty() {
         return;
     }
-    let l = cached(widget, cfg, text, px, face, width.round().max(1.0) as i32, align);
-    let h = l.pixel_extents().1.height() as f64;
+    let k = zoom();
+    let l = cached(widget, cfg, text, px * k, face, (width * k).round().max(1.0) as i32, align);
+    let h = l.pixel_extents().1.height() as f64 / k;
     s.save();
-    s.translate(&graphene::Point::new(x.round() as f32, (mid - h / 2.0).round() as f32));
-    put(s, &l, color);
+    // Rounded where a unit is a pixel; zoomed, a unit isn't one.
+    let (x, y) = if k == 1.0 { (x.round(), (mid - h / 2.0).round()) } else { (x, mid - h / 2.0) };
+    s.translate(&graphene::Point::new(x as f32, y as f32));
+    put(s, &l, color, k);
     s.restore();
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn icon(s: &gtk::Snapshot, widget: &impl IsA<gtk::Widget>, cfg: &Config, name: &str, px: f64, fill: bool, color: Rgb, cx: f64, mid: f64) {
-    let l = shaped(widget, cfg, name, px, Face::Icon(fill));
+    let k = zoom();
+    let l = shaped(widget, cfg, name, px * k, Face::Icon(fill));
     let (ink, _) = l.pixel_extents();
+    let x = cx - (ink.x() as f64 + ink.width() as f64 / 2.0) / k;
+    let y = mid - (ink.y() as f64 + ink.height() as f64 / 2.0) / k;
     s.save();
-    s.translate(&graphene::Point::new(
-        (cx - ink.x() as f64 - ink.width() as f64 / 2.0).round() as f32,
-        (mid - ink.y() as f64 - ink.height() as f64 / 2.0).round() as f32,
-    ));
-    put(s, &l, color);
+    let (x, y) = if k == 1.0 { (x.round(), y.round()) } else { (x, y) };
+    s.translate(&graphene::Point::new(x as f32, y as f32));
+    put(s, &l, color, k);
     s.restore();
 }
 

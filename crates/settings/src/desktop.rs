@@ -1543,6 +1543,55 @@ fn placed(places: &[String; 6]) -> Vec<Option<&'static str>> {
     }).collect()
 }
 
+/// Each widget's size, in `WIDGETS` order (see `kit::deskwidget::SIZES`).
+fn sizes(t: &toml::Table) -> Vec<f64> {
+    WIDGETS.iter().map(|w| kit::deskwidget::size(t, w.ink)).collect()
+}
+
+/// Where a widget `k` times as big as designed sits on a box `w` by `h`, in the spot `id` at `r`:
+/// grown away from the corner it keeps to, as on the desktop; at the top centre, both ways.
+fn sized_rect(id: &str, r: Rect, k: f64, w: f64, h: f64) -> Rect {
+    let (x, y, rw, rh) = (r.0 * w, r.1 * h, r.2 * w, r.3 * h);
+    let (nw, nh) = (rw * k, rh * k);
+    let nx = if id.ends_with("right") { x + rw - nw } else if id.ends_with("center") { x + (rw - nw) / 2.0 } else { x };
+    (nx, if id.starts_with("bottom") { y + rh - nh } else { y }, nw, nh)
+}
+
+/// The point a widget in the spot `id` grows from, and its corner that resizes it, away from it.
+fn grip(id: &str, (x, y, rw, rh): Rect) -> ((f64, f64), (f64, f64)) {
+    let (right, bottom) = (id.ends_with("right"), id.starts_with("bottom"));
+    let from = (if right { x + rw } else if id.ends_with("center") { x + rw / 2.0 } else { x }, if bottom { y + rh } else { y });
+    (from, (if right { x } else { x + rw }, if bottom { y } else { y + rh }))
+}
+
+/// The cursor over the corner of a widget in the spot `id`.
+fn grip_cursor(id: &str) -> &'static str {
+    if id == "top_right" || id == "bottom_left" { "nesw-resize" } else { "nwse-resize" }
+}
+
+/// The size a widget `k0` times as big reaches when its corner, `from` its growing point, is
+/// pulled by `(dx, dy)`: as far as the pull goes along the line from that point to the corner.
+fn pulled(k0: f64, from: (f64, f64), corner: (f64, f64), (dx, dy): (f64, f64)) -> f64 {
+    let (vx, vy) = (corner.0 - from.0, corner.1 - from.1);
+    let len = vx * vx + vy * vy;
+    if len < 1.0 { return k0; }
+    kit::deskwidget::clamp_size(k0 * (vx * (vx + dx) + vy * (vy + dy)) / len)
+}
+
+/// How near a widget's corner a press takes it.
+const GRIP: f64 = 9.0;
+
+/// A widget's corner being pulled: the widget, its spot, its size when taken, and where it grows
+/// from and its corner was then.
+#[derive(Clone, Copy)]
+struct Pull {
+    widget: usize,
+    spot: usize,
+    from_k: f64,
+    from: (f64, f64),
+    corner: (f64, f64),
+}
+
 /// The desktop widgets on the screens' small maps (see `wallpaper::Overlay`): each screen has its
 /// own places, set by clicking a spot on its map; what each widget shows and its color are the
 /// same everywhere, so those actions are shared by every map.
@@ -1550,6 +1599,8 @@ pub(crate) struct DeskWidgets {
     primary: String,
     places: Rc<std::cell::RefCell<std::collections::BTreeMap<String, [String; 6]>>>,
     backed: Rc<std::cell::RefCell<Vec<bool>>>,
+    /// Each widget's size, the same on every screen.
+    sized: Rc<std::cell::RefCell<Vec<f64>>>,
     areas: Rc<std::cell::RefCell<Vec<glib::WeakRef<gtk::DrawingArea>>>>,
     group: gio::SimpleActionGroup,
 }
@@ -1589,7 +1640,7 @@ impl DeskWidgets {
             });
             group.add_action(&action);
         }
-        Self { primary: primary.to_string(), places: Rc::default(), backed, areas, group }
+        Self { primary: primary.to_string(), places: Rc::default(), backed, sized: Rc::new(std::cell::RefCell::new(sizes(t))), areas, group }
     }
 
     /// The widgets on the map of the screen `output`: click a spot to choose what sits there,
@@ -1599,26 +1650,94 @@ impl DeskWidgets {
         let main = output == self.primary;
         self.places.borrow_mut().insert(output.to_string(), kit::deskwidget::places(t, output, main));
         let output = output.to_string();
-        let (places, backed, areas) = (self.places.clone(), self.backed.clone(), self.areas.clone());
+        let (places, backed, sized, areas) = (self.places.clone(), self.backed.clone(), self.sized.clone(), self.areas.clone());
         let hover: Rc<Cell<Option<usize>>> = Rc::default();
+        let pull: Rc<Cell<Option<Pull>>> = Rc::default();
         let spot = Rc::new(Cell::new(0usize));
         let put = gio::SimpleAction::new_stateful("put", Some(glib::VariantTy::STRING), &"none".to_variant());
-        let spot_at = |x: f64, y: f64, w: f64, h: f64| {
-            SPOTS.iter().position(|(id, _, r)| WIDGETS.iter().any(|wd| wd.places.iter().any(|p| p.0 == *id)) && x >= r.0 * w && x <= (r.0 + r.2) * w && y >= r.1 * h && y <= (r.1 + r.3) * h)
-        };
         let here_now = {
             let (places, output) = (places.clone(), output.clone());
             move || placed(places.borrow().get(&output).unwrap_or(&std::array::from_fn(|_| "off".to_string())))
         };
+        // Each widget that is out: its spot, and where it is drawn at its size.
+        let shown = {
+            let (now, sized) = (here_now.clone(), sized.clone());
+            move |w: f64, h: f64| -> Vec<(usize, usize, Rect)> {
+                let sized = sized.borrow();
+                now().iter().enumerate().filter_map(|(i, at)| {
+                    let s = SPOTS.iter().position(|(id, _, _)| Some(*id) == *at)?;
+                    Some((i, s, sized_rect(SPOTS[s].0, SPOTS[s].2, sized[i], w, h)))
+                }).collect()
+            }
+        };
+        // The spot under a place in the box: a widget's, as large as it is drawn, else an empty one.
+        let spot_at = {
+            let shown = shown.clone();
+            move |x: f64, y: f64, w: f64, h: f64| {
+                let within = |(rx, ry, rw, rh): Rect| x >= rx && x <= rx + rw && y >= ry && y <= ry + rh;
+                shown(w, h).into_iter().find(|(_, _, r)| within(*r)).map(|(_, s, _)| s).or_else(|| {
+                    SPOTS.iter().position(|(id, _, r)| WIDGETS.iter().any(|wd| wd.places.iter().any(|p| p.0 == *id)) && within((r.0 * w, r.1 * h, r.2 * w, r.3 * h)))
+                })
+            }
+        };
+        // The widget whose corner is at a place in the box.
+        let grip_at = {
+            let shown = shown.clone();
+            move |x: f64, y: f64, w: f64, h: f64| {
+                shown(w, h).into_iter().find(|(_, s, r)| {
+                    let (_, corner) = grip(SPOTS[*s].0, *r);
+                    (x - corner.0).abs() <= GRIP && (y - corner.1).abs() <= GRIP
+                })
+            }
+        };
+        let on_grip = Rc::new(Cell::new(false));
         let draw: crate::wallpaper::DrawFn = {
-            let (now, hv, bk) = (here_now.clone(), hover.clone(), backed.clone());
-            Box::new(move |cr, w, h| draw_desk_map(cr, w, h, &now(), &bk.borrow(), hv.get()))
+            let (now, hv, bk, sz, pl, og) = (here_now.clone(), hover.clone(), backed.clone(), sized.clone(), pull.clone(), on_grip.clone());
+            Box::new(move |cr, w, h| {
+                // The corner shows on the widget the pointer is over, and on the one being resized.
+                let gripped = pl.get().map(|p| p.spot).or_else(|| hv.get());
+                draw_desk_map(cr, w, h, &now(), &bk.borrow(), &sz.borrow(), hv.get(), gripped.map(|s| (s, og.get() || pl.get().is_some())), pl.get().map(|p| sz.borrow()[p.widget]));
+            })
         };
         let moved: crate::wallpaper::MovedFn = {
-            let hv = hover.clone();
+            let (hv, og, spot_at, grip_at) = (hover.clone(), on_grip.clone(), spot_at.clone(), grip_at.clone());
             Box::new(move |at, w, h| {
-                let now = at.and_then(|(x, y)| spot_at(x, y, w, h));
-                (hv.replace(now) != now, now.is_some())
+                let corner = at.and_then(|(x, y)| grip_at(x, y, w, h));
+                let now = corner.map(|(_, s, _)| s).or_else(|| at.and_then(|(x, y)| spot_at(x, y, w, h)));
+                let redraw = hv.replace(now) != now || og.replace(corner.is_some()) != corner.is_some();
+                (redraw, corner.map(|(_, s, _)| grip_cursor(SPOTS[s].0)).or(now.map(|_| "pointer")))
+            })
+        };
+        let grab: crate::wallpaper::GrabFn = {
+            let (pl, sz) = (pull.clone(), sized.clone());
+            Box::new(move |(x, y), w, h| {
+                let Some((widget, spot, r)) = grip_at(x, y, w, h) else { return false };
+                let (from, corner) = grip(SPOTS[spot].0, r);
+                pl.set(Some(Pull { widget, spot, from_k: sz.borrow()[widget], from, corner }));
+                true
+            })
+        };
+        let drag: Box<dyn Fn(f64, f64)> = {
+            let (pl, sz, areas) = (pull.clone(), sized.clone(), areas.clone());
+            Box::new(move |dx, dy| {
+                let Some(p) = pl.get() else { return };
+                let k = pulled(p.from_k, p.from, p.corner, (dx, dy));
+                if sz.borrow()[p.widget] != k {
+                    sz.borrow_mut()[p.widget] = k;
+                    redraw_all(&areas);
+                }
+            })
+        };
+        // The size is kept when the corner is let go; one that can't be saved goes back.
+        let drop: Box<dyn Fn()> = {
+            let (pl, sz, areas) = (pull.clone(), sized.clone(), areas.clone());
+            Box::new(move || {
+                let Some(p) = pl.take() else { return };
+                let k = sz.borrow()[p.widget];
+                if k != p.from_k && !saved(kit::deskwidget::save_size(WIDGETS[p.widget].ink, k)) {
+                    sz.borrow_mut()[p.widget] = p.from_k;
+                }
+                redraw_all(&areas);
             })
         };
         // What a spot holds is picked from a menu at the spot.
@@ -1664,7 +1783,9 @@ impl DeskWidgets {
             Box::new(move |area, (ox, oy), (w, h), (x, y)| {
                 let Some(i) = spot_at(x, y, w, h) else { return };
                 spot.set(i);
-                let (id, _, r) = SPOTS[i];
+                let (id, _, base) = SPOTS[i];
+                // The popover points at the widget as large as it is drawn.
+                let r = shown(w, h).into_iter().find(|(_, s, _)| *s == i).map_or((base.0 * w, base.1 * h, base.2 * w, base.3 * h), |(_, _, r)| r);
                 let here = WIDGETS.iter().zip(now().iter()).find(|(_, at)| **at == Some(id)).map_or("none", |(wd, _)| wd.id);
                 put.set_state(&here.to_variant());
                 // What can sit here on the left; what the one here shows on the right, beside it.
@@ -1730,7 +1851,7 @@ impl DeskWidgets {
                 }
                 pop.set_child(Some(&both));
                 pop.set_has_arrow(false);
-                pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new((ox + r.0 * w) as i32, (oy + r.1 * h) as i32, (r.2 * w) as i32, (r.3 * h) as i32)));
+                pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new((ox + r.0) as i32, (oy + r.1) as i32, r.2 as i32, r.3 as i32)));
                 pop.connect_closed(|p| {
                     let p = p.clone();
                     glib::idle_add_local_once(move || p.unparent());
@@ -1738,7 +1859,7 @@ impl DeskWidgets {
                 pop.popup();
             })
         };
-        Overlay { draw, moved, click, install }
+        Overlay { draw, moved, grab, drag, drop, click, install }
     }
 }
 
@@ -1868,19 +1989,21 @@ fn draw_system(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, alpha: f64) {
     }
 }
 
-/// The small screen: the wallpaper, the notch, every widget in its spot and the empty spots,
-/// dashed with a plus.
-fn draw_desk_map(cr: &gtk::cairo::Context, w: f64, h: f64, placed: &[Option<&'static str>], backed: &[bool], hover: Option<usize>) {
+/// The small screen: the wallpaper, the notch, every widget in its spot at its size and the
+/// empty spots, dashed with a plus. `grip`: the spot whose widget shows its resizing corner, and
+/// whether that corner is lit; `pulling`: the size of the widget being resized, shown by it.
+#[allow(clippy::too_many_arguments)]
+fn draw_desk_map(cr: &gtk::cairo::Context, w: f64, h: f64, placed: &[Option<&'static str>], backed: &[bool], sizes: &[f64], hover: Option<usize>, grip: Option<(usize, bool)>, pulling: Option<f64>) {
     let nw = w * 0.25;
     cr.set_source_rgb(0.0, 0.0, 0.0);
     kit::paint::rounded(cr, (w - nw) / 2.0, -h * 0.06, nw, h * 0.125, h * 0.045);
     let _ = cr.fill();
     for (i, (id, _, r)) in SPOTS.iter().enumerate() {
         if !WIDGETS.iter().any(|wd| wd.places.iter().any(|p| p.0 == *id)) { continue; }
-        let rect = (r.0 * w, r.1 * h, r.2 * w, r.3 * h);
-        let hot = hover == Some(i);
         // Two widgets can share a spot from older settings: the second sits under the first.
-        let here: Vec<(&DeskWidget, bool)> = WIDGETS.iter().zip(placed.iter()).zip(backed.iter()).filter(|((_, at), _)| **at == Some(*id)).map(|((wd, _), card)| (wd, *card)).collect();
+        let here: Vec<(&DeskWidget, bool, f64)> = WIDGETS.iter().zip(placed.iter()).zip(backed.iter()).zip(sizes.iter()).filter(|(((_, at), _), _)| **at == Some(*id)).map(|(((wd, _), card), k)| (wd, *card, *k)).collect();
+        let rect = sized_rect(id, *r, here.first().map_or(1.0, |h| h.2), w, h);
+        let hot = hover == Some(i);
         if hot {
             cr.set_source_rgba(1.0, 1.0, 1.0, 0.16);
             kit::paint::rounded(cr, rect.0, rect.1, rect.2, rect.3, rect.3 * 0.22);
@@ -1901,7 +2024,7 @@ fn draw_desk_map(cr: &gtk::cairo::Context, w: f64, h: f64, placed: &[Option<&'st
             cr.line_to(cx, cy + arm);
             let _ = cr.stroke();
         }
-        for (k, (wd, card)) in here.iter().enumerate() {
+        for (k, (wd, card, _)) in here.iter().enumerate() {
             let dy = k as f64 * (rect.3 + h * 0.03);
             if *card {
                 cr.set_source_rgba(0.08, 0.08, 0.1, 0.42);
@@ -1910,7 +2033,46 @@ fn draw_desk_map(cr: &gtk::cairo::Context, w: f64, h: f64, placed: &[Option<&'st
             }
             (wd.draw)(cr, (rect.0, rect.1 + dy, rect.2, rect.3), 1.0);
         }
+        if let Some((_, lit)) = grip.filter(|(s, _)| *s == i && !here.is_empty()) {
+            draw_grip(cr, id, rect, lit);
+            if let Some(k) = pulling {
+                draw_percent(cr, rect, k);
+            }
+        }
     }
+}
+
+/// A widget's resizing corner on the small screen: a bracket at its corner, dark under light so
+/// it reads on any picture, as the picture's own zoom corner.
+fn draw_grip(cr: &gtk::cairo::Context, id: &str, rect: Rect, lit: bool) {
+    let (_, (cx, cy)) = grip(id, rect);
+    // The bracket's arms run back along the widget's edges from its corner.
+    let (sx, sy) = (if id.ends_with("right") { 1.0 } else { -1.0 }, if id.starts_with("bottom") { 1.0 } else { -1.0 });
+    let len = 9.0;
+    cr.set_line_cap(gtk::cairo::LineCap::Round);
+    cr.set_line_join(gtk::cairo::LineJoin::Round);
+    for (width, (r, g, b, a)) in [(4.5, (0.0, 0.0, 0.0, 0.35)), (2.25, (1.0, 1.0, 1.0, if lit { 1.0 } else { 0.8 }))] {
+        cr.set_line_width(width);
+        cr.set_source_rgba(r, g, b, a);
+        cr.move_to(cx + sx * len, cy);
+        cr.line_to(cx, cy);
+        cr.line_to(cx, cy + sy * len);
+        let _ = cr.stroke();
+    }
+}
+
+/// The size of the widget being resized, in a small dark pill in its middle.
+fn draw_percent(cr: &gtk::cairo::Context, (x, y, rw, rh): Rect, k: f64) {
+    let l = kit::paint::layout(cr, &format!("{}%", (k * 100.0).round()), "Readex Pro Medium 9");
+    let (_, ext) = l.pixel_extents();
+    let (pw, ph) = (ext.width() as f64 + 14.0, ext.height() as f64 + 8.0);
+    let (px, py) = (x + (rw - pw) / 2.0, y + (rh - ph) / 2.0);
+    cr.set_source_rgba(0.0, 0.0, 0.0, 0.62);
+    kit::paint::rounded(cr, px, py, pw, ph, ph / 2.0);
+    let _ = cr.fill();
+    cr.move_to(px + 7.0 - ext.x() as f64, py + 4.0 - ext.y() as f64);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+    kit::paint::show(cr, &l);
 }
 
 fn search(body: &gtk::Box, t: &toml::Table) {
@@ -2291,6 +2453,28 @@ mod tests {
 #[cfg(test)]
 mod reduction_tests {
     use super::*;
+
+    #[test]
+    fn a_widget_on_the_map_grows_away_from_its_corner_and_its_own_corner_resizes_it() {
+        let spot = |id: &str| SPOTS.iter().find(|s| s.0 == id).unwrap().2;
+        let (w, h) = (400.0, 225.0);
+        let (one, big) = (sized_rect("bottom_right", spot("bottom_right"), 1.0, w, h), sized_rect("bottom_right", spot("bottom_right"), 1.5, w, h));
+        assert!((big.0 + big.2 - (one.0 + one.2)).abs() < 1e-9 && (big.1 + big.3 - (one.1 + one.3)).abs() < 1e-9, "the bottom right corner stays");
+        assert!((big.2 - one.2 * 1.5).abs() < 1e-9);
+        let centre = sized_rect("top_center", spot("top_center"), 1.4, w, h);
+        let base = sized_rect("top_center", spot("top_center"), 1.0, w, h);
+        assert!((centre.0 + centre.2 / 2.0 - (base.0 + base.2 / 2.0)).abs() < 1e-9 && centre.1 == base.1, "the centre stays, the top too");
+        // The corner is the one away from where it grows from.
+        let ((fx, fy), (cx, cy)) = grip("top_right", one);
+        assert_eq!((fx, fy, cx, cy), (one.0 + one.2, one.1, one.0, one.1 + one.3));
+        assert_eq!(grip_cursor("top_right"), "nesw-resize");
+        // Pulling the corner outwards along the line doubles it, inwards halves it, sideways leaves it.
+        let (from, corner) = ((0.0, 0.0), (100.0, 50.0));
+        assert_eq!(pulled(1.0, from, corner, (50.0, 25.0)), 1.5);
+        assert_eq!(pulled(1.0, from, corner, (-40.0, -20.0)), kit::deskwidget::clamp_size(0.6));
+        assert_eq!(pulled(1.0, from, corner, (-10.0, 20.0)), 1.0);
+        assert_eq!(pulled(1.2, from, corner, (500.0, 500.0)), kit::deskwidget::SIZE_RANGE.1);
+    }
 
     #[test]
     fn every_desktop_widget_has_a_color_the_shell_reads() {

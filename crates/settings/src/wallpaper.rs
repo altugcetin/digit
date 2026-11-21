@@ -124,9 +124,16 @@ fn set_shared(path: PathBuf, then: impl FnOnce() + 'static) {
 pub(crate) struct Overlay {
     /// Draws in a box of the given size, with the pointer's spot highlighted.
     pub draw: DrawFn,
-    /// The pointer moved to a place in the box (or left it): whether to redraw, and whether it is
-    /// over something to click.
+    /// The pointer moved to a place in the box (or left it): whether to redraw, and the cursor
+    /// for what it is over, when that is something of the overlay's.
     pub moved: MovedFn,
+    /// A press at a place in the box of the given size: whether the overlay takes the drag
+    /// (a widget's corner, which resizes it). A drag it takes goes to `drag`, then `drop`.
+    pub grab: GrabFn,
+    /// How far the pointer has moved since the press the overlay took.
+    pub drag: Box<dyn Fn(f64, f64)>,
+    /// The drag the overlay took has ended.
+    pub drop: Box<dyn Fn()>,
     /// A click at a place in the box of the given size, whose corner sits at `origin` in the area.
     pub click: ClickFn,
     /// Called once with the area, to give it the actions its menus use.
@@ -134,7 +141,8 @@ pub(crate) struct Overlay {
 }
 
 pub(crate) type DrawFn = Box<dyn Fn(&gtk::cairo::Context, f64, f64)>;
-pub(crate) type MovedFn = Box<dyn Fn(Option<(f64, f64)>, f64, f64) -> (bool, bool)>;
+pub(crate) type MovedFn = Box<dyn Fn(Option<(f64, f64)>, f64, f64) -> (bool, Option<&'static str>)>;
+pub(crate) type GrabFn = Box<dyn Fn((f64, f64), f64, f64) -> bool>;
 /// Arguments: the area, the box's corner in it, the box's size, and the click in the box.
 pub(crate) type ClickFn = Box<dyn Fn(&gtk::DrawingArea, (f64, f64), (f64, f64), (f64, f64))>;
 
@@ -168,6 +176,8 @@ struct Map {
     moved: Cell<bool>,
     /// The drag began on the corner handle: it zooms instead of moving the picture.
     zooming: Cell<bool>,
+    /// The overlay that took the drag, by its place in `overlays`.
+    grabbed: Cell<Option<usize>>,
 }
 
 /// How near the bottom-right corner a press takes the zoom handle.
@@ -196,7 +206,7 @@ impl Map {
         note.set_wrap(true);
         note.set_xalign(0.0);
         for (o, _) in &overlays { (o.install)(&area); }
-        let map = Rc::new(Self { area: area.downgrade(), note: note.downgrade(), pixels: RefCell::new(None), covered: RefCell::new(None), path: RefCell::new(None), focus: Cell::new(focus), key: key.into(), parts, overlays, asked: Cell::new(0), moved: Cell::new(false), zooming: Cell::new(false) });
+        let map = Rc::new(Self { area: area.downgrade(), note: note.downgrade(), pixels: RefCell::new(None), covered: RefCell::new(None), path: RefCell::new(None), focus: Cell::new(focus), key: key.into(), parts, overlays, asked: Cell::new(0), moved: Cell::new(false), zooming: Cell::new(false), grabbed: Cell::new(None) });
         let owner = map.clone();
         area.set_draw_func(move |_, cr, w, h| owner.draw(cr, w as f64, h as f64));
         let drag = gtk::GestureDrag::new();
@@ -206,13 +216,23 @@ impl Map {
             from.set(m.focus.get());
             m.moved.set(false);
             let size = g.widget().map(|w| (w.width() as f64, w.height() as f64)).unwrap_or_default();
-            m.zooming.set(m.pixels.borrow().is_some() && on_handle(x, y, size.0, size.1));
+            // A widget's corner first: it sits over the picture.
+            let grabbed = m.overlays.iter().position(|(o, spot)| {
+                let (bx, by, bw, bh) = (spot.0 * size.0, spot.1 * size.1, spot.2 * size.0, spot.3 * size.1);
+                x >= bx && x <= bx + bw && y >= by && y <= by + bh && (o.grab)((x - bx, y - by), bw, bh)
+            });
+            m.grabbed.set(grabbed);
+            m.zooming.set(grabbed.is_none() && m.pixels.borrow().is_some() && on_handle(x, y, size.0, size.1));
         });
         let (m, from) = (map.clone(), start);
         drag.connect_drag_update(move |g, dx, dy| {
             // A click wobbles a little; only a real drag moves the picture.
             if dx.abs() + dy.abs() < 4.0 && !m.moved.get() { return; }
             m.moved.set(true);
+            if let Some(i) = m.grabbed.get() {
+                (m.overlays[i].0.drag)(dx, dy);
+                return;
+            }
             let from = from.get();
             if m.zooming.get() {
                 // The corner pulled out makes the picture larger, pushed in smaller again.
@@ -233,6 +253,10 @@ impl Map {
         });
         let m = map.clone();
         drag.connect_drag_end(move |_, _, _| {
+            if let Some(i) = m.grabbed.take() {
+                (m.overlays[i].0.drop)();
+                return;
+            }
             if m.moved.get() { m.store(); }
             m.refresh();
         });
@@ -272,16 +296,18 @@ impl Map {
         let (w, h) = (area.width() as f64, area.height() as f64);
         // On the zoom handle, no spot is lit.
         let handle = self.pixels.borrow().is_some() && at.is_some_and(|(x, y)| on_handle(x, y, w, h));
-        let mut over = false;
+        let mut over = None;
         for (o, spot) in &self.overlays {
             let (bx, by, bw, bh) = (spot.0 * w, spot.1 * h, spot.2 * w, spot.3 * h);
             let local = at.filter(|(x, y)| !handle && *x >= bx && *x <= bx + bw && *y >= by && *y <= by + bh).map(|(x, y)| (x - bx, y - by));
             let (redraw, here) = (o.moved)(local, bw, bh);
             if redraw { area.queue_draw(); }
-            over |= here;
+            over = over.or(here);
         }
+        // While a widget is resized its corner keeps the cursor it was taken with.
+        if self.grabbed.get().is_some() { return; }
         let (over_x, over_y) = self.overflow();
-        area.set_cursor_from_name(Some(if handle { "nwse-resize" } else if over { "pointer" } else if over_x >= 1.0 || over_y >= 1.0 { "grab" } else { "default" }));
+        area.set_cursor_from_name(Some(if handle { "nwse-resize" } else if let Some(cursor) = over { cursor } else if over_x >= 1.0 || over_y >= 1.0 { "grab" } else { "default" }));
     }
 
     /// How far the picture, scaled to cover the frame and zoomed, runs past it sideways and up
@@ -568,7 +594,7 @@ fn fill(holder: &gtk::Box) {
         })
     };
     let card = section(holder, "Screens");
-    let (hint, _) = ui::row(Some("dashboard_customize"), "Wallpaper and widgets", "Click a spot to choose what sits there. Drag the picture to move it, its corner to zoom");
+    let (hint, _) = ui::row(Some("dashboard_customize"), "Wallpaper and widgets", "Click a spot to choose what sits there, drag a widget's corner to resize it. Drag the picture to move it, its corner to zoom");
     let shared = |card: &gtk::Box, title: &str| {
         let shown = global();
         let refill = again(holder);
