@@ -808,6 +808,21 @@ pub fn apply(app: &Rc<App>) {
     }
 }
 
+/// Takes every click on the screen but the Now playing buttons. The widgets share this surface's
+/// layer, and the one mapped last is on top: this surface is mapped again whenever it asks for
+/// the keyboard, and would then cover the buttons. Called on each draw, so a new surface takes
+/// it with its first frame.
+fn leave_widget_buttons(d: &Rc<RefCell<Desktop>>) {
+    let Ok(d) = d.try_borrow() else { return };
+    let (Some(app), Some(surface)) = (d.app.upgrade(), d.window.surface()) else { return };
+    let (w, h) = (d.geometry.0, d.geometry.1);
+    let region = gtk::cairo::Region::create_rectangle(&gtk::cairo::RectangleInt::new(0, 0, w, h));
+    for r in crate::deskcards::media_buttons(&app, &d.output, (w, h)) {
+        let _ = region.subtract_rectangle(&gtk::cairo::RectangleInt::new(r.x.floor() as i32, r.y.floor() as i32, r.w.ceil() as i32 + 1, r.h.ceil() as i32 + 1));
+    }
+    surface.set_input_region(Some(&region));
+}
+
 fn desktop_window(monitor: &gdk::Monitor, mode: KeyboardMode) -> gtk::Window {
     let window = gtk::Window::new();
     window.init_layer_shell();
@@ -919,6 +934,7 @@ fn create_surface(
     let weak = Rc::downgrade(&desktop);
     paint.on_draw(move |s| {
         if let Some(d) = weak.upgrade() {
+            leave_widget_buttons(&d);
             draw_desktop(&d, s);
         }
     });

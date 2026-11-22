@@ -181,6 +181,36 @@ thread_local! {
     static TIMER: RefCell<Option<glib::SourceId>> = const { RefCell::new(None) };
     static APP: RefCell<Weak<App>> = const { RefCell::new(Weak::new()) };
     static STATS: RefCell<(crate::sysmon::Sampler, Option<crate::sysmon::Stats>, Option<f64>)> = RefCell::new(Default::default());
+    /// The glow under each Now playing button: previous, play or pause, next.
+    static GLOW: RefCell<[kit::motion::Tween; 3]> = RefCell::new(std::array::from_fn(|_| kit::motion::Tween::still(0.0)));
+}
+
+/// Glows the Now playing button at `at` (an index into `buttons`) and lets the others fade,
+/// redrawing `paint` until they settle.
+fn hover(paint: &Paint, at: Option<usize>) {
+    let now = glib::monotonic_time();
+    let moving = GLOW.with(|g| {
+        let mut g = g.borrow_mut();
+        let mut moving = false;
+        for (i, t) in g.iter_mut().enumerate() {
+            let to = if Some(i) == at { 1.0 } else { 0.0 };
+            if t.target() != to {
+                t.go(to, now, if to > 0.0 { 160 } else { 260 }, kit::motion::STANDARD);
+                moving = true;
+            }
+        }
+        moving
+    });
+    paint.set_cursor_from_name(at.map(|_| "pointer"));
+    if !moving {
+        return;
+    }
+    paint.queue_draw();
+    paint.add_tick_callback(|paint, clock| {
+        paint.queue_draw();
+        let settled = GLOW.with(|g| g.borrow().iter().all(|t| t.settled(clock.frame_time())));
+        if settled { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+    });
 }
 
 /// Redraws the widgets, after the weather or the palette changed.
@@ -242,6 +272,33 @@ pub(crate) fn rects(app: &App, output: &str, screen: (i32, i32)) -> Vec<CardRect
             Some(CardRect { x: x - pad, y: y - pad, w: w + 2.0 * pad, h: h + 2.0 * pad })
         })
         .collect()
+}
+
+/// Where the Now playing buttons sit on a screen `screen` big, in its coordinates, when the
+/// widget is out there with its controls on. The desktop icons' surface, which covers the whole
+/// screen in the same layer and can end up above the widget, leaves these to it.
+pub(crate) fn media_buttons(app: &App, output: &str, screen: (i32, i32)) -> Vec<CardRect> {
+    let prefs = app.prefs.borrow().clone();
+    let kind = Kind::Media;
+    let place = kind.place_on(app, output);
+    if !prefs.desktop_media_controls || matches!(place.as_str(), "" | "off") {
+        return Vec::new();
+    }
+    let (top, left) = (place.starts_with("top"), place.ends_with("left"));
+    let k = kind.scale(&prefs);
+    let (side, bottom) = dock_margins(output, top, left);
+    let top_at = if top { top_margin(app, output, left) as f64 } else { 0.0 };
+    media_buttons_at(screen, (top, left), k, (side, bottom), top_at)
+}
+
+/// [`media_buttons`] for a widget `k` times as big in the corner `(top, left)`, `margins` (side,
+/// bottom) from the screen's edges and `top_at` from its top.
+fn media_buttons_at(screen: (i32, i32), (top, left): (bool, bool), k: f64, (side, bottom): (i32, i32), top_at: f64) -> Vec<CardRect> {
+    let (w, h) = (MEDIA_W * k, Kind::Media.size().1 * k);
+    // The drawn area starts AIR in from the surface, as in `rects`.
+    let x = if left { side as f64 + AIR } else { screen.0 as f64 - side as f64 - AIR - w };
+    let y = if top { top_at + AIR } else { screen.1 as f64 - bottom as f64 - AIR - h };
+    buttons().into_iter().map(|(_, (bx, by, bw, bh))| CardRect { x: x + (bx - AIR) * k, y: y + (by - AIR) * k, w: bw * k, h: bh * k }).collect()
 }
 
 pub fn apply(app: &Rc<App>) {
@@ -306,11 +363,27 @@ pub fn apply(app: &Rc<App>) {
                 }
                 let (x, y) = (AIR + (x - AIR) / k, AIR + (y - AIR) / k);
                 let Some(cmd) = buttons().into_iter().find(|(_, r)| contains(*r, x, y)).map(|(c, _)| c) else { return };
-                if let Some(p) = app.players.borrow().as_ref() {
-                    p.command(cmd);
+                let players = app.players.borrow().clone();
+                if let Some(p) = players {
+                    if cmd == crate::media::Command::PlayPause { p.play_pause_now() } else { p.command(cmd) }
                 }
             });
             paint.add_controller(click);
+            // The buttons glow under the pointer, as the shell's other round buttons do.
+            let motion = gtk::EventControllerMotion::new();
+            let weak = paint.downgrade();
+            motion.connect_motion(move |_, x, y| {
+                let Some(p) = weak.upgrade() else { return };
+                let (x, y) = (AIR + (x - AIR) / k, AIR + (y - AIR) / k);
+                hover(&p, buttons().iter().position(|(_, r)| contains(*r, x, y)));
+            });
+            let weak = paint.downgrade();
+            motion.connect_leave(move |_| {
+                if let Some(p) = weak.upgrade() {
+                    hover(&p, None);
+                }
+            });
+            paint.add_controller(motion);
         }
         window.set_child(Some(&paint));
         window.connect_realize(|w| {
@@ -471,6 +544,11 @@ fn media(s: &gtk::Snapshot, p: &Paint, app: &App, ink: Rgb, controls: bool) {
             Command::Next => ("skip_next", 24.0, m.can_next),
             Command::PlayPause => (if m.playing { "pause" } else { "play_arrow" }, 30.0, true),
         };
+        let glow = if on { GLOW.with(|g| g.borrow()[buttons().iter().position(|(c, _)| *c == cmd).unwrap_or(0)].value(now)) } else { 0.0 };
+        if glow > 0.0 {
+            let r = w / 2.0 + 1.5 * glow;
+            draw::fill(s, &draw::round(x + w / 2.0 - r, y + h / 2.0 - r, 2.0 * r, 2.0 * r, r), ink.alpha(0.14 * glow));
+        }
         draw::icon(s, p, cfg, glyph, size, true, ink.alpha(if on { 0.92 } else { 0.35 }), x + w / 2.0, y + h / 2.0);
     }
 }
@@ -606,6 +684,25 @@ mod tests {
         }
         assert_eq!(mmss(65.4), "1:05");
         assert_eq!(mmss(-3.0), "0:00");
+    }
+
+    #[test]
+    fn media_buttons_on_screen_sit_where_the_widget_draws_them() {
+        let screen = (1920, 1080);
+        for (corner, k) in [((true, true), 1.0), ((false, false), 1.5), ((true, false), 0.6)] {
+            let (top, left) = corner;
+            let at = media_buttons_at(screen, corner, k, (10, 20), 40.0);
+            assert_eq!(at.len(), 3);
+            // The drawn area, as `rects` places it.
+            let (w, h) = (MEDIA_W * k, ART * k);
+            let x = if left { 10.0 + AIR } else { 1920.0 - 10.0 - AIR - w };
+            let y = if top { 40.0 + AIR } else { 1080.0 - 20.0 - AIR - h };
+            for r in &at {
+                assert!(r.x >= x && r.y >= y && r.x + r.w <= x + w + 0.01 && r.y + r.h <= y + h + 0.01, "{corner:?} {k}");
+                assert!((r.w - 36.0 * k).abs() < 1e-9);
+            }
+            assert!(at[0].x + at[0].w <= at[1].x && at[1].x + at[1].w <= at[2].x, "previous, play, next in a row");
+        }
     }
 
     #[test]

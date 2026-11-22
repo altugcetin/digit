@@ -973,6 +973,8 @@ impl App {
             });
         }
         self.changed();
+        // The Now playing widget shows the change now, not at its next tick.
+        crate::deskcards::media_changed();
     }
 }
 
