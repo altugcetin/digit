@@ -116,6 +116,8 @@ pub struct Config {
     pub desktop_clock_bg: bool,
     /// Draws the desktop's text through cairo (see `draw::rasterized`). Off unless asked for.
     pub desktop_raster: bool,
+    /// The clock's digits roll and the widgets' values glide as they change. On unless turned off.
+    pub desktop_motion: bool,
     /// Counts how long each app has the focus (see `screentime`). On unless turned off.
     pub screen_time: bool,
     pub desktop_battery_bg: bool,
@@ -261,6 +263,7 @@ impl Default for Config {
             desktop_media_controls: false,
             desktop_clock_bg: false,
             desktop_raster: false,
+            desktop_motion: true,
             screen_time: true,
             desktop_battery_bg: false,
             desktop_media_bg: false,
@@ -356,6 +359,8 @@ pub struct Prefs {
     pub desktop_clock_bg: bool,
     /// Draws the desktop's text through cairo (see `draw::rasterized`). Off unless asked for.
     pub desktop_raster: bool,
+    /// The clock's digits roll and the widgets' values glide as they change. On unless turned off.
+    pub desktop_motion: bool,
     /// Counts how long each app has the focus (see `screentime`). On unless turned off.
     pub screen_time: bool,
     pub desktop_battery_bg: bool,
@@ -462,6 +467,7 @@ impl From<&Config> for Prefs {
             desktop_media_controls: c.desktop_media_controls,
             desktop_clock_bg: c.desktop_clock_bg,
             desktop_raster: c.desktop_raster,
+            desktop_motion: c.desktop_motion,
             screen_time: c.screen_time,
             desktop_battery_bg: c.desktop_battery_bg,
             desktop_media_bg: c.desktop_media_bg,

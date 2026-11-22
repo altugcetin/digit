@@ -66,6 +66,42 @@ pub(crate) fn rect(app: &App, output: &str, screen: (i32, i32)) -> Option<crate:
     Some(crate::batterywidget::CardRect { x: x - pad, y: y - pad, w: W as f64 * k + 2.0 * pad, h: height(date, weather) * k + 2.0 * pad })
 }
 
+/// How long the time's changed digits take to roll in.
+const ROLL_MS: i64 = 560;
+
+/// The time as last drawn, and the one it rolls on from while its digits change.
+struct Roll {
+    shown: String,
+    from: Option<String>,
+    t: kit::motion::Tween,
+    ticking: bool,
+}
+
+impl Default for Roll {
+    fn default() -> Self {
+        Self { shown: String::new(), from: None, t: kit::motion::Tween::still(1.0), ticking: false }
+    }
+}
+
+impl Roll {
+    /// Notes that `time` is to show at `now`; while the digits that changed are on their way,
+    /// the time they come from and how far they got. `on`: they roll at all.
+    fn step(&mut self, time: &str, now: i64, on: bool) -> Option<(String, f64)> {
+        if self.shown != time {
+            let was = std::mem::replace(&mut self.shown, time.to_string());
+            if on && !was.is_empty() {
+                self.from = Some(was);
+                self.t = kit::motion::Tween::still(0.0);
+                self.t.go(1.0, now, ROLL_MS, kit::motion::Curve::new(0.2, 0.0, 0.0, 1.0));
+            }
+        }
+        if !on || self.t.settled(now) {
+            self.from = None;
+        }
+        Some((self.from.clone()?, self.t.value(now)))
+    }
+}
+
 thread_local! {
     static DESKS: RefCell<Vec<(String, gtk::Window, Paint)>> = const { RefCell::new(Vec::new()) };
     static MODE: RefCell<String> = const { RefCell::new(String::new()) };
@@ -146,11 +182,30 @@ pub fn apply(app: &Rc<App>) {
         let weak = paint.downgrade();
         let a = Rc::downgrade(app);
         let output = name.clone();
+        let roll = Rc::new(RefCell::new(Roll::default()));
         paint.on_draw(move |s| {
             let (Some(p), Some(app)) = (weak.upgrade(), a.upgrade()) else { return };
             s.scale(k as f32, k as f32);
             let font = app.prefs.borrow().font_of("clock");
-            draw::zoomed(k, || draw::in_font(&font, || draw::rasterized(|| draw_desk(s, &p, &app, &output, center))));
+            let rolling = {
+                let mut r = roll.borrow_mut();
+                draw::zoomed(k, || draw::in_font(&font, || draw::rasterized(|| draw_desk(s, &p, &app, &output, center, Some(&mut r)))));
+                r.from.is_some() && !std::mem::replace(&mut r.ticking, true)
+            };
+            // Frames until the digits have rolled in.
+            if rolling {
+                let roll = roll.clone();
+                p.add_tick_callback(move |p, _| {
+                    p.queue_draw();
+                    let mut r = roll.borrow_mut();
+                    if r.from.is_some() {
+                        glib::ControlFlow::Continue
+                    } else {
+                        r.ticking = false;
+                        glib::ControlFlow::Break
+                    }
+                });
+            }
         });
         window.set_child(Some(&paint));
         window.connect_realize(|w| {
@@ -164,7 +219,34 @@ pub fn apply(app: &Rc<App>) {
     tick();
 }
 
-fn draw_desk(s: &gtk::Snapshot, p: &Paint, app: &App, output: &str, center: bool) {
+/// `roll`: the time's digits as they roll in, where the clock draws them.
+/// The time on its way from `from` to `to`, `e` of the way there: what both share stays, sliding
+/// to where it sits in `to`, and the digits that changed roll up out of the line and in from
+/// under it. `row`: the line's left, its top and how wide it is.
+#[allow(clippy::too_many_arguments)]
+fn rolled(s: &gtk::Snapshot, p: &Paint, cfg: &crate::config::Config, (from, to): (&str, &str), e: f64, ink: kit::palette::Rgb, (x0, top, w): (f64, f64, f64), align: pango::Alignment) {
+    let face = Face::Text(330);
+    let same = from.chars().zip(to.chars()).take_while(|(a, b)| a == b).count();
+    let cut = |t: &str| t.char_indices().nth(same).map_or(t.len(), |(i, _)| i);
+    let (head, gone, come) = (&to[..cut(to)], &from[cut(from)..], &to[cut(to)..]);
+    let start = |t: &str| if align == pango::Alignment::Center { x0 + (w - draw::width(p, cfg, t, 96.0, face)) / 2.0 } else { x0 };
+    let x = start(from) + (start(to) - start(from)) * e;
+    let tail = x + if head.is_empty() { 0.0 } else { draw::width(p, cfg, head, 96.0, face) };
+    let mid = top + 48.0;
+    let left = pango::Alignment::Left;
+    draw::text(s, p, cfg, head, 96.0, face, ink, x, mid, w, left);
+    s.push_clip(&gtk::graphene::Rect::new((x0 - 48.0) as f32, top as f32, (w + 96.0) as f32, TIME_H as f32));
+    let reach = TIME_H * 0.62;
+    s.push_opacity((1.0 - e).clamp(0.0, 1.0));
+    draw::text(s, p, cfg, gone, 96.0, face, ink, tail, mid - reach * e, w, left);
+    s.pop();
+    s.push_opacity(e.clamp(0.0, 1.0));
+    draw::text(s, p, cfg, come, 96.0, face, ink, tail, mid + reach * (1.0 - e), w, left);
+    s.pop();
+    s.pop();
+}
+
+fn draw_desk(s: &gtk::Snapshot, p: &Paint, app: &App, output: &str, center: bool, roll: Option<&mut Roll>) {
     let cfg = &app.cfg;
     let (date_on, weather_on) = rows(app);
     let look = crate::deskcards::look(app, output, true, app.prefs.borrow().desktop_clock_bg, "clock");
@@ -199,7 +281,11 @@ fn draw_desk(s: &gtk::Snapshot, p: &Paint, app: &App, output: &str, center: bool
         draw::text(s, p, cfg, &date, 21.0, Face::Text(560), ink.alpha(0.88), PAD, y + 22.0, w, align);
         y += DATE_H;
     }
-    draw::text(s, p, cfg, &time, 96.0, Face::Text(330), ink.alpha(0.96), PAD, y + 48.0, w, align);
+    let on = app.prefs.borrow().desktop_motion;
+    match roll.and_then(|r| r.step(&time, glib::monotonic_time(), on)) {
+        Some((from, e)) => rolled(s, p, cfg, (&from, &time), e, ink.alpha(0.96), (PAD, y, w), align),
+        None => draw::text(s, p, cfg, &time, 96.0, Face::Text(330), ink.alpha(0.96), PAD, y + 48.0, w, align),
+    }
     y += TIME_H;
     if let (Some(line), Some(wx)) = (line, wx) {
         y += 10.0;
@@ -211,5 +297,24 @@ fn draw_desk(s: &gtk::Snapshot, p: &Paint, app: &App, output: &str, center: bool
     }
     if look.shade.is_some() {
         s.pop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_time_rolls_only_when_it_changes_and_only_with_animations_on() {
+        let mut r = Roll::default();
+        assert!(r.step("12:30", 0, true).is_none(), "the first time shows at once");
+        assert!(r.step("12:30", 1_000, true).is_none());
+        let (from, e) = r.step("12:31", 2_000_000, true).expect("a new minute rolls in");
+        assert_eq!((from.as_str(), e), ("12:30", 0.0));
+        let (_, half) = r.step("12:31", 2_000_000 + ROLL_MS * 500, true).unwrap();
+        assert!(half > 0.0 && half < 1.0);
+        assert!(r.step("12:31", 2_000_000 + ROLL_MS * 1000, true).is_none(), "and settles");
+        // Off, a new minute just shows.
+        assert!(r.step("12:32", 9_000_000, false).is_none());
     }
 }

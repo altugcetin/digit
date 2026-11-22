@@ -105,7 +105,7 @@ pub(crate) fn controlled(key: &str) -> Option<&'static str> {
 /// `still`: Compositor animations is off, which stops the compositor's animations on its own.
 fn controlled_in(key: &str, motion: bool, effects: bool, still: bool) -> Option<&'static str> {
     match key {
-        "smooth_scroll" | "smooth_caret" | "intro" | "compositor_motion" | "hypr_window_anim" | "hypr_workspace_anim" | "niri_motion" if motion => Some("Off while Reduce motion is on"),
+        "smooth_scroll" | "smooth_caret" | "intro" | "compositor_motion" | "hypr_window_anim" | "hypr_workspace_anim" | "niri_motion" | "desktop_motion" if motion => Some("Off while Reduce motion is on"),
         "hypr_window_anim" | "hypr_workspace_anim" | "niri_motion" if still => Some("Off while Compositor animations is off"),
         "hypr_blur" | "hypr_shadow" | "menubar_look" if effects => Some("Off while Reduce effects is on"),
         _ => None,
@@ -1495,6 +1495,7 @@ fn desktop(body: &gtk::Box, t: &toml::Table) {
     field(&desk, "location_on", "Weather city", "Shown in Control Center, under the desktop clock and in the Weather widget. The city name goes to open-meteo.com over HTTPS; leave empty to keep weather off", "weather_city", &prefs::get_str(t, "weather_city", ""), "Istanbul", |_| true);
     choice(&desk, "device_thermostat", "Units", "", "weather_unit", &[("celsius", "°C"), ("fahrenheit", "°F")], &prefs::get_str(t, "weather_unit", "celsius"));
     toggle(&desk, "folder", "Desktop icons", "Show what's in your Desktop folder on the wallpaper", "desktop_icons", prefs::get_bool(t, "desktop_icons", true));
+    toggle(&desk, "animation", "Widget animations", "The clock's digits roll as they change, and the widgets' numbers and rings glide to new values", "desktop_motion", prefs::get_bool(t, "desktop_motion", true));
     toggle(&desk, "text_fields", "Draw widget text another way", "Can fix text that now and then disappears from the clock and the widgets, on some graphics setups. Leave it off unless that happens", "desktop_raster", prefs::get_bool(t, "desktop_raster", false));
 }
 

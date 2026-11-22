@@ -10,6 +10,7 @@ use crate::paint::Paint;
 use gtk::{cairo, gdk, glib, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use kit::palette::Rgb;
+use kit::motion::Tween;
 use kit::deskwidget::{Ink, Tone};
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
@@ -175,18 +176,106 @@ struct Card {
     paint: Paint,
 }
 
-/// The glow under each of one Now playing widget's buttons (previous, play or pause, next), and
-/// whether its frames are being drawn until they settle.
-struct Glow {
-    tweens: [kit::motion::Tween; 3],
+/// What one widget animates: the glow under the Now playing buttons (previous, play or pause,
+/// next), the values on their way to new ones, the track it fades over from, and whether its
+/// frames are being drawn until all of that settles.
+struct Live {
+    glow: [Tween; 3],
+    glides: crate::glide::Glides,
+    track: Swap,
     ticking: bool,
 }
 
-impl Default for Glow {
+impl Default for Live {
     fn default() -> Self {
-        Self { tweens: std::array::from_fn(|_| kit::motion::Tween::still(0.0)), ticking: false }
+        Self { glow: std::array::from_fn(|_| Tween::still(0.0)), glides: Default::default(), track: Swap::default(), ticking: false }
     }
 }
+
+impl Live {
+    fn moving(&self, now: i64) -> bool {
+        self.glow.iter().any(|t| !t.settled(now)) || self.glides.moving(now) || self.track.moving(now)
+    }
+}
+
+/// A track as Now playing shows it.
+#[derive(Clone)]
+struct Shown {
+    art: Option<gdk::Texture>,
+    title: String,
+    artist: String,
+}
+
+/// The track Now playing fades over from to a new one, and its cover fading in once it comes.
+struct Swap {
+    key: String,
+    last: Option<Shown>,
+    from: Option<Shown>,
+    t: Tween,
+    art: Option<gdk::Texture>,
+    art_t: Tween,
+}
+
+impl Default for Swap {
+    fn default() -> Self {
+        Self { key: String::new(), last: None, from: None, t: Tween::still(1.0), art: None, art_t: Tween::still(1.0) }
+    }
+}
+
+impl Swap {
+    /// Notes that `now` shows `shown`: a new track fades over from the one before, a cover that
+    /// came for it fades in. `on`: they do at all. How far the track and its cover got.
+    fn step(&mut self, shown: &Shown, now: i64, on: bool) -> (Option<f64>, f64) {
+        let key = format!("{}\u{1}{}", shown.title, shown.artist);
+        if self.key != key {
+            if on && !self.key.is_empty() {
+                self.from = self.last.take();
+                self.t = Tween::still(0.0);
+                self.t.go(1.0, now, 460, kit::motion::STANDARD);
+            }
+            self.key = key;
+        }
+        if self.art != shown.art {
+            if on && shown.art.is_some() {
+                self.art_t = Tween::still(0.0);
+                self.art_t.go(1.0, now, 320, kit::motion::STANDARD);
+            }
+            self.art = shown.art.clone();
+        }
+        self.last = Some(shown.clone());
+        if !on || self.t.settled(now) {
+            self.from = None;
+        }
+        (self.from.as_ref().map(|_| self.t.value(now)), if on { self.art_t.value(now) } else { 1.0 })
+    }
+
+    fn moving(&self, now: i64) -> bool {
+        (self.from.is_some() && !self.t.settled(now)) || !self.art_t.settled(now)
+    }
+}
+
+/// After a frame of `paint`: keeps drawing frames while anything of `live` is on its way.
+fn keep_going(paint: &Paint, live: &Rc<RefCell<Live>>) {
+    let start = {
+        let Ok(mut l) = live.try_borrow_mut() else { return };
+        l.moving(glib::monotonic_time()) && !std::mem::replace(&mut l.ticking, true)
+    };
+    if !start {
+        return;
+    }
+    let live = live.clone();
+    paint.add_tick_callback(move |paint, clock| {
+        paint.queue_draw();
+        let mut l = live.borrow_mut();
+        if l.moving(clock.frame_time()) {
+            glib::ControlFlow::Continue
+        } else {
+            l.ticking = false;
+            glib::ControlFlow::Break
+        }
+    });
+}
+
 
 thread_local! {
     static CARDS: RefCell<Vec<Card>> = const { RefCell::new(Vec::new()) };
@@ -200,39 +289,27 @@ thread_local! {
 
 /// Glows the Now playing button at `at` (an index into `buttons`) of the widget `paint` and
 /// lets its others fade, redrawing it until they settle.
-fn hover(paint: &Paint, glow: &Rc<RefCell<Glow>>, at: Option<usize>) {
+fn hover(paint: &Paint, live: &Rc<RefCell<Live>>, at: Option<usize>) {
     let now = glib::monotonic_time();
     paint.set_cursor_from_name(at.map(|_| "pointer"));
-    let start = {
-        let mut g = glow.borrow_mut();
+    let moved = {
+        let mut l = live.borrow_mut();
         let mut moved = false;
-        for (i, t) in g.tweens.iter_mut().enumerate() {
+        for (i, t) in l.glow.iter_mut().enumerate() {
             let to = if Some(i) == at { 1.0 } else { 0.0 };
             if t.target() != to {
                 t.go(to, now, if to > 0.0 { 160 } else { 260 }, kit::motion::STANDARD);
                 moved = true;
             }
         }
-        if !moved {
-            return;
-        }
-        !std::mem::replace(&mut g.ticking, true)
+        moved
     };
-    paint.queue_draw();
-    if start {
-        let glow = glow.clone();
-        paint.add_tick_callback(move |paint, clock| {
-            paint.queue_draw();
-            let mut g = glow.borrow_mut();
-            if g.tweens.iter().all(|t| t.settled(clock.frame_time())) {
-                g.ticking = false;
-                glib::ControlFlow::Break
-            } else {
-                glib::ControlFlow::Continue
-            }
-        });
+    if moved {
+        paint.queue_draw();
+        keep_going(paint, live);
     }
 }
+
 
 /// Redraws the widgets, after the weather or the palette changed.
 pub fn changed() {
@@ -373,14 +450,21 @@ pub fn apply(app: &Rc<App>) {
         window.set_margin(if left { Edge::Left } else { Edge::Right }, side);
         window.set_margin(if top { Edge::Top } else { Edge::Bottom }, if top { top_margin(app, &output, left) } else { bottom });
         let paint = Paint::new((w * k + 2.0 * AIR).ceil() as i32, (h * k + 2.0 * AIR).ceil() as i32);
-        let glow = Rc::new(RefCell::new(Glow::default()));
-        let (weak, a, out, g) = (paint.downgrade(), Rc::downgrade(app), output.clone(), glow.clone());
+        let live = Rc::new(RefCell::new(Live::default()));
+        let (weak, a, out, l) = (paint.downgrade(), Rc::downgrade(app), output.clone(), live.clone());
         paint.on_draw(move |s| {
             let (Some(p), Some(app)) = (weak.upgrade(), a.upgrade()) else { return };
             sized(s, AIR, k);
-            let font = app.prefs.borrow().font_of(kind.name());
-            let glow = g.borrow();
-            crate::draw::zoomed(k, || crate::draw::in_font(&font, || crate::draw::rasterized(|| draw(s, &p, &app, kind, &out, top, k, &glow))));
+            let (font, on) = {
+                let prefs = app.prefs.borrow();
+                (prefs.font_of(kind.name()), prefs.desktop_motion)
+            };
+            {
+                let mut live = l.borrow_mut();
+                live.glides.begin(on);
+                crate::draw::zoomed(k, || crate::draw::in_font(&font, || crate::draw::rasterized(|| draw(s, &p, &app, kind, &out, top, k, &mut live, on))));
+            }
+            keep_going(&p, &l);
         });
         if kind == Kind::Media {
             let click = gtk::GestureClick::new();
@@ -400,16 +484,16 @@ pub fn apply(app: &Rc<App>) {
             paint.add_controller(click);
             // The buttons glow under the pointer, as the shell's other round buttons do.
             let motion = gtk::EventControllerMotion::new();
-            let (weak, g) = (paint.downgrade(), glow.clone());
+            let (weak, l) = (paint.downgrade(), live.clone());
             motion.connect_motion(move |_, x, y| {
                 let Some(p) = weak.upgrade() else { return };
                 let (x, y) = (AIR + (x - AIR) / k, AIR + (y - AIR) / k);
-                hover(&p, &g, buttons().iter().position(|(_, r)| contains(*r, x, y)));
+                hover(&p, &l, buttons().iter().position(|(_, r)| contains(*r, x, y)));
             });
             let weak = paint.downgrade();
             motion.connect_leave(move |_| {
                 if let Some(p) = weak.upgrade() {
-                    hover(&p, &glow, None);
+                    hover(&p, &live, None);
                 }
             });
             paint.add_controller(motion);
@@ -488,10 +572,10 @@ fn mmss(seconds: f64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
-/// `k`: the size it's drawn at (see [`sized`]), which the buttons' input region follows; `glow`
-/// the glow under the Now playing buttons.
+/// `k`: the size it's drawn at (see [`sized`]), which the buttons' input region follows; `live`
+/// what it animates, `on` whether it does.
 #[allow(clippy::too_many_arguments)]
-fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, kind: Kind, output: &str, top: bool, k: f64, glow: &Glow) {
+fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, kind: Kind, output: &str, top: bool, k: f64, live: &mut Live, on: bool) {
     let (with_card, controls) = {
         let prefs = app.prefs.borrow();
         (kind.backed(&prefs), prefs.desktop_media_controls)
@@ -525,15 +609,15 @@ fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, kind: Kind, output: &str, top: 
     }
     // Under the shadow, which must keep still while the glow comes and goes.
     if kind == Kind::Media && controls {
-        media_glow(s, app, look.ink, glow);
+        media_glow(s, app, look.ink, &live.glow);
     }
     if let Some(shade) = look.shade {
         s.push_shadow(&[gtk::gsk::Shadow::new(shade, 0.0, 1.0, 12.0)]);
     }
     match kind {
-        Kind::Media => media(s, p, app, look.ink, controls),
+        Kind::Media => media(s, p, app, look.ink, controls, &mut live.track, on),
         Kind::Weather => weather(s, p, app, look.ink),
-        Kind::System => system(s, p, app, look.ink),
+        Kind::System => system(s, p, app, look.ink, &mut live.glides),
         Kind::ScreenTime => screentime(s, p, app, look.ink, look.card.is_some(), k),
     }
     if look.shade.is_some() {
@@ -541,29 +625,55 @@ fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, kind: Kind, output: &str, top: 
     }
 }
 
-fn media(s: &gtk::Snapshot, p: &Paint, app: &App, ink: Rgb, controls: bool) {
+/// The cover, the title and the artist of `track`, its cover `art` of the way faded in.
+fn track(s: &gtk::Snapshot, p: &Paint, app: &App, ink: Rgb, top: f64, track: &Shown, art: f64) {
     let cfg = &app.cfg;
-    let m = app.media.borrow();
-    let now = glib::monotonic_time();
-    let art = draw::round(AIR, AIR, ART, ART, crate::metrics::scaled(16.0, app.round(), ART));
-    match &m.art {
-        Some(tex) => {
-            s.push_rounded_clip(&art);
-            s.append_texture(tex, art.bounds());
-            s.pop();
-        }
-        None => {
-            draw::fill(s, &art, ink.alpha(0.14));
-            draw::icon(s, p, cfg, "music_note", 40.0, true, ink.alpha(0.85), AIR + ART / 2.0, AIR + ART / 2.0);
-        }
+    let cover = draw::round(AIR, AIR, ART, ART, crate::metrics::scaled(16.0, app.round(), ART));
+    if track.art.is_none() || art < 1.0 {
+        draw::fill(s, &cover, ink.alpha(0.14));
+        draw::icon(s, p, cfg, "music_note", 40.0, true, ink.alpha(0.85), AIR + ART / 2.0, AIR + ART / 2.0);
+    }
+    if let Some(tex) = &track.art {
+        s.push_opacity(art.clamp(0.0, 1.0));
+        s.push_rounded_clip(&cover);
+        s.append_texture(tex, cover.bounds());
+        s.pop();
+        s.pop();
     }
     let (tx, tw) = (AIR + ART + 18.0, MEDIA_W - ART - 18.0);
     let left = pango::Alignment::Left;
-    let title = if m.title.is_empty() { m.player.as_str() } else { m.title.as_str() };
+    draw::text(s, p, cfg, &track.title, 18.0, Face::Text(600), ink.alpha(0.96), tx, top + 14.0, tw, left);
+    draw::text(s, p, cfg, &track.artist, 14.0, Face::Text(450), ink.alpha(0.72), tx, top + 37.0, tw, left);
+}
+
+/// `swap`: the track it fades over from, `on` whether it does.
+fn media(s: &gtk::Snapshot, p: &Paint, app: &App, ink: Rgb, controls: bool, swap: &mut Swap, on: bool) {
+    let cfg = &app.cfg;
+    let m = app.media.borrow();
+    let now = glib::monotonic_time();
+    let (tx, tw) = (AIR + ART + 18.0, MEDIA_W - ART - 18.0);
+    let left = pango::Alignment::Left;
     // Without the controls, the track sits in the middle of the cover's height.
     let top = if controls { AIR } else { AIR + 20.0 };
-    draw::text(s, p, cfg, title, 18.0, Face::Text(600), ink.alpha(0.96), tx, top + 14.0, tw, left);
-    draw::text(s, p, cfg, &m.artist, 14.0, Face::Text(450), ink.alpha(0.72), tx, top + 37.0, tw, left);
+    let shown = Shown { art: m.art.clone(), title: if m.title.is_empty() { m.player.clone() } else { m.title.clone() }, artist: m.artist.clone() };
+    match swap.step(&shown, now, on) {
+        (Some(e), art) => {
+            // The track before rises out as the new one comes up into its place.
+            let lift = |s: &gtk::Snapshot, dy: f64, a: f64, t: &Shown, art: f64| {
+                s.save();
+                s.translate(&gtk::graphene::Point::new(0.0, dy.round() as f32));
+                s.push_opacity(a.clamp(0.0, 1.0));
+                track(s, p, app, ink, top, t, art);
+                s.pop();
+                s.restore();
+            };
+            if let Some(from) = swap.from.as_ref() {
+                lift(s, -10.0 * e, 1.0 - e, from, 1.0);
+            }
+            lift(s, 10.0 * (1.0 - e), e, &shown, art);
+        }
+        (None, art) => track(s, p, app, ink, top, &shown, art),
+    }
     if m.length > 0.0 {
         let at = m.elapsed(now);
         let y = top + 58.0;
@@ -606,10 +716,10 @@ fn note_shown(shown: &mut Vec<String>, output: &str, on: bool) -> bool {
 }
 
 /// The glow under the Now playing buttons that can be pressed, as the pointer left it.
-fn media_glow(s: &gtk::Snapshot, app: &App, ink: Rgb, glow: &Glow) {
+fn media_glow(s: &gtk::Snapshot, app: &App, ink: Rgb, glow: &[Tween; 3]) {
     let m = app.media.borrow();
     let now = glib::monotonic_time();
-    for ((cmd, (x, y, w, h)), t) in buttons().into_iter().zip(&glow.tweens) {
+    for ((cmd, (x, y, w, h)), t) in buttons().into_iter().zip(glow) {
         use crate::media::Command;
         let on = match cmd {
             Command::Previous => m.can_prev,
@@ -641,9 +751,17 @@ fn weather(s: &gtk::Snapshot, p: &Paint, app: &App, ink: Rgb) {
     draw::text(s, p, cfg, &wx.place, 13.0, Face::Text(450), ink.alpha(0.64), rx, y + 52.0, rw, left);
 }
 
-fn system(s: &gtk::Snapshot, p: &Paint, app: &App, ink: Rgb) {
+/// `glides`: the values on their way to the last sample's.
+fn system(s: &gtk::Snapshot, p: &Paint, app: &App, ink: Rgb, glides: &mut crate::glide::Glides) {
     let cfg = &app.cfg;
-    let st = STATS.with(|st| st.borrow().1).unwrap_or_default();
+    let mut st = STATS.with(|st| st.borrow().1).unwrap_or_default();
+    let now = glib::monotonic_time();
+    // Only a change of a tenth or more glides; the small ones of every sample just show.
+    st.cpu = glides.at("cpu", st.cpu, 0.1, now);
+    st.mem = glides.at("mem", st.mem, 0.1, now);
+    st.used = glides.at("used", st.used, 0.1 * st.total, now);
+    st.gpu = st.gpu.map(|g| glides.at("gpu", g, 0.1, now));
+    st.temp = st.temp.map(|t| glides.at("temp", t, 10.0, now));
     let hot = |v: f64, warn: f64| if v >= warn { RED } else { ink };
     let cells: [(&str, &str, f64, String, Rgb); 4] = [
         ("memory", "CPU", st.cpu, format!("{}%", (st.cpu * 100.0).round()), hot(st.cpu, 0.9)),
@@ -755,6 +873,20 @@ mod tests {
         }
         assert_eq!(mmss(65.4), "1:05");
         assert_eq!(mmss(-3.0), "0:00");
+    }
+
+    #[test]
+    fn a_new_track_fades_over_from_the_one_before() {
+        let track = |t: &str| Shown { art: None, title: t.into(), artist: "Artist".into() };
+        let mut swap = Swap::default();
+        assert_eq!(swap.step(&track("One"), 0, true).0, None, "the first shows at once");
+        assert_eq!(swap.step(&track("Two"), 1_000_000, true).0, Some(0.0));
+        assert_eq!(swap.from.as_ref().map(|f| f.title.as_str()), Some("One"));
+        assert!(swap.moving(1_200_000));
+        assert_eq!(swap.step(&track("Two"), 3_000_000, true).0, None, "and settles");
+        assert!(swap.from.is_none());
+        // Off, it just shows.
+        assert_eq!(swap.step(&track("Three"), 4_000_000, false).0, None);
     }
 
     #[test]

@@ -31,6 +31,7 @@ mod draw;
 mod emoji;
 mod free;
 mod gamebar;
+mod glide;
 mod gpu;
 mod gsr;
 mod hooks;

@@ -134,11 +134,20 @@ pub fn apply(app: &Rc<App>) {
         let paint = Paint::new(grown(SURFACE_W, k).ceil() as i32, grown(SURFACE_H, k).ceil() as i32);
         let weak = paint.downgrade();
         let a = Rc::downgrade(app);
+        let glides = Rc::new(RefCell::new(crate::glide::Glides::default()));
         paint.on_draw(move |s| {
             let (Some(p), Some(app)) = (weak.upgrade(), a.upgrade()) else { return };
             crate::deskcards::sized(s, AIR, k);
-            let font = app.prefs.borrow().font_of("battery");
-            crate::draw::zoomed(k, || crate::draw::in_font(&font, || crate::draw::rasterized(|| draw(s, &p, &app, &output, left, top))));
+            let (font, on) = {
+                let prefs = app.prefs.borrow();
+                (prefs.font_of("battery"), prefs.desktop_motion)
+            };
+            {
+                let mut g = glides.borrow_mut();
+                g.begin(on);
+                crate::draw::zoomed(k, || crate::draw::in_font(&font, || crate::draw::rasterized(|| draw(s, &p, &app, &output, left, top, &mut g))));
+            }
+            crate::glide::follow(&p, &glides);
         });
         window.set_child(Some(&paint));
         window.connect_realize(|w| {
@@ -160,7 +169,8 @@ pub fn apply(app: &Rc<App>) {
     TIMER.with(|t| *t.borrow_mut() = Some(id));
 }
 
-fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, output: &str, left: bool, top: bool) {
+/// `glides`: the levels on their way to new ones.
+fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, output: &str, left: bool, top: bool, glides: &mut crate::glide::Glides) {
     let mut list = crate::batteries::list(app);
     if list.is_empty() {
         return;
@@ -188,9 +198,13 @@ fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, output: &str, left: bool, top: 
     if let Some(shade) = look.shade {
         s.push_shadow(&[gtk::gsk::Shadow::new(shade, 0.0, 1.0, 10.0)]);
     }
+    let now = glib::monotonic_time();
     for (i, g) in list.iter().enumerate() {
         let cx = x + INSET + CELL_W * (i as f64 + 0.5);
-        crate::batteries::cell(s, p, &app.cfg, &pal, g, cx, top_y + 42.0, CELL_W, false, levels);
+        // The ring and the level go round to a level ten or more away instead of jumping there.
+        let mut g = g.clone();
+        g.level = glides.at(&g.path, g.level as f64, 10.0, now).round().clamp(0.0, 100.0) as u8;
+        crate::batteries::cell(s, p, &app.cfg, &pal, &g, cx, top_y + 42.0, CELL_W, false, levels);
     }
     if look.shade.is_some() {
         s.pop();
