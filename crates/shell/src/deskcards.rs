@@ -175,42 +175,63 @@ struct Card {
     paint: Paint,
 }
 
+/// The glow under each of one Now playing widget's buttons (previous, play or pause, next), and
+/// whether its frames are being drawn until they settle.
+struct Glow {
+    tweens: [kit::motion::Tween; 3],
+    ticking: bool,
+}
+
+impl Default for Glow {
+    fn default() -> Self {
+        Self { tweens: std::array::from_fn(|_| kit::motion::Tween::still(0.0)), ticking: false }
+    }
+}
+
 thread_local! {
     static CARDS: RefCell<Vec<Card>> = const { RefCell::new(Vec::new()) };
     static SHOWN: RefCell<String> = const { RefCell::new(String::new()) };
     static TIMER: RefCell<Option<glib::SourceId>> = const { RefCell::new(None) };
     static APP: RefCell<Weak<App>> = const { RefCell::new(Weak::new()) };
+    /// The screens where the Now playing buttons showed when last drawn.
+    static BUTTONS_ON: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static STATS: RefCell<(crate::sysmon::Sampler, Option<crate::sysmon::Stats>, Option<f64>)> = RefCell::new(Default::default());
-    /// The glow under each Now playing button: previous, play or pause, next.
-    static GLOW: RefCell<[kit::motion::Tween; 3]> = RefCell::new(std::array::from_fn(|_| kit::motion::Tween::still(0.0)));
 }
 
-/// Glows the Now playing button at `at` (an index into `buttons`) and lets the others fade,
-/// redrawing `paint` until they settle.
-fn hover(paint: &Paint, at: Option<usize>) {
+/// Glows the Now playing button at `at` (an index into `buttons`) of the widget `paint` and
+/// lets its others fade, redrawing it until they settle.
+fn hover(paint: &Paint, glow: &Rc<RefCell<Glow>>, at: Option<usize>) {
     let now = glib::monotonic_time();
-    let moving = GLOW.with(|g| {
-        let mut g = g.borrow_mut();
-        let mut moving = false;
-        for (i, t) in g.iter_mut().enumerate() {
+    paint.set_cursor_from_name(at.map(|_| "pointer"));
+    let start = {
+        let mut g = glow.borrow_mut();
+        let mut moved = false;
+        for (i, t) in g.tweens.iter_mut().enumerate() {
             let to = if Some(i) == at { 1.0 } else { 0.0 };
             if t.target() != to {
                 t.go(to, now, if to > 0.0 { 160 } else { 260 }, kit::motion::STANDARD);
-                moving = true;
+                moved = true;
             }
         }
-        moving
-    });
-    paint.set_cursor_from_name(at.map(|_| "pointer"));
-    if !moving {
-        return;
-    }
+        if !moved {
+            return;
+        }
+        !std::mem::replace(&mut g.ticking, true)
+    };
     paint.queue_draw();
-    paint.add_tick_callback(|paint, clock| {
-        paint.queue_draw();
-        let settled = GLOW.with(|g| g.borrow().iter().all(|t| t.settled(clock.frame_time())));
-        if settled { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
-    });
+    if start {
+        let glow = glow.clone();
+        paint.add_tick_callback(move |paint, clock| {
+            paint.queue_draw();
+            let mut g = glow.borrow_mut();
+            if g.tweens.iter().all(|t| t.settled(clock.frame_time())) {
+                g.ticking = false;
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+    }
 }
 
 /// Redraws the widgets, after the weather or the palette changed.
@@ -239,6 +260,7 @@ fn clear() {
     for c in CARDS.with(|c| std::mem::take(&mut *c.borrow_mut())) {
         c.window.destroy();
     }
+    BUTTONS_ON.with(|b| b.borrow_mut().clear());
     if let Some(id) = TIMER.with(|t| t.borrow_mut().take()) {
         id.remove();
     }
@@ -274,18 +296,21 @@ pub(crate) fn rects(app: &App, output: &str, screen: (i32, i32)) -> Vec<CardRect
         .collect()
 }
 
-/// Where the Now playing buttons sit on a screen `screen` big, in its coordinates, when the
-/// widget is out there with its controls on. The desktop icons' surface, which covers the whole
+/// Where the Now playing buttons sit on a screen `screen` big, in its coordinates, while the
+/// widget shows there with its controls on. The desktop icons' surface, which covers the whole
 /// screen in the same layer and can end up above the widget, leaves these to it.
 pub(crate) fn media_buttons(app: &App, output: &str, screen: (i32, i32)) -> Vec<CardRect> {
-    let prefs = app.prefs.borrow().clone();
-    let kind = Kind::Media;
-    let place = kind.place_on(app, output);
-    if !prefs.desktop_media_controls || matches!(place.as_str(), "" | "off") {
+    // As the widget last drew them, so the two never disagree.
+    if !BUTTONS_ON.with(|b| b.borrow().iter().any(|o| o == output)) {
         return Vec::new();
     }
+    let kind = Kind::Media;
+    let place = kind.place_on(app, output);
+    if matches!(place.as_str(), "" | "off") {
+        return Vec::new();
+    }
+    let k = kind.scale(&app.prefs.borrow());
     let (top, left) = (place.starts_with("top"), place.ends_with("left"));
-    let k = kind.scale(&prefs);
     let (side, bottom) = dock_margins(output, top, left);
     let top_at = if top { top_margin(app, output, left) as f64 } else { 0.0 };
     media_buttons_at(screen, (top, left), k, (side, bottom), top_at)
@@ -318,6 +343,8 @@ pub fn apply(app: &Rc<App>) {
             }
         }
     }
+    // The widgets may have moved, or their buttons come or gone: the icons make way again.
+    crate::deskicons::widget_buttons_moved();
     if SHOWN.with(|s| *s.borrow() == key) && CARDS.with(|c| c.borrow().len()) == places.len() {
         // Same places: options (cards, controls) only need a redraw.
         changed();
@@ -346,12 +373,14 @@ pub fn apply(app: &Rc<App>) {
         window.set_margin(if left { Edge::Left } else { Edge::Right }, side);
         window.set_margin(if top { Edge::Top } else { Edge::Bottom }, if top { top_margin(app, &output, left) } else { bottom });
         let paint = Paint::new((w * k + 2.0 * AIR).ceil() as i32, (h * k + 2.0 * AIR).ceil() as i32);
-        let (weak, a, out) = (paint.downgrade(), Rc::downgrade(app), output.clone());
+        let glow = Rc::new(RefCell::new(Glow::default()));
+        let (weak, a, out, g) = (paint.downgrade(), Rc::downgrade(app), output.clone(), glow.clone());
         paint.on_draw(move |s| {
             let (Some(p), Some(app)) = (weak.upgrade(), a.upgrade()) else { return };
             sized(s, AIR, k);
             let font = app.prefs.borrow().font_of(kind.name());
-            crate::draw::zoomed(k, || crate::draw::in_font(&font, || crate::draw::rasterized(|| draw(s, &p, &app, kind, &out, top, k))));
+            let glow = g.borrow();
+            crate::draw::zoomed(k, || crate::draw::in_font(&font, || crate::draw::rasterized(|| draw(s, &p, &app, kind, &out, top, k, &glow))));
         });
         if kind == Kind::Media {
             let click = gtk::GestureClick::new();
@@ -371,16 +400,16 @@ pub fn apply(app: &Rc<App>) {
             paint.add_controller(click);
             // The buttons glow under the pointer, as the shell's other round buttons do.
             let motion = gtk::EventControllerMotion::new();
-            let weak = paint.downgrade();
+            let (weak, g) = (paint.downgrade(), glow.clone());
             motion.connect_motion(move |_, x, y| {
                 let Some(p) = weak.upgrade() else { return };
                 let (x, y) = (AIR + (x - AIR) / k, AIR + (y - AIR) / k);
-                hover(&p, buttons().iter().position(|(_, r)| contains(*r, x, y)));
+                hover(&p, &g, buttons().iter().position(|(_, r)| contains(*r, x, y)));
             });
             let weak = paint.downgrade();
             motion.connect_leave(move |_| {
                 if let Some(p) = weak.upgrade() {
-                    hover(&p, None);
+                    hover(&p, &glow, None);
                 }
             });
             paint.add_controller(motion);
@@ -459,8 +488,10 @@ fn mmss(seconds: f64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
-/// `k`: the size it's drawn at (see [`sized`]), which the buttons' input region follows.
-fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, kind: Kind, output: &str, top: bool, k: f64) {
+/// `k`: the size it's drawn at (see [`sized`]), which the buttons' input region follows; `glow`
+/// the glow under the Now playing buttons.
+#[allow(clippy::too_many_arguments)]
+fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, kind: Kind, output: &str, top: bool, k: f64, glow: &Glow) {
     let (with_card, controls) = {
         let prefs = app.prefs.borrow();
         (kind.backed(&prefs), prefs.desktop_media_controls)
@@ -471,6 +502,9 @@ fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, kind: Kind, output: &str, top: 
         Kind::Weather => app.weather.borrow().is_some(),
         Kind::System | Kind::ScreenTime => true,
     };
+    if kind == Kind::Media {
+        buttons_shown(output, drawn && controls);
+    }
     // Only the media buttons take clicks, and only while they're there.
     if let Some(surface) = p.root().and_then(|r| r.surface()) {
         let region = cairo::Region::create();
@@ -488,6 +522,10 @@ fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, kind: Kind, output: &str, top: 
     if let Some(fill) = look.card {
         let (w, h) = kind.size();
         card(s, app, (AIR - CARD_PAD, AIR - CARD_PAD, w + 2.0 * CARD_PAD, h + 2.0 * CARD_PAD), fill);
+    }
+    // Under the shadow, which must keep still while the glow comes and goes.
+    if kind == Kind::Media && controls {
+        media_glow(s, app, look.ink, glow);
     }
     if let Some(shade) = look.shade {
         s.push_shadow(&[gtk::gsk::Shadow::new(shade, 0.0, 1.0, 12.0)]);
@@ -544,12 +582,45 @@ fn media(s: &gtk::Snapshot, p: &Paint, app: &App, ink: Rgb, controls: bool) {
             Command::Next => ("skip_next", 24.0, m.can_next),
             Command::PlayPause => (if m.playing { "pause" } else { "play_arrow" }, 30.0, true),
         };
-        let glow = if on { GLOW.with(|g| g.borrow()[buttons().iter().position(|(c, _)| *c == cmd).unwrap_or(0)].value(now)) } else { 0.0 };
-        if glow > 0.0 {
-            let r = w / 2.0 + 1.5 * glow;
-            draw::fill(s, &draw::round(x + w / 2.0 - r, y + h / 2.0 - r, 2.0 * r, 2.0 * r, r), ink.alpha(0.14 * glow));
-        }
         draw::icon(s, p, cfg, glyph, size, true, ink.alpha(if on { 0.92 } else { 0.35 }), x + w / 2.0, y + h / 2.0);
+    }
+}
+
+/// Notes whether the Now playing buttons show on the screen `output`; when that changes, the
+/// desktop icons leave their place to them, or take it back.
+fn buttons_shown(output: &str, on: bool) {
+    if BUTTONS_ON.with(|b| note_shown(&mut b.borrow_mut(), output, on)) {
+        crate::deskicons::widget_buttons_moved();
+    }
+}
+
+/// Puts `output` in `shown` or takes it out; whether that changed anything.
+fn note_shown(shown: &mut Vec<String>, output: &str, on: bool) -> bool {
+    let was = shown.iter().any(|o| o == output);
+    if on && !was {
+        shown.push(output.to_string());
+    } else if !on && was {
+        shown.retain(|o| o != output);
+    }
+    on != was
+}
+
+/// The glow under the Now playing buttons that can be pressed, as the pointer left it.
+fn media_glow(s: &gtk::Snapshot, app: &App, ink: Rgb, glow: &Glow) {
+    let m = app.media.borrow();
+    let now = glib::monotonic_time();
+    for ((cmd, (x, y, w, h)), t) in buttons().into_iter().zip(&glow.tweens) {
+        use crate::media::Command;
+        let on = match cmd {
+            Command::Previous => m.can_prev,
+            Command::Next => m.can_next,
+            Command::PlayPause => true,
+        };
+        let v = t.value(now);
+        if on && v > 0.0 {
+            let r = w / 2.0 + 1.5 * v;
+            draw::fill(s, &draw::round(x + w / 2.0 - r, y + h / 2.0 - r, 2.0 * r, 2.0 * r, r), ink.alpha(0.14 * v));
+        }
     }
 }
 
@@ -684,6 +755,17 @@ mod tests {
         }
         assert_eq!(mmss(65.4), "1:05");
         assert_eq!(mmss(-3.0), "0:00");
+    }
+
+    #[test]
+    fn the_icons_make_way_only_when_the_buttons_come_or_go_on_a_screen() {
+        let mut shown = Vec::new();
+        assert!(note_shown(&mut shown, "DP-2", true));
+        assert!(!note_shown(&mut shown, "DP-2", true), "a redraw that changes nothing");
+        assert!(note_shown(&mut shown, "HDMI-A-1", true));
+        assert!(note_shown(&mut shown, "DP-2", false));
+        assert_eq!(shown, ["HDMI-A-1"]);
+        assert!(!note_shown(&mut shown, "DP-2", false));
     }
 
     #[test]

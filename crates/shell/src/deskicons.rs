@@ -808,6 +808,16 @@ pub fn apply(app: &Rc<App>) {
     }
 }
 
+/// The Now playing buttons moved, came or went: each surface leaves their place again, with its
+/// next frame.
+pub fn widget_buttons_moved() {
+    for d in surfaces() {
+        if let Ok(d) = d.try_borrow() {
+            d.paint.queue_draw();
+        }
+    }
+}
+
 /// Takes every click on the screen but the Now playing buttons. The widgets share this surface's
 /// layer, and the one mapped last is on top: this surface is mapped again whenever it asks for
 /// the keyboard, and would then cover the buttons. Called on each draw, so a new surface takes
