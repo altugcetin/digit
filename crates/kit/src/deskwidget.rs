@@ -174,50 +174,55 @@ pub fn save_font(widget: &str, family: &str) -> Result<(), String> {
 pub const CARDS: &str = "desktop_cards";
 
 /// Each card tone as stored, and as Settings names it.
-pub const CARD_TONES: [(&str, &str); 3] = [("auto", "Automatic"), ("light", "Light"), ("dark", "Dark")];
+pub const TONES: [(&str, &str); 3] = [("auto", "Automatic"), ("light", "Light"), ("dark", "Dark")];
 
 /// How light a widget's card is: Automatic follows the widget's color, light under dark text
 /// and dark under light text.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Card {
+pub enum Tone {
     #[default]
     Auto,
     Light,
     Dark,
 }
 
-impl Card {
+impl Tone {
     pub fn parse(value: &str) -> Self {
         match value {
-            "light" => Card::Light,
-            "dark" => Card::Dark,
-            _ => Card::Auto,
+            "light" => Tone::Light,
+            "dark" => Tone::Dark,
+            _ => Tone::Auto,
+        }
+    }
+
+    /// As stored, the way [`Tone::parse`] reads it back.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tone::Auto => "auto",
+            Tone::Light => "light",
+            Tone::Dark => "dark",
         }
     }
 }
 
 /// `widget`'s card tone in the [`CARDS`] table `cards`.
-pub fn card_from(cards: &toml::Table, widget: &str) -> Card {
-    Card::parse(cards.get(widget).and_then(toml::Value::as_str).unwrap_or("auto"))
+pub fn tone_from(cards: &toml::Table, widget: &str) -> Tone {
+    Tone::parse(cards.get(widget).and_then(toml::Value::as_str).unwrap_or("auto"))
 }
 
-/// [`card_from`], read from the preferences.
-pub fn card(prefs: &toml::Table, widget: &str) -> Card {
-    prefs.get(CARDS).and_then(toml::Value::as_table).map_or(Card::Auto, |t| card_from(t, widget))
+/// [`tone_from`], read from the preferences.
+pub fn tone(prefs: &toml::Table, widget: &str) -> Tone {
+    prefs.get(CARDS).and_then(toml::Value::as_table).map_or(Tone::Auto, |t| tone_from(t, widget))
 }
 
 /// Sets `widget`'s card tone, the others kept; Automatic takes it out of the table.
-pub fn save_card(widget: &str, tone: &str) -> Result<(), String> {
-    let tone = Card::parse(tone);
-    crate::prefs::update_table(CARDS, |all| match tone {
-        Card::Auto => {
+pub fn save_tone(widget: &str, tone: &str) -> Result<(), String> {
+    let tone = Tone::parse(tone);
+    crate::prefs::update_table(CARDS, |all| {
+        if tone == Tone::Auto {
             all.remove(widget);
-        }
-        Card::Light => {
-            all.insert(widget.to_string(), toml::Value::String("light".into()));
-        }
-        Card::Dark => {
-            all.insert(widget.to_string(), toml::Value::String("dark".into()));
+        } else {
+            all.insert(widget.to_string(), toml::Value::String(tone.as_str().into()));
         }
     })
 }
@@ -261,13 +266,13 @@ mod tests {
     #[test]
     fn card_tones_and_the_font_read_back_and_default_to_automatic() {
         let prefs: toml::Table = "[desktop_fonts]\nclock = ' Inter '\nmedia = 4\n[desktop_cards]\nclock = 'light'\nmedia = 'dark'\nweather = 'pink'\nsystem = 3".parse().unwrap();
-        assert_eq!(card(&prefs, "clock"), Card::Light);
-        assert_eq!(card(&prefs, "media"), Card::Dark);
-        assert_eq!(card(&prefs, "weather"), Card::Auto);
-        assert_eq!(card(&prefs, "system"), Card::Auto);
-        assert_eq!(card(&prefs, "battery"), Card::Auto);
-        assert_eq!(card(&toml::Table::new(), "clock"), Card::Auto);
-        assert!(CARD_TONES.iter().all(|(v, _)| *v == "auto" || Card::parse(v) != Card::Auto));
+        assert_eq!(tone(&prefs, "clock"), Tone::Light);
+        assert_eq!(tone(&prefs, "media"), Tone::Dark);
+        assert_eq!(tone(&prefs, "weather"), Tone::Auto);
+        assert_eq!(tone(&prefs, "system"), Tone::Auto);
+        assert_eq!(tone(&prefs, "battery"), Tone::Auto);
+        assert_eq!(tone(&toml::Table::new(), "clock"), Tone::Auto);
+        assert!(TONES.iter().all(|(v, _)| Tone::parse(v).as_str() == *v));
         assert_eq!(font(&prefs, "clock"), "Inter");
         assert_eq!(font(&prefs, "media"), "");
         assert_eq!(font(&prefs, "weather"), "");

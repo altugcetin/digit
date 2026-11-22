@@ -519,8 +519,8 @@ impl Prefs {
     }
 
     /// How light `widget`'s card is drawn (see `kit::deskwidget::CARDS`).
-    pub fn card_of(&self, widget: &str) -> kit::deskwidget::Card {
-        kit::deskwidget::card_from(&self.desktop_cards, widget)
+    pub fn tone_of(&self, widget: &str) -> kit::deskwidget::Tone {
+        kit::deskwidget::tone_from(&self.desktop_cards, widget)
     }
 
     /// The hot corners of the screen `output`: its own, or the shared ones.
