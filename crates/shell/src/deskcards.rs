@@ -10,7 +10,7 @@ use crate::paint::Paint;
 use gtk::{cairo, gdk, glib, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use kit::palette::Rgb;
-use kit::deskwidget::{Card as Tone, Ink};
+use kit::deskwidget::{Ink, Tone};
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
@@ -47,7 +47,7 @@ pub(crate) fn ink_of(app: &App, widget: &str) -> Ink {
 /// set for `widget`.
 pub(crate) fn look(app: &App, output: &str, top: bool, card: bool, widget: &str) -> Look {
     let luma = app.wallpapers.top_luma(output, if top { 0.32 } else { 1.0 }).unwrap_or(0.0);
-    let tone = app.prefs.borrow().card_of(widget);
+    let tone = app.prefs.borrow().tone_of(widget);
     look_for(luma > 0.42, card, kit::effects::reduced(), ink_of(app, widget), tone, app.palette.get().accent)
 }
 

@@ -1667,7 +1667,7 @@ impl DeskWidgets {
         for (i, w) in WIDGETS.iter().enumerate() {
             for &(key, _, default) in w.options {
                 let action = gio::SimpleAction::new_stateful(&option_action(key), None, &prefs::get_bool(t, key, default).to_variant());
-                let (bk, areas) = (backed.clone(), areas.clone());
+                let (bk, areas, tones, ink) = (backed.clone(), areas.clone(), group.downgrade(), w.ink);
                 action.connect_activate(move |action, _| {
                     let on = !action.state().and_then(|v| v.get::<bool>()).unwrap_or(default);
                     if !save(key, toml::Value::Boolean(on)) { return; }
@@ -1675,6 +1675,10 @@ impl DeskWidgets {
                     if key.ends_with("_bg") {
                         bk.borrow_mut()[i] = on;
                         redraw_all(&areas);
+                        // The card's tone has nothing to change without the card.
+                        if let Some(tone) = tones.upgrade().and_then(|g| g.lookup_action(&format!("card-{ink}"))).and_downcast::<gio::SimpleAction>() {
+                            tone.set_enabled(on);
+                        }
                     }
                 });
                 group.add_action(&action);
@@ -1692,14 +1696,16 @@ impl DeskWidgets {
             });
             group.add_action(&action);
         }
-        // Each widget's card tone, from the same menu: it shows only with a background.
-        for w in &WIDGETS {
-            let now = match kit::deskwidget::card(t, w.ink) { kit::deskwidget::Card::Light => "light", kit::deskwidget::Card::Dark => "dark", kit::deskwidget::Card::Auto => "auto" };
+        // Each widget's card tone, from the same menu: it shows only with a background, and can
+        // be picked only then.
+        for (i, w) in WIDGETS.iter().enumerate() {
+            let now = kit::deskwidget::tone(t, w.ink).as_str();
             let action = gio::SimpleAction::new_stateful(&format!("card-{}", w.ink), Some(glib::VariantTy::STRING), &now.to_variant());
+            action.set_enabled(backed.borrow().get(i).copied().unwrap_or(false));
             let widget = w.ink;
             action.connect_activate(move |action, param| {
                 let Some(value) = param.and_then(|p| p.get::<String>()) else { return };
-                if !saved(kit::deskwidget::save_card(widget, &value)) { return; }
+                if !saved(kit::deskwidget::save_tone(widget, &value)) { return; }
                 action.set_state(&value.to_variant());
             });
             group.add_action(&action);
@@ -1924,7 +1930,7 @@ impl DeskWidgets {
                     tone.set_xalign(0.0);
                     panel.append(&tone);
                     let mut first: Option<gtk::CheckButton> = None;
-                    for (value, name) in kit::deskwidget::CARD_TONES {
+                    for (value, name) in kit::deskwidget::TONES {
                         let check = gtk::CheckButton::with_label(name);
                         check.set_action_name(Some(&format!("desk.card-{}", wd.ink)));
                         check.set_action_target_value(Some(&value.to_variant()));
