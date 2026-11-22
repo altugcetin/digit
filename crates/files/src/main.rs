@@ -1431,6 +1431,7 @@ rubberband {{ background: alpha({accent}, 0.18); border: 1px solid alpha({accent
 .look-backdrop {{ background: rgba(0,0,0,0.62); }}
 .look {{ background: @d_card; border-radius: 26px; padding: 16px 18px 18px 18px; box-shadow: 0 24px 60px rgba(0,0,0,0.6); }}
 .stage {{ border-radius: 16px; }}
+scrolledwindow.look-scroll {{ background: mix(@d_base, @d_card, 0.5); border-radius: 16px; }}
 textview.look-text, textview.look-text text {{ background: mix(@d_base, @d_card, 0.5); color: {main}; font-size: 13px; }}
 notebook > header {{ background: transparent; border: none; box-shadow: none; padding: 0 8px; }}
 notebook > header > tabs > tab {{ background: transparent; border-radius: 12px; padding: 4px 10px; margin: 0 2px 6px 0; color: {meta}; border: none; box-shadow: none; outline: none; min-height: 24px; }}

@@ -211,6 +211,11 @@ fn show() {
     update();
 }
 
+/// Whether text of the type `ct` is prose, which wraps, rather than code or data, which doesn't.
+fn prose(ct: &str) -> bool {
+    matches!(ct, "text/plain" | "text/markdown" | "text/x-markdown" | "text/x-log" | "text/rtf" | "text/x-readme")
+}
+
 /// Runs `f` once the card stopped moving, a frame after.
 fn later(look: &Look, f: impl FnOnce() + 'static) {
     let wait = (look.calm.get() - glib::monotonic_time()).max(0) / 1000 + 30;
@@ -374,12 +379,28 @@ pub fn update() {
         view.set_cursor_visible(false);
         view.set_monospace(true);
         view.add_css_class("look-text");
-        view.set_wrap_mode(gtk::WrapMode::WordChar);
+        // Room around the text, and a little between its lines.
+        view.set_left_margin(16);
+        view.set_right_margin(16);
+        view.set_top_margin(14);
+        view.set_bottom_margin(14);
+        view.set_pixels_below_lines(2);
+        view.set_pixels_inside_wrap(2);
+        let tab = view.create_pango_layout(Some("    ")).pixel_size().0;
+        let mut tabs = pango::TabArray::new(1, true);
+        tabs.set_tab(0, pango::TabAlign::Left, tab.max(1));
+        view.set_tabs(&tabs);
+        // Prose wraps at the edge; code keeps its lines and scrolls across.
+        let prose = prose(&ct);
+        view.set_wrap_mode(if prose { gtk::WrapMode::WordChar } else { gtk::WrapMode::None });
         let sc = gtk::ScrolledWindow::new();
+        sc.add_css_class("look-scroll");
+        sc.set_overflow(gtk::Overflow::Hidden);
+        sc.set_hscrollbar_policy(if prose { gtk::PolicyType::Never } else { gtk::PolicyType::Automatic });
         sc.set_size_request(maxw.min(900), maxh.min(620));
         sc.set_child(Some(&view));
         look.stage.append(&sc);
-        let f = file.clone();
+        let (f, stage, calm) = (file.clone(), look.stage.clone(), look.calm.get());
         glib::spawn_future_local(async move {
             let text = gio::spawn_blocking(move || {
                 use std::io::Read;
@@ -392,6 +413,12 @@ pub fn update() {
             .ok()
             .flatten()
             .unwrap_or_else(|| "Can't read this file".into());
+            // In once the card stopped moving: laying a long text out holds everything up.
+            let wait = (calm - glib::monotonic_time()).max(0) / 1000;
+            glib::timeout_future(std::time::Duration::from_millis(wait as u64)).await;
+            if !showing(&stage, &uri) {
+                return;
+            }
             view.buffer().set_text(&text);
         });
         return;
