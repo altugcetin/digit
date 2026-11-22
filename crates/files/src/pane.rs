@@ -58,6 +58,8 @@ pub struct Pane {
     rename_new: RefCell<Option<String>>,
     /// A model change is waiting for the views to have taken it in (see `after_change`).
     changing: Cell<bool>,
+    /// A folder just opened stays at its top while it's read and sorted, until scrolled.
+    top: Cell<bool>,
     dragging: RefCell<Vec<gio::FileInfo>>,
 }
 
@@ -365,6 +367,7 @@ impl Pane {
             pending: RefCell::new(None),
             rename_new: RefCell::new(None),
             changing: Cell::new(false),
+            top: Cell::new(false),
             dragging: RefCell::new(Vec::new()),
         });
         let columns = p.build_columns();
@@ -1025,6 +1028,19 @@ impl Pane {
                 p.after_change();
             }
         });
+        // Scrolled while a folder is still read: it stays where it was taken.
+        for view in [self.grid.upcast_ref::<gtk::Widget>(), self.list.upcast_ref()] {
+            let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+            wheel.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let me = self.weak();
+            wheel.connect_scroll(move |_, _, _| {
+                if let Some(p) = me.upgrade() {
+                    p.top.set(false);
+                }
+                glib::Propagation::Proceed
+            });
+            view.add_controller(wheel);
+        }
         let me = self.weak();
         self.sel.connect_selection_changed(move |_, _, _| {
             if let Some(p) = me.upgrade() {
@@ -1230,9 +1246,18 @@ impl Pane {
             return;
         }
         let me = self.weak();
+        // Before the next frame is laid out, so a view that slid off its top never shows so.
         glib::idle_add_local_full(glib::Priority::HIGH_IDLE, move || {
             let Some(p) = me.upgrade() else { return glib::ControlFlow::Break };
             p.changing.set(false);
+            // GTK keeps a view on the item at its top, which sorting moves along: a big folder
+            // read in parts would end up at its bottom.
+            if p.top.get() && p.sorted.n_items() > 0 {
+                match p.view.get() {
+                    View::Grid => p.grid.scroll_to(0, gtk::ListScrollFlags::empty(), None),
+                    View::List => p.list.scroll_to(0, None::<&gtk::ColumnViewColumn>, gtk::ListScrollFlags::empty(), None),
+                }
+            }
             p.sync_empty();
             p.sync_status();
             if p.rename_new.borrow().is_some() {
@@ -1249,6 +1274,7 @@ impl Pane {
         if self.filtered.pending() > 0 || self.sorted.pending() > 0 {
             return;
         }
+        self.top.set(false);
         let pending = self.pending.borrow_mut().take();
         if let Some(name) = pending {
             let n = self.sorted.n_items();
@@ -1313,6 +1339,8 @@ impl Pane {
         self.typed.borrow_mut().0.clear();
         self.dir.set_file(Some(file));
         *self.pending.borrow_mut() = from.parent().filter(|p| p.equal(file)).and_then(|_| from.basename()).and_then(|n| n.to_str().map(str::to_string));
+        // Opened at its top, unless it's to show the folder just left.
+        self.top.set(self.pending.borrow().is_none());
         crate::location_changed(self);
         kit::app::trim_later(1200);
     }
