@@ -8,6 +8,9 @@ use std::rc::Rc;
 
 pub struct Screen {
     pub name: String,
+    /// Where it sits in the compositor's layout of all the screens, in logical pixels.
+    pub x: f64,
+    pub y: f64,
     pub w: f64,
     pub h: f64,
     pub base: draw::Base,
@@ -56,6 +59,8 @@ glib::wrapper! {
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
 }
 
+/// A drag on a screen, in the layout's coordinates: across the screens, the pointer stays with
+/// the screen it was pressed on, which goes on hearing it beyond its edges.
 #[derive(Clone, Copy)]
 enum Drag {
     Create(f64, f64),
@@ -75,7 +80,8 @@ pub enum Act {
 pub struct Overlay {
     app: gtk::Application,
     screens: RefCell<Vec<Screen>>,
-    sel: Cell<Option<(usize, Rect)>>,
+    /// The selection in the layout's coordinates; it can reach across screens.
+    sel: Cell<Option<Rect>>,
     drag: Cell<Option<(usize, Drag)>>,
     hover: Cell<Option<(usize, f64, f64)>>,
     prefs: out::Prefs,
@@ -95,6 +101,35 @@ const HINT: &str = "Drag to select  ·  Click a window, or Space for the whole s
 
 fn norm(a: (f64, f64), b: (f64, f64)) -> Rect {
     (a.0.min(b.0), a.1.min(b.1), (a.0 - b.0).abs(), (a.1 - b.1).abs())
+}
+
+/// Where `a` and `b` overlap, if they do.
+fn meet(a: Rect, b: Rect) -> Option<Rect> {
+    let (x0, y0) = (a.0.max(b.0), a.1.max(b.1));
+    let (x1, y1) = ((a.0 + a.2).min(b.0 + b.2), (a.1 + a.3).min(b.1 + b.3));
+    (x1 > x0 && y1 > y0).then_some((x0, y0, x1 - x0, y1 - y0))
+}
+
+/// What all of `rects` cover together, gaps between them included.
+fn span(rects: &[Rect]) -> Rect {
+    let Some(first) = rects.first() else { return (0.0, 0.0, 1.0, 1.0) };
+    let (mut x0, mut y0, mut x1, mut y1) = (first.0, first.1, first.0 + first.2, first.1 + first.3);
+    for r in rects {
+        (x0, y0, x1, y1) = (x0.min(r.0), y0.min(r.1), x1.max(r.0 + r.2), y1.max(r.1 + r.3));
+    }
+    (x0, y0, x1 - x0, y1 - y0)
+}
+
+/// Where each screen named in `names`, `sizes` big, sits in the layout: as the compositor has
+/// them, or side by side when it doesn't say.
+fn layout(names: &[String], sizes: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let mut next = 0.0;
+    names.iter().zip(sizes).map(|(n, (w, _))| {
+        let at = kit::screens::by_name(n).map(|m| m.geometry()).map(|g| (g.x() as f64, g.y() as f64));
+        let at = at.unwrap_or((next, 0.0));
+        next = next.max(at.0 + w);
+        at
+    }).collect()
 }
 
 fn handles(r: Rect) -> [(f64, f64); 8] {
@@ -135,7 +170,10 @@ pub fn open(app: &gtk::Application, shots: Vec<Shot>, pick: bool) {
     let prefs = out::prefs();
     let ov = Rc::new(Overlay { app: app.clone(), screens: RefCell::new(Vec::new()), sel: Cell::new(None), drag: Cell::new(None), hover: Cell::new(None), prefs, closed: Cell::new(false), pick });
     let mut screens = Vec::new();
-    for (shot, wins) in shots.into_iter().zip(rects) {
+    let names: Vec<String> = shots.iter().map(|s| s.name.clone()).collect();
+    let sizes: Vec<(f64, f64)> = shots.iter().map(|s| (s.w as f64, s.h as f64)).collect();
+    let origins = layout(&names, &sizes);
+    for ((shot, wins), (ox, oy)) in shots.into_iter().zip(rects).zip(origins) {
         let Some(base) = draw::Base::new(shot.data, shot.pw, shot.ph, shot.stride) else { continue };
         // A failed image must not leave subsequent callbacks addressing the wrong screen.
         let i = screens.len();
@@ -196,10 +234,10 @@ pub fn open(app: &gtk::Application, shots: Vec<Shot>, pick: bool) {
                 return None;
             }
             let o = weak.upgrade()?;
-            let (si, r) = o.sel.get()?;
-            if si != i {
+            if o.bar_screen()? != i {
                 return None;
             }
+            let r = o.part(i)?;
             // Run during allocation: CSS has resolved and the overlay has its
             // actual monitor size. No physical screenshot pixels or desktop offsets.
             let bw = child.measure(gtk::Orientation::Horizontal, -1).1;
@@ -219,7 +257,7 @@ pub fn open(app: &gtk::Application, shots: Vec<Shot>, pick: bool) {
         let loupe_label = area.create_pango_layout(None);
         loupe_label.set_font_description(Some(&pango::FontDescription::from_string("Rubik Medium 11px")));
         wire(&ov, i, &window, &area);
-        screens.push(Screen { name: shot.name, w: shot.w as f64, h: shot.h as f64, base, wins, window, area, layer, texture, label, loupe_label, bar, hint });
+        screens.push(Screen { name: shot.name, x: ox, y: oy, w: shot.w as f64, h: shot.h as f64, base, wins, window, area, layer, texture, label, loupe_label, bar, hint });
     }
     *ov.screens.borrow_mut() = screens;
     let windows: Vec<gtk::Window> = ov.screens.borrow().iter().map(|s| s.window.clone()).collect();
@@ -292,7 +330,10 @@ fn wire(ov: &Rc<Overlay>, i: usize, window: &gtk::Window, area: &Canvas) {
             } else {
                 o.close();
             }
-        } else if n == 2 && o.sel.get().is_some_and(|(s, r)| s == i && x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3) {
+        } else if n == 2 && o.sel.get().is_some_and(|r| {
+            let (x, y) = o.global(i, x, y);
+            x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3
+        }) {
             o.act(o.default_act());
         }
     });
@@ -324,28 +365,63 @@ impl Overlay {
     fn redraw_hover(&self, i: usize) {
         // Hover only affects the window preview/loupe before selection or while
         // creating it. Moving over a completed selection changes no pixels.
-        if !self.sel.get().is_some_and(|(si, _)| si == i)
+        if self.part(i).is_none()
             || self.drag.get().is_some_and(|(di, d)| di == i && matches!(d, Drag::Create(..)))
         {
             self.redraw(i);
         }
     }
 
-    fn select(&self, selection: Option<(usize, Rect)>) {
+    fn select(&self, selection: Option<Rect>) {
         let previous = self.sel.replace(selection);
         if previous == selection {
             return;
         }
-        if let Some((i, _)) = previous {
-            self.redraw(i);
-        }
-        if let Some((i, _)) = selection && previous.is_none_or(|(p, _)| p != i) {
+        // A selection can reach across screens; there are only a few of them.
+        for i in 0..self.screens.borrow().len() {
             self.redraw(i);
         }
     }
 
     fn size(&self, i: usize) -> (f64, f64) {
         self.screens.borrow().get(i).map(|s| (s.w, s.h)).unwrap_or((1.0, 1.0))
+    }
+
+    /// Where the screen `i` sits in the layout.
+    fn screen(&self, i: usize) -> Rect {
+        self.screens.borrow().get(i).map(|s| (s.x, s.y, s.w, s.h)).unwrap_or((0.0, 0.0, 1.0, 1.0))
+    }
+
+    /// The point `x`, `y` on the screen `i`, in the layout.
+    fn global(&self, i: usize, x: f64, y: f64) -> (f64, f64) {
+        let r = self.screen(i);
+        (r.0 + x, r.1 + y)
+    }
+
+    /// What all the screens cover, which a selection stays within.
+    fn area(&self) -> Rect {
+        let rects: Vec<Rect> = self.screens.borrow().iter().map(|s| (s.x, s.y, s.w, s.h)).collect();
+        span(&rects)
+    }
+
+    /// The part of the selection on the screen `i`, in its own coordinates.
+    fn part(&self, i: usize) -> Option<Rect> {
+        let screen = self.screen(i);
+        let r = meet(self.sel.get()?, screen)?;
+        Some((r.0 - screen.0, r.1 - screen.1, r.2, r.3))
+    }
+
+    /// The screen with the most of the selection, where its buttons go.
+    fn bar_screen(&self) -> Option<usize> {
+        let n = self.screens.borrow().len();
+        (0..n).filter_map(|i| self.part(i).map(|r| (i, r.2 * r.3))).max_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| i)
+    }
+
+    /// Image pixels per logical pixel in the screenshot of the selection: the sharpest of the
+    /// screens it covers.
+    fn sharpest(&self) -> f64 {
+        let s = self.screens.borrow();
+        (0..s.len()).filter(|i| self.part(*i).is_some()).map(|i| s[i].base.w as f64 / s[i].w).fold(0.0, f64::max).max(1.0)
     }
 
     fn window_at(&self, i: usize, x: f64, y: f64) -> Option<Rect> {
@@ -361,7 +437,8 @@ impl Overlay {
 
     fn begin(&self, i: usize, x: f64, y: f64) {
         self.hide_bars();
-        if let Some((s, r)) = self.sel.get() && s == i {
+        let (x, y) = self.global(i, x, y);
+        if let Some(r) = self.sel.get() {
             if let Some(h) = handles(r).iter().position(|p| (p.0 - x).abs() < 10.0 && (p.1 - y).abs() < 10.0) {
                 self.drag.set(Some((i, Drag::Resize(h as u8, r))));
                 return;
@@ -380,8 +457,10 @@ impl Overlay {
         if di != i {
             return;
         }
-        let (w, h) = self.size(i);
-        let cur = ((sx + dx).clamp(0.0, w), (sy + dy).clamp(0.0, h));
+        // Past this screen's edges, onto the others: within all of them.
+        let (ax, ay, aw, ah) = self.area();
+        let (gx, gy) = self.global(i, sx + dx, sy + dy);
+        let cur = (gx.clamp(ax, ax + aw), gy.clamp(ay, ay + ah));
         let r = match d {
             Drag::Create(x, y) => {
                 if dx.abs() < 3.0 && dy.abs() < 3.0 {
@@ -389,7 +468,7 @@ impl Overlay {
                 }
                 norm((x, y), cur)
             }
-            Drag::Move(r) => ((r.0 + dx).clamp(0.0, w - r.2), (r.1 + dy).clamp(0.0, h - r.3), r.2, r.3),
+            Drag::Move(r) => ((r.0 + dx).clamp(ax, ax + aw - r.2), (r.1 + dy).clamp(ay, ay + ah - r.3), r.2, r.3),
             Drag::Resize(hd, r) => {
                 let (mut x0, mut y0, mut x1, mut y1) = (r.0, r.1, r.0 + r.2, r.1 + r.3);
                 match hd {
@@ -405,15 +484,18 @@ impl Overlay {
                 norm((x0, y0), (x1, y1))
             }
         };
-        self.select(Some((i, r)));
+        self.select(Some(r));
     }
 
     fn end(&self, i: usize, x: f64, y: f64) {
         let d = self.drag.take();
-        if let Some((_, Drag::Create(sx, sy))) = d && (x - sx).abs() < 4.0 && (y - sy).abs() < 4.0 {
+        let (gx, gy) = self.global(i, x, y);
+        if let Some((_, Drag::Create(sx, sy))) = d && (gx - sx).abs() < 4.0 && (gy - sy).abs() < 4.0 {
+            // A click: the window under it, or the whole screen.
             let (w, h) = self.size(i);
             let r = self.window_at(i, x, y).unwrap_or((0.0, 0.0, w, h));
-            self.select(Some((i, r)));
+            let (ox, oy) = self.global(i, 0.0, 0.0);
+            self.select(Some((r.0 + ox, r.1 + oy, r.2, r.3)));
         }
         self.redraw(i);
         self.show_bar();
@@ -434,7 +516,7 @@ impl Overlay {
     }
 
     fn show_bar(&self) {
-        let Some((i, _)) = self.sel.get() else { return };
+        let Some(i) = self.bar_screen() else { return };
         let s = self.screens.borrow();
         for (k, sc) in s.iter().enumerate() {
             sc.hint.set_visible(false);
@@ -492,7 +574,7 @@ impl Overlay {
                 self.show_bar();
             }
             gdk::Key::Left | gdk::Key::Right | gdk::Key::Up | gdk::Key::Down => {
-                let Some((i, r)) = self.sel.get() else { return true };
+                let Some(r) = self.sel.get() else { return true };
                 let step = if shift { 10.0 } else { 1.0 };
                 let (dx, dy) = match k {
                     gdk::Key::Left => (-step, 0.0),
@@ -500,9 +582,9 @@ impl Overlay {
                     gdk::Key::Up => (0.0, -step),
                     _ => (0.0, step),
                 };
-                let (w, h) = self.size(i);
-                let r = if ctrl { (r.0, r.1, (r.2 + dx).clamp(1.0, w - r.0), (r.3 + dy).clamp(1.0, h - r.1)) } else { ((r.0 + dx).clamp(0.0, w - r.2), (r.1 + dy).clamp(0.0, h - r.3), r.2, r.3) };
-                self.select(Some((i, r)));
+                let (ax, ay, aw, ah) = self.area();
+                let r = if ctrl { (r.0, r.1, (r.2 + dx).clamp(1.0, ax + aw - r.0), (r.3 + dy).clamp(1.0, ay + ah - r.1)) } else { ((r.0 + dx).clamp(ax, ax + aw - r.2), (r.1 + dy).clamp(ay, ay + ah - r.3), r.2, r.3) };
+                self.select(Some(r));
                 self.show_bar();
             }
             _ => return false,
@@ -519,8 +601,7 @@ impl Overlay {
 
     fn whole(&self) {
         let i = self.hover.get().map(|h| h.0).unwrap_or(0);
-        let (w, h) = self.size(i);
-        self.select(Some((i, (0.0, 0.0, w, h))));
+        self.select(Some(self.screen(i)));
     }
 
     fn picked(&self, i: usize, x: f64, y: f64) {
@@ -554,22 +635,18 @@ impl Overlay {
     }
 
     fn act(&self, a: Act) {
-        let Some((i, r)) = self.sel.get() else { return };
+        let Some(r) = self.sel.get() else { return };
         if r.2 < 2.0 || r.3 < 2.0 {
             return;
         }
-        let (surface, name, origin) = {
+        let Some(main) = self.bar_screen() else { return };
+        let Some(surface) = self.picture(r) else { return };
+        // Edited or pinned on the screen with the most of it, where its part of it sits.
+        let (name, origin) = {
             let s = self.screens.borrow();
-            let Some(sc) = s.get(i) else { return };
-            let k = sc.base.w as f64 / sc.w;
-            let (px, py) = ((r.0 * k).round(), (r.1 * k).round());
-            let (pw, ph) = (((r.0 + r.2) * k).round() - px, ((r.1 + r.3) * k).round() - py);
-            let Ok(surface) = cairo::ImageSurface::create(cairo::Format::ARgb32, pw.max(1.0) as i32, ph.max(1.0) as i32) else { return };
-            if let Ok(cr) = cairo::Context::new(&surface) {
-                let _ = cr.set_source_surface(&sc.base.surface, -px, -py);
-                let _ = cr.paint();
-            }
-            (surface, sc.name.clone(), (r.0, r.1, r.2, r.3))
+            let Some(sc) = s.get(main) else { return };
+            let at = self.part(main).unwrap_or((0.0, 0.0, r.2, r.3));
+            (sc.name.clone(), (at.0, at.1, r.2, r.3))
         };
         let app = self.app.clone();
         let hold = app.hold();
@@ -606,6 +683,51 @@ impl Overlay {
         });
     }
 
+    /// The screenshot of `r`, in the layout's coordinates: one screen's pixels as they are, or
+    /// the parts of each screen it covers put together, at the sharpest one's scale. What lies
+    /// between screens stays clear.
+    fn picture(&self, r: Rect) -> Option<cairo::ImageSurface> {
+        let s = self.screens.borrow();
+        let parts: Vec<usize> = (0..s.len()).filter(|i| self.part(*i).is_some()).collect();
+        if let [i] = parts[..] {
+            let sc = &s[i];
+            let local = (r.0 - sc.x, r.1 - sc.y, r.2, r.3);
+            let k = sc.base.w as f64 / sc.w;
+            let (px, py) = ((local.0 * k).round(), (local.1 * k).round());
+            let (pw, ph) = (((local.0 + local.2) * k).round() - px, ((local.1 + local.3) * k).round() - py);
+            let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, pw.max(1.0) as i32, ph.max(1.0) as i32).ok()?;
+            let cr = cairo::Context::new(&surface).ok()?;
+            let _ = cr.set_source_surface(&sc.base.surface, -px, -py);
+            let _ = cr.paint();
+            drop(cr);
+            return Some(surface);
+        }
+        let k = self.sharpest();
+        let (ox, oy) = ((r.0 * k).round(), (r.1 * k).round());
+        let (pw, ph) = (((r.0 + r.2) * k).round() - ox, ((r.1 + r.3) * k).round() - oy);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, pw.max(1.0) as i32, ph.max(1.0) as i32).ok()?;
+        let cr = cairo::Context::new(&surface).ok()?;
+        for i in parts {
+            let sc = &s[i];
+            let Some(seen) = meet(r, (sc.x, sc.y, sc.w, sc.h)) else { continue };
+            let own = sc.base.w as f64 / sc.w;
+            cr.save().ok()?;
+            cr.rectangle((seen.0 * k).round() - ox, (seen.1 * k).round() - oy, (seen.2 * k).round(), (seen.3 * k).round());
+            cr.clip();
+            // Whole pixels where the screen's scale is the picture's, so it stays as sharp.
+            cr.translate((sc.x * k).round() - ox, (sc.y * k).round() - oy);
+            cr.scale(k / own, k / own);
+            let _ = cr.set_source_surface(&sc.base.surface, 0.0, 0.0);
+            if (k - own).abs() > 1e-6 {
+                cr.source().set_filter(cairo::Filter::Good);
+            }
+            let _ = cr.paint();
+            cr.restore().ok()?;
+        }
+        drop(cr);
+        Some(surface)
+    }
+
     fn paint(&self, i: usize, snapshot: &gtk::Snapshot) {
         let Ok(s) = self.screens.try_borrow() else { return };
         let Some(sc) = s.get(i) else { return };
@@ -614,10 +736,13 @@ impl Overlay {
         // The frozen screenshot is uploaded once, then reused by both the
         // background and magnifier. No full-screen Cairo raster/upload per frame.
         snapshot.append_texture(&sc.texture, &bounds((0.0, 0.0, w, h)));
-        let sel = self.sel.get().filter(|(si, _)| *si == i).map(|(_, r)| r);
+        // The selection where this screen sits: what of it is on here, and all of it, whose
+        // edges and handles past this screen's edges fall off it.
+        let part = self.sel.get().and_then(|r| meet(r, (sc.x, sc.y, w, h))).map(|r| (r.0 - sc.x, r.1 - sc.y, r.2, r.3));
+        let sel = self.sel.get().filter(|_| part.is_some()).map(|r| (r.0 - sc.x, r.1 - sc.y, r.2, r.3));
         if !self.pick {
             let dim = gdk::RGBA::new(0.0, 0.0, 0.0, 0.45);
-            if let Some((x, y, sw, sh)) = sel {
+            if let Some((x, y, sw, sh)) = part {
                 for r in [(0.0, 0.0, w, y), (0.0, y, x, sh), (x + sw, y, w - x - sw, sh), (0.0, y + sh, w, h - y - sh)] {
                     if r.2 > 0.0 && r.3 > 0.0 {
                         snapshot.append_color(&dim, &bounds(r));
@@ -653,9 +778,20 @@ impl Overlay {
                     let _ = cr.stroke();
                 }
             }
-            let label = format!("{} × {}", (r.2 * k).round(), (r.3 * k).round());
-            set_text(&sc.label, &label);
-            pill(snapshot, &sc.label, r.0 + 2.0, if r.1 > 34.0 { r.1 - 30.0 } else { r.1 + 6.0 }, w);
+            // The size, by its top left corner, on the screen that has it; else by the part of
+            // it the buttons are on.
+            let k = self.sharpest();
+            let corner_here = r.0 >= 0.0 && r.0 < w && r.1 >= 0.0 && r.1 < h;
+            let corner_nowhere = !s.iter().any(|o| {
+                let (cx, cy) = (r.0 + sc.x, r.1 + sc.y);
+                cx >= o.x && cx < o.x + o.w && cy >= o.y && cy < o.y + o.h
+            });
+            if corner_here || (corner_nowhere && self.bar_screen() == Some(i)) {
+                let at = if corner_here { r } else { part.unwrap_or(r) };
+                let label = format!("{} × {}", (r.2 * k).round(), (r.3 * k).round());
+                set_text(&sc.label, &label);
+                pill(snapshot, &sc.label, at.0 + 2.0, if at.1 > 34.0 { at.1 - 30.0 } else { at.1 + 6.0 }, w);
+            }
         }
         if (self.prefs.loupe || self.pick) && (sel.is_none() || dragging) && let Some((_, x, y)) = hover {
             loupe(snapshot, sc, x, y, k, self.pick);
@@ -746,7 +882,18 @@ fn loupe(snapshot: &gtk::Snapshot, sc: &Screen, x: f64, y: f64, k: f64, color: b
 
 #[cfg(test)]
 mod tests {
-    use super::place;
+    use super::{meet, place, span};
+
+    #[test]
+    fn a_selection_across_two_screens_has_a_part_on_each() {
+        let (left, right) = ((0.0, 0.0, 1920.0, 1080.0), (1920.0, 0.0, 2560.0, 1440.0));
+        let sel = (1800.0, 100.0, 400.0, 300.0);
+        assert_eq!(meet(sel, left), Some((1800.0, 100.0, 120.0, 300.0)));
+        assert_eq!(meet(sel, right), Some((1920.0, 100.0, 280.0, 300.0)));
+        assert_eq!(meet((0.0, 0.0, 10.0, 10.0), right), None);
+        // Both screens together, the space under the shorter one included.
+        assert_eq!(span(&[left, right]), (0.0, 0.0, 4480.0, 1440.0));
+    }
 
     const BAR: (f64, f64) = (300.0, 46.0);
     const MONITOR: (f64, f64) = (1920.0, 1080.0);
