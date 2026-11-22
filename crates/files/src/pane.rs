@@ -56,6 +56,8 @@ pub struct Pane {
     pending: RefCell<Option<String>>,
     /// A just-created item to rename in place as soon as it shows up in the view.
     rename_new: RefCell<Option<String>>,
+    /// A model change is waiting for the views to have taken it in (see `after_change`).
+    changing: Cell<bool>,
     dragging: RefCell<Vec<gio::FileInfo>>,
 }
 
@@ -362,6 +364,7 @@ impl Pane {
             cut: Rc::new(RefCell::new(Vec::new())),
             pending: RefCell::new(None),
             rename_new: RefCell::new(None),
+            changing: Cell::new(false),
             dragging: RefCell::new(Vec::new()),
         });
         let columns = p.build_columns();
@@ -996,37 +999,30 @@ impl Pane {
                 p.activate(pos);
             }
         });
+        // Incremental filtering/sorting can settle after DirectoryList finishes.
+        // Keep a pending reveal until both models have processed the directory.
         let me = self.weak();
         self.dir.connect_loading_notify(move || {
             if let Some(p) = me.upgrade() {
-                if !p.dir.is_loading() {
-                    p.settled();
-                }
-                p.sync_empty();
+                p.after_change();
             }
         });
         let me = self.weak();
         self.sorted.connect_items_changed(move |_, _, _, _| {
             if let Some(p) = me.upgrade() {
-                p.sync_empty();
-                p.sync_status();
-                if p.rename_new.borrow().is_some() {
-                    p.try_rename_new();
-                }
+                p.after_change();
             }
         });
-        // Incremental filtering/sorting can settle after DirectoryList finishes.
-        // Keep a pending reveal until both models have processed the directory.
         let me = self.weak();
         self.filtered.connect_pending_notify(move |_| {
-            if let Some(p) = me.upgrade() && !p.dir.is_loading() {
-                p.settled();
+            if let Some(p) = me.upgrade() {
+                p.after_change();
             }
         });
         let me = self.weak();
         self.sorted.connect_pending_notify(move |_| {
-            if let Some(p) = me.upgrade() && !p.dir.is_loading() {
-                p.settled();
+            if let Some(p) = me.upgrade() {
+                p.after_change();
             }
         });
         let me = self.weak();
@@ -1224,6 +1220,29 @@ impl Pane {
             Some(pos) => self.reveal(pos),
             None => *self.pending.borrow_mut() = Some(name.to_string()),
         }
+    }
+
+    /// Follows a change of the listing or its models, once the views have taken it in: never from
+    /// inside the models' signals, where scrolling a view, selecting in it or swapping it for the
+    /// empty folder's page upsets GTK's lists, which aborts.
+    fn after_change(self: &Rc<Self>) {
+        if self.changing.replace(true) {
+            return;
+        }
+        let me = self.weak();
+        glib::idle_add_local_full(glib::Priority::HIGH_IDLE, move || {
+            let Some(p) = me.upgrade() else { return glib::ControlFlow::Break };
+            p.changing.set(false);
+            p.sync_empty();
+            p.sync_status();
+            if p.rename_new.borrow().is_some() {
+                p.try_rename_new();
+            }
+            if !p.dir.is_loading() {
+                p.settled();
+            }
+            glib::ControlFlow::Break
+        });
     }
 
     fn settled(&self) {
