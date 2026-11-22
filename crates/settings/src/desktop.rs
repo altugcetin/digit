@@ -1490,6 +1490,38 @@ fn desktop(body: &gtk::Box, t: &toml::Table) {
     toggle(&desk, "text_fields", "Draw widget text another way", "Can fix text that now and then disappears from the clock and the widgets, on some graphics setups. Leave it off unless that happens", "desktop_raster", prefs::get_bool(t, "desktop_raster", false));
 }
 
+/// A picker for the font `widget` draws its text in: the shell's own, or any installed family.
+fn font_picker(widget: &'static str, current: &str) -> gtk::DropDown {
+    let probe = gtk::Label::new(None);
+    let mut families: Vec<String> = probe.pango_context().list_families().iter().map(|f| f.name().to_string()).filter(|n| !n.is_empty()).collect();
+    families.sort_by_key(|n| n.to_lowercase());
+    families.dedup();
+    if !current.is_empty() && !families.iter().any(|f| f == current) {
+        families.insert(0, current.to_string());
+    }
+    let mut labels = vec!["Digit's own"];
+    labels.extend(families.iter().map(String::as_str));
+    let at = families.iter().position(|f| f == current).map_or(0, |i| i + 1);
+    let pick = kit::ui::dropdown(&labels, at as u32);
+    pick.set_expression(Some(gtk::PropertyExpression::new(gtk::StringObject::static_type(), gtk::Expression::NONE, "string")));
+    pick.set_enable_search(true);
+    let accepted = Rc::new(Cell::new(at as u32));
+    let restoring = Rc::new(Cell::new(false));
+    pick.connect_selected_notify(move |p| {
+        if restoring.get() { return; }
+        let i = p.selected() as usize;
+        let family = if i == 0 { "" } else { families.get(i - 1).map_or("", String::as_str) };
+        if saved(kit::deskwidget::save_font(widget, family)) {
+            accepted.set(p.selected());
+        } else {
+            restoring.set(true);
+            p.set_selected(accepted.get());
+            restoring.set(false);
+        }
+    });
+    pick
+}
+
 type Rect = (f64, f64, f64, f64);
 
 /// The places on the wallpaper a widget can take, as fractions of the screen.
@@ -1656,6 +1688,18 @@ impl DeskWidgets {
             action.connect_activate(move |action, param| {
                 let Some(value) = param.and_then(|p| p.get::<String>()) else { return };
                 if !save(&key, toml::Value::String(value.clone())) { return; }
+                action.set_state(&value.to_variant());
+            });
+            group.add_action(&action);
+        }
+        // Each widget's card tone, from the same menu: it shows only with a background.
+        for w in &WIDGETS {
+            let now = match kit::deskwidget::card(t, w.ink) { kit::deskwidget::Card::Light => "light", kit::deskwidget::Card::Dark => "dark", kit::deskwidget::Card::Auto => "auto" };
+            let action = gio::SimpleAction::new_stateful(&format!("card-{}", w.ink), Some(glib::VariantTy::STRING), &now.to_variant());
+            let widget = w.ink;
+            action.connect_activate(move |action, param| {
+                let Some(value) = param.and_then(|p| p.get::<String>()) else { return };
+                if !saved(kit::deskwidget::save_card(widget, &value)) { return; }
                 action.set_state(&value.to_variant());
             });
             group.add_action(&action);
@@ -1860,6 +1904,29 @@ impl DeskWidgets {
                     for (value, name) in kit::deskwidget::CHOICES {
                         let check = gtk::CheckButton::with_label(name);
                         check.set_action_name(Some(&format!("desk.ink-{}", wd.ink)));
+                        check.set_action_target_value(Some(&value.to_variant()));
+                        match &first {
+                            Some(f) => check.set_group(Some(f)),
+                            None => first = Some(check.clone()),
+                        }
+                        panel.append(&check);
+                    }
+                    let font = gtk::Label::new(Some("Font"));
+                    font.add_css_class("heading");
+                    font.set_xalign(0.0);
+                    panel.append(&font);
+                    let pick = font_picker(wd.ink, &kit::deskwidget::font(&prefs::read(), wd.ink));
+                    pick.set_halign(gtk::Align::Start);
+                    panel.append(&pick);
+                    // Light or dark under the widget, when it has a background.
+                    let tone = gtk::Label::new(Some("Background color"));
+                    tone.add_css_class("heading");
+                    tone.set_xalign(0.0);
+                    panel.append(&tone);
+                    let mut first: Option<gtk::CheckButton> = None;
+                    for (value, name) in kit::deskwidget::CARD_TONES {
+                        let check = gtk::CheckButton::with_label(name);
+                        check.set_action_name(Some(&format!("desk.card-{}", wd.ink)));
                         check.set_action_target_value(Some(&value.to_variant()));
                         match &first {
                             Some(f) => check.set_group(Some(f)),

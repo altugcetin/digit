@@ -10,7 +10,7 @@ use crate::paint::Paint;
 use gtk::{cairo, gdk, glib, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use kit::palette::Rgb;
-use kit::deskwidget::Ink;
+use kit::deskwidget::{Card as Tone, Ink};
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
@@ -47,21 +47,32 @@ pub(crate) fn ink_of(app: &App, widget: &str) -> Ink {
 /// set for `widget`.
 pub(crate) fn look(app: &App, output: &str, top: bool, card: bool, widget: &str) -> Look {
     let luma = app.wallpapers.top_luma(output, if top { 0.32 } else { 1.0 }).unwrap_or(0.0);
-    look_for(luma > 0.42, card, kit::effects::reduced(), ink_of(app, widget), app.palette.get().accent)
+    let tone = app.prefs.borrow().card_of(widget);
+    look_for(luma > 0.42, card, kit::effects::reduced(), ink_of(app, widget), tone, app.palette.get().accent)
 }
 
 /// `light`: the wallpaper behind is light. A color that was set holds over it, and the card
 /// and the shadow follow that color instead, so it always reads: white on dark, black on light.
-fn look_for(light: bool, card: bool, reduced: bool, set: Ink, accent: Rgb) -> Look {
-    let light = match set {
+/// A card set Light or Dark holds too, and Automatic text on it follows the card.
+fn look_for(light: bool, card: bool, reduced: bool, set: Ink, tone: Tone, accent: Rgb) -> Look {
+    let mut light = match set {
         Ink::White => false,
         Ink::Black => true,
         Ink::Auto | Ink::Accent => light,
     };
+    if card {
+        match tone {
+            Tone::Light => light = true,
+            Tone::Dark => light = false,
+            Tone::Auto => {}
+        }
+    }
     let ink = match set {
         Ink::Accent => accent,
-        _ if light => Rgb::new(0.08, 0.08, 0.1),
-        _ => Rgb::new(1.0, 1.0, 1.0),
+        Ink::White => Rgb::new(1.0, 1.0, 1.0),
+        Ink::Black => Rgb::new(0.08, 0.08, 0.1),
+        Ink::Auto if light => Rgb::new(0.08, 0.08, 0.1),
+        Ink::Auto => Rgb::new(1.0, 1.0, 1.0),
     };
     if card {
         // As macOS's widgets: a soft see-through card, light over a light wallpaper and dark
@@ -282,7 +293,8 @@ pub fn apply(app: &Rc<App>) {
         paint.on_draw(move |s| {
             let (Some(p), Some(app)) = (weak.upgrade(), a.upgrade()) else { return };
             sized(s, AIR, k);
-            crate::draw::zoomed(k, || crate::draw::rasterized(|| draw(s, &p, &app, kind, &out, top, k)));
+            let font = app.prefs.borrow().font_of(kind.name());
+            crate::draw::zoomed(k, || crate::draw::in_font(&font, || crate::draw::rasterized(|| draw(s, &p, &app, kind, &out, top, k))));
         });
         if kind == Kind::Media {
             let click = gtk::GestureClick::new();
@@ -600,19 +612,26 @@ mod tests {
     fn cards_fit_in_the_air_around_each_widget() {
         const { assert!(CARD_PAD < AIR) };
         for light in [false, true] {
-            let on = look_for(light, true, false, Ink::Auto, RED);
+            let on = look_for(light, true, false, Ink::Auto, Tone::Auto, RED);
             assert!(on.card.is_some() && on.shade.is_none(), "a card's ink needs no shadow");
-            let off = look_for(light, false, false, Ink::Auto, RED);
+            let off = look_for(light, false, false, Ink::Auto, Tone::Auto, RED);
             assert!(off.card.is_none() && off.shade.is_some());
-            assert!(look_for(light, false, true, Ink::Auto, RED).shade.is_none(), "reduced effects drop the shadow");
+            assert!(look_for(light, false, true, Ink::Auto, Tone::Auto, RED).shade.is_none(), "reduced effects drop the shadow");
             // Dark ink over light, light over dark.
             assert_eq!(on.ink.r > 0.5, !light);
             // A color that was set holds over any wallpaper, its card the other way round.
-            let white = look_for(light, true, false, Ink::White, RED);
+            let white = look_for(light, true, false, Ink::White, Tone::Auto, RED);
             assert!(white.ink.r > 0.9 && white.card.is_some_and(|c| c.r < 0.5));
-            let black = look_for(light, true, false, Ink::Black, RED);
+            let black = look_for(light, true, false, Ink::Black, Tone::Auto, RED);
             assert!(black.ink.r < 0.1 && black.card.is_some_and(|c| c.r > 0.5));
-            assert_eq!(look_for(light, false, false, Ink::Accent, RED).ink, RED);
+            assert_eq!(look_for(light, false, false, Ink::Accent, Tone::Auto, RED).ink, RED);
+            // A card tone that was set holds over any wallpaper, and Automatic text follows it.
+            let pale = look_for(light, true, false, Ink::Auto, Tone::Light, RED);
+            assert!(pale.card.is_some_and(|c| c.r > 0.5) && pale.ink.r < 0.1);
+            let deep = look_for(light, true, false, Ink::Auto, Tone::Dark, RED);
+            assert!(deep.card.is_some_and(|c| c.r < 0.5) && deep.ink.r > 0.9);
+            // Without a card the tone changes nothing.
+            assert_eq!(look_for(light, false, false, Ink::Auto, Tone::Light, RED).ink.r, off.ink.r);
         }
     }
 }

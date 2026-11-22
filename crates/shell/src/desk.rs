@@ -149,7 +149,8 @@ pub fn apply(app: &Rc<App>) {
         paint.on_draw(move |s| {
             let (Some(p), Some(app)) = (weak.upgrade(), a.upgrade()) else { return };
             s.scale(k as f32, k as f32);
-            draw::zoomed(k, || draw::rasterized(|| draw_desk(s, &p, &app, &output, center)));
+            let font = app.prefs.borrow().font_of("clock");
+            draw::zoomed(k, || draw::in_font(&font, || draw::rasterized(|| draw_desk(s, &p, &app, &output, center))));
         });
         window.set_child(Some(&paint));
         window.connect_realize(|w| {

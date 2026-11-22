@@ -137,7 +137,8 @@ pub fn apply(app: &Rc<App>) {
         paint.on_draw(move |s| {
             let (Some(p), Some(app)) = (weak.upgrade(), a.upgrade()) else { return };
             crate::deskcards::sized(s, AIR, k);
-            crate::draw::zoomed(k, || crate::draw::rasterized(|| draw(s, &p, &app, &output, left, top)));
+            let font = app.prefs.borrow().font_of("battery");
+            crate::draw::zoomed(k, || crate::draw::in_font(&font, || crate::draw::rasterized(|| draw(s, &p, &app, &output, left, top))));
         });
         window.set_child(Some(&paint));
         window.connect_realize(|w| {
