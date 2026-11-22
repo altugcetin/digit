@@ -132,6 +132,7 @@ pub fn note(b: &Bind, across: bool) -> Option<String> {
         Act::Window(Win::Move(d)) if crosses(d, across) => Some(format!("Moves the window {}; at the edge, to the {} workspace", match d { Dir::Up => "up", Dir::Down => "down", Dir::Left => "left", Dir::Right => "right" }, side(d))),
         Act::Window(Win::StepWorkspace(1) | Win::MoveStepWorkspace(1)) => Some("The next one in use; after the last, a new empty one".into()),
         Act::Window(Win::StepWorkspace(_) | Win::MoveStepWorkspace(_)) => Some("The previous one in use".into()),
+        _ if b.id == "dock" => Some("Does nothing while the dock is off".into()),
         _ => None,
     }
 }
@@ -184,7 +185,7 @@ pub fn defaults() -> Vec<Bind> {
         bind("spaces", "Shell", "Workspaces", "SUPER + TAB", ctl("key spaces"), n, false),
         bind("windows", "Shell", "Switch windows", "ALT + TAB", ctl("key windows"), n, false),
         bind("windows-back", "Shell", "Switch windows backwards", "ALT + SHIFT + TAB", ctl("key windows-back"), n, false),
-        bind("dock", "Shell", "Show or hide the dock", "ALT + D", ctl("key dock"), n, false),
+        bind("dock", "Shell", "Show or hide the dock", "", ctl("key dock"), n, false),
         bind("wallpaper", "Shell", "Wallpapers", "SUPER + W", ctl("key wallpaper"), n, false),
         bind("settings", "Shell", "Settings", "ALT + COMMA", ctl("key settings"), n, false),
         bind("files", "Shell", "Files", "SUPER + E", run("digit-files"), n, false),

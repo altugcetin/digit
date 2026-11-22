@@ -119,7 +119,8 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
             if !matches!(verb, "show" | "hide" | "toggle") {
                 return "dock show | hide | toggle".into();
             }
-            if crate::dock::command(app, verb) { "ok".into() } else { "dock: could not save".into() }
+            crate::dock::command(app, verb);
+            "ok".into()
         }
         "layout" => {
             let name = words.get(1).map(String::as_str).unwrap_or("");
@@ -227,7 +228,8 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
                     "ok".into()
                 }
                 "dock" => {
-                    if crate::dock::command(app, "toggle") { "ok".into() } else { "dock: could not save".into() }
+                    crate::dock::command(app, "toggle");
+                    "ok".into()
                 }
                 "layouts" => {
                     crate::layouts::toggle(app);
