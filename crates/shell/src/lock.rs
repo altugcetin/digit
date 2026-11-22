@@ -42,6 +42,188 @@ struct Sheet {
     /// The main screen's sheet holds the clock, the password and the buttons; the others show
     /// only the wallpaper and pass what is typed on them to it.
     main: Rc<Cell<bool>>,
+    /// When unlocking started to clear this screen into the desktop (see [`reveal`]).
+    reveal: Rc<Cell<Option<i64>>>,
+}
+
+/// How long unlocking takes to clear the wallpaper before the screen unlocks, and then for the
+/// clock to settle onto the desktop.
+const CLEAR_MS: i64 = 240;
+const SETTLE_MS: i64 = 600;
+/// How long the rest of the desktop takes to fade in once unlocked.
+const FADE_MS: i64 = 460;
+
+/// `x` eased in and out, 0 to 1.
+fn smooth(x: f64) -> f64 {
+    let x = x.clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
+/// How far something `ms` long that started at `start` got at `now`, 0 to 1.
+fn part(start: i64, now: i64, ms: i64) -> f64 {
+    ((now - start) as f64 / (ms * 1000) as f64).clamp(0.0, 1.0)
+}
+
+/// The middles and sizes of the lock screen's date and time on a screen `w` by `h`, `fade` of
+/// the way in.
+fn lock_lines(w: f64, h: f64, fade: f64) -> ((f64, f64, f64), (f64, f64, f64)) {
+    let top = h * 0.14 + (1.0 - fade) * 10.0;
+    ((w / 2.0, top, 22.0), (w / 2.0, top + 22.0 + (h * 0.06).clamp(42.0, 88.0), (h * 0.105).clamp(72.0, 150.0)))
+}
+
+/// The lock screen's date and time, white, their middles and sizes `date_at` and `time_at`; with
+/// a soft shadow unless `flat`.
+#[allow(clippy::too_many_arguments)]
+fn lines(s: &gtk::Snapshot, p: &Paint, cfg: &crate::config::Config, w: f64, (date_at, time_at): ((f64, f64, f64), (f64, f64, f64)), date_shown: f64, flat: bool) {
+    let dt = glib::DateTime::now_local().ok();
+    let date = dt.as_ref().and_then(|d| d.format("%A, %-d %B").ok()).map(|s| s.to_string()).unwrap_or_default();
+    let time = dt.as_ref().and_then(|d| d.format(&cfg.clock).ok()).map(|s| s.to_string()).unwrap_or_default();
+    let white = Rgb::new(1.0, 1.0, 1.0);
+    if !flat { s.push_shadow(&[gtk::gsk::Shadow::new(gdk::RGBA::new(0.0, 0.0, 0.0, 0.25), 0.0, 1.0, 12.0)]); }
+    draw::text(s, p, cfg, &date, date_at.2, Face::Text(560), white.alpha(0.9 * date_shown), date_at.0 - w, date_at.1, 2.0 * w, pango::Alignment::Center);
+    draw::text(s, p, cfg, &time, time_at.2, Face::Text(420), white.alpha(0.96), time_at.0 - w, time_at.1, 2.0 * w, pango::Alignment::Center);
+    if !flat { s.pop(); }
+}
+
+/// Unlocking a bare screen: a surface of its own above the whole desktop shows the wallpaper as
+/// the lock screen left it, cleared, with its clock (`clock`: on the main screen). It waits so
+/// until `go` holds when it may start; then the wallpaper fades for the desktop to come in from
+/// under it, the bar and the widgets as they are, and the clock settles where the desktop's
+/// sits, which shows once it's there. Made before the screen unlocks, so it's there the moment
+/// it does.
+fn settle(app: &Rc<App>, monitor: &gdk::Monitor, go: Rc<Cell<Option<i64>>>, clock: bool) {
+    let output = monitor.connector().map(|c| c.to_string()).unwrap_or_default();
+    let window = gtk::Window::new();
+    window.init_layer_shell();
+    window.set_layer(Layer::Overlay);
+    window.set_namespace(Some("digit-unlock"));
+    window.set_exclusive_zone(-1);
+    window.set_keyboard_mode(KeyboardMode::None);
+    window.set_monitor(Some(monitor));
+    for e in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+        window.set_anchor(e, true);
+    }
+    window.add_css_class("digit");
+    let paint = Paint::new(-1, -1);
+    paint.set_hexpand(true);
+    paint.set_vexpand(true);
+    let held = clock && crate::desk::hold(&output, true);
+    let spot: Rc<RefCell<Option<Option<crate::desk::Spot>>>> = Rc::default();
+    let sharp: RefCell<Option<Option<(gdk::Texture, graphene::Rect)>>> = RefCell::new(None);
+    {
+        let (weak, a, output, go, spot) = (paint.downgrade(), Rc::downgrade(app), output.clone(), go.clone(), spot.clone());
+        paint.on_draw(move |s| {
+            let (Some(p), Some(app)) = (weak.upgrade(), a.upgrade()) else { return };
+            let (w, h) = (p.width() as f64, p.height() as f64);
+            if w < 2.0 || h < 2.0 {
+                return;
+            }
+            let now = p.frame_clock().map(|c| c.frame_time()).unwrap_or_else(glib::monotonic_time);
+            let (b, veil) = match go.get() {
+                Some(start) if start != i64::MAX => (part(start, now, SETTLE_MS), 1.0 - smooth(part(start, now, FADE_MS))),
+                _ => (0.0, 1.0),
+            };
+            // The wallpaper the lock screen cleared into, over the desktop until it fades.
+            if veil > 0.0 {
+                let full = graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
+                if let Some((tex, rect)) = sharp.borrow_mut().get_or_insert_with(|| app.wallpapers.sharp(&output, w, h)).clone() {
+                    s.push_clip(&full);
+                    s.push_opacity(veil);
+                    s.append_color(&gdk::RGBA::BLACK, &full);
+                    s.append_texture(&tex, &rect);
+                    s.pop();
+                    s.pop();
+                }
+            }
+            if !clock {
+                return;
+            }
+            let mut slot = spot.borrow_mut();
+            let spot = slot.get_or_insert_with(|| if held { crate::desk::spot(&app, &p, &output, (w as i32, h as i32)) } else { None });
+            let (mut date_at, mut time_at) = lock_lines(w, h, 1.0);
+            let m = kit::motion::STANDARD.at(b);
+            let mut date_shown = 1.0;
+            let shown = match spot.as_ref() {
+                Some(spot) => {
+                    time_at = toward(time_at, spot.time, m);
+                    match spot.date {
+                        Some(d) => date_at = toward(date_at, d, m),
+                        None => {
+                            date_shown = 1.0 - smooth(b / 0.4);
+                            date_at.1 -= 24.0 * m;
+                        }
+                    }
+                    1.0 - smooth((b - 0.3) / 0.55)
+                }
+                // No clock on the desktop: this one rises away.
+                None => {
+                    time_at.1 -= 40.0 * m;
+                    date_at.1 -= 40.0 * m;
+                    1.0 - smooth(b / 0.55)
+                }
+            };
+            if shown > 0.0 {
+                s.push_opacity(shown);
+                lines(s, &p, &app.cfg, w, (date_at, time_at), date_shown, kit::effects::reduced());
+                s.pop();
+            }
+            // The desktop's clock, as its own surface draws it, comes in where it sits.
+            if let Some(spot) = spot.as_ref() {
+                let desk = smooth((b - 0.25) / 0.6);
+                if desk > 0.0 {
+                    s.push_opacity(desk);
+                    crate::desk::paint_at(s, &p, &app, &output, spot);
+                    s.pop();
+                }
+            }
+        });
+    }
+    window.set_child(Some(&paint));
+    window.connect_realize(|w| {
+        if let Some(surface) = w.surface() {
+            surface.set_input_region(Some(&gtk::cairo::Region::create()));
+        }
+    });
+    window.present();
+    // Until it may start, then on its way; once there, the desktop's own clock shows again and
+    // this goes a moment later, the two drawing the same meanwhile.
+    let (w, o) = (window.clone(), output.clone());
+    let done = Rc::new(Cell::new(false));
+    paint.add_tick_callback(move |p, frames| {
+        p.queue_draw();
+        let now = frames.frame_time();
+        let start = match go.get() {
+            None => return glib::ControlFlow::Continue,
+            Some(i64::MAX) => {
+                go.set(Some(now));
+                now
+            }
+            Some(t) => t,
+        };
+        let over = if clock { part(start, now, SETTLE_MS.max(FADE_MS)) } else { part(start, now, FADE_MS) };
+        if over < 1.0 || done.replace(true) {
+            return glib::ControlFlow::Continue;
+        }
+        if clock {
+            crate::desk::hold(&o, false);
+        }
+        let w = w.clone();
+        glib::timeout_add_local_once(Duration::from_millis(160), move || w.destroy());
+        glib::ControlFlow::Break
+    });
+    // Whatever happens to unlocking, nothing stays behind.
+    let (w, o) = (window.downgrade(), output);
+    glib::timeout_add_local_once(Duration::from_secs(4), move || {
+        if let Some(w) = w.upgrade() {
+            crate::desk::hold(&o, false);
+            w.destroy();
+        }
+    });
+}
+
+/// `a` on its way to `b`, `t` of the way.
+fn toward(a: (f64, f64, f64), b: (f64, f64, f64), t: f64) -> (f64, f64, f64) {
+    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, a.2 + (b.2 - a.2) * t)
 }
 
 /// Whether `monitor` is the main screen (see `kit::screens::primary`).
@@ -65,6 +247,7 @@ fn main_face() -> Option<Sheet> {
 
 struct State {
     generation: u64,
+    app: std::rc::Weak<App>,
     mode: Mode,
     faces: Vec<Sheet>,
     busy: bool,
@@ -179,7 +362,7 @@ pub fn lock(app: &Rc<App>) -> bool {
     // SAFETY: `ptr` is the non-null new object above, whose one reference this takes over.
     let instance: glib::Object = unsafe { glib::Object::from_glib_full(ptr) };
     let generation = next_generation();
-    STATE.with(|s| *s.borrow_mut() = Some(State { generation, mode: Mode::Real(instance.clone()), faces: Vec::new(), busy: false, locked: false, clock: None }));
+    STATE.with(|s| *s.borrow_mut() = Some(State { generation, app: Rc::downgrade(app), mode: Mode::Real(instance.clone()), faces: Vec::new(), busy: false, locked: false, clock: None }));
     let a = app.clone();
     instance.connect_local("monitor", false, move |args| {
         if !current(generation) { return None; }
@@ -260,7 +443,7 @@ pub fn preview(app: &Rc<App>, output: Option<&str>) {
     }
     style(app);
     let generation = next_generation();
-    STATE.with(|s| *s.borrow_mut() = Some(State { generation, mode: Mode::Preview, faces: Vec::new(), busy: false, locked: true, clock: None }));
+    STATE.with(|s| *s.borrow_mut() = Some(State { generation, app: Rc::downgrade(app), mode: Mode::Preview, faces: Vec::new(), busy: false, locked: true, clock: None }));
     for m in kit::screens::all() {
         if output.is_some_and(|o| m.connector().as_deref() != Some(o)) {
             continue;
@@ -316,6 +499,52 @@ fn finish(generation: u64) {
     } else {
         glib::spawn_future_local(locked_hint(false));
     }
+}
+
+/// Whether the screen `monitor` unlocks into windows: its workspace in view has some.
+fn busy(app: &App, monitor: &gdk::Monitor) -> bool {
+    let output = monitor.connector().map(|c| c.to_string()).unwrap_or_default();
+    app.spaces.borrow().iter().any(|sp| sp.output == output && sp.active && sp.filled)
+}
+
+/// The password was right. On each screen that unlocks into its bare desktop the wallpaper
+/// clears and the password fades, then the screen unlocks, and the clock settles onto the
+/// desktop above the bar and the widgets, which show as they are (see [`settle`]). At once
+/// without animations, or when the main screen unlocks into windows, which would cover it.
+fn reveal(generation: u64) {
+    let app = STATE.with(|s| s.borrow().as_ref().and_then(|st| st.app.upgrade()));
+    let Some(app) = app.filter(|a| a.prefs.borrow().lock_motion && !kit::motion::reduced()) else {
+        unlock(generation);
+        return;
+    };
+    if main_face().is_none_or(|f| busy(&app, &f.monitor)) {
+        unlock(generation);
+        return;
+    }
+    let go: Rc<Cell<Option<i64>>> = Rc::default();
+    let start = glib::monotonic_time();
+    each(|f| {
+        // A screen with windows waits as it is.
+        if busy(&app, &f.monitor) {
+            return;
+        }
+        settle(&app, &f.monitor, go.clone(), f.main.get());
+        f.reveal.set(Some(start));
+        f.paint.queue_draw();
+        let (column, actions) = (f.column.clone(), f.actions.clone());
+        f.paint.add_tick_callback(move |p, clock| {
+            p.queue_draw();
+            let r = part(start, clock.frame_time(), CLEAR_MS);
+            column.set_opacity(1.0 - smooth(r));
+            actions.set_opacity(1.0 - smooth(r));
+            if r >= 1.0 { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+        });
+    });
+    // A frame after the clear one; the clock starts settling with the first frame unlocked.
+    glib::timeout_add_local_once(Duration::from_millis((CLEAR_MS + 30) as u64), move || {
+        go.set(Some(i64::MAX));
+        unlock(generation);
+    });
 }
 
 fn unlock(generation: u64) {
@@ -424,7 +653,7 @@ fn submit(entry: &gtk::PasswordEntry, generation: u64) {
         if !current(generation) { return; }
         if ok == Some(true) {
             each(|f| f.status.set_text(""));
-            unlock(generation);
+            reveal(generation);
             return;
         }
         STATE.with(|s| {
@@ -479,10 +708,14 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64, 
     let paint = Paint::new(-1, -1);
     paint.set_hexpand(true);
     paint.set_vexpand(true);
+    let reveal: Rc<Cell<Option<i64>>> = Rc::default();
     {
         let weak = paint.downgrade();
         let cfg = app.cfg.clone();
         let main = main.clone();
+        let (a, reveal, output) = (Rc::downgrade(app), reveal.clone(), output.clone());
+        // The sharp wallpaper, found once unlocking starts.
+        let sharp: RefCell<Option<Option<(gdk::Texture, graphene::Rect)>>> = RefCell::new(None);
         paint.on_draw(move |s| {
             let Some(p) = weak.upgrade() else { return };
             let (w, h) = (p.width() as f64, p.height() as f64);
@@ -500,27 +733,34 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64, 
                 s.append_texture(t, &full);
                 s.pop();
             }
-            s.append_color(&gdk::RGBA::new(0.0, 0.0, 0.0, 0.26), &full);
+            // Unlocking: the soft wallpaper clears into the sharp one the desktop shows, and the
+            // dark over it lifts.
+            let r = reveal.get().map(|start| part(start, now, CLEAR_MS));
+            let clear = r.map_or(0.0, smooth);
+            if let (Some(_), Some(app), false) = (r, a.upgrade(), effects) {
+                let sharp = sharp.borrow_mut().get_or_insert_with(|| app.wallpapers.sharp(&output, w, h)).clone();
+                if let Some((tex, rect)) = sharp {
+                    s.push_clip(&full);
+                    s.push_opacity(clear);
+                    s.append_texture(&tex, &rect);
+                    s.pop();
+                    s.pop();
+                }
+            }
+            s.append_color(&gdk::RGBA::new(0.0, 0.0, 0.0, 0.26 * (1.0 - clear) as f32), &full);
             s.append_linear_gradient(
                 &graphene::Rect::new(0.0, (h * 0.55) as f32, w as f32, (h * 0.45) as f32),
                 &graphene::Point::new(0.0, (h * 0.55) as f32),
                 &graphene::Point::new(0.0, h as f32),
-                &[gtk::gsk::ColorStop::new(0.0, gdk::RGBA::new(0.0, 0.0, 0.0, 0.0)), gtk::gsk::ColorStop::new(1.0, gdk::RGBA::new(0.0, 0.0, 0.0, 0.38))],
+                &[gtk::gsk::ColorStop::new(0.0, gdk::RGBA::new(0.0, 0.0, 0.0, 0.0)), gtk::gsk::ColorStop::new(1.0, gdk::RGBA::new(0.0, 0.0, 0.0, 0.38 * (1.0 - clear) as f32))],
             );
             // The other screens show only the wallpaper.
             if !main.get() {
                 return;
             }
-            let dt = glib::DateTime::now_local().ok();
-            let date = dt.as_ref().and_then(|d| d.format("%A, %-d %B").ok()).map(|s| s.to_string()).unwrap_or_default();
-            let time = dt.as_ref().and_then(|d| d.format(&cfg.clock).ok()).map(|s| s.to_string()).unwrap_or_default();
-            let white = Rgb::new(1.0, 1.0, 1.0);
-            let top = h * 0.14 + (1.0 - fade) * 10.0;
+            // Unlocking, the clock stays where it is: its own surface takes it on (see `settle`).
             s.push_opacity(fade);
-            if !effects { s.push_shadow(&[gtk::gsk::Shadow::new(gdk::RGBA::new(0.0, 0.0, 0.0, 0.25), 0.0, 1.0, 12.0)]); }
-            draw::text(s, &p, &cfg, &date, 22.0, Face::Text(560), white.alpha(0.9), 0.0, top, w, pango::Alignment::Center);
-            draw::text(s, &p, &cfg, &time, (h * 0.105).clamp(72.0, 150.0), Face::Text(420), white.alpha(0.96), 0.0, top + 22.0 + (h * 0.06).clamp(42.0, 88.0), w, pango::Alignment::Center);
-            if !effects { s.pop(); }
+            lines(s, &p, &cfg, w, lock_lines(w, h, fade), 1.0, effects);
             s.pop();
         });
     }
@@ -658,7 +898,7 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64, 
             e.grab_focus();
         }
     });
-    Sheet { monitor: monitor.clone(), window, paint, column, actions, entry, status, main }
+    Sheet { monitor: monitor.clone(), window, paint, column, actions, entry, status, main, reveal }
 }
 
 /// A key pressed on a screen without the password box, put into `entry` on the main screen:
@@ -693,7 +933,7 @@ mod tests {
 
     fn state(mode: Mode) -> u64 {
         let generation = next_generation();
-        STATE.with(|s| *s.borrow_mut() = Some(State { generation, mode, faces: Vec::new(), busy: false, locked: false, clock: None }));
+        STATE.with(|s| *s.borrow_mut() = Some(State { generation, app: std::rc::Weak::new(), mode, faces: Vec::new(), busy: false, locked: false, clock: None }));
         generation
     }
 

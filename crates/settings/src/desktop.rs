@@ -105,7 +105,7 @@ pub(crate) fn controlled(key: &str) -> Option<&'static str> {
 /// `still`: Compositor animations is off, which stops the compositor's animations on its own.
 fn controlled_in(key: &str, motion: bool, effects: bool, still: bool) -> Option<&'static str> {
     match key {
-        "smooth_scroll" | "smooth_caret" | "intro" | "compositor_motion" | "hypr_window_anim" | "hypr_workspace_anim" | "niri_motion" | "desktop_motion" if motion => Some("Off while Reduce motion is on"),
+        "smooth_scroll" | "smooth_caret" | "intro" | "compositor_motion" | "hypr_window_anim" | "hypr_workspace_anim" | "niri_motion" | "desktop_motion" | "lock_motion" if motion => Some("Off while Reduce motion is on"),
         "hypr_window_anim" | "hypr_workspace_anim" | "niri_motion" if still => Some("Off while Compositor animations is off"),
         "hypr_blur" | "hypr_shadow" | "menubar_look" if effects => Some("Off while Reduce effects is on"),
         _ => None,
@@ -1404,6 +1404,7 @@ fn power(body: &gtk::Box, t: &toml::Table) {
         }
     }
     toggle(&power, "lock", "Lock before sleep", "The lock screen is ready before the computer suspends, so waking needs your password", "lock_on_sleep", prefs::get_bool(&t, "lock_on_sleep", true));
+    toggle(&power, "lock_open", "Unlock animation", "On a screen without windows, the wallpaper clears and the clock settles onto the desktop", "lock_motion", prefs::get_bool(t, "lock_motion", true));
     let mut said = Vec::new();
     if let Some(k) = keys("lock") {
         said.push(format!("{k} locks"));

@@ -102,6 +102,84 @@ impl Roll {
     }
 }
 
+/// Where the desktop clock's surface sits on its screen and what it shows there, for the lock
+/// screen to settle its own clock onto.
+pub struct Spot {
+    /// The surface's top left corner, in the screen's coordinates.
+    pub origin: (f64, f64),
+    /// How much larger than as designed it is drawn.
+    pub k: f64,
+    pub center: bool,
+    /// The middle of the time, as drawn, and how tall its letters are.
+    pub time: (f64, f64, f64),
+    /// The same for the date, when it shows.
+    pub date: Option<(f64, f64, f64)>,
+}
+
+/// Where the clock is on the screen `output`, `screen` big, laid out by `p`; None where it's off.
+pub fn spot(app: &App, p: &Paint, output: &str, screen: (i32, i32)) -> Option<Spot> {
+    let mode = mode_on(app, output);
+    if mode == "off" || mode.is_empty() || !app.cfg.wallpaper {
+        return None;
+    }
+    let center = mode == "center";
+    let k = size(app);
+    let pad = (PAD * k).round();
+    let surface_w = ((W as f64 + 2.0 * PAD) * k).ceil();
+    let origin = if center {
+        (((screen.0 as f64 - surface_w) / 2.0).floor(), (screen.1 as f64 * 0.16).trunc() - pad)
+    } else {
+        (64.0 - pad, (app.reserve() + 36) as f64 - pad)
+    };
+    let (date_on, _) = rows(app);
+    let cfg = &app.cfg;
+    let time = glib::DateTime::now_local().ok().and_then(|d| d.format(&cfg.clock).ok()).map(|s| s.to_string()).unwrap_or_default();
+    let date = glib::DateTime::now_local().ok().and_then(|d| d.format("%A, %-d %B").ok()).map(|s| s.to_string()).unwrap_or_default();
+    let font = app.prefs.borrow().font_of("clock");
+    // The middle of a line, from its left as drawn: centered in the clock's width, or at its left.
+    let mid = |text: &str, px: f64, face: Face| {
+        if center {
+            return PAD + W as f64 / 2.0;
+        }
+        let wide = std::cell::Cell::new(0.0);
+        draw::zoomed(k, || draw::in_font(&font, || wide.set(draw::width(p, cfg, text, px, face))));
+        PAD + wide.get() / 2.0
+    };
+    let at = |x: f64, y: f64, px: f64| (origin.0 + x * k, origin.1 + y * k, px * k);
+    let time_y = PAD + if date_on { DATE_H } else { 0.0 } + 48.0;
+    Some(Spot {
+        origin,
+        k,
+        center,
+        time: at(mid(&time, 96.0, Face::Text(330)), time_y, 96.0),
+        date: date_on.then(|| at(mid(&date, 21.0, Face::Text(560)), PAD + 22.0, 21.0)),
+    })
+}
+
+/// Draws the desktop clock as its surface on `spot`'s screen shows it, onto `s` covering that
+/// screen, laid out by `p`.
+pub fn paint_at(s: &gtk::Snapshot, p: &Paint, app: &App, output: &str, spot: &Spot) {
+    s.save();
+    s.translate(&gtk::graphene::Point::new(spot.origin.0 as f32, spot.origin.1 as f32));
+    s.scale(spot.k as f32, spot.k as f32);
+    let font = app.prefs.borrow().font_of("clock");
+    draw::zoomed(spot.k, || draw::in_font(&font, || draw::rasterized(|| draw_desk(s, p, app, output, spot.center, None))));
+    s.restore();
+}
+
+/// Hides the clock on the screen `output` while the lock screen's settles onto its place, or
+/// shows it again; whether there is one there.
+pub fn hold(output: &str, hide: bool) -> bool {
+    let window = DESKS.with(|d| d.borrow().iter().find(|(n, _, _)| n == output).map(|(_, w, _)| w.clone()));
+    let Some(window) = window else { return false };
+    if hide {
+        window.set_visible(false);
+    } else if !window.is_visible() {
+        window.present();
+    }
+    true
+}
+
 thread_local! {
     static DESKS: RefCell<Vec<(String, gtk::Window, Paint)>> = const { RefCell::new(Vec::new()) };
     static MODE: RefCell<String> = const { RefCell::new(String::new()) };
@@ -208,11 +286,14 @@ pub fn apply(app: &Rc<App>) {
             }
         });
         window.set_child(Some(&paint));
-        window.connect_realize(|w| {
+        // Shown again after unlocking (see `hold`), it takes no clicks either.
+        let clickless = |w: &gtk::Window| {
             if let Some(surface) = w.surface() {
                 surface.set_input_region(Some(&cairo::Region::create()));
             }
-        });
+        };
+        window.connect_realize(clickless);
+        window.connect_map(move |w| clickless(w.upcast_ref()));
         window.present();
         DESKS.with(|d| d.borrow_mut().push((name, window, paint)));
     }

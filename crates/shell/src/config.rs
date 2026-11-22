@@ -118,6 +118,8 @@ pub struct Config {
     pub desktop_raster: bool,
     /// The clock's digits roll and the widgets' values glide as they change. On unless turned off.
     pub desktop_motion: bool,
+    /// Unlocking clears the wallpaper and settles the clock onto the desktop. On unless turned off.
+    pub lock_motion: bool,
     /// Counts how long each app has the focus (see `screentime`). On unless turned off.
     pub screen_time: bool,
     pub desktop_battery_bg: bool,
@@ -264,6 +266,7 @@ impl Default for Config {
             desktop_clock_bg: false,
             desktop_raster: false,
             desktop_motion: true,
+            lock_motion: true,
             screen_time: true,
             desktop_battery_bg: false,
             desktop_media_bg: false,
@@ -361,6 +364,8 @@ pub struct Prefs {
     pub desktop_raster: bool,
     /// The clock's digits roll and the widgets' values glide as they change. On unless turned off.
     pub desktop_motion: bool,
+    /// Unlocking clears the wallpaper and settles the clock onto the desktop. On unless turned off.
+    pub lock_motion: bool,
     /// Counts how long each app has the focus (see `screentime`). On unless turned off.
     pub screen_time: bool,
     pub desktop_battery_bg: bool,
@@ -468,6 +473,7 @@ impl From<&Config> for Prefs {
             desktop_clock_bg: c.desktop_clock_bg,
             desktop_raster: c.desktop_raster,
             desktop_motion: c.desktop_motion,
+            lock_motion: c.lock_motion,
             screen_time: c.screen_time,
             desktop_battery_bg: c.desktop_battery_bg,
             desktop_media_bg: c.desktop_media_bg,

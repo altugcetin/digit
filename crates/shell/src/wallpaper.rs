@@ -766,6 +766,16 @@ impl Wallpapers {
         frame.blur
     }
 
+    /// The wallpaper the screen `output`, `w` by `h`, shows, and where it's drawn to show it there
+    /// as the desktop does: for the lock screen to clear into the same picture.
+    pub fn sharp(&self, output: &str, w: f64, h: f64) -> Option<(gdk::Texture, graphene::Rect)> {
+        let screens = self.screens();
+        let screen = screens.iter().find(|s| s.monitor.borrow().output == output).or(screens.first())?;
+        let frame = screen.canvas.imp().scene.borrow().new.clone()?;
+        let rect = frame.fit(w, h, 1.0);
+        Some((frame.texture, rect))
+    }
+
     pub fn texture(&self, output: &str) -> Option<gdk::Texture> {
         let screens = self.screens();
         let screen = screens.iter().find(|s| s.monitor.borrow().output == output).or(screens.first())?;
