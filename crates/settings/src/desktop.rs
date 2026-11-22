@@ -1061,8 +1061,8 @@ fn roundness(body: &gtk::Box, t: &toml::Table) {
 
 fn dock(body: &gtk::Box, t: &toml::Table) {
     let dock = section(body, "Dock");
-    let shows = keys("dock").map(|k| format!("{k} shows or hides it at any time")).unwrap_or_default();
-    let visibility = choice(&dock, "dock_to_bottom", "Visibility", &shows, "dock_mode", &[("on", "Always shown"), ("autohide", "Auto-hide"), ("smart", "Hide when windows are open"), ("off", "Off")], &prefs::get_str(&t, "dock_mode", "on"));
+    let shows = keys("dock").map(|k| format!("{k} shows or hides it")).unwrap_or_default();
+    let visibility = choice(&dock, "dock_to_bottom", "Visibility", &shows, "dock_mode", &[("on", "Always shown"), ("autohide", "Auto-hide"), ("smart", "Hide when windows are open"), ("off", "Off")], &prefs::get_str(t, "dock_mode", "on"));
     // With the dock off, the rest has nothing to change.
     let rest = gtk::Box::new(gtk::Orientation::Vertical, 0);
     visibility.enable_when(&rest, |v| v != "off");

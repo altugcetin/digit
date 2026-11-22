@@ -84,7 +84,7 @@ pub fn working_area(app: &App) -> (f64, f64) {
     let (w, h) = m.map_or((1920.0, 1080.0), |m| (m.geometry().width() as f64, m.geometry().height() as f64));
     let top = app.reserve().max(0) as f64;
     let dock = app.prefs.borrow().dock.clone();
-    let on_dock = dock.mode == "on" && (dock.output.is_none() || dock.output == output);
+    let on_dock = crate::dock::mode(app) == "on" && (dock.output.is_none() || dock.output == output);
     let reserve = if on_dock { 8.0 + dock.size.clamp(28.0, 96.0).round() * 1.36 } else { 0.0 };
     match dock.side.as_str() {
         "left" | "right" => (w - reserve, h - top),

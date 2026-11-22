@@ -209,6 +209,24 @@ thread_local! {
     static ONE: RefCell<Option<Shared>> = const { RefCell::new(None) };
     static PREFER: RefCell<Option<String>> = const { RefCell::new(None) };
     static MENU: RefCell<Option<Rc<RefCell<Menu>>>> = const { RefCell::new(None) };
+    /// An always shown dock the shortcut has hidden, until the setting changes or the shell
+    /// starts again.
+    static HIDDEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The dock's mode as it is now: as set, unless the shortcut has hidden an always shown one.
+pub fn mode(app: &App) -> String {
+    let set = app.prefs.borrow().dock.mode.clone();
+    shown_mode(set, HIDDEN.with(std::cell::Cell::get))
+}
+
+fn shown_mode(set: String, hidden: bool) -> String {
+    if hidden && set == "on" { "off".into() } else { set }
+}
+
+/// Its setting changed: the dock is as set again.
+pub fn follow_setting() {
+    HIDDEN.with(|h| h.set(false));
 }
 
 fn current() -> Option<Shared> {
@@ -564,7 +582,7 @@ fn trash_action(st: &Shared, x: f64, y: f64) -> gdk::DragAction {
 
 pub fn apply(app: &Rc<App>) {
     let prefs = app.prefs.borrow().dock.clone();
-    let mode = match prefs.mode.as_str() {
+    let mode = match mode(app).as_str() {
         "off" => None,
         "autohide" => Some(Mode::Autohide),
         "smart" => Some(Mode::Smart),
@@ -751,31 +769,51 @@ fn watch_trash(st: &Shared) {
     });
 }
 
-pub fn command(app: &Rc<App>, verb: &str) -> bool {
-    let mode = app.prefs.borrow().dock.mode.clone();
-    let remembered = kit::theme::state_dir().join("dock-mode");
-    let visible = mode != "off";
-    let want = match verb {
+/// The shortcut, the dock's setting kept: an always shown dock hides or shows for now, an
+/// auto-hiding one comes out as with the pointer at the edge (and goes once the pointer has been
+/// over it and left), and one that is off stays off.
+pub fn command(app: &Rc<App>, verb: &str) {
+    let set = app.prefs.borrow().dock.mode.clone();
+    match set.as_str() {
+        "off" => {}
+        "on" => {
+            let hidden = HIDDEN.with(std::cell::Cell::get);
+            let hide = !wanted(verb, !hidden);
+            if hide != hidden {
+                close_menu();
+                HIDDEN.with(|h| h.set(hide));
+                apply(app);
+            }
+        }
+        _ => {
+            if let Some(st) = current() {
+                peek(&st, verb);
+            }
+        }
+    }
+}
+
+/// Whether the dock is to show after "show", "hide" or a toggle, `shown` as it is.
+fn wanted(verb: &str, shown: bool) -> bool {
+    match verb {
         "show" => true,
         "hide" => false,
-        _ => !visible,
-    };
-    if want == visible {
-        return true;
+        _ => !shown,
     }
-    let next = if want {
-        std::fs::read_to_string(&remembered).ok().map(|s| s.trim().to_string()).filter(|m| matches!(m.as_str(), "on" | "autohide" | "smart")).unwrap_or_else(|| "on".into())
-    } else {
-        let _ = kit::atomic::write(&remembered, &mode);
-        "off".into()
-    };
-    close_menu();
-    if let Err(e) = crate::config::set("dock_mode", toml::Value::String(next)) {
-        eprintln!("digit: dock: {e}");
-        return false;
+}
+
+/// Brings an auto-hiding dock out, or puts it away, as the pointer at its edge would.
+fn peek(st: &Shared, verb: &str) {
+    let out = st.borrow().shown.target() > 0.5;
+    let want = wanted(verb, out);
+    if want == out {
+        return;
     }
-    app.apply_prefs(crate::config::Prefs::from(&crate::config::load()));
-    true
+    if !want {
+        close_menu();
+    }
+    st.borrow_mut().reveal = want;
+    settle(st);
 }
 
 fn build(app: &Rc<App>, geo: Geo, monitor: Option<&gdk::Monitor>, output: String, layer: Layer) -> Shared {
@@ -2041,5 +2079,20 @@ mod target_tests {
         assert_eq!(target_window(&[b, Window { focused: true, ..a }, c]), Some(b));
         assert_eq!(target_window(&[b, a, Window { focused: true, ..c }]), Some(a));
         assert_eq!(target_window(&[b]), Some(b));
+    }
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn the_shortcut_hides_only_an_always_shown_dock_and_keeps_its_setting() {
+        assert_eq!(shown_mode("on".into(), false), "on");
+        assert_eq!(shown_mode("on".into(), true), "off");
+        assert_eq!(shown_mode("autohide".into(), true), "autohide");
+        assert_eq!(shown_mode("off".into(), true), "off");
+        assert!(wanted("toggle", false) && !wanted("toggle", true));
+        assert!(wanted("show", true) && !wanted("hide", true));
     }
 }

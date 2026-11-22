@@ -744,6 +744,9 @@ impl App {
             crate::icons::theme(next.icon_theme.as_deref());
         }
         let corners_moved = before.corners != next.corners || before.monitor_corners != next.monitor_corners;
+        if before.dock.mode != next.dock.mode {
+            crate::dock::follow_setting();
+        }
         if before.dock != next.dock || before.icon_theme != next.icon_theme || corners_moved {
             crate::dock::apply(self);
         }
