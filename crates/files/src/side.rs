@@ -1,4 +1,5 @@
 mod devices;
+mod phones;
 
 use gtk::{gdk, gio, glib, pango, prelude::*};
 use std::cell::{Cell, RefCell};
@@ -12,6 +13,16 @@ enum Target {
     Mount(gio::Mount),
     Volume(gio::Volume),
     Connect,
+    /// A device KDE Connect reaches, by its id and name.
+    Phone(String, String),
+    /// A phone plugged in that GVfs can't read yet: the packages that teach it.
+    Install(&'static [&'static str]),
+}
+
+/// What a row's eject button takes out: a mount, or a KDE Connect device's files.
+enum Eject {
+    Mount(gio::Mount),
+    Phone(String),
 }
 
 pub struct Side {
@@ -25,6 +36,11 @@ pub struct Side {
     refresh_pending: Cell<bool>,
     mounting: Rc<RefCell<HashSet<gio::Volume>>>,
     marking: Cell<bool>,
+    /// The devices KDE Connect reaches, as last asked, and those being opened.
+    phones: RefCell<Vec<phones::Kde>>,
+    opening: Rc<RefCell<HashSet<String>>>,
+    /// The USB buses, watched for a phone plugged in that needs GVfs taught first.
+    usb: RefCell<Vec<gio::FileMonitor>>,
 }
 
 fn bookmarks_file() -> PathBuf {
@@ -84,6 +100,7 @@ impl Side {
         let side = Rc::new(Side {
             root, list, targets: RefCell::new(Vec::new()), monitor: gio::VolumeMonitor::get(), mount_monitor: gio_unix::MountMonitor::get(),
             device_start: Cell::new(0), device_count: Cell::new(0), refresh_pending: Cell::new(false), mounting: Rc::new(RefCell::new(HashSet::new())), marking: Cell::new(false),
+            phones: RefCell::new(Vec::new()), opening: Rc::default(), usb: RefCell::new(Vec::new()),
         });
         let me = Rc::downgrade(&side);
         side.list.connect_row_activated(move |_, row| {
@@ -119,8 +136,52 @@ impl Side {
                 None
             });
         }
+        let me = Rc::downgrade(&side);
+        phones::watch(move || {
+            if let Some(s) = me.upgrade() {
+                s.load_phones();
+            }
+        });
+        side.load_phones();
+        for bus in phones::usb_buses() {
+            let Ok(m) = gio::File::for_path(bus).monitor_directory(gio::FileMonitorFlags::NONE, None::<&gio::Cancellable>) else { continue };
+            let me = Rc::downgrade(&side);
+            m.connect_changed(move |_, _, _, _| {
+                if let Some(s) = me.upgrade() {
+                    s.queue_devices();
+                }
+            });
+            side.usb.borrow_mut().push(m);
+        }
         side.build();
         side
+    }
+
+    /// Asks KDE Connect again which devices it reaches, and shows them once that changed.
+    fn load_phones(self: &Rc<Self>) {
+        let me = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let list = phones::kde().await;
+            let Some(s) = me.upgrade() else { return };
+            if *s.phones.borrow() != list {
+                *s.phones.borrow_mut() = list;
+                s.queue_devices();
+            }
+        });
+    }
+
+    /// The rows under Devices after Computer: drives and volumes, phones over USB, and the
+    /// devices KDE Connect reaches.
+    fn device_rows(&self) -> Vec<(&'static str, String, Option<Eject>, Target)> {
+        let mut rows: Vec<(&'static str, String, Option<Eject>, Target)> = devices::rows(&self.monitor).into_iter().map(|d| (d.icon, d.name, d.eject.map(Eject::Mount), d.target)).collect();
+        if let Some((name, packages)) = phones::waiting() {
+            rows.push(("smartphone", name.to_string(), None, Target::Install(packages)));
+        }
+        for p in self.phones.borrow().iter() {
+            let icon = if p.tablet { "tablet" } else { "smartphone" };
+            rows.push((icon, p.name.clone(), p.mounted.then(|| Eject::Phone(p.id.clone())), Target::Phone(p.id.clone(), p.name.clone())));
+        }
+        rows
     }
 
     pub fn build(&self) {
@@ -166,10 +227,10 @@ impl Side {
         self.list.append(&row);
         targets.push(Some(Target::File(gio::File::for_path("/"))));
         self.device_start.set(targets.len());
-        for device in devices::rows(&self.monitor) {
-            let row = self.row_widget(device.icon, &device.name, device.eject, &device.target, true);
+        for (icon, name, eject, target) in self.device_rows() {
+            let row = self.row_widget(icon, &name, eject, &target, true);
             self.list.append(&row);
-            targets.push(Some(device.target));
+            targets.push(Some(target));
         }
         self.device_count.set(targets.len() - self.device_start.get());
         self.header("Network", &mut targets);
@@ -195,7 +256,7 @@ impl Side {
     }
 
     fn refresh_devices(&self) {
-        let devices = devices::rows(&self.monitor);
+        let devices = self.device_rows();
         let start = self.device_start.get();
         self.marking.set(true);
         for _ in 0..self.device_count.get() {
@@ -204,10 +265,10 @@ impl Side {
             }
         }
         let mut targets = Vec::with_capacity(devices.len());
-        for (i, device) in devices.into_iter().enumerate() {
-            let row = self.row_widget(device.icon, &device.name, device.eject, &device.target, true);
+        for (i, (icon, name, eject, target)) in devices.into_iter().enumerate() {
+            let row = self.row_widget(icon, &name, eject, &target, true);
             self.list.insert(&row, (start + i) as i32);
-            targets.push(Some(device.target));
+            targets.push(Some(target));
         }
         let count = targets.len();
         self.targets.borrow_mut().splice(start..start + self.device_count.get(), targets);
@@ -230,14 +291,14 @@ impl Side {
         targets.push(None);
     }
 
-    fn row(&self, icon: &str, label: &str, eject: Option<gio::Mount>, targets: &mut Vec<Option<Target>>, target: Target) {
+    fn row(&self, icon: &str, label: &str, eject: Option<Eject>, targets: &mut Vec<Option<Target>>, target: Target) {
         let row = self.row_widget(icon, label, eject, &target, false);
         self.list.append(&row);
         targets.push(Some(target));
     }
 
     /// A row of the sidebar. A drive (`usage`) shows how full it is under its name.
-    fn row_widget(&self, icon: &str, label: &str, eject: Option<gio::Mount>, target: &Target, usage: bool) -> gtk::ListBoxRow {
+    fn row_widget(&self, icon: &str, label: &str, eject: Option<Eject>, target: &Target, usage: bool) -> gtk::ListBoxRow {
         let b = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         let s = kit::ui::sym(icon);
         s.add_css_class("place-icon");
@@ -251,7 +312,7 @@ impl Side {
             Target::File(f) => Some(f.clone()),
             Target::Mount(m) => Some(m.root()),
             Target::Volume(v) => v.get_mount().map(|m| m.root()),
-            Target::Connect => None,
+            Target::Connect | Target::Phone(..) | Target::Install(_) => None,
         };
         match place.filter(|f| usage && f.is_native()) {
             Some(f) => {
@@ -263,7 +324,15 @@ impl Side {
             }
             _ => b.append(&l),
         }
-        if let Some(m) = eject {
+        if let Some(Eject::Phone(id)) = eject {
+            let e = kit::app::control("eject", "");
+            e.set_tooltip_text(Some("Disconnect"));
+            e.connect_clicked(move |_| {
+                let id = id.clone();
+                glib::spawn_future_local(async move { phones::close(&id).await });
+            });
+            b.append(&e);
+        } else if let Some(Eject::Mount(m)) = eject {
             let e = kit::app::control("eject", "");
             e.set_tooltip_text(Some(if m.can_eject() { "Eject" } else { "Unmount" }));
             e.connect_clicked(move |_| {
@@ -337,6 +406,37 @@ impl Side {
                 });
             }
             Target::Connect => connect(),
+            Target::Phone(id, name) => {
+                // Selection and row activation can both fire for one click.
+                if !self.opening.borrow_mut().insert(id.clone()) {
+                    return;
+                }
+                let opening = self.opening.clone();
+                crate::toast(&format!("Opening {name}…"));
+                glib::spawn_future_local(async move {
+                    let r = phones::open(&id).await;
+                    opening.borrow_mut().remove(&id);
+                    match r {
+                        Ok(f) => crate::go(&f),
+                        Err(e) => crate::toast(&format!("Couldn't open {name}: {e}")),
+                    }
+                });
+            }
+            Target::Install(packages) => {
+                if !self.opening.borrow_mut().insert("install".into()) {
+                    return;
+                }
+                let opening = self.opening.clone();
+                crate::toast("Installing phone support…");
+                glib::spawn_future_local(async move {
+                    let r = phones::install(packages).await;
+                    opening.borrow_mut().remove("install");
+                    match r {
+                        Ok(()) => crate::toast("Phone support is installed. Open Files again to see your phone"),
+                        Err(e) => crate::toast(&format!("Couldn't install phone support: {e}")),
+                    }
+                });
+            }
         }
     }
 

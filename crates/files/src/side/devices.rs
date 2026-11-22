@@ -161,6 +161,15 @@ fn size(device: &Path) -> Option<u64> {
         .checked_mul(512)
 }
 
+/// The icon for what GVfs reaches at `root` beyond this computer: a phone, a camera, or a server.
+fn remote_icon(root: &gio::File) -> &'static str {
+    match root.uri_scheme().as_deref() {
+        Some("mtp" | "afc") => "smartphone",
+        Some("gphoto2") => "photo_camera",
+        _ => "lan",
+    }
+}
+
 fn name(label: &str, bytes: Option<u64>) -> String {
     if !label.trim().is_empty() {
         label.to_string()
@@ -220,9 +229,11 @@ pub(super) fn rows(monitor: &gio::VolumeMonitor) -> Vec<Row> {
             shadowed: mount.as_ref().is_some_and(|m| m.is_shadowed()),
         });
         let device = v.identifier("unix-device");
+        // A phone not mounted yet says what it is by where it would be.
+        let at = root.clone().or_else(|| v.activation_root());
         rows.push(Row {
-            icon: if root.as_ref().is_some_and(|r| !r.is_native()) {
-                "lan"
+            icon: if let Some(r) = at.as_ref().filter(|r| !r.is_native()) {
+                remote_icon(r)
             } else if mount
                 .as_ref()
                 .map_or_else(|| v.can_eject(), |m| m.can_eject())
@@ -256,7 +267,7 @@ pub(super) fn rows(monitor: &gio::VolumeMonitor) -> Vec<Row> {
         });
         rows.push(Row {
             icon: if !root.is_native() {
-                "lan"
+                remote_icon(&root)
             } else if m.can_eject() {
                 "usb"
             } else {
@@ -403,6 +414,14 @@ mod tests {
         assert!(!hidden_properties(
             "E:UDISKS_IGNORE=0\nE:UDISKS_SYSTEM=1\nE:UDISKS_AUTO=0\n"
         ));
+    }
+
+    #[test]
+    fn phones_and_cameras_have_their_own_icons() {
+        assert_eq!(remote_icon(&gio::File::for_uri("mtp://Pixel_8/")), "smartphone");
+        assert_eq!(remote_icon(&gio::File::for_uri("afc://00008110/")), "smartphone");
+        assert_eq!(remote_icon(&gio::File::for_uri("gphoto2://Canon/")), "photo_camera");
+        assert_eq!(remote_icon(&gio::File::for_uri("sftp://host/")), "lan");
     }
 
     #[test]
