@@ -72,16 +72,20 @@ fn lock_lines(w: f64, h: f64, fade: f64) -> ((f64, f64, f64), (f64, f64, f64)) {
 }
 
 /// The lock screen's date and time, white, their middles and sizes `date_at` and `time_at`; with
-/// a soft shadow unless `flat`.
+/// a soft shadow unless `flat`. In the desktop clock's font, when it has one of its own.
 #[allow(clippy::too_many_arguments)]
-fn lines(s: &gtk::Snapshot, p: &Paint, cfg: &crate::config::Config, w: f64, (date_at, time_at): ((f64, f64, f64), (f64, f64, f64)), date_shown: f64, flat: bool) {
+fn lines(s: &gtk::Snapshot, p: &Paint, app: &App, w: f64, (date_at, time_at): ((f64, f64, f64), (f64, f64, f64)), date_shown: f64, flat: bool) {
+    let cfg = &app.cfg;
+    let font = app.prefs.borrow().font_of("clock");
     let dt = glib::DateTime::now_local().ok();
     let date = dt.as_ref().and_then(|d| d.format("%A, %-d %B").ok()).map(|s| s.to_string()).unwrap_or_default();
     let time = dt.as_ref().and_then(|d| d.format(&cfg.clock).ok()).map(|s| s.to_string()).unwrap_or_default();
     let white = Rgb::new(1.0, 1.0, 1.0);
     if !flat { s.push_shadow(&[gtk::gsk::Shadow::new(gdk::RGBA::new(0.0, 0.0, 0.0, 0.25), 0.0, 1.0, 12.0)]); }
-    draw::text(s, p, cfg, &date, date_at.2, Face::Text(560), white.alpha(0.9 * date_shown), date_at.0 - w, date_at.1, 2.0 * w, pango::Alignment::Center);
-    draw::text(s, p, cfg, &time, time_at.2, Face::Text(420), white.alpha(0.96), time_at.0 - w, time_at.1, 2.0 * w, pango::Alignment::Center);
+    draw::in_font(&font, || {
+        draw::text(s, p, cfg, &date, date_at.2, Face::Text(560), white.alpha(0.9 * date_shown), date_at.0 - w, date_at.1, 2.0 * w, pango::Alignment::Center);
+        draw::text(s, p, cfg, &time, time_at.2, Face::Text(420), white.alpha(0.96), time_at.0 - w, time_at.1, 2.0 * w, pango::Alignment::Center);
+    });
     if !flat { s.pop(); }
 }
 
@@ -164,7 +168,7 @@ fn settle(app: &Rc<App>, monitor: &gdk::Monitor, go: Rc<Cell<Option<i64>>>, cloc
             };
             if shown > 0.0 {
                 s.push_opacity(shown);
-                lines(s, &p, &app.cfg, w, (date_at, time_at), date_shown, kit::effects::reduced());
+                lines(s, &p, &app, w, (date_at, time_at), date_shown, kit::effects::reduced());
                 s.pop();
             }
             // The desktop's clock, as its own surface draws it, comes in where it sits.
@@ -711,7 +715,6 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64, 
     let reveal: Rc<Cell<Option<i64>>> = Rc::default();
     {
         let weak = paint.downgrade();
-        let cfg = app.cfg.clone();
         let main = main.clone();
         let (a, reveal, output) = (Rc::downgrade(app), reveal.clone(), output.clone());
         // The sharp wallpaper, found once unlocking starts.
@@ -760,7 +763,9 @@ fn build(app: &Rc<App>, monitor: &gdk::Monitor, preview: bool, generation: u64, 
             }
             // Unlocking, the clock stays where it is: its own surface takes it on (see `settle`).
             s.push_opacity(fade);
-            lines(s, &p, &cfg, w, lock_lines(w, h, fade), 1.0, effects);
+            if let Some(app) = a.upgrade() {
+                lines(s, &p, &app, w, lock_lines(w, h, fade), 1.0, effects);
+            }
             s.pop();
         });
     }
