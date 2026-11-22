@@ -379,20 +379,23 @@ pub fn move_to_space(id: u64, space: u64) -> bool {
     }
 }
 
-/// Whether the workspace shown on `output` has a fullscreen window.
+/// Whether the workspace shown on `output` has a fullscreen window. A maximized window is not
+/// one, though Hyprland's `hasfullscreen` counts it too.
 pub fn fullscreen_on(output: &str) -> bool {
     match which() {
         Wm::Niri => niri_fullscreen(output).unwrap_or(false),
         Wm::Hyprland => {
             let Some(id) = hypr_outputs().iter().find(|m| text(m, "name") == output).and_then(|m| m.get("activeWorkspace")?.get("id")?.as_i64()) else { return false };
-            hypr_json("workspaces")
-                .and_then(|v| v.as_array().cloned())
-                .unwrap_or_default()
-                .iter()
-                .any(|w| w.get("id").and_then(Value::as_i64) == Some(id) && w.get("hasfullscreen").and_then(Value::as_bool).unwrap_or(false))
+            hypr_json("clients").and_then(|v| v.as_array().cloned()).unwrap_or_default().iter().any(|c| hypr_fullscreen_in(c, id))
         }
         Wm::Other => false,
     }
+}
+
+/// Hyprland's `fullscreen` is a bit set: 1 maximized, 2 fullscreen.
+fn hypr_fullscreen_in(client: &Value, workspace: i64) -> bool {
+    client.get("workspace").and_then(|w| w.get("id")).and_then(Value::as_i64) == Some(workspace)
+        && client.get("fullscreen").and_then(Value::as_i64).is_some_and(|mode| mode & 2 != 0)
 }
 
 fn niri_fullscreen(output: &str) -> Option<bool> {
@@ -579,5 +582,16 @@ mod minimized_tests {
             assert_eq!(hypr_minimized(&json!({ "workspace": { "id": -99, "name": name } })), expected);
         }
         assert!(!hypr_minimized(&json!({})));
+    }
+
+    #[test]
+    fn a_maximized_window_does_not_count_as_fullscreen() {
+        let on = |mode: i64, id: i64| hypr_fullscreen_in(&json!({ "workspace": { "id": id }, "fullscreen": mode }), 2);
+        assert!(!on(0, 2));
+        assert!(!on(1, 2));
+        assert!(on(2, 2));
+        assert!(on(3, 2));
+        assert!(!on(2, 3));
+        assert!(!hypr_fullscreen_in(&json!({ "workspace": { "id": 2 } }), 2));
     }
 }
