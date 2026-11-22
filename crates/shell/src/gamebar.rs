@@ -980,8 +980,9 @@ fn press(st: &Shared, hit: Hit) {
         Hit::Level(_) | Hit::Bare => {}
         Hit::Mute(row) => mute(st, row),
         Hit::Media(which) => {
-            if let Some(p) = app.players.borrow().as_ref() {
-                p.command(match which {
+            let players = app.players.borrow().clone();
+            if let Some(p) = players {
+                p.press(match which {
                     0 => crate::media::Command::Previous,
                     1 => crate::media::Command::PlayPause,
                     _ => crate::media::Command::Next,

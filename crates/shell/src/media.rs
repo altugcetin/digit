@@ -80,7 +80,7 @@ pub fn key(app: &App, action: &str) -> &'static str {
     let Some(cmd) = Command::from_key(action) else { return "unhandled" };
     let players = app.players.borrow().clone();
     if let Some(p) = players.filter(|p| p.active_entry().is_some()) {
-        p.command(cmd);
+        p.press(cmd);
         return "ok";
     }
     if app.prefs.borrow().media.narrows() { "ok" } else { "unhandled" }
@@ -569,6 +569,12 @@ impl Players {
                 eprintln!("digit: media command: {e}");
             }
         });
+    }
+
+    /// Runs `cmd` on the shown player, as its buttons and keys do: play and pause show at once
+    /// (see [`Players::play_pause_now`]).
+    pub fn press(&self, cmd: Command) {
+        if cmd == Command::PlayPause { self.play_pause_now() } else { self.command(cmd) }
     }
 
     /// Plays or pauses the shown player, showing the change at once instead of after the player

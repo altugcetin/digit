@@ -365,7 +365,7 @@ pub fn apply(app: &Rc<App>) {
                 let Some(cmd) = buttons().into_iter().find(|(_, r)| contains(*r, x, y)).map(|(c, _)| c) else { return };
                 let players = app.players.borrow().clone();
                 if let Some(p) = players {
-                    if cmd == crate::media::Command::PlayPause { p.play_pause_now() } else { p.command(cmd) }
+                    p.press(cmd);
                 }
             });
             paint.add_controller(click);

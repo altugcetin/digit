@@ -552,8 +552,9 @@ impl Notch {
                 Action::Toggle => media::Command::PlayPause,
                 Action::Next => media::Command::Next,
             };
-            if let Some(p) = app.players.borrow().as_ref() {
-                p.command(cmd);
+            let players = app.players.borrow().clone();
+            if let Some(p) = players {
+                p.press(cmd);
             }
             return;
         }
