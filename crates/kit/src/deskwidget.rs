@@ -11,6 +11,10 @@
 //!
 //! The color: Automatic follows the wallpaper behind, light over dark and dark over light; the
 //! others hold whatever is behind.
+//!
+//! The card: a widget with a background draws it light or dark as its color asks, or as set in
+//! the [`CARDS`] table by widget. The font: each widget's text in a family of its own, in the
+//! [`FONTS`] table by widget, or the shell's own when it has none.
 
 /// The widgets, by the name their settings go under, in the order places are given in.
 pub const WIDGETS: [&str; 6] = ["clock", "battery", "media", "weather", "system", "screentime"];
@@ -140,6 +144,84 @@ pub fn read(prefs: &toml::Table, widget: &str) -> Ink {
     Ink::parse(&crate::prefs::text(prefs, &key(widget), "auto"))
 }
 
+/// The table of the widgets' font families, by widget; one without is drawn in the shell's own
+/// fonts (Readex Pro, and Rubik for numbers).
+pub const FONTS: &str = "desktop_fonts";
+
+/// `widget`'s family in the [`FONTS`] table `fonts`, "" for the shell's own.
+pub fn font_from(fonts: &toml::Table, widget: &str) -> String {
+    fonts.get(widget).and_then(toml::Value::as_str).unwrap_or("").trim().to_string()
+}
+
+/// [`font_from`], read from the preferences.
+pub fn font(prefs: &toml::Table, widget: &str) -> String {
+    prefs.get(FONTS).and_then(toml::Value::as_table).map_or_else(String::new, |t| font_from(t, widget))
+}
+
+/// Sets `widget`'s family, the others kept; "" takes it out of the table.
+pub fn save_font(widget: &str, family: &str) -> Result<(), String> {
+    let family = family.trim();
+    crate::prefs::update_table(FONTS, |all| {
+        if family.is_empty() {
+            all.remove(widget);
+        } else {
+            all.insert(widget.to_string(), toml::Value::String(family.to_string()));
+        }
+    })
+}
+
+/// The table of the widgets' card tones, by widget.
+pub const CARDS: &str = "desktop_cards";
+
+/// Each card tone as stored, and as Settings names it.
+pub const CARD_TONES: [(&str, &str); 3] = [("auto", "Automatic"), ("light", "Light"), ("dark", "Dark")];
+
+/// How light a widget's card is: Automatic follows the widget's color, light under dark text
+/// and dark under light text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Card {
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+
+impl Card {
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "light" => Card::Light,
+            "dark" => Card::Dark,
+            _ => Card::Auto,
+        }
+    }
+}
+
+/// `widget`'s card tone in the [`CARDS`] table `cards`.
+pub fn card_from(cards: &toml::Table, widget: &str) -> Card {
+    Card::parse(cards.get(widget).and_then(toml::Value::as_str).unwrap_or("auto"))
+}
+
+/// [`card_from`], read from the preferences.
+pub fn card(prefs: &toml::Table, widget: &str) -> Card {
+    prefs.get(CARDS).and_then(toml::Value::as_table).map_or(Card::Auto, |t| card_from(t, widget))
+}
+
+/// Sets `widget`'s card tone, the others kept; Automatic takes it out of the table.
+pub fn save_card(widget: &str, tone: &str) -> Result<(), String> {
+    let tone = Card::parse(tone);
+    crate::prefs::update_table(CARDS, |all| match tone {
+        Card::Auto => {
+            all.remove(widget);
+        }
+        Card::Light => {
+            all.insert(widget.to_string(), toml::Value::String("light".into()));
+        }
+        Card::Dark => {
+            all.insert(widget.to_string(), toml::Value::String("dark".into()));
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +256,22 @@ mod tests {
         assert_eq!(read(&prefs, "weather"), Ink::Auto);
         assert!(CHOICES.iter().all(|(v, _)| *v == "auto" || Ink::parse(v) != Ink::Auto));
         assert_eq!(key("screentime"), "desktop_screentime_ink");
+    }
+
+    #[test]
+    fn card_tones_and_the_font_read_back_and_default_to_automatic() {
+        let prefs: toml::Table = "[desktop_fonts]\nclock = ' Inter '\nmedia = 4\n[desktop_cards]\nclock = 'light'\nmedia = 'dark'\nweather = 'pink'\nsystem = 3".parse().unwrap();
+        assert_eq!(card(&prefs, "clock"), Card::Light);
+        assert_eq!(card(&prefs, "media"), Card::Dark);
+        assert_eq!(card(&prefs, "weather"), Card::Auto);
+        assert_eq!(card(&prefs, "system"), Card::Auto);
+        assert_eq!(card(&prefs, "battery"), Card::Auto);
+        assert_eq!(card(&toml::Table::new(), "clock"), Card::Auto);
+        assert!(CARD_TONES.iter().all(|(v, _)| *v == "auto" || Card::parse(v) != Card::Auto));
+        assert_eq!(font(&prefs, "clock"), "Inter");
+        assert_eq!(font(&prefs, "media"), "");
+        assert_eq!(font(&prefs, "weather"), "");
+        assert_eq!(font(&toml::Table::new(), "clock"), "");
     }
 
     #[test]

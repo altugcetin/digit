@@ -11,6 +11,7 @@ struct Key {
     px: u32,
     face: (u8, i32),
     glyphs: &'static str,
+    family: String,
     width: i32,
     align: u8,
 }
@@ -21,7 +22,18 @@ thread_local! {
     static LAYOUTS: RefCell<HashMap<Key, (glib::WeakRef<gtk::Widget>, pango::Layout)>> = RefCell::new(HashMap::new());
     static RASTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static ZOOM: std::cell::Cell<f64> = const { std::cell::Cell::new(1.0) };
+    /// The family text and numbers are drawn in instead of the shell's own, while [`in_font`] runs.
+    static FAMILY: RefCell<String> = const { RefCell::new(String::new()) };
 }
+
+/// Runs `draw` with its text and numbers in `family`, the shell's own fonts when it's empty:
+/// the desktop widgets' font setting. Icons keep their own font.
+pub fn in_font(family: &str, draw: impl FnOnce()) {
+    let was = FAMILY.with(|f| f.replace(family.to_string()));
+    draw();
+    FAMILY.with(|f| *f.borrow_mut() = was);
+}
+
 
 /// Runs `draw` for a surface whose snapshot is scaled by `k` (a desktop widget at its size, see
 /// `deskcards::sized`): text and icons are then laid out at the size they show at and drawn with
@@ -97,6 +109,7 @@ fn cached(widget: &impl IsA<gtk::Widget>, cfg: &Config, text: &str, px: f64, fac
         px: (px * 64.0) as u32,
         face: face_key(face),
         glyphs: kit::style::glyph_family(),
+        family: FAMILY.with(|f| f.borrow().clone()),
         width,
         align: match align {
             pango::Alignment::Left => 0,
@@ -166,18 +179,23 @@ fn weight(w: i32) -> pango::Weight {
     }
 }
 
+/// The family set by [`in_font`], else `own`.
+fn family_or(own: &str) -> String {
+    FAMILY.with(|f| { let f = f.borrow(); if f.is_empty() { own.to_string() } else { f.clone() } })
+}
+
 pub fn layout(widget: &impl IsA<gtk::Widget>, cfg: &Config, text: &str, px: f64, face: Face) -> pango::Layout {
     let l = widget.as_ref().create_pango_layout(Some(text));
     let mut fd = pango::FontDescription::new();
     fd.set_absolute_size(px * pango::SCALE as f64);
     match face {
         Face::Text(w) => {
-            fd.set_family(&cfg.font);
+            fd.set_family(&family_or(&cfg.font));
             fd.set_variations(Some(&format!("wght={w}")));
             fd.set_weight(weight(w));
         }
         Face::Number(w) => {
-            fd.set_family(&cfg.numbers);
+            fd.set_family(&family_or(&cfg.numbers));
             fd.set_variations(Some(&format!("wght={w}")));
             fd.set_weight(weight(w));
         }

@@ -132,6 +132,9 @@ pub struct Config {
     pub desktop_screentime_ink: String,
     /// Each widget's size against as designed, by widget (see `kit::deskwidget::SIZES`).
     pub desktop_sizes: toml::Table,
+    /// Each widget's font family and card tone, by widget (see `kit::deskwidget`).
+    pub desktop_fonts: toml::Table,
+    pub desktop_cards: toml::Table,
     /// Rounded screen corners: on/off, whether they follow the app roundness, and the radius
     /// used when they don't. Older configs only had the radius, where 0 meant off.
     pub screen_round: Option<bool>,
@@ -271,6 +274,8 @@ impl Default for Config {
             desktop_system_ink: "auto".into(),
             desktop_screentime_ink: "auto".into(),
             desktop_sizes: toml::Table::new(),
+            desktop_fonts: toml::Table::new(),
+            desktop_cards: toml::Table::new(),
             screen_round: None,
             screen_round_follow: None,
             screen_corners: 0.0,
@@ -365,6 +370,8 @@ pub struct Prefs {
     pub desktop_system_ink: String,
     pub desktop_screentime_ink: String,
     pub desktop_sizes: toml::Table,
+    pub desktop_fonts: toml::Table,
+    pub desktop_cards: toml::Table,
     /// The screen-corner radius in pixels, already resolved from on/off and roundness; 0 is off.
     pub screen_corners: f64,
     pub tray: bool,
@@ -468,6 +475,8 @@ impl From<&Config> for Prefs {
             desktop_system_ink: c.desktop_system_ink.clone(),
             desktop_screentime_ink: c.desktop_screentime_ink.clone(),
             desktop_sizes: c.desktop_sizes.clone(),
+            desktop_fonts: c.desktop_fonts.clone(),
+            desktop_cards: c.desktop_cards.clone(),
             screen_corners: screen_radius(c),
             tray: c.tray,
             mic_guard: c.mic_guard,
@@ -502,6 +511,16 @@ impl Prefs {
     /// How much larger or smaller than as designed `widget` is drawn (see `kit::deskwidget`).
     pub fn size_of(&self, widget: &str) -> f64 {
         kit::deskwidget::size_from(&self.desktop_sizes, widget)
+    }
+
+    /// The family `widget`'s text is drawn in, "" for the shell's own (see `kit::deskwidget::FONTS`).
+    pub fn font_of(&self, widget: &str) -> String {
+        kit::deskwidget::font_from(&self.desktop_fonts, widget)
+    }
+
+    /// How light `widget`'s card is drawn (see `kit::deskwidget::CARDS`).
+    pub fn card_of(&self, widget: &str) -> kit::deskwidget::Card {
+        kit::deskwidget::card_from(&self.desktop_cards, widget)
     }
 
     /// The hot corners of the screen `output`: its own, or the shared ones.
