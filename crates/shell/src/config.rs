@@ -612,10 +612,6 @@ pub fn edit(cfg: &Config) {
     let _ = gtk::gio::AppInfo::launch_default_for_uri(&uri, Some(&context));
 }
 
-pub fn set(key: &str, value: toml::Value) -> Result<(), String> {
-    kit::prefs::set(key, value)
-}
-
 thread_local! {
     static LAST: std::cell::RefCell<Config> = std::cell::RefCell::new(Config::default());
     /// The settings file as last loaded, for the settings `Config` has no field for.
@@ -713,7 +709,7 @@ mod persistence_tests {
             std::fs::create_dir_all(dir()).unwrap();
             for body in [b"dock_mode = [".as_slice(), b"dock_mode = \xff".as_slice()] {
                 std::fs::write(kit::prefs::path(), body).unwrap();
-                assert!(set("dock_mode", "bar".into()).is_err());
+                assert!(kit::prefs::set("dock_mode", "bar".into()).is_err());
                 assert_eq!(std::fs::read(kit::prefs::path()).unwrap(), body);
             }
             return;
