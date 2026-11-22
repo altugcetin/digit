@@ -571,6 +571,35 @@ impl Players {
         });
     }
 
+    /// Plays or pauses the shown player, showing the change at once instead of after the player
+    /// reports it, which can take a moment. The player's own report then settles it, and if none
+    /// comes, its state is read again shortly after.
+    pub fn play_pause_now(&self) {
+        let Some((name, _, _)) = self.active_entry() else { return };
+        self.command(Command::PlayPause);
+        {
+            let now = App::now();
+            let mut inner = self.0.borrow_mut();
+            let Some(e) = inner.entries.get_mut(&name) else { return };
+            let playing = e.track.status == "Playing";
+            if playing {
+                // Keep where it got to, so the progress doesn't jump back while paused.
+                e.position += (now - e.position_at) as f64 / 1e6;
+                if e.track.length > 0.0 {
+                    e.position = e.position.min(e.track.length);
+                }
+            }
+            e.position_at = now;
+            e.track.status = if playing { "Paused" } else { "Playing" }.into();
+        }
+        self.pick();
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            glib::timeout_future(Duration::from_millis(1500)).await;
+            this.refresh(&name, false).await;
+        });
+    }
+
     /// Jumps the shown player to `fraction` of the current track.
     pub fn seek_to(&self, fraction: f64) {
         let Some((name, proxy, track)) = self.active_entry() else { return };
