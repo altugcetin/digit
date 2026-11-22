@@ -649,7 +649,7 @@ pub fn sections(page: &str) -> &'static [Section] {
         "appearance" => &[shell_look, app_look, roundness, window_buttons, app_themes, effects],
         "dock" => &[dock],
         "notch" => &[notch, menu_bar, workspaces],
-        "desktop" => &[crate::wallpaper::section_for, desktop, screen_edges],
+        "desktop" => &[crate::wallpaper::section_for, desktop, screen_edges, widgets_advanced],
         "spotlight" => &[search, scopes, clipboard],
         "compositor" => &[session],
         "displays" => &[night_light],
@@ -1368,6 +1368,14 @@ fn screen_edges(body: &gtk::Box, t: &toml::Table) {
     toggle(&edge, "fullscreen", "Over fullscreen apps", "Let the dock edge and screen corners open panels while an app or game is fullscreen. Spotlight always opens", "fullscreen_edges", prefs::get_bool(&t, "fullscreen_edges", false));
 }
 
+/// Whether each widget's menu on the screens also has its color, font and background color.
+const WIDGETS_ADVANCED: &str = "desktop_widgets_advanced";
+
+fn widgets_advanced(body: &gtk::Box, t: &toml::Table) {
+    let card = section(body, "Advanced");
+    toggle(&card, "tune", "Show advanced widget settings", "Color, font and background color in each widget's menu on the screens above", WIDGETS_ADVANCED, prefs::get_bool(t, WIDGETS_ADVANCED, false));
+}
+
 fn power(body: &gtk::Box, t: &toml::Table) {
     let power = section(body, "Lock and power");
     let timeline = gtk::DrawingArea::new();
@@ -1901,44 +1909,48 @@ impl DeskWidgets {
                         check.set_action_name(Some(&format!("desk.{}", option_action(key))));
                         panel.append(&check);
                     }
-                    // Automatic follows the wallpaper; the others hold whatever is behind.
-                    let color = gtk::Label::new(Some("Color"));
-                    color.add_css_class("heading");
-                    color.set_xalign(0.0);
-                    panel.append(&color);
-                    let mut first: Option<gtk::CheckButton> = None;
-                    for (value, name) in kit::deskwidget::CHOICES {
-                        let check = gtk::CheckButton::with_label(name);
-                        check.set_action_name(Some(&format!("desk.ink-{}", wd.ink)));
-                        check.set_action_target_value(Some(&value.to_variant()));
-                        match &first {
-                            Some(f) => check.set_group(Some(f)),
-                            None => first = Some(check.clone()),
+                    // Color, font and background color only once asked for, at the page's end.
+                    let stored = prefs::read();
+                    if prefs::get_bool(&stored, WIDGETS_ADVANCED, false) {
+                        // Automatic follows the wallpaper; the others hold whatever is behind.
+                        let color = gtk::Label::new(Some("Color"));
+                        color.add_css_class("heading");
+                        color.set_xalign(0.0);
+                        panel.append(&color);
+                        let mut first: Option<gtk::CheckButton> = None;
+                        for (value, name) in kit::deskwidget::CHOICES {
+                            let check = gtk::CheckButton::with_label(name);
+                            check.set_action_name(Some(&format!("desk.ink-{}", wd.ink)));
+                            check.set_action_target_value(Some(&value.to_variant()));
+                            match &first {
+                                Some(f) => check.set_group(Some(f)),
+                                None => first = Some(check.clone()),
+                            }
+                            panel.append(&check);
                         }
-                        panel.append(&check);
-                    }
-                    let font = gtk::Label::new(Some("Font"));
-                    font.add_css_class("heading");
-                    font.set_xalign(0.0);
-                    panel.append(&font);
-                    let pick = font_picker(wd.ink, &kit::deskwidget::font(&prefs::read(), wd.ink));
-                    pick.set_halign(gtk::Align::Start);
-                    panel.append(&pick);
-                    // Light or dark under the widget, when it has a background.
-                    let tone = gtk::Label::new(Some("Background color"));
-                    tone.add_css_class("heading");
-                    tone.set_xalign(0.0);
-                    panel.append(&tone);
-                    let mut first: Option<gtk::CheckButton> = None;
-                    for (value, name) in kit::deskwidget::TONES {
-                        let check = gtk::CheckButton::with_label(name);
-                        check.set_action_name(Some(&format!("desk.card-{}", wd.ink)));
-                        check.set_action_target_value(Some(&value.to_variant()));
-                        match &first {
-                            Some(f) => check.set_group(Some(f)),
-                            None => first = Some(check.clone()),
+                        let font = gtk::Label::new(Some("Font"));
+                        font.add_css_class("heading");
+                        font.set_xalign(0.0);
+                        panel.append(&font);
+                        let pick = font_picker(wd.ink, &kit::deskwidget::font(&stored, wd.ink));
+                        pick.set_halign(gtk::Align::Start);
+                        panel.append(&pick);
+                        // Light or dark under the widget, when it has a background.
+                        let tone = gtk::Label::new(Some("Background color"));
+                        tone.add_css_class("heading");
+                        tone.set_xalign(0.0);
+                        panel.append(&tone);
+                        let mut first: Option<gtk::CheckButton> = None;
+                        for (value, name) in kit::deskwidget::TONES {
+                            let check = gtk::CheckButton::with_label(name);
+                            check.set_action_name(Some(&format!("desk.card-{}", wd.ink)));
+                            check.set_action_target_value(Some(&value.to_variant()));
+                            match &first {
+                                Some(f) => check.set_group(Some(f)),
+                                None => first = Some(check.clone()),
+                            }
+                            panel.append(&check);
                         }
-                        panel.append(&check);
                     }
                     both.append(&panel);
                 }
