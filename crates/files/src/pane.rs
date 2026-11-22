@@ -460,6 +460,26 @@ impl Pane {
         }
     }
 
+    /// Where the first selected item's picture is, in `target`'s coordinates, while it shows in
+    /// the view: for Quick Look to grow out of it and back into it.
+    pub fn selected_spot(&self, target: &impl IsA<gtk::Widget>) -> Option<gtk::graphene::Rect> {
+        if !self.root.is_mapped() { return None; }
+        let first = self.selected_position()?;
+        let view: &gtk::Widget = match self.view.get() { View::Grid => self.grid.upcast_ref(), View::List => self.list.upcast_ref() };
+        let scroll = view.ancestor(gtk::ScrolledWindow::static_type())?;
+        let (_, widget) = item_widgets(view).into_iter().find(|(pos, _)| *pos == first)?;
+        let image = item_image(&widget).filter(|i| i.is_mapped())?;
+        // Only while it shows: scrolled out of the view, there's nothing to grow from.
+        let seen = image.compute_bounds(&scroll)?;
+        if seen.x() + seen.width() <= 0.0 || seen.y() + seen.height() <= 0.0 || seen.x() >= scroll.width() as f32 || seen.y() >= scroll.height() as f32 { return None; }
+        image.compute_bounds(target)
+    }
+
+    /// Where the first selected item is in the view's order.
+    pub fn selected_position(&self) -> Option<u32> {
+        gtk::BitsetIter::init_first(&self.sel.selection()).map(|(_, first)| first)
+    }
+
     pub fn trash_flights(&self, files: &[gio::File]) -> Vec<TrashFlight> {
         if !self.root.is_mapped() { return Vec::new(); }
         let Some(window) = self.root.root().and_downcast::<gtk::Window>() else { return Vec::new() };

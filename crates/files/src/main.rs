@@ -3,6 +3,7 @@ mod audio;
 mod info;
 mod listing;
 mod look;
+mod moved;
 mod ops;
 mod pane;
 mod popup;

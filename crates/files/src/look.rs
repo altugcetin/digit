@@ -1,6 +1,8 @@
+use crate::moved::Moved;
 use crate::pane::{is_dir, kind, size_text, target_of};
 use gtk::{gdk, gio, glib, pango, prelude::*};
-use std::cell::RefCell;
+use kit::motion::{Curve, Tween};
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -10,7 +12,16 @@ const MARGIN: i32 = 36;
 struct Look {
     root: gtk::Box,
     card: gtk::Box,
+    /// The card, grown out of the file it shows as it opens and back into it as it closes.
+    zoom: Moved,
     stage: gtk::Box,
+    /// The preview, coming in from the side of the file it moved to.
+    shift: Moved,
+    /// Where the file shown is in the view's order, and which move of the preview is the last.
+    at: Cell<Option<u32>>,
+    moves: std::rc::Rc<Cell<u64>>,
+    /// When the card stops moving, for what's heavy to start (see `later`).
+    calm: Cell<i64>,
     title: gtk::Label,
     sub: gtk::Label,
     shown: RefCell<Option<String>>,
@@ -41,12 +52,86 @@ pub fn close() {
         }
         l.root.set_can_target(false);
         let (root, stage) = (l.root.clone(), l.stage.clone());
-        play(&l.root, &l.card, MARGIN, false, move || {
+        let done = move || {
             kit::ui::clear(&stage);
             crate::overlay_remove(&root);
             kit::app::trim_later(600);
-        });
+        };
+        // Back into the file it shows, while that shows in the view; else as every dialog goes.
+        match spot() {
+            Some(spot) if !kit::motion::reduced() => {
+                l.zoom.grow_from(Some((spot.0, &spot.1)));
+                grow(&l, false, done);
+            }
+            _ => play(&l.root, &l.card, MARGIN, false, done),
+        }
     }
+}
+
+/// Where the selected file's picture is in the window, while it shows in the view.
+fn spot() -> Option<(gtk::graphene::Rect, gtk::Widget)> {
+    let window = crate::window()?;
+    let rect = crate::active()?.selected_spot(&window)?;
+    Some((rect, window.upcast()))
+}
+
+/// Quick Look growing out of the file it shows (`opening`), or back into it, then `done`.
+fn grow(look: &Look, opening: bool, done: impl FnOnce() + 'static) {
+    let now = glib::monotonic_time();
+    look.calm.set(now + 360_000);
+    let mut t = Tween::still(if opening { 0.0 } else { 1.0 });
+    if opening {
+        t.go(1.0, now, 360, Curve::new(0.16, 1.0, 0.3, 1.0));
+    } else {
+        t.go(0.0, now, 240, Curve::new(0.4, 0.0, 0.9, 0.6));
+    }
+    let (zoom, done) = (look.zoom.downgrade(), Cell::new(Some(done)));
+    let step = move |root: &gtk::Widget, now: i64| {
+        let v = t.value(now);
+        if let Some(zoom) = zoom.upgrade() {
+            zoom.set_grown(v);
+        }
+        // It shows as it starts to grow, and goes as it's nearly back.
+        root.set_opacity((v * 1.6).min(1.0));
+        t.settled(now)
+    };
+    step(look.root.upcast_ref(), now);
+    look.root.add_tick_callback(move |root, clock| {
+        if !step(root.upcast_ref(), clock.frame_time()) {
+            return glib::ControlFlow::Continue;
+        }
+        if let Some(f) = done.take() {
+            f();
+        }
+        glib::ControlFlow::Break
+    });
+}
+
+/// The preview of the file the selection moved to comes in from its side: `ahead`, from the
+/// right.
+fn slide_in(look: &Look, ahead: bool) {
+    let n = look.moves.get() + 1;
+    look.moves.set(n);
+    let now = glib::monotonic_time();
+    look.calm.set(look.calm.get().max(now + 220_000));
+    let mut t = Tween::still(0.0);
+    t.go(1.0, now, 220, kit::motion::STANDARD);
+    let reach = if ahead { 28.0 } else { -28.0 };
+    let (stage, shift) = (look.stage.downgrade(), look.shift.downgrade());
+    let mine = look.moves.clone();
+    let step = move |now: i64| {
+        let v = t.value(now);
+        if let (Some(stage), Some(shift)) = (stage.upgrade(), shift.upgrade()) {
+            shift.set_dx(reach * (1.0 - v));
+            stage.set_opacity(v);
+        }
+        t.settled(now)
+    };
+    step(now);
+    look.shift.add_tick_callback(move |_, clock| {
+        // A newer move takes over.
+        if mine.get() != n || step(clock.frame_time()) { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+    });
 }
 
 /// Quick Look and every Files dialog share the shell-like settle; `margin` is the card's resting margin.
@@ -61,10 +146,11 @@ fn show() {
     root.set_vexpand(true);
     let card = gtk::Box::new(gtk::Orientation::Vertical, 12);
     card.add_css_class("look");
-    card.set_halign(gtk::Align::Center);
-    card.set_valign(gtk::Align::Center);
-    card.set_margin_top(MARGIN + DROP as i32);
-    card.set_margin_bottom(MARGIN - DROP as i32);
+    // Out of the selected file, while it shows; else as every dialog comes.
+    let from = spot().filter(|_| !kit::motion::reduced());
+    let drop = if from.is_some() { 0 } else { DROP as i32 };
+    card.set_margin_top(MARGIN + drop);
+    card.set_margin_bottom(MARGIN - drop);
     card.set_margin_start(48);
     card.set_margin_end(48);
     let head = gtk::Box::new(gtk::Orientation::Horizontal, 10);
@@ -92,8 +178,15 @@ fn show() {
     stage.add_css_class("stage");
     stage.set_vexpand(true);
     stage.set_hexpand(true);
-    card.append(&stage);
-    root.append(&card);
+    let shift = Moved::new(&stage);
+    card.append(&shift);
+    let zoom = Moved::new(&card);
+    // In the middle of the window, as the card was before it grew.
+    zoom.set_halign(gtk::Align::Center);
+    zoom.set_valign(gtk::Align::Center);
+    zoom.set_hexpand(true);
+    zoom.set_vexpand(true);
+    root.append(&zoom);
     let click = gtk::GestureClick::new();
     let c2 = card.clone();
     click.connect_released(move |g, _, x, y| {
@@ -105,11 +198,23 @@ fn show() {
     });
     root.add_controller(click);
     root.set_opacity(0.0);
-    let look = std::rc::Rc::new(Look { root: root.clone(), card: card.clone(), stage, title, sub, shown: RefCell::new(None), busy: RefCell::new(None) });
-    LOOK.with(|l| *l.borrow_mut() = Some(look));
+    let look = std::rc::Rc::new(Look { root: root.clone(), card: card.clone(), zoom, stage, shift, at: Cell::new(None), moves: std::rc::Rc::default(), calm: Cell::new(0), title, sub, shown: RefCell::new(None), busy: RefCell::new(None) });
+    LOOK.with(|l| *l.borrow_mut() = Some(look.clone()));
     crate::overlay_add(&root);
-    play(&root, &card, MARGIN, true, || {});
+    match from {
+        Some((rect, of)) => {
+            look.zoom.grow_from(Some((rect, &of)));
+            grow(&look, true, || {});
+        }
+        None => play(&root, &card, MARGIN, true, || {}),
+    }
     update();
+}
+
+/// Runs `f` once the card stopped moving, a frame after.
+fn later(look: &Look, f: impl FnOnce() + 'static) {
+    let wait = (look.calm.get() - glib::monotonic_time()).max(0) / 1000 + 30;
+    glib::timeout_add_local_once(std::time::Duration::from_millis(wait as u64), f);
 }
 
 fn showing(stage: &gtk::Box, uri: &str) -> bool {
@@ -129,7 +234,15 @@ pub fn update() {
     if look.shown.borrow().as_deref() == Some(uri.as_str()) {
         return;
     }
-    *look.shown.borrow_mut() = Some(uri.clone());
+    let before = look.shown.replace(Some(uri.clone()));
+    // Moved to another file while open: its preview comes in from that side.
+    let now_at = p.selected_position();
+    if let (Some(_), Some(was), Some(at)) = (before, look.at.replace(now_at), now_at)
+        && was != at
+        && !kit::motion::reduced()
+    {
+        slide_in(&look, at > was);
+    }
     if let Some(b) = look.busy.borrow_mut().take() {
         b.store(true, std::sync::atomic::Ordering::Relaxed);
     }
@@ -175,15 +288,62 @@ pub fn update() {
         return;
     }
     if ct.starts_with("video/") {
-        let v = gtk::Video::for_file(Some(&file));
-        v.set_autoplay(true);
-        v.set_size_request(maxw.min(960), maxh.min(560));
-        look.stage.append(&v);
+        // The player starts once the card stopped moving: setting it up holds everything up a
+        // moment, which would stutter its growing. Meanwhile, and until its first frame is
+        // ready, the video's picture shows where it plays.
+        let size = (maxw.min(960), maxh.min(560));
+        let held = gtk::Overlay::new();
+        held.set_size_request(size.0, size.1);
+        let still = gtk::Picture::new();
+        still.set_content_fit(gtk::ContentFit::Contain);
+        held.set_child(Some(&still));
+        let (pic, icon) = (still.clone(), info.icon());
+        crate::thumbs::texture_for(&file, &info, move |t| match t {
+            Some(t) => pic.set_paintable(Some(&t)),
+            // No picture of it: its icon, as large as the shown file's.
+            None => {
+                let theme = gtk::IconTheme::for_display(&pic.display());
+                let icon = icon.unwrap_or_else(|| gio::ThemedIcon::new("video-x-generic").upcast());
+                pic.set_paintable(Some(&theme.lookup_by_gicon(&icon, 256, pic.scale_factor(), gtk::TextDirection::None, gtk::IconLookupFlags::empty())));
+                pic.set_content_fit(gtk::ContentFit::ScaleDown);
+            }
+        });
+        look.stage.append(&held);
+        let (stage, uri) = (look.stage.clone(), uri.clone());
+        later(&look, move || {
+            if !showing(&stage, &uri) {
+                return;
+            }
+            let v = gtk::Video::for_file(Some(&file));
+            v.set_autoplay(true);
+            v.set_size_request(size.0, size.1);
+            v.set_opacity(0.0);
+            held.add_overlay(&v);
+            let shown = v.downgrade();
+            let reveal = move || {
+                if let Some(v) = shown.upgrade() {
+                    v.set_opacity(1.0);
+                    still.set_visible(false);
+                }
+            };
+            match v.media_stream() {
+                Some(m) if !m.is_prepared() => {
+                    let once = Cell::new(Some(reveal));
+                    m.connect_prepared_notify(move |m| {
+                        if m.is_prepared() && let Some(f) = once.take() {
+                            f();
+                        }
+                    });
+                }
+                _ => reveal(),
+            }
+        });
         return;
     }
     if let Some(path) = file.path().filter(|_| ct.starts_with("audio/")) {
         let stage = look.stage.clone();
         let opened_for = uri.clone();
+        let calm = look.calm.get();
         glib::spawn_future_local(async move {
             let opened = gio::spawn_blocking(move || crate::audio::open(&path)).await.ok().and_then(Result::ok);
             if !showing(&stage, &opened_for) {
@@ -193,6 +353,12 @@ pub fn update() {
                 stage.append(&kit::ui::text("Can't read this file", "sub"));
                 return;
             };
+            // As for a video: the player starts once the card stopped moving.
+            let wait = (calm - glib::monotonic_time()).max(0) / 1000;
+            glib::timeout_future(std::time::Duration::from_millis(wait as u64)).await;
+            if !showing(&stage, &opened_for) {
+                return;
+            }
             let media = gtk::MediaFile::for_input_stream(&crate::audio::Tagless::new(source, audio));
             let v = gtk::Video::for_media_stream(Some(&media));
             v.set_autoplay(true);
