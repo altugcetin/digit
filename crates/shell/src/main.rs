@@ -29,6 +29,7 @@ mod devices;
 mod dock;
 mod draw;
 mod emoji;
+mod filemanager;
 mod free;
 mod gamebar;
 mod glide;
@@ -240,6 +241,7 @@ fn run() {
         });
     }
     ipc::serve(&app);
+    filemanager::start();
     if app.cfg.notifications {
         notify::start(&app);
     }

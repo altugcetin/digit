@@ -484,9 +484,6 @@ build() {
     done
     drop_rec
     launchers
-    for a in digit-store digit-files; do
-        run "$BIN/$a" --register >/dev/null 2>&1 || true
-    done
 }
 
 # The apps' launchers and icons, which a package puts in /usr/share instead.

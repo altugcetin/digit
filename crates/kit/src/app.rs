@@ -1,15 +1,5 @@
 use gtk::{gio, glib, prelude::*};
 
-pub fn claim(desktop: &str, types: &[&str]) {
-    let Some(info) = gio_unix::DesktopAppInfo::new(desktop) else { return };
-    for t in types {
-        let current = gio::AppInfo::default_for_type(t, false).and_then(|a| a.id()).map(|s| s.to_string());
-        if current.as_deref() != Some(desktop) {
-            let _ = info.set_as_default_for_type(t);
-        }
-    }
-}
-
 pub fn control(icon: &str, kind: &str) -> gtk::Button {
     let b = gtk::Button::new();
     b.set_child(Some(&crate::ui::sym(icon)));
@@ -100,49 +90,18 @@ pub fn lean(env: &str) {
     tune_malloc();
 }
 
-pub fn replace(ids: &[&str], by: &str, marker: &str) {
-    let state = std::env::var_os("XDG_STATE_HOME").map(std::path::PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| glib::home_dir().join(".local/state"));
-    let marker = state.join("digit").join(marker);
-    let done = std::fs::read_to_string(&marker).unwrap_or_default();
-    let mut record = done.clone();
-    let apps = glib::user_data_dir().join("applications");
-    for id in ids {
-        if done.lines().any(|l| l == *id) {
-            continue;
-        }
-        let local = apps.join(id);
-        if local.exists() {
-            continue;
-        }
-        let Some(source) = gio_unix::DesktopAppInfo::new(id).and_then(|i| i.filename()) else { continue };
-        let Ok(text) = std::fs::read_to_string(&source) else { continue };
-        let mut out = String::with_capacity(text.len() + 64);
-        let mut group = String::new();
-        for line in text.lines() {
-            if line.starts_with('[') {
-                group = line.to_string();
-                out.push_str(line);
-                out.push('\n');
-                if group == "[Desktop Entry]" {
-                    out.push_str(&format!("NoDisplay=true\nX-Digit-Replaced-By={by}\n"));
-                }
-                continue;
-            }
-            if group == "[Desktop Entry]" && (line.starts_with("NoDisplay=") || line.starts_with("Hidden=")) {
-                continue;
-            }
-            out.push_str(line);
-            out.push('\n');
-        }
-        let _ = std::fs::create_dir_all(&apps);
-        if crate::atomic::write(&local, &out).is_ok() {
-            record.push_str(id);
-            record.push('\n');
-        }
-    }
-    if record != done {
-        let _ = crate::atomic::write(&marker, record);
-    }
+/// The D-Bus interface other apps call to show files in a folder ("Show in folder").
+pub const FILE_MANAGER: &str = "org.freedesktop.FileManager1";
+pub const FILE_MANAGER_XML: &str = r#"<node><interface name="org.freedesktop.FileManager1">
+<method name="ShowFolders"><arg type="as" name="URIs" direction="in"/><arg type="s" name="StartupId" direction="in"/></method>
+<method name="ShowItems"><arg type="as" name="URIs" direction="in"/><arg type="s" name="StartupId" direction="in"/></method>
+<method name="ShowItemProperties"><arg type="as" name="URIs" direction="in"/><arg type="s" name="StartupId" direction="in"/></method>
+</interface></node>"#;
+pub const FILES_DESKTOP: &str = "dev.digit.Files.desktop";
+
+/// The app other than Digit Files the user picked to open folders, if they picked one.
+pub fn folders_elsewhere() -> Option<gio::AppInfo> {
+    gio::AppInfo::default_for_type("inode/directory", false).filter(|a| a.id().is_some_and(|id| id != FILES_DESKTOP))
 }
 
 #[cfg(test)]

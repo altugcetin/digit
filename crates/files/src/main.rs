@@ -1636,11 +1636,9 @@ fn build(app: &gtk::Application, start: &gio::File) -> Rc<Files> {
     f
 }
 
+/// Opens `targets` in a new window, each after the first in a tab of it; with `select`, files
+/// and folders alike show selected in the folder they're in.
 fn open_paths(app: &gtk::Application, targets: Vec<gio::File>, select: bool) {
-    open_paths_in(app, targets, select, false);
-}
-
-fn open_paths_in(app: &gtk::Application, targets: Vec<gio::File>, select: bool, new_window: bool) {
     let targets = if targets.is_empty() { vec![gio::File::for_path(glib::home_dir())] } else { targets };
     let mut first = true;
     for t in targets {
@@ -1649,18 +1647,10 @@ fn open_paths_in(app: &gtk::Application, targets: Vec<gio::File>, select: bool, 
             gio::FileType::Unknown if t.uri_scheme().is_some_and(|s| s != "file") => (t.clone(), None),
             _ => (t.parent().unwrap_or_else(|| t.clone()), Some(t.clone())),
         };
-        match files() {
-            _ if first && new_window => { build(app, &dir); }
-            None => {
-                build(app, &dir);
-            }
-            Some(_) if first => {
-                if active().is_some_and(|p| p.location().equal(&dir)) {
-                } else {
-                    new_tab(&dir);
-                }
-            }
-            Some(_) => new_tab(&dir),
+        if first || files().is_none() {
+            build(app, &dir);
+        } else {
+            new_tab(&dir);
         }
         first = false;
         if let Some(p) = pick {
@@ -1675,7 +1665,6 @@ fn open_paths_in(app: &gtk::Application, targets: Vec<gio::File>, select: bool, 
 
 #[derive(Debug, PartialEq)]
 enum Request {
-    Service,
     Search { query: String, home: bool },
     Open { paths: Vec<String>, select: bool },
 }
@@ -1691,7 +1680,6 @@ fn request(args: &[String]) -> Result<Request, &'static str> {
                 if args.next().is_some() { return Err("Unexpected search argument"); }
                 return Ok(Request::Search { query, home: arg == "--search-home" });
             }
-            "--service" => return Ok(Request::Service),
             "--select" => select = true,
             "--" => { paths.extend(args.cloned()); break; }
             _ if arg.starts_with("--") => return Err("Unknown option"),
@@ -1713,22 +1701,22 @@ fn search_files(app: &gtk::Application, query: &str, home: bool) {
     f.hold.borrow_mut().take();
 }
 
-const BUS_XML: &str = r#"<node><interface name="org.freedesktop.FileManager1">
-<method name="ShowFolders"><arg type="as" name="URIs" direction="in"/><arg type="s" name="StartupId" direction="in"/></method>
-<method name="ShowItems"><arg type="as" name="URIs" direction="in"/><arg type="s" name="StartupId" direction="in"/></method>
-<method name="ShowItemProperties"><arg type="as" name="URIs" direction="in"/><arg type="s" name="StartupId" direction="in"/></method>
-</interface></node>"#;
-
+/// Answers "Show in folder" from other apps while it runs, in a Digit session where folders open
+/// in Files. It takes that over from the shell, which answers it while Files is closed and gets
+/// it back when Files quits; elsewhere the file manager there answers.
 fn serve(app: &gtk::Application) {
+    if std::env::var_os("DIGIT_SESSION").is_none() || kit::app::folders_elsewhere().is_some() {
+        return;
+    }
     let app = app.clone();
     // Owned for as long as Files runs: the id has no drop that would let the name go.
     let _owner = gio::bus_own_name(
         gio::BusType::Session,
-        "org.freedesktop.FileManager1",
-        gio::BusNameOwnerFlags::NONE,
+        kit::app::FILE_MANAGER,
+        gio::BusNameOwnerFlags::REPLACE | gio::BusNameOwnerFlags::ALLOW_REPLACEMENT,
         move |conn, _| {
-            let Ok(node) = gio::DBusNodeInfo::for_xml(BUS_XML) else { return };
-            let Some(iface) = node.lookup_interface("org.freedesktop.FileManager1") else { return };
+            let Ok(node) = gio::DBusNodeInfo::for_xml(kit::app::FILE_MANAGER_XML) else { return };
+            let Some(iface) = node.lookup_interface(kit::app::FILE_MANAGER) else { return };
             let app = app.clone();
             let _ = conn
                 .register_object("/org/freedesktop/FileManager1", &iface)
@@ -1736,6 +1724,8 @@ fn serve(app: &gtk::Application) {
                     let uris: Vec<String> = params.child_value(0).get::<Vec<String>>().unwrap_or_default();
                     let files: Vec<gio::File> = uris.iter().filter(|u| !u.is_empty()).map(|u| gio::File::for_commandline_arg(u)).collect();
                     match method {
+                        // A window of its own, where the user is: the one open may be on
+                        // another workspace, and the app asking can't bring it forward.
                         "ShowFolders" => open_paths(&app, files, false),
                         "ShowItems" => open_paths(&app, files, true),
                         _ => {
@@ -1760,19 +1750,6 @@ fn files_rc() -> Option<Rc<Files>> {
     files()
 }
 
-fn install() {
-    kit::app::claim(&format!("{APP_ID}.desktop"), &["inode/directory"]);
-    kit::app::replace(&["org.gnome.Nautilus.desktop", "org.kde.dolphin.desktop", "nemo.desktop", "thunar.desktop"], &format!("{APP_ID}.desktop"), "files-replaced");
-    let services = glib::user_data_dir().join("dbus-1/services");
-    let file = services.join("org.freedesktop.FileManager1.service");
-    let exe = std::env::current_exe().ok().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "digit-files".into());
-    let exe = if exe.contains("/target/") { glib::home_dir().join(".local/bin/digit-files").to_string_lossy().into_owned() } else { exe };
-    let body = format!("[D-BUS Service]\nName=org.freedesktop.FileManager1\nExec={exe} --service\n");
-    if std::fs::read_to_string(&file).ok().as_deref() != Some(body.as_str()) {
-        let _ = kit::atomic::write(&file, &body);
-    }
-}
-
 /// GStreamer's GL sink shares GTK's EGL display and terminates it when a video closes.
 /// On NVIDIA the window can never draw again, so this wins over libEGL's symbol (see build.rs).
 #[unsafe(no_mangle)]
@@ -1784,17 +1761,12 @@ pub extern "C" fn eglTerminate(_display: *mut std::ffi::c_void) -> u32 {
 kit::layer_shell_first!();
 
 fn main() -> glib::ExitCode {
-    if std::env::args().nth(1).as_deref() == Some("--register") {
-        install();
-        return glib::ExitCode::SUCCESS;
-    }
     kit::app::lean("DIGIT_FILES_RENDERER");
-    // GApplication forwards command lines to the primary, including a --service
-    // instance. NON_UNIQUE would leave searches in a fresh process without its windows.
+    // GApplication forwards command lines to the primary. NON_UNIQUE would leave searches in a
+    // fresh process without its windows.
     let app = gtk::Application::new(Some(APP_ID), gio::ApplicationFlags::HANDLES_COMMAND_LINE);
     app.connect_startup(|app| {
         gtk::Window::set_default_icon_name(APP_ID);
-        install();
         if let Some(display) = gdk::Display::default() {
             kit::style::live_with(&display, css, art::refresh_accent);
         }
@@ -1804,16 +1776,10 @@ fn main() -> glib::ExitCode {
     app.connect_command_line(|app, cmd| {
         let args: Vec<String> = cmd.arguments().iter().skip(1).filter_map(|a| a.to_str().map(str::to_string)).collect();
         match request(&args) {
-            Ok(Request::Service) => {
-                if files().is_none() {
-                    let guard = app.hold();
-                    glib::timeout_add_local_once(std::time::Duration::from_secs(20), move || drop(guard));
-                }
-            }
             Ok(Request::Search { query, home }) => search_files(app, &query, home),
             Ok(Request::Open { paths, select }) => {
                 let targets = paths.iter().map(|a| cmd.create_file_for_arg(a)).collect();
-                open_paths_in(app, targets, select, true);
+                open_paths(app, targets, select);
             }
             Err(message) => {
                 eprintln!("digit-files: {message}");
@@ -1845,9 +1811,8 @@ mod command_tests {
     }
 
     #[test]
-    fn paths_select_and_service_still_parse() {
+    fn paths_and_select_parse() {
         assert_eq!(request(&["--select".into(), "/tmp/a b".into()]), Ok(Request::Open { paths: vec!["/tmp/a b".into()], select: true }));
-        assert_eq!(request(&["--service".into()]), Ok(Request::Service));
-        assert_eq!(request(&["--".into(), "--service".into()]), Ok(Request::Open { paths: vec!["--service".into()], select: false }));
+        assert_eq!(request(&["--".into(), "--select".into()]), Ok(Request::Open { paths: vec!["--select".into()], select: false }));
     }
 }

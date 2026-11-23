@@ -45,7 +45,7 @@ The installer:
 4. builds Digit locally and installs the programs to `~/.local/bin`, with their
    launchers and icons from `data/applications` and `data/icons` in `~/.local/share`,
 5. installs Readex Pro, Rubik and Material Symbols Rounded to
-   `~/.local/share/fonts/digit`, registers the companion apps and sets up Flathub,
+   `~/.local/share/fonts/digit` and sets up Flathub,
 6. adds the “Hyprland with Digit” or “niri with Digit” login session in
    `/usr/share/wayland-sessions` (needs sudo) and prepares its config.
 

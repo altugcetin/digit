@@ -614,22 +614,6 @@ window.install-sheet {{ background: transparent; }}
     )
 }
 
-/// What Store sets up for the user: the links and files it opens. Its launcher and icon come
-/// with the install.
-fn install_files() {
-    for mime in ["x-scheme-handler/appstream", "application/vnd.flatpak.ref", "application/vnd.flatpak", "application/vnd.appimage", "application/x-iso9660-appimage"] {
-        let current = gio::AppInfo::default_for_type(mime, false).and_then(|a| a.id()).map(|s| s.to_string());
-        if current.as_deref() != Some("dev.digit.Store.desktop") {
-            if let Some(info) = gio_unix::DesktopAppInfo::new("dev.digit.Store.desktop") {
-                let _ = info.set_as_default_for_type(mime);
-            }
-        }
-    }
-    kit::app::replace(&REPLACES, "dev.digit.Store.desktop", "store-replaced");
-}
-
-const REPLACES: [&str; 2] = ["org.gnome.Software.desktop", "org.kde.discover.desktop"];
-
 fn target(arg: &str) -> Page {
     if let Some(rest) = arg.strip_prefix("appstream://").or_else(|| arg.strip_prefix("appstream:")) {
         let id = rest.trim_matches('/').trim_end_matches(".desktop");
@@ -980,15 +964,10 @@ fn collections(store: &Rc<Store>) {
 kit::layer_shell_first!();
 
 fn main() -> glib::ExitCode {
-    if std::env::args().nth(1).as_deref() == Some("--register") {
-        install_files();
-        return glib::ExitCode::SUCCESS;
-    }
     kit::app::lean("DIGIT_STORE_RENDERER");
     let app = gtk::Application::new(Some(APP_ID), gio::ApplicationFlags::HANDLES_COMMAND_LINE | gio::ApplicationFlags::HANDLES_OPEN);
     app.connect_startup(|_| {
         gtk::Window::set_default_icon_name(APP_ID);
-        install_files();
         if let Some(display) = gtk::gdk::Display::default() {
             kit::style::live(&display, css);
         }
