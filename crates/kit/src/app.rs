@@ -1,52 +1,5 @@
 use gtk::{gio, glib, prelude::*};
 
-pub struct Entry<'a> {
-    pub id: &'a str,
-    pub name: &'a str,
-    pub generic: &'a str,
-    pub comment: &'a str,
-    pub exec: &'a str,
-    pub letter: &'a str,
-    pub colors: (&'a str, &'a str),
-    pub extra: &'a str,
-}
-
-pub fn install(e: &Entry) -> bool {
-    let (_, w, h) = crate::pixel::cells(e.letter);
-    let cell = 12.0;
-    let (ox, oy) = ((128.0 - w as f64 * cell) / 2.0, (128.0 - h as f64 * cell) / 2.0);
-    let (d, _, _) = crate::pixel::path(e.letter, cell, ox, oy);
-    let svg = format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{}"/><stop offset="1" stop-color="{}"/></linearGradient></defs><rect width="128" height="128" rx="30" fill="url(#g)"/><path d="{d}" fill="#ffffff"/></svg>"##,
-        e.colors.0, e.colors.1
-    );
-    let desktop = format!(
-        "[Desktop Entry]\nType=Application\nName={}\nGenericName={}\nComment={}\nExec={}\nIcon={}\nStartupNotify=true\n{}",
-        e.name, e.generic, e.comment, e.exec, e.id, e.extra
-    );
-    let data = glib::user_data_dir();
-    let mut changed = false;
-    let mut icon = false;
-    for (path, body) in [(data.join(format!("icons/hicolor/scalable/apps/{}.svg", e.id)), svg), (data.join(format!("applications/{}.desktop", e.id)), desktop)] {
-        if std::fs::read_to_string(&path).ok().as_deref() == Some(body.as_str()) {
-            continue;
-        }
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if crate::atomic::write(&path, &body).is_ok() {
-            changed = true;
-            icon |= path.extension().is_some_and(|x| x == "svg");
-        }
-    }
-    if icon {
-        let theme = data.join("icons/hicolor");
-        let argv: [&std::ffi::OsStr; 5] = ["gtk4-update-icon-cache".as_ref(), "-q".as_ref(), "-t".as_ref(), "-f".as_ref(), theme.as_os_str()];
-        let _ = gio::Subprocess::newv(&argv, gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE);
-    }
-    changed
-}
-
 pub fn claim(desktop: &str, types: &[&str]) {
     let Some(info) = gio_unix::DesktopAppInfo::new(desktop) else { return };
     for t in types {
@@ -189,5 +142,56 @@ pub fn replace(ids: &[&str], by: &str, marker: &str) {
     }
     if record != done {
         let _ = crate::atomic::write(&marker, record);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    /// Digit's apps' icons in `data/`: a letter on a gradient, top color first.
+    const ICONS: [(&str, &str, (&str, &str)); 4] = [
+        ("dev.digit.Settings", "d", ("#6a8dff", "#2f55e0")),
+        ("dev.digit.Store", "s", ("#4aa3ff", "#0a64e0")),
+        ("dev.digit.Files", "f", ("#5ec8ff", "#1673e6")),
+        ("dev.digit.Snap", "c", ("#ff6a88", "#e8355b")),
+    ];
+
+    fn icon(letter: &str, (top, bottom): (&str, &str)) -> String {
+        let (_, w, h) = crate::pixel::cells(letter);
+        let cell = 12.0;
+        let (ox, oy) = ((128.0 - w as f64 * cell) / 2.0, (128.0 - h as f64 * cell) / 2.0);
+        let (d, _, _) = crate::pixel::path(letter, cell, ox, oy);
+        format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{top}"/><stop offset="1" stop-color="{bottom}"/></linearGradient></defs><rect width="128" height="128" rx="30" fill="url(#g)"/><path d="{d}" fill="#ffffff"/></svg>
+"##
+        )
+    }
+
+    fn data() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data")
+    }
+
+    /// `DIGIT_WRITE_ICONS=1 cargo test -p kit app_icons` writes them again after a change here.
+    #[test]
+    fn the_app_icons_in_data_are_drawn_from_their_letters() {
+        for (id, letter, colors) in ICONS {
+            let path = data().join(format!("icons/hicolor/scalable/apps/{id}.svg"));
+            let svg = icon(letter, colors);
+            if std::env::var_os("DIGIT_WRITE_ICONS").is_some() {
+                std::fs::write(&path, &svg).unwrap();
+            }
+            assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), svg, "{id}'s icon; DIGIT_WRITE_ICONS=1 writes it");
+        }
+    }
+
+    #[test]
+    fn every_app_entry_in_data_has_its_icon_and_a_plain_command() {
+        for (id, _, _) in ICONS {
+            let text = std::fs::read_to_string(data().join(format!("applications/{id}.desktop"))).unwrap();
+            assert!(text.lines().any(|l| l == format!("Icon={id}")), "{id}");
+            // install.sh puts its own folder before the command; a package leaves it on PATH.
+            assert!(text.lines().filter(|l| l.starts_with("Exec=")).all(|l| l.starts_with("Exec=digit-")), "{id}");
+        }
     }
 }

@@ -1761,16 +1761,6 @@ fn files_rc() -> Option<Rc<Files>> {
 }
 
 fn install() {
-    kit::app::install(&kit::app::Entry {
-        id: APP_ID,
-        name: "Digit Files",
-        generic: "Files",
-        comment: "Browse, find and manage your files",
-        exec: "digit-files %U",
-        letter: "f",
-        colors: ("#5ec8ff", "#1673e6"),
-        extra: "Categories=System;FileTools;FileManager;Utility;Core;\nMimeType=inode/directory;\nKeywords=files;folders;finder;explorer;directory;browser;nautilus;\nActions=new-window;\n\n[Desktop Action new-window]\nName=New Window\nExec=digit-files\n",
-    });
     kit::app::claim(&format!("{APP_ID}.desktop"), &["inode/directory"]);
     kit::app::replace(&["org.gnome.Nautilus.desktop", "org.kde.dolphin.desktop", "nemo.desktop", "thunar.desktop"], &format!("{APP_ID}.desktop"), "files-replaced");
     let services = glib::user_data_dir().join("dbus-1/services");

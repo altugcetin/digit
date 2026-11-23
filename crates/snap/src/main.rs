@@ -59,19 +59,6 @@ button.pill.accent {{ background: {accent}; color: {on_accent}; }}
     )
 }
 
-fn install() {
-    kit::app::install(&kit::app::Entry {
-        id: APP_ID,
-        name: "Digit Screenshot",
-        generic: "Screenshot",
-        comment: "Capture, mark up, pin and share screenshots",
-        exec: "digit-snap",
-        letter: "c",
-        colors: ("#ff6a88", "#e8355b"),
-        extra: "Categories=Utility;Graphics;\nKeywords=screenshot;capture;snip;print;annotate;markup;\nActions=screen;window;delay;\n\n[Desktop Action screen]\nName=Whole Screen\nExec=digit-snap screen\n\n[Desktop Action window]\nName=Window\nExec=digit-snap window\n\n[Desktop Action delay]\nName=In 3 Seconds\nExec=digit-snap --delay 3\n",
-    });
-}
-
 fn countdown(app: &gtk::Application, secs: u32, then: impl FnOnce() + 'static) {
     if secs == 0 {
         then();
@@ -177,15 +164,10 @@ fn finish(app: &gtk::Application, shot: capture::Shot, r: windows::Rect) {
 kit::layer_shell_first!();
 
 fn main() -> glib::ExitCode {
-    if std::env::args().nth(1).as_deref() == Some("--register") {
-        install();
-        return glib::ExitCode::SUCCESS;
-    }
     kit::app::lean("DIGIT_SNAP_RENDERER");
     let app = gtk::Application::new(Some(APP_ID), gio::ApplicationFlags::HANDLES_COMMAND_LINE);
     app.connect_startup(|_| {
         gtk::Window::set_default_icon_name(APP_ID);
-        install();
         if let Some(display) = gdk::Display::default() {
             kit::style::live(&display, css);
         }

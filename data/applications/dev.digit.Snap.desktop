@@ -1,0 +1,23 @@
+[Desktop Entry]
+Type=Application
+Name=Digit Screenshot
+GenericName=Screenshot
+Comment=Capture, mark up, pin and share screenshots
+Exec=digit-snap
+Icon=dev.digit.Snap
+StartupNotify=true
+Categories=Utility;Graphics;
+Keywords=screenshot;capture;snip;print;annotate;markup;
+Actions=screen;window;delay;
+
+[Desktop Action screen]
+Name=Whole Screen
+Exec=digit-snap screen
+
+[Desktop Action window]
+Name=Window
+Exec=digit-snap window
+
+[Desktop Action delay]
+Name=In 3 Seconds
+Exec=digit-snap --delay 3

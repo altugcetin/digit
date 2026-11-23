@@ -614,37 +614,9 @@ window.install-sheet {{ background: transparent; }}
     )
 }
 
+/// What Store sets up for the user: the links and files it opens. Its launcher and icon come
+/// with the install.
 fn install_files() {
-    let (_, w, h) = kit::pixel::cells("s");
-    let cell = 12.0;
-    let (ox, oy) = ((128.0 - w as f64 * cell) / 2.0, (128.0 - h as f64 * cell) / 2.0);
-    let (d, _, _) = kit::pixel::path("s", cell, ox, oy);
-    let svg = format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4aa3ff"/><stop offset="1" stop-color="#0a64e0"/></linearGradient></defs><rect width="128" height="128" rx="30" fill="url(#g)"/><path d="{d}" fill="#ffffff"/></svg>"##);
-    let data = glib::user_data_dir();
-    // The full path, as Files' service file has: an app started by D-Bus may not have
-    // ~/.local/bin on its PATH. A build run from the source tree keeps the plain name.
-    let exe = std::fs::read_link("/proc/self/exe").ok().filter(|e| e.file_name().is_some_and(|n| n == "digit-store") && !e.components().any(|c| c.as_os_str() == "target"));
-    let exec = exe.map_or_else(|| "digit-store".to_string(), |e| format!("\"{}\"", e.to_string_lossy()));
-    let desktop = format!(
-        "[Desktop Entry]\nType=Application\nName=Digit Store\nGenericName=Software Store\nComment=Find, get and update apps from Flathub\nKeywords=Software;Store;App Store;Apps;Flathub;Flatpak;Install;Uninstall;Update;Updates;Program;\nExec={exec} %U\nIcon={APP_ID}\nCategories=System;PackageManager;\nMimeType=x-scheme-handler/appstream;application/vnd.flatpak.ref;application/vnd.flatpak;application/vnd.appimage;application/x-iso9660-appimage;\nStartupNotify=true\n"
-    );
-    let mut icon_changed = false;
-    for (path, body) in [(data.join(format!("icons/hicolor/scalable/apps/{APP_ID}.svg")), svg), (data.join(format!("applications/{APP_ID}.desktop")), desktop)] {
-        if std::fs::read_to_string(&path).ok().as_deref() == Some(body.as_str()) {
-            continue;
-        }
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if kit::atomic::write(&path, &body).is_ok() && path.extension().is_some_and(|e| e == "svg") {
-            icon_changed = true;
-        }
-    }
-    if icon_changed {
-        let theme = data.join("icons/hicolor");
-        let argv: [&std::ffi::OsStr; 5] = ["gtk4-update-icon-cache".as_ref(), "-q".as_ref(), "-t".as_ref(), "-f".as_ref(), theme.as_os_str()];
-        let _ = gio::Subprocess::newv(&argv, gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE);
-    }
     for mime in ["x-scheme-handler/appstream", "application/vnd.flatpak.ref", "application/vnd.flatpak", "application/vnd.appimage", "application/x-iso9660-appimage"] {
         let current = gio::AppInfo::default_for_type(mime, false).and_then(|a| a.id()).map(|s| s.to_string());
         if current.as_deref() != Some("dev.digit.Store.desktop") {

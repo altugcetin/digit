@@ -215,36 +215,6 @@ fn refresh_brand() {
     });
 }
 
-fn install() {
-    let ink = style::ink();
-    let (_, w, h) = kit::pixel::cells("d");
-    let cell = 12.0;
-    let (ox, oy) = ((128.0 - w as f64 * cell) / 2.0, (128.0 - h as f64 * cell) / 2.0);
-    let (d, _, _) = kit::pixel::path("d", cell, ox, oy);
-    let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128"><rect width="128" height="128" rx="30" fill="{}"/><path d="{d}" fill="{}"/></svg>"#, ink.accent, ink.on_accent);
-    let data = glib::user_data_dir();
-    let desktop = format!("[Desktop Entry]\nType=Application\nName=Digit Settings\nGenericName=Settings\nComment=System, apps, drivers and desktop settings\nExec=digit-settings\nIcon={APP_ID}\nCategories=Settings;System;\nStartupNotify=true\n");
-    for (path, body) in [(data.join(format!("icons/hicolor/scalable/apps/{APP_ID}.svg")), svg), (data.join(format!("applications/{APP_ID}.desktop")), desktop)] {
-        if std::fs::read_to_string(&path).ok().as_deref() == Some(body.as_str()) {
-            continue;
-        }
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let tmp = path.with_extension("new");
-        if std::fs::write(&tmp, &body).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
-        }
-        if path.extension().is_some_and(|e| e == "svg") {
-            let theme = data.join("icons/hicolor");
-            let argv: [&std::ffi::OsStr; 5] = ["gtk4-update-icon-cache".as_ref(), "-q".as_ref(), "-t".as_ref(), "-f".as_ref(), theme.as_os_str()];
-            if gio::Subprocess::newv(&argv, gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE).is_err() {
-                let _ = std::fs::File::open(&theme).and_then(|f| f.set_modified(std::time::SystemTime::now()));
-            }
-        }
-    }
-}
-
 fn control(icon: &str, kind: &str) -> gtk::Button {
     let b = gtk::Button::new();
     b.set_child(Some(&ui::sym(icon)));
@@ -636,10 +606,6 @@ fn present(app: &gtk::Application, page: Option<&str>) {
 kit::layer_shell_first!();
 
 fn main() -> glib::ExitCode {
-    if std::env::args().nth(1).as_deref() == Some("--register") {
-        install();
-        return glib::ExitCode::SUCCESS;
-    }
     if std::env::args().nth(1).as_deref() == Some("--prepare-session") {
         return match kit::setup::prepare(&std::env::args().nth(2).unwrap_or_default()) {
             Ok(()) => glib::ExitCode::SUCCESS,
@@ -698,7 +664,6 @@ fn main() -> glib::ExitCode {
         };
     }
     kit::app::lean("DIGIT_SETTINGS_RENDERER");
-    install();
     let app = gtk::Application::new(Some(APP_ID), gio::ApplicationFlags::HANDLES_COMMAND_LINE);
     app.connect_startup(|_| gtk::Window::set_default_icon_name(APP_ID));
     app.connect_shutdown(|_| displays::revert_pending());

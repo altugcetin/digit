@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Digit Store
+GenericName=Software Store
+Comment=Find, get and update apps from Flathub
+Keywords=Software;Store;App Store;Apps;Flathub;Flatpak;Install;Uninstall;Update;Updates;Program;
+Exec=digit-store %U
+Icon=dev.digit.Store
+Categories=System;PackageManager;
+MimeType=x-scheme-handler/appstream;application/vnd.flatpak.ref;application/vnd.flatpak;application/vnd.appimage;application/x-iso9660-appimage;
+StartupNotify=true

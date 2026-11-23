@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Digit Files
+GenericName=Files
+Comment=Browse, find and manage your files
+Exec=digit-files %U
+Icon=dev.digit.Files
+StartupNotify=true
+Categories=System;FileTools;FileManager;Utility;Core;
+MimeType=inode/directory;
+Keywords=files;folders;finder;explorer;directory;browser;
+Actions=new-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=digit-files

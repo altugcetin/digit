@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Digit Settings
+GenericName=Settings
+Comment=System, apps, drivers and desktop settings
+Exec=digit-settings
+Icon=dev.digit.Settings
+Categories=Settings;System;
+StartupNotify=true

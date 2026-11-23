@@ -483,9 +483,30 @@ build() {
         run mv -f "$BIN/$a.new" "$BIN/$a"
     done
     drop_rec
-    for a in digit-settings digit-store digit-files digit-snap; do
+    launchers
+    for a in digit-store digit-files; do
         run "$BIN/$a" --register >/dev/null 2>&1 || true
     done
+}
+
+# The apps' launchers and icons, which a package puts in /usr/share instead.
+launchers() {
+    local f out
+    for f in "$ROOT"/data/icons/hicolor/scalable/apps/*.svg; do
+        run install -Dm644 "$f" "$DATA/icons/hicolor/scalable/apps/${f##*/}"
+    done
+    run mkdir -p "$DATA/applications"
+    for f in "$ROOT"/data/applications/*.desktop; do
+        out="$DATA/applications/${f##*/}"
+        # By their full path: an app opened from a link or by D-Bus may not have $BIN on its PATH.
+        if [[ $BIN =~ ^[A-Za-z0-9_./+-]+$ ]]; then
+            $DRY && { info "[dry-run] $f -> $out with Exec=$BIN/..."; continue; }
+            sed "s|^Exec=digit-|Exec=$BIN/digit-|" "$f" >"$out.new" && mv -f "$out.new" "$out"
+        else
+            run install -m644 "$f" "$out"
+        fi
+    done
+    command -v gtk4-update-icon-cache >/dev/null 2>&1 && run gtk4-update-icon-cache -q -t -f "$DATA/icons/hicolor" || true
 }
 
 flathub() {
