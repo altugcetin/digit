@@ -105,7 +105,7 @@ fn next_tiling_with_prefs(now: &str, t: &toml::Table) -> (&'static str, &'static
     let off: Vec<&str> = t.get("hypr_tiling_cycle_off").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
     let on: Vec<(&'static str, &'static str)> = TILINGS.iter().copied().filter(|l| !off.contains(&l.0)).collect();
     let on = if on.len() < 2 { TILINGS.to_vec() } else { on };
-    let now = kit::hyprconf::selected_layout(t, now);
+    let now = kit::hyprconf::layout(now);
     let start = TILINGS.iter().position(|l| l.0 == now).unwrap_or(0);
     (1..=TILINGS.len()).map(|k| TILINGS[(start + k) % TILINGS.len()]).find(|l| on.contains(l)).unwrap_or(on[0])
 }
@@ -480,9 +480,6 @@ mod mode_tests {
     fn hyprland_cycles_native_layouts_and_respects_disabled_modes() {
         let prefs = toml::Table::new();
         assert_eq!(next_tiling_with_prefs("scrolling", &prefs).0, "dwindle");
-        assert_eq!(next_tiling_with_prefs("floating", &prefs).0, "master");
-        let prefs = "hypr_tiled_layout = 'master'".parse().unwrap();
-        assert_eq!(next_tiling_with_prefs("floating", &prefs).0, "scrolling");
         let prefs = "hypr_tiling_cycle_off = ['master']".parse().unwrap();
         assert_eq!(next_tiling_with_prefs("scrolling", &prefs).0, "dwindle");
         assert_eq!(next_tiling_with_prefs("dwindle", &prefs).0, "scrolling");

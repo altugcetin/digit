@@ -180,15 +180,15 @@ mod tests {
             set("answer", 42.into()).unwrap();
             assert_eq!(read().get("answer").and_then(toml::Value::as_integer), Some(42));
             assert!(problem().is_none());
-            set_many(&[("hypr_tiling", "floating".into()), ("hypr_tiled_layout", "master".into())]).unwrap();
+            set_many(&[("hypr_tiling", "master".into()), ("hypr_window_anim", "popin".into())]).unwrap();
             let prefs = read();
-            assert_eq!(text(&prefs, "hypr_tiling", ""), "floating");
-            assert_eq!(text(&prefs, "hypr_tiled_layout", ""), "master");
+            assert_eq!(text(&prefs, "hypr_tiling", ""), "master");
+            assert_eq!(text(&prefs, "hypr_window_anim", ""), "popin");
             for body in [b"answer = 42\n\xff".as_slice(), b"answer = 42\nbroken = [".as_slice()] {
                 std::fs::write(path(), body).unwrap();
                 assert!(set("answer", 43.into()).is_err());
                 assert!(unset("answer").is_err());
-                assert!(set_many(&[("hypr_tiling", "dwindle".into()), ("hypr_tiled_layout", "scrolling".into())]).is_err());
+                assert!(set_many(&[("hypr_tiling", "dwindle".into()), ("hypr_window_anim", "slide".into())]).is_err());
                 assert!(problem().is_some());
                 if body.is_ascii() {
                     assert!(problem().unwrap().contains("line 2"));

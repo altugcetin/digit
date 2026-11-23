@@ -201,13 +201,12 @@ mod tests {
     }
 
     #[test]
-    fn invalid_values_disable_a_corner_and_legacy_keys_are_ignored() {
+    fn invalid_values_disable_a_corner() {
         for p in [None, Workspaces, Control] {
             assert_eq!(Panel::parse(p.value()), p);
         }
         assert_eq!(Panel::parse("unknown"), None);
-        let prefs = "hot_corner = false\ncontrol_corner = false".parse().unwrap();
-        assert_eq!(read(&prefs), [Workspaces, None, None, Control]);
+        assert_eq!(read(&toml::Table::new()), [Workspaces, None, None, Control]);
         let prefs = "corner_top_left = false\ncorner_bottom_right = 'unknown'".parse().unwrap();
         assert_eq!(read(&prefs), [None; 4]);
     }

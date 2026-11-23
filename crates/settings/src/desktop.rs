@@ -1031,10 +1031,8 @@ fn effects(body: &gtk::Box, t: &toml::Table) {
 fn roundness(body: &gtk::Box, t: &toml::Table) {
     let card = section(body, "Corners");
     corners(&card, "rounded_corner", "Apps", "Cards, menus, buttons and dialogs", "ui_round", prefs::get_f64(t, "ui_round", 1.0));
-    let legacy = prefs::get_f64(t, "screen_corners", 0.0);
-    let screen_row = toggle(&card, "fit_screen", "Rounded screen corners", "Softens the corners of every display", "screen_round", prefs::get_bool(t, "screen_round", legacy >= 2.0));
-    let screen_follows = prefs::get_bool(t, "screen_round_follow", t.contains_key("screen_round") || legacy < 2.0);
-    let follows = prefs::get_bool(t, "notch_round_follow", true) && screen_follows;
+    let screen_row = toggle(&card, "fit_screen", "Rounded screen corners", "Softens the corners of every display", "screen_round", prefs::get_bool(t, "screen_round", false));
+    let follows = prefs::get_bool(t, "notch_round_follow", true) && prefs::get_bool(t, "screen_round_follow", true);
     let (follow_row, end) = ui::row(Some("join"), "Notch and screen corners follow", "They round like the apps. Turn off to set their own below");
     let follow = gtk::Switch::new();
     follow.set_valign(gtk::Align::Center);
@@ -1042,7 +1040,7 @@ fn roundness(body: &gtk::Box, t: &toml::Table) {
     end.append(&follow);
     card.append(&follow_row);
     let notch_own = corners(&card, "toolbar", "Notch corners", "", "notch_round", prefs::get_f64(t, "notch_round", 1.0));
-    let screen_own = slider(&card, "rounded_corner", "Screen corner radius", "", "screen_corners", (4.0, 24.0, 1.0), if legacy >= 4.0 { legacy.min(24.0) } else { 12.0 }, 12.0, 0);
+    let screen_own = slider(&card, "rounded_corner", "Screen corner radius", "", "screen_corners", (4.0, 24.0, 1.0), prefs::get_f64(t, "screen_corners", 12.0).clamp(4.0, 24.0), 12.0, 0);
     // Their own roundness only matters while they don't follow, and the screen's while it's on.
     if let Some(on) = find_switch(screen_row.upcast_ref()) {
         let sync = {

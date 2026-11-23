@@ -249,14 +249,8 @@ pub fn layout(value: &str) -> &str {
     LAYOUTS.iter().find(|(key, _)| *key == value).map_or("dwindle", |(key, _)| *key)
 }
 
-/// Old floating preferences fall back to the stored real layout without rewriting them.
-pub fn selected_layout<'a>(prefs: &'a toml::Table, value: &'a str) -> &'a str {
-    let value = if value == "floating" { prefs.get("hypr_tiled_layout").and_then(toml::Value::as_str).unwrap_or("dwindle") } else { value };
-    layout(value)
-}
-
 pub fn tiled_layout(prefs: &toml::Table) -> &str {
-    selected_layout(prefs, prefs.get("hypr_tiling").and_then(toml::Value::as_str).unwrap_or("dwindle"))
+    layout(prefs.get("hypr_tiling").and_then(toml::Value::as_str).unwrap_or("dwindle"))
 }
 
 pub(crate) fn fill(template: &str, values: &[(&str, &str)]) -> String {
@@ -306,7 +300,7 @@ fn workspaces(prefs: &toml::Table) -> String {
             if let (Ok(id), Some(mode)) = (id.parse::<u32>(), mode.as_str())
                 && id > 0 && id <= i32::MAX as u32
             {
-                rules.push_str(&format!("hl.workspace_rule({{ workspace = \"{id}\", layout = {} }})\n", lua_str(selected_layout(prefs, mode))));
+                rules.push_str(&format!("hl.workspace_rule({{ workspace = \"{id}\", layout = {} }})\n", lua_str(layout(mode))));
             }
         }
     }
@@ -548,14 +542,6 @@ pub(crate) fn write_if_changed(path: &Path, body: &str) -> std::io::Result<bool>
     Ok(true)
 }
 
-fn remove_legacy_floating(dir: &Path) -> std::io::Result<bool> {
-    match std::fs::remove_file(dir.join("digit-floating.lua")) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e),
-    }
-}
-
 /// Rewrites digit's folder from digit's settings. Display geometry is only created when
 /// missing; workspace assignments are regenerated from connector-keyed preferences.
 pub fn sync() -> Result<bool, String> {
@@ -583,7 +569,6 @@ fn generate() -> Result<bool, String> {
     changed |= write_if_changed(&d.join("digit-decorations.lua"), &decorations()).map_err(e)?;
     let prefs = crate::prefs::read();
     changed |= write_if_changed(&d.join("digit-primary.lua"), &primary(&prefs)).map_err(e)?;
-    changed |= remove_legacy_floating(&d).map_err(e)?;
     let workspaces_path = d.join("digit-workspaces.lua");
     let managed = std::fs::read_to_string(&workspaces_path).is_ok_and(|text| text.starts_with(WORKSPACES.lines().next().unwrap_or_default()));
     if prefs.contains_key("spaces_always") || prefs.contains_key("monitor_workspaces") || prefs.contains_key("primary_monitor") || prefs.contains_key("hypr_workspace_layouts") || managed || !workspaces_path.exists() {
@@ -721,9 +706,8 @@ mod tests {
     }
 
     #[test]
-    fn stored_floating_uses_the_real_layout_without_migration() {
-        let prefs = "hypr_tiling = 'floating'\nhypr_tiled_layout = 'master'\n[hypr_workspace_layouts]\n1 = 'floating'\n2 = 'scrolling'\n0 = 'floating'\nbad = 'floating'".parse().unwrap();
-        let stored = toml::to_string(&prefs).unwrap();
+    fn the_stored_layout_and_each_workspace_layout_render() {
+        let prefs = "hypr_tiling = 'master'\n[hypr_workspace_layouts]\n1 = 'master'\n2 = 'scrolling'\n0 = 'master'\nbad = 'master'".parse().unwrap();
         assert_eq!(LAYOUTS.iter().map(|l| l.0).collect::<Vec<_>>(), ["dwindle", "master", "scrolling"]);
         assert_eq!(tiled_layout(&prefs), "master");
         assert!(compositor_with(&prefs, false, false).contains("layout = \"master\""));
@@ -731,14 +715,7 @@ mod tests {
         assert!(rendered.contains("workspace = \"1\", layout = \"master\""));
         assert!(rendered.contains("workspace = \"2\", layout = \"scrolling\""));
         assert_eq!(rendered.matches("hl.workspace_rule(").count(), 2);
-        assert!(!rendered.contains("floating"));
-        for body in ["hypr_tiling = 'floating'", "hypr_tiling = 'floating'\nhypr_tiled_layout = 'floating'", "hypr_tiling = 'floating'\nhypr_tiled_layout = 'invalid'"] {
-            let prefs = body.parse().unwrap();
-            assert_eq!(tiled_layout(&prefs), "dwindle");
-            assert_eq!(selected_layout(&prefs, "floating"), "dwindle");
-        }
-        assert_eq!(toml::to_string(&prefs).unwrap(), stored);
-        assert!(!INIT.contains("digit-floating"));
+        assert_eq!(tiled_layout(&"hypr_tiling = 'unknown'".parse().unwrap()), "dwindle");
         assert!(MAIN.find("require(\"digit\")").unwrap() < MAIN.find("require(\"user\")").unwrap());
     }
 
@@ -746,7 +723,6 @@ mod tests {
     fn floating_module_bindings_use_native_actions_or_are_unsupported() {
         let binds = keybinds::defaults();
         let rendered = render_keybinds(&binds);
-        assert!(!rendered.contains("digit-floating"));
         assert!(rendered.contains("hl.dsp.window.float({ action = \"toggle\" })"));
         assert!(rendered.contains("bind(\"SUPER + mouse:272\", hl.dsp.window.drag(), { mouse = true })"));
         // Toward the workspaces, digit's own helper moves the window; the other way, Hyprland.
@@ -763,18 +739,6 @@ mod tests {
             assert!(!crate::niriconf::supports(b));
             assert!(!rendered.contains(&format!("bind({},", lua_str(&b.keys))));
         }
-    }
-
-    #[test]
-    fn config_cleanup_removes_only_the_obsolete_generated_file() {
-        let root = std::env::temp_dir().join(format!("digit-hypr-cleanup-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("digit-floating.lua"), "old").unwrap();
-        std::fs::write(root.join("user.lua"), "keep").unwrap();
-        assert!(remove_legacy_floating(&root).unwrap());
-        assert!(!remove_legacy_floating(&root).unwrap());
-        assert_eq!(std::fs::read_to_string(root.join("user.lua")).unwrap(), "keep");
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -140,9 +140,9 @@ pub struct Config {
     pub desktop_fonts: toml::Table,
     pub desktop_cards: toml::Table,
     /// Rounded screen corners: on/off, whether they follow the app roundness, and the radius
-    /// used when they don't. Older configs only had the radius, where 0 meant off.
-    pub screen_round: Option<bool>,
-    pub screen_round_follow: Option<bool>,
+    /// used when they don't.
+    pub screen_round: bool,
+    pub screen_round_follow: bool,
     pub screen_corners: f64,
     pub tray: bool,
     pub mic_guard: bool,
@@ -153,20 +153,10 @@ const SCREEN_CORNER: f64 = 12.0;
 
 /// The radius the screen corners are drawn with, in pixels; 0 when they're off.
 fn screen_radius(c: &Config) -> f64 {
-    let legacy = c.screen_corners >= 2.0;
-    if !c.screen_round.unwrap_or(legacy) {
+    if !c.screen_round {
         return 0.0;
     }
-    // A radius set before the toggle existed keeps applying until the user picks otherwise.
-    let follow = c.screen_round_follow.unwrap_or(c.screen_round.is_some() || !legacy);
-    let r = if follow {
-        SCREEN_CORNER * c.ui_round.clamp(0.1, 1.8)
-    } else if c.screen_corners >= 4.0 {
-        c.screen_corners
-    } else {
-        // Settings shows the default radius until the slider is first moved.
-        SCREEN_CORNER
-    };
+    let r = if c.screen_round_follow { SCREEN_CORNER * c.ui_round.clamp(0.1, 1.8) } else { c.screen_corners };
     r.clamp(4.0, 40.0).round()
 }
 
@@ -282,9 +272,9 @@ impl Default for Config {
             desktop_sizes: toml::Table::new(),
             desktop_fonts: toml::Table::new(),
             desktop_cards: toml::Table::new(),
-            screen_round: None,
-            screen_round_follow: None,
-            screen_corners: 0.0,
+            screen_round: false,
+            screen_round_follow: true,
+            screen_corners: SCREEN_CORNER,
             tray: true,
             mic_guard: true,
         }
@@ -684,8 +674,6 @@ mod persistence_tests {
         assert_eq!(radius("screen_round = true\nscreen_round_follow = false"), 12.0);
         assert_eq!(radius("screen_round = true\nscreen_round_follow = false\nscreen_corners = 18.0"), 18.0);
         assert_eq!(radius("screen_round = false\nscreen_corners = 18.0"), 0.0);
-        // A radius from before the toggle keeps applying as an override.
-        assert_eq!(radius("screen_corners = 10.0\nui_round = 1.6"), 10.0);
     }
 
     #[test]
