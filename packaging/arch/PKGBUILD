@@ -8,7 +8,7 @@ pkgver=r0.0000000
 pkgrel=1
 pkgdesc='A calm GTK4 desktop for Hyprland and niri'
 arch=(x86_64)
-url='https://github.com/gonnachange/gonnachange'
+url='https://github.com/altugcetin/digit'
 license=(MIT)
 depends=(
   gtk4 gtk4-layer-shell glib2 cairo pango gdk-pixbuf2 graphene wayland pam
@@ -22,6 +22,18 @@ optdepends=(
   'niri: compositor for the "niri with Digit" session'
   'xdg-desktop-portal-gnome: screen sharing on niri'
   'kitty: terminal for Super+Return when no other is installed'
+  'pipewire-pulse: volume and the sound mixer'
+  'wireplumber: volume when the PulseAudio connection is missing'
+  'networkmanager: Wi-Fi and network in Control Center and Settings'
+  'bluez: Bluetooth in Control Center and Settings'
+  'power-profiles-daemon: power modes in Control Center'
+  'fwupd: firmware updates in Settings'
+  'wl-clipboard: screenshots stay on the clipboard after Snap closes'
+  'tesseract: copying text from a screenshot'
+  'scrcpy: mirroring a phone screen'
+  'android-tools: mirroring a phone over USB'
+  'bubblewrap: thumbnails from other apps in Digit Files'
+  'libjxl: JPEG XL app icons in Digit Store'
   'flatpak: apps from Flathub in Digit Store'
   'archlinux-appstream-data: system apps in Digit Store'
   'packagekit: installing drivers and packages from Settings and Files'
