@@ -47,7 +47,11 @@ The installer:
 5. installs Readex Pro, Rubik and Material Symbols Rounded to
    `~/.local/share/fonts/digit` and sets up Flathub,
 6. adds the “Hyprland with Digit” or “niri with Digit” login session in
-   `/usr/share/wayland-sessions` (needs sudo) and prepares its config.
+   `/usr/share/wayland-sessions` and the lock screen's PAM service in
+   `/etc/pam.d/digit` (needs sudo), and prepares its config.
+
+When Digit is already installed from a package, the installer stops and says how
+to remove the package first.
 
 Both text and graphical installs add `kitty` when it is missing, even if another
 terminal is installed. Super+Return keeps the existing terminal detection.

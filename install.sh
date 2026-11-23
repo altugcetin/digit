@@ -298,6 +298,20 @@ install_wm() {
     esac
 }
 
+# The package that installed the file $1, when one did.
+owner_pkg() {
+    case $FAMILY in
+        arch) pacman -Qqo "$1" 2>/dev/null ;;
+        fedora|suse) rpm -qf --qf '%{NAME}\n' "$1" 2>/dev/null ;;
+        *) return 1 ;;
+    esac
+}
+
+# Files of Digit's that a package owns are left to it.
+unowned() {
+    [ -e "$1" ] && ! owner_pkg "$1" >/dev/null
+}
+
 installed_pkg() {
     case $FAMILY in
         arch) pacman -Qq "$1" >/dev/null 2>&1 ;;
@@ -482,7 +496,6 @@ build() {
         run install -m 755 "$ROOT/target/release/$a" "$BIN/$a.new"
         run mv -f "$BIN/$a.new" "$BIN/$a"
     done
-    drop_rec
     launchers
 }
 
@@ -569,30 +582,25 @@ sessions() {
         fi
         rm -f "$tmp"
     fi
+    # The lock screen's own PAM service, which signs in as login does; one already there is kept.
+    if [ ! -e /etc/pam.d/digit ]; then
+        superuser install -D -m 644 "$ROOT/data/pam/digit" /etc/pam.d/digit || warn "Could not add Digit's PAM service; the lock screen uses login's."
+    fi
     # Write the config now, so it is there to look at before the first login.
     if $NVIDIA_ENV; then run "$BIN/digit-settings" --nvidia-env on || warn "Could not add the NVIDIA variables; turn them on in Settings > Windows."; fi
     run "$BIN/digit-settings" --prepare-session "$w" || warn "Could not write Digit's $w config yet; the session writes it when it starts."
 }
 
-# Older installs let D-Bus start the whole shell for the first notification, which raced the
-# compositor's own autostart. digit now starts only from the compositor config.
-drop_dbus() {
-    local file="$DATA/dbus-1/services/org.freedesktop.Notifications.service"
-    if grep -qs "$BIN/digit" "$file"; then
-        run rm -f "$file"
-        info "Removed the old D-Bus notification autostart; your compositor config starts digit now."
-    fi
-}
-
-# Recording lives in the shell, with its settings in Settings > Recording.
-drop_rec() {
-    run rm -f "$BIN/digit-rec" "$DATA/applications/dev.digit.Rec.desktop" "$DATA/icons/hicolor/scalable/apps/dev.digit.Rec.svg"
-}
-
 uninstall() {
     bold "Removing digit"
     run pkill -x digit 2>/dev/null || true
-    superuser rm -f /usr/share/wayland-sessions/digit-hyprland.desktop /usr/share/wayland-sessions/digit-niri.desktop
+    local f
+    for f in /usr/share/wayland-sessions/digit-hyprland.desktop /usr/share/wayland-sessions/digit-niri.desktop; do
+        if unowned "$f"; then superuser rm -f "$f"; fi
+    done
+    if unowned /etc/pam.d/digit && cmp -s "$ROOT/data/pam/digit" /etc/pam.d/digit; then
+        superuser rm -f /etc/pam.d/digit
+    fi
     run rm -f "$BIN/digit-session"
     local a
     for a in "${APPS[@]}"; do
@@ -600,9 +608,6 @@ uninstall() {
             run rm -f "$BIN/$a"
         fi
     done
-    drop_dbus
-    drop_rec
-    local f
     for f in Settings Store Files Snap; do
         run rm -f "$DATA/applications/dev.digit.$f.desktop" "$DATA/icons/hicolor/scalable/apps/dev.digit.$f.svg"
     done
@@ -726,6 +731,12 @@ main() {
     step system "Detecting system"
     distro
     [ "$FAMILY" != unsupported ] || die "$NAME_SHOWN is not supported yet. Supported: openSUSE, Fedora, Arch and Arch-based."
+    local pkg
+    if ! $REMOVE && pkg=$(owner_pkg /usr/bin/digit); then
+        local remove="sudo pacman -R"
+        case $FAMILY in fedora) remove="sudo dnf remove" ;; suse) remove="sudo zypper remove" ;; esac
+        die "Digit is installed from the $pkg package, which keeps it updated. To build it from this checkout instead, remove that first: $remove $pkg"
+    fi
     if $REMOVE; then
         uninstall
         $ENGINE && echo '@@digit done'
@@ -752,7 +763,6 @@ main() {
     libs
     build
     sessions
-    drop_dbus
     flathub
     fonts
     case ":$PATH:" in
