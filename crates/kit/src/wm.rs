@@ -385,14 +385,17 @@ pub fn fullscreen_on(output: &str) -> bool {
         Wm::Niri => niri_fullscreen(output).unwrap_or(false),
         Wm::Hyprland => {
             let Some(id) = hypr_outputs().iter().find(|m| text(m, "name") == output).and_then(|m| m.get("activeWorkspace")?.get("id")?.as_i64()) else { return false };
-            hypr_json("workspaces")
-                .and_then(|v| v.as_array().cloned())
-                .unwrap_or_default()
-                .iter()
-                .any(|w| w.get("id").and_then(Value::as_i64) == Some(id) && w.get("hasfullscreen").and_then(Value::as_bool).unwrap_or(false))
+            hypr_json("clients").and_then(|v| v.as_array().cloned()).unwrap_or_default().iter().any(|c| hypr_fullscreen_on(c, id))
         }
         Wm::Other => false,
     }
+}
+
+/// Whether the Hyprland client `c` is fullscreen on the workspace `id`. A maximized window
+/// isn't: the workspace's own `hasfullscreen` counts it too, so the client's mode is read, where
+/// maximized is 1 and fullscreen 2.
+fn hypr_fullscreen_on(c: &Value, id: i64) -> bool {
+    c.get("workspace").and_then(|w| w.get("id")).and_then(Value::as_i64) == Some(id) && c.get("fullscreen").and_then(Value::as_i64).is_some_and(|m| m & 2 != 0)
 }
 
 fn niri_fullscreen(output: &str) -> Option<bool> {
@@ -579,5 +582,15 @@ mod minimized_tests {
             assert_eq!(hypr_minimized(&json!({ "workspace": { "id": -99, "name": name } })), expected);
         }
         assert!(!hypr_minimized(&json!({})));
+    }
+
+    #[test]
+    fn a_maximized_window_is_not_fullscreen() {
+        let on = |mode: i64, ws: i64| hypr_fullscreen_on(&json!({ "workspace": { "id": ws }, "fullscreen": mode }), 1);
+        assert!(!on(0, 1));
+        assert!(!on(1, 1), "maximized");
+        assert!(on(2, 1));
+        assert!(on(3, 1));
+        assert!(!on(2, 4), "fullscreen on another workspace");
     }
 }
