@@ -16,10 +16,10 @@ A calm, fast desktop shell for Wayland, written in Rust and GTK 4. It runs on
 
 ## Install
 
-Run the installer from your local checkout (repository access is required while
-Digit is private):
+Clone the repository and run the installer from the checkout:
 
 ```bash
+git clone https://github.com/altugcetin/digit.git
 cd digit
 ./install.sh
 ```
@@ -198,7 +198,7 @@ and run `WAYLAND_DISPLAY=wayland-1 swaylock`; it takes over the lock so you can 
 ## Türkçe hızlı kurulum
 
 ```bash
-git clone https://github.com/altugcetin/astrobabaninammehizmeti.git digit
+git clone https://github.com/altugcetin/digit.git
 cd digit
 ./install.sh
 ```
