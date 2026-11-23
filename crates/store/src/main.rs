@@ -482,6 +482,53 @@ impl Store {
         });
     }
 
+    /// Downloads pacman's file lists (`pacman -Fy`) through pkexec, so package types are told
+    /// apart; once they're there, or the user said not now, Store doesn't ask again.
+    pub fn sync_file_lists(self: &Rc<Self>) {
+        if self.busy.borrow().is_some() {
+            self.note("Another app is still being installed", true);
+            return;
+        }
+        *self.busy.borrow_mut() = Some("arch:files".into());
+        self.bar_label.set_text("Downloading file lists");
+        self.bar_label.remove_css_class("warn");
+        self.bar_progress.set_visible(true);
+        self.bar_progress.set_fraction(0.0);
+        self.bar_line.set_visible(true);
+        self.update_bar();
+        let me = self.clone();
+        glib::spawn_future_local(async move {
+            let bar = me.bar_progress.clone();
+            let pulse = glib::timeout_add_local(std::time::Duration::from_millis(300), move || {
+                bar.pulse();
+                glib::ControlFlow::Continue
+            });
+            let args: [&std::ffi::OsStr; 3] = ["pkexec".as_ref(), "pacman".as_ref(), "-Fy".as_ref()];
+            let result = match gio::Subprocess::newv(&args, gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_PIPE) {
+                Ok(p) => match p.communicate_utf8_future(None).await {
+                    Ok(_) if p.is_successful() => Ok(()),
+                    Ok((_, err)) => Err(match p.exit_status() {
+                        126 | 127 => "Cancelled".to_string(),
+                        _ => err.and_then(|e| e.lines().rev().map(str::trim).find(|l| l.starts_with("error:")).map(str::to_string)).unwrap_or_else(|| "pacman failed".into()),
+                    }),
+                    Err(e) => Err(e.to_string()),
+                },
+                Err(e) => Err(e.to_string()),
+            };
+            pulse.remove();
+            *me.busy.borrow_mut() = None;
+            match result {
+                Ok(()) => {
+                    pages::file_lists_answered();
+                    me.note("File lists downloaded", false);
+                    load_arch(&me);
+                }
+                Err(e) => me.note(&format!("File lists: {e}"), true),
+            }
+            me.refresh();
+        });
+    }
+
     pub fn note(&self, text: &str, bad: bool) {
         self.bar_label.set_text(text);
         if bad {

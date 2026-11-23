@@ -900,10 +900,27 @@ fn packages_head(s: &Rc<Store>, arch: &crate::arch::Index) -> gtk::Widget {
     h.set_hexpand(true);
     h.set_xalign(0.0);
     row.append(&h);
-    if !arch.detailed {
-        let hint = ui::text("Package types are rough until the file lists are synced (sudo pacman -Fy)", "dim");
+    // Asked once: without pacman's file lists, package types are guesses.
+    if !arch.detailed && !file_lists_asked() {
+        let hint = ui::text("Package types are rough without pacman's file lists", "dim");
         hint.set_ellipsize(pango::EllipsizeMode::End);
         row.append(&hint);
+        let get = ui::button("Download", "");
+        get.set_sensitive(s.busy.borrow().is_none());
+        get.connect_clicked(|_| {
+            if let Some(s) = store() {
+                s.sync_file_lists();
+            }
+        });
+        let skip = ui::button("Not now", "");
+        skip.connect_clicked(|_| {
+            file_lists_answered();
+            if let Some(s) = store() {
+                s.refresh();
+            }
+        });
+        row.append(&get);
+        row.append(&skip);
     }
     for (label, all) in [("Apps & Tools", false), ("All Packages", true)] {
         let t = ui::button(label, if s.all_packages.get() == all { "accent" } else { "" });
@@ -917,6 +934,19 @@ fn packages_head(s: &Rc<Store>, arch: &crate::arch::Index) -> gtk::Widget {
         row.append(&t);
     }
     row.upcast()
+}
+
+fn file_lists_mark() -> std::path::PathBuf {
+    kit::theme::state_dir().join("store-file-lists-asked")
+}
+
+fn file_lists_asked() -> bool {
+    file_lists_mark().exists()
+}
+
+/// Remembers the file lists were offered and answered, so Store doesn't ask again.
+pub(crate) fn file_lists_answered() {
+    let _ = kit::atomic::write(&file_lists_mark(), "");
 }
 
 /// A package's AppStream icon. Arch caches them as JPEG XL, which GTK may not read, so each is
