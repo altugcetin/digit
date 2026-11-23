@@ -1,4 +1,7 @@
 use serde_json::{Value, json};
+
+mod hypr_preview;
+pub use hypr_preview::HyprPreview;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -446,6 +449,103 @@ pub fn toggle_special(name: &str) -> bool {
     hypr_dispatch(&format!("togglespecialworkspace {arg}"), &format!("hl.dsp.workspace.toggle_special({})", serde_json::to_string(&arg).unwrap_or_default()))
 }
 
+/// Where a window opened by dragging an app out of the dock goes on Hyprland: the center
+/// floats it, anywhere else on the screen leaves it to the workspace's layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Zone {
+    Float,
+    Tiled,
+}
+
+impl Zone {
+    /// The zone under a point of a `w` x `h` screen; none off the screen.
+    pub fn at(x: f64, y: f64, w: f64, h: f64) -> Option<Self> {
+        if !(0.0..w).contains(&x) || !(0.0..h).contains(&y) {
+            return None;
+        }
+        let center = (0.35..=0.65).contains(&(x / w)) && (0.3..=0.7).contains(&(y / h));
+        Some(if center { Self::Float } else { Self::Tiled })
+    }
+}
+
+/// Whether an app dragged out of the dock can open where it's dropped.
+pub fn can_place() -> bool {
+    which() == Wm::Hyprland
+}
+
+/// Where a floating window opened from the dock goes in the work area `[x, y, w, h]`.
+pub fn hypr_float_rect([x, y, w, h]: [f64; 4]) -> [f64; 4] {
+    [(x + w * 0.23).round(), (y + h * 0.19).round(), (w * 0.54).round(), (h * 0.62).round()]
+}
+
+fn hypr_monitor(output: &str) -> Option<Value> {
+    hypr_outputs().into_iter().find(|m| m["name"].as_str() == Some(output))
+}
+
+fn hypr_work_area(monitor: &Value) -> Option<[f64; 4]> {
+    let scale = monitor["scale"].as_f64().filter(|s| *s > 0.0)?;
+    let (mut w, mut h) = (monitor["width"].as_f64()?, monitor["height"].as_f64()?);
+    if matches!(monitor["transform"].as_u64()?, 1 | 3 | 5 | 7) {
+        std::mem::swap(&mut w, &mut h);
+    }
+    let reserved = monitor["reserved"].as_array()?;
+    let [left, top, right, bottom] = <&[Value; 4]>::try_from(reserved.as_slice()).ok()?;
+    let (x, y) = (left.as_f64()?, top.as_f64()?);
+    let (w, h) = ((w / scale).round() - x - right.as_f64()?, (h / scale).round() - y - bottom.as_f64()?);
+    (w > 0.0 && h > 0.0).then_some([x, y, w, h])
+}
+
+/// Puts the window `id` on `output`'s workspace: floating in the middle for `Zone::Float`,
+/// tiled by the layout otherwise.
+pub fn place(id: u64, zone: Zone, output: &str) -> bool {
+    if which() != Wm::Hyprland {
+        return false;
+    }
+    let Some(monitor) = hypr_monitor(output) else { return false };
+    let Some(monitor_id) = monitor["id"].as_i64() else { return false };
+    let Some(clients) = hypr_json("clients") else { return false };
+    let Some(client) = clients.as_array().and_then(|list| list.iter().find(|c| hex(c) == Some(id))) else { return false };
+    let address = format!("address:0x{id:x}");
+
+    if client["monitor"].as_i64() != Some(monitor_id) {
+        let workspace = &monitor["activeWorkspace"];
+        let Some(selector) = workspace["id"].as_i64().filter(|i| *i > 0).map(|i| i.to_string())
+            .or_else(|| workspace["name"].as_str().filter(|s| !s.is_empty()).map(|s| format!("name:{s}")))
+        else { return false };
+        if !hypr_dispatch(
+            &format!("movetoworkspacesilent {selector},{address}"),
+            &format!(r#"hl.dsp.window.move({{ monitor = "{monitor_id}", follow = false, window = "{address}" }})"#),
+        ) {
+            return false;
+        }
+    }
+
+    let fullscreen = client["fullscreen"].as_i64().unwrap_or(0);
+    if fullscreen != 0 {
+        if !HYPR_LUA.load(Ordering::Relaxed) && !focus(id) {
+            return false;
+        }
+        if !hypr_dispatch("fullscreenstate 0 0", &format!(r#"hl.dsp.window.fullscreen_state({{ internal = 0, client = 0, action = "set", window = "{address}" }})"#)) {
+            return false;
+        }
+    }
+
+    if zone == Zone::Tiled {
+        return client["floating"].as_bool() == Some(false) || hypr_dispatch(
+            &format!("settiled {address}"),
+            &format!(r#"hl.dsp.window.float({{ action = "unset", window = "{address}" }})"#),
+        );
+    }
+
+    let Some(area) = hypr_work_area(&monitor) else { return false };
+    let Some((output_x, output_y)) = monitor["x"].as_f64().zip(monitor["y"].as_f64()) else { return false };
+    let [x, y, w, h] = hypr_float_rect(area);
+    let (x, y) = ((output_x + x).round(), (output_y + y).round());
+    hypr_dispatch(&format!("setfloating {address}"), &format!(r#"hl.dsp.window.float({{ action = "set", window = "{address}" }})"#))
+        && hypr_dispatch(&format!("resizewindowpixel exact {w} {h},{address}"), &format!(r#"hl.dsp.window.resize({{ x = {w}, y = {h}, relative = false, window = "{address}" }})"#))
+        && hypr_dispatch(&format!("movewindowpixel exact {x} {y},{address}"), &format!(r#"hl.dsp.window.move({{ x = {x}, y = {y}, relative = false, window = "{address}" }})"#))
+}
+
 /// Restore to the focused monitor's normal workspace, then focus without opening a special workspace.
 pub fn restore(id: u64) -> bool {
     if which() != Wm::Hyprland { return false; }
@@ -574,6 +674,27 @@ pub fn layouts() -> Option<(Vec<String>, usize)> {
 
 #[cfg(test)]
 mod minimized_tests {
+    #[test]
+    fn the_center_floats_and_the_rest_of_the_screen_tiles() {
+        use super::Zone;
+        let at = |x, y| Zone::at(x, y, 1280.0, 720.0);
+        assert_eq!(at(640.0, 504.0), Some(Zone::Float));
+        for y in [505.0, 540.0, 580.0, 635.0, 719.0] {
+            assert_eq!(at(640.0, y), Some(Zone::Tiled));
+        }
+        assert_eq!(at(900.0, 360.0), Some(Zone::Tiled));
+        assert_eq!([at(640.0, 720.0), at(-1.0, 360.0)], [None, None]);
+    }
+
+    #[test]
+    fn hypr_work_area_uses_scaled_rotated_dimensions_and_logical_reservations() {
+        let mut monitor = serde_json::json!({"scale": 1.25, "width": 2560, "height": 1600, "transform": 0, "reserved": [10, 38, 12, 20]});
+        assert_eq!(super::hypr_work_area(&monitor), Some([10.0, 38.0, 2026.0, 1222.0]));
+        monitor["transform"] = 3.into();
+        assert_eq!(super::hypr_work_area(&monitor), Some([10.0, 38.0, 1258.0, 1990.0]));
+        monitor["scale"] = 0.into();
+        assert_eq!(super::hypr_work_area(&monitor), None);
+    }
     use super::*;
 
     #[test]

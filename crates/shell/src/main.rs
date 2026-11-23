@@ -68,6 +68,7 @@ mod screentime;
 mod session;
 mod share;
 mod sni;
+mod snapzone;
 mod spaces;
 mod spectrum;
 mod stash;

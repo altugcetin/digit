@@ -40,6 +40,7 @@ pub struct Config {
     pub dock_magnify: f64,
     pub dock_output: Option<String>,
     pub dock_running: bool,
+    pub dock_drag_to_open: bool,
     pub dock_trash: bool,
     pub dock_recent: bool,
     pub dock_trash_reveal: bool,
@@ -188,6 +189,7 @@ impl Default for Config {
             dock_magnify: 1.5,
             dock_output: None,
             dock_running: true,
+            dock_drag_to_open: true,
             dock_trash: true,
             dock_recent: true,
             dock_trash_reveal: true,
@@ -289,6 +291,7 @@ pub struct DockPrefs {
     pub magnify: f64,
     pub output: Option<String>,
     pub running: bool,
+    pub drag_to_open: bool,
     pub trash: bool,
     pub recent: bool,
     pub trash_reveal: bool,
@@ -405,6 +408,7 @@ impl From<&Config> for Prefs {
             magnify: c.dock_magnify,
             output: c.dock_output.clone(),
             running: c.dock_running,
+            drag_to_open: c.dock_drag_to_open,
             trash: c.dock_trash,
             recent: c.dock_recent,
             trash_reveal: c.dock_trash_reveal,
@@ -653,6 +657,14 @@ pub fn load() -> Config {
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
+
+    #[test]
+    fn dock_drag_to_open_defaults_on_and_honors_an_explicit_off() {
+        let old: Config = toml::from_str("dock_side = 'left'").unwrap();
+        assert!(Prefs::from(&old).dock.drag_to_open);
+        let off: Config = toml::from_str("dock_drag_to_open = false").unwrap();
+        assert!(!Prefs::from(&off).dock.drag_to_open);
+    }
 
     #[test]
     fn no_gaps_keep_the_tight_space_under_the_island() {

@@ -5,11 +5,12 @@ use crate::paint::Paint;
 use gtk::{cairo, gdk, gio, glib, graphene, gsk, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use kit::motion::{self, Tween};
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
+mod launch_drag;
 mod stack;
 
 const LIFT: f64 = 8.0;
@@ -142,6 +143,15 @@ struct Drag {
     origin: (f64, f64),
     at: (f64, f64),
     moving: bool,
+    dock_span: (f64, f64),
+    /// Where the app opens if dropped now, out on the screen (see `kit::wm::Zone`).
+    zone: Option<kit::wm::Zone>,
+    /// The compositor state for this drag's preview.
+    preview: Option<Rc<OnceCell<Option<kit::wm::HyprPreview>>>>,
+    /// Whether the drag went out onto the screen; a drop out there never unpins.
+    out: bool,
+    /// The pins and order before the drag, put back when the app is dropped on the screen.
+    before: (Vec<String>, Vec<String>),
 }
 
 struct State {
@@ -194,6 +204,7 @@ struct State {
     reveal: bool,
     leave: u64,
     drag: Option<Drag>,
+    drag_target: Option<gtk::Window>,
     menu: bool,
     ticking: bool,
     region: Option<(i32, i32, i32, i32)>,
@@ -381,7 +392,8 @@ pub fn incoming(app: Option<(&str, Point, Point)>) {
                 let now = glib::monotonic_time();
                 let before = s.items.iter().zip(s.layout(now)).filter(|(i, (x, size))| i.pinned && i.key != id && x + size / 2.0 < p.0).count();
                 let had = s.pins.iter().position(|k| k == id);
-                s.drag = Some(Drag { key: id.to_string(), origin: p, at: p, moving: true });
+                let kept = (s.pins.clone(), s.order.clone());
+                s.drag = Some(Drag { key: id.to_string(), origin: p, at: p, moving: true, dock_span: s.rest_span(), zone: None, preview: None, out: false, before: kept });
                 if had == Some(before) {
                     false
                 } else {
@@ -447,7 +459,9 @@ pub fn primary_changed(app: &Rc<App>) {
 }
 
 fn teardown(st: &Shared) {
+    launch_drag::close(st);
     close_menu();
+    crate::snapzone::hide();
     let (keep, window, paint, triggers, edge) = {
         let mut s = st.borrow_mut();
         let mut triggers = std::mem::take(&mut s.triggers);
@@ -906,6 +920,7 @@ fn build(app: &Rc<App>, geo: Geo, monitor: Option<&gdk::Monitor>, output: String
         reveal: false,
         leave: 0,
         drag: None,
+        drag_target: None,
         menu: false,
         ticking: false,
         region: None,
@@ -985,9 +1000,7 @@ fn wire(st: &Shared) {
     drag.connect_drag_begin(move |_, x, y| {
         let Some(st) = weak.upgrade() else { return };
         let mut s = st.borrow_mut();
-        let p = s.local(x, y);
-        let key = s.index_at(p.0, glib::monotonic_time()).and_then(|i| s.items.get(i)).filter(|it| it.entry.is_some()).map(|it| it.key.clone());
-        s.drag = key.map(|key| Drag { key, origin: p, at: p, moving: false });
+        s.drag = drag_from(&s, x, y);
     });
     let weak = Rc::downgrade(st);
     drag.connect_drag_update(move |g, dx, dy| {
@@ -995,12 +1008,18 @@ fn wire(st: &Shared) {
         drag_to(&st, x + dx, y + dy);
     });
     let weak = Rc::downgrade(st);
-    drag.connect_drag_end(move |_, _, _| {
+    drag.connect_drag_end(move |g, _, _| {
         if let Some(st) = weak.upgrade() {
-            drop_drag(&st);
+            let released = g.current_event().is_some_and(|event| {
+                matches!(event.event_type(), gdk::EventType::ButtonRelease | gdk::EventType::TouchEnd)
+            });
+            if st.borrow().drag_target.is_none() {
+                drop_drag(&st, released);
+            }
         }
     });
     paint.add_controller(drag);
+    launch_drag::wire(st, &paint);
     // Hyprland offers only MOVE before negotiation, so accept both and answer COPY: the dock
     // trashes the files itself and the source must never delete them. Same as the notch's target.
     let drop = gtk::DropTargetAsync::new(None, gdk::DragAction::COPY | gdk::DragAction::MOVE);
@@ -1346,10 +1365,33 @@ fn left(st: &Shared) {
     });
 }
 
+fn drag_from(s: &State, x: f64, y: f64) -> Option<Drag> {
+    let p = s.local(x, y);
+    let item = s.items.get(s.index_at(p.0, glib::monotonic_time())?)?;
+    item.entry.as_ref()?;
+    let before = (s.pins.clone(), s.order.clone());
+    Some(Drag { key: item.key.clone(), origin: p, at: p, moving: false, dock_span: s.rest_span(), zone: None, preview: None, out: false, before })
+}
+
 fn drag_to(st: &Shared, x: f64, y: f64) {
-    let reorder = {
+    let p = {
         let mut s = st.borrow_mut();
         let p = s.local(x, y);
+        if launch_drag::enabled(&s) {
+            // If the native drag cannot start, its release still must not activate an app.
+            if s.drag.as_ref().is_some_and(|d| (p.0 - d.origin.0).hypot(p.1 - d.origin.1) >= 8.0) {
+                s.dragged = glib::monotonic_time();
+            }
+            return;
+        }
+        p
+    };
+    drag_at(st, p);
+}
+
+fn drag_at(st: &Shared, p: Point) {
+    let reorder = {
+        let mut s = st.borrow_mut();
         // Out over the open app grid, it draws the app under the pointer.
         if let Some(d) = s.drag.as_ref().filter(|d| d.moving) {
             let side = s.geo.side;
@@ -1365,6 +1407,13 @@ fn drag_to(st: &Shared, x: f64, y: f64) {
             d.moving = true;
             s.hover = None;
             s.tip.set(0.0);
+            if placement_enabled(&s) {
+                begin_placement(st, &mut s);
+            }
+        }
+        if aim(&mut s) {
+            s.paint.queue_draw();
+            return;
         }
         let key = s.drag.as_ref().map(|d| d.key.clone()).unwrap_or_default();
         let now = glib::monotonic_time();
@@ -1408,7 +1457,90 @@ fn drag_to(st: &Shared, x: f64, y: f64) {
     kick(st);
 }
 
-fn drop_drag(st: &Shared) {
+/// Whether a drag point is on the dock's body, where a drop rearranges the dock.
+fn aimed_at_dock(s: &State, drag: &Drag) -> bool {
+    let (a, c) = drag.at;
+    // The dock's body stays this tall as its icons shrink or the pointer leaves.
+    let (start, width) = drag.dock_span;
+    (0.0..=s.geo.reserve()).contains(&c) && (start..=start + width).contains(&a)
+}
+
+fn begin_placement(st: &Shared, s: &mut State) {
+    let preview = Rc::new(OnceCell::new());
+    s.drag.as_mut().unwrap().preview = Some(preview.clone());
+    let (weak, output) = (Rc::downgrade(st), s.output.clone());
+    glib::spawn_future_local(async move {
+        let _ = preview.set(gio::spawn_blocking(move || kit::wm::HyprPreview::read(&output)).await.ok().flatten());
+        if let Some(st) = weak.upgrade() {
+            let mut s = st.borrow_mut();
+            if s.drag.as_ref().and_then(|d| d.preview.as_ref()).is_some_and(|p| Rc::ptr_eq(p, &preview)) {
+                aim(&mut s);
+            }
+        }
+    });
+}
+
+fn placement_enabled(s: &State) -> bool {
+    s.lifted.is_none() && s.app.prefs.borrow().dock.drag_to_open && kit::wm::can_place()
+}
+
+/// Shows the drop zone while an app is dragged off the dock.
+fn aim(s: &mut State) -> bool {
+    // Out means off the dock's body, not just above its band: the band spans the whole
+    // edge, and the bottom corners of the screen are in it.
+    let out = placement_enabled(s) && s.drag.as_ref().is_some_and(|d| !aimed_at_dock(s, d));
+    let monitor = if out { kit::screens::by_name(&s.output).or_else(crate::screens::main) } else { None };
+    let Some(g) = monitor.map(|m| m.geometry()) else {
+        if s.drag.as_mut().and_then(|d| d.zone.take()).is_some() {
+            crate::snapzone::hide();
+        }
+        return false;
+    };
+    let (mw, mh) = (f64::from(g.width()), f64::from(g.height()));
+    let (app, output) = (s.app.clone(), s.output.clone());
+    let Some(d) = s.drag.as_mut() else { return false };
+    let (sx, sy) = to_screen(s.geo.side, d.at, (mw, mh));
+    let zone = kit::wm::Zone::at(sx, sy, mw, mh);
+    let preview = d.preview.as_ref().and_then(|p| p.get()).and_then(Option::as_ref);
+    // Until Hyprland's layout is read, only the floating center can be shown.
+    let rect = zone.and_then(|z| match preview {
+        Some(preview) => preview.rect(z, (sx, sy)),
+        None => (z == kit::wm::Zone::Float).then(|| kit::wm::hypr_float_rect([0.0, 0.0, mw, mh])),
+    });
+    // A drop opens the app only where the preview can show its tile.
+    let zone = zone.filter(|_| rect.is_some());
+    if let Some(rect) = rect {
+        crate::snapzone::show(&app, &output, rect);
+    } else {
+        crate::snapzone::hide();
+    }
+    d.zone = zone;
+    d.out = true;
+    true
+}
+
+/// Opens the app and, once its new window shows up, puts that window in `zone`.
+fn open_in(st: &Shared, key: String, zone: kit::wm::Zone) {
+    let (app, output) = { let s = st.borrow(); (s.app.clone(), s.output.clone()) };
+    let before: std::collections::HashSet<u64> = app.running.borrow().iter().map(|r| r.id).collect();
+    launch_key(st, key.clone());
+    let started = glib::monotonic_time();
+    glib::timeout_add_local(Duration::from_millis(150), move || {
+        let list = app.apps.list();
+        let new = app.running.borrow().iter()
+            .find(|r| !before.contains(&r.id) && app.apps.find(&r.app_id).and_then(|i| list.get(i)).is_some_and(|e| e.id == key))
+            .map(|r| r.id);
+        if let Some(id) = new {
+            let output = output.clone();
+            gio::spawn_blocking(move || kit::wm::place(id, zone, &output));
+            return glib::ControlFlow::Break;
+        }
+        // shortcut: An app can reuse a window, so wait only for a new match until launch tracking is available.
+        if glib::monotonic_time() - started > 15_000_000 { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+    });
+}
+
+fn drop_drag(st: &Shared, released: bool) {
     let note = {
         let mut s = st.borrow_mut();
         let Some(d) = s.drag.take() else { return };
@@ -1416,6 +1548,21 @@ fn drop_drag(st: &Shared) {
             return;
         }
         s.dragged = glib::monotonic_time();
+        if d.out {
+            crate::snapzone::hide();
+        }
+        let outside = d.out && placement_enabled(&s) && !aimed_at_dock(&s, &d);
+        if outside || (!released && d.preview.is_some()) {
+            // Reordering during the drag was only a preview of the drop.
+            (s.pins, s.order) = d.before;
+            drop(s);
+            rebuild(st);
+            settle(st);
+            if released && let Some(zone) = d.zone {
+                open_in(st, d.key, zone);
+            }
+            return;
+        }
         let far = d.at.1 > s.geo.reach() + 24.0;
         let name = s.items.iter().find(|i| i.key == d.key).map(|i| i.name.clone()).unwrap_or_default();
         // Over the open app grid, the app goes into it where it's let go, quietly.
