@@ -694,9 +694,16 @@ impl Notch {
             let pressed: Rc<Cell<Option<Zone>>> = Rc::new(Cell::new(None));
             let was = pressed.clone();
             let target = st.downgrade();
-            click.connect_pressed(move |_, _, _, _| {
+            click.connect_pressed(move |_, _, x, y| {
                 let Some(target) = target.upgrade() else { return };
+                target.press(target.zone_at(x, y));
                 was.set(if crate::popmenu::is_open() || crate::datepop::is_open() { target.held() } else { None });
+            });
+            let target = st.downgrade();
+            click.connect_end(move |_, _| {
+                if let Some(target) = target.upgrade() {
+                    target.release();
+                }
             });
             let weak = Rc::downgrade(&self.0);
             let target = st.downgrade();

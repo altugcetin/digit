@@ -1,5 +1,6 @@
 use crate::app::App;
 use crate::draw::{self, Face};
+use crate::feel;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{glib, graphene, pango};
@@ -273,8 +274,28 @@ impl Strip {
 
     pub fn hover(&self, zone: Option<Zone>) {
         if self.imp().hot.replace(zone) != zone {
-            self.queue_draw();
+            let keys: Vec<Zone> = zone.into_iter().collect();
+            self.imp().feel.hover(&keys, App::now());
+            self.kick();
         }
+    }
+
+    pub fn press(&self, zone: Option<Zone>) {
+        if let Some(zone) = zone {
+            self.imp().feel.press(zone, App::now());
+            self.kick();
+        }
+    }
+
+    pub fn release(&self) {
+        self.imp().feel.release(App::now());
+        self.kick();
+    }
+
+    /// Draws while the pills move.
+    fn kick(&self) {
+        let weak = self.downgrade();
+        feel::run(self, &self.imp().moving, move |now| weak.upgrade().is_some_and(|w| w.imp().feel.busy(now)));
     }
 
     pub fn hold(&self, zone: Option<Zone>) {
@@ -441,7 +462,6 @@ impl Strip {
             s.push_shadow(&[gtk::gsk::Shadow::new(c.rgba(), 0.0, 0.5, 5.0)]);
         }
         let cfg = &app.cfg;
-        let hot = imp.hot.get();
         let held = imp.held.get();
         // Every pill keeps the same space from the bar's edges, above, below and at the sides,
         // whether the bar is the notch's or the island's.
@@ -450,12 +470,14 @@ impl Strip {
         let ph = (space - 2.0 * MIN_GAP).min(PILL_TALL);
         let gap = ((space - ph) / 2.0).round();
         imp.pill_y.set((mid - ph / 2.0, mid + ph / 2.0));
-        let pill = |s: &gtk::Snapshot, zone: Zone, x: f64, width: f64| {
-            if held == Some(zone) {
-                draw::fill(s, &draw::round(x, mid - ph / 2.0, width, ph, ph / 2.0), ink_main.alpha(0.22));
-            } else if hot == Some(zone) {
-                draw::fill(s, &draw::round(x, mid - ph / 2.0, width, ph, ph / 2.0), ink_main.alpha(0.14));
-            }
+        let pill = |s: &gtk::Snapshot, zone: Zone, x: f64, width: f64, inside: &dyn Fn()| {
+            let lit = (0.22 * imp.feel.on(zone, held == Some(zone), now)).max(0.14 * imp.feel.glow(zone, now));
+            feel::scaled(s, imp.feel.scale(zone, feel::PILL, now), x + width / 2.0, mid, || {
+                if lit > 0.002 {
+                    draw::fill(s, &draw::round(x, mid - ph / 2.0, width, ph, ph / 2.0), ink_main.alpha(lit));
+                }
+                inside();
+            });
         };
         let mut zones = Vec::with_capacity(4);
         let scale = self.scale_factor().max(1);
@@ -464,11 +486,12 @@ impl Strip {
             *imp.logo.borrow_mut() = Some((scale, kit::distro::logo(logo_px, scale, true)));
         }
         let mut x = gap;
-        pill(s, Zone::Logo, x, 36.0);
         let logo = imp.logo.borrow().as_ref().and_then(|(_, l)| l.clone());
-        let digit = crate::menubar::logo(s, &app, x + 18.0 - logo_px as f64 / 2.0, mid - logo_px as f64 / 2.0, logo_px as f64);
-        if !digit {
-            match logo {
+        pill(s, Zone::Logo, x, 36.0, &|| {
+            if crate::menubar::logo(s, &app, x + 18.0 - logo_px as f64 / 2.0, mid - logo_px as f64 / 2.0, logo_px as f64) {
+                return;
+            }
+            match &logo {
                 Some(l) => {
                     s.save();
                     s.translate(&graphene::Point::new((x + 18.0 - logo_px as f64 / 2.0) as f32, (mid - logo_px as f64 / 2.0) as f32));
@@ -477,7 +500,7 @@ impl Strip {
                 }
                 None => draw::icon(s, self, cfg, "deployed_code", 20.0, true, ink_main, x + 18.0, mid),
             }
-        }
+        });
         zones.push((Zone::Logo, (x, 0.0, 36.0, reach)));
         x += 42.0;
         // The workspace pill, its own pill beside the logo: it grows open from the left.
@@ -488,7 +511,7 @@ impl Strip {
         if open > 0.002 && row > 0.0 {
             let pw = (row * open).max(1.0);
             let shape = draw::round(x, mid - ph / 2.0, pw, ph, (ph / 2.0).min(pw / 2.0));
-            pill(s, Zone::Spaces, x, pw);
+            pill(s, Zone::Spaces, x, pw, &|| {});
             s.push_rounded_clip(&shape);
             s.push_opacity(open);
             imp.spaces.borrow().draw(s, x, mid, now, ink_main, pal.accent);
@@ -511,11 +534,12 @@ impl Strip {
             let text_w = draw::width(self, cfg, &name, TEXT, Face::Text(650)).ceil().min(edge - x - 140.0).max(0.0);
             if text_w > 8.0 {
                 let width = 12.0 + 20.0 + 8.0 + text_w + 12.0;
-                pill(s, Zone::App, x, width);
-                if let Some(p) = imp.icon.borrow().as_ref().and_then(|(_, p)| p.clone()) {
-                    draw::paintable(s, &p, x + 12.0, mid - 10.0, 20.0);
-                }
-                draw::text(s, self, cfg, &name, TEXT, Face::Text(650), ink_main, x + 40.0, mid, text_w + 1.0, pango::Alignment::Left);
+                pill(s, Zone::App, x, width, &|| {
+                    if let Some(p) = imp.icon.borrow().as_ref().and_then(|(_, p)| p.clone()) {
+                        draw::paintable(s, &p, x + 12.0, mid - 10.0, 20.0);
+                    }
+                    draw::text(s, self, cfg, &name, TEXT, Face::Text(650), ink_main, x + 40.0, mid, text_w + 1.0, pango::Alignment::Left);
+                });
                 zones.push((Zone::App, (x, 0.0, width, reach)));
                 x += width + 2.0;
                 let ww = draw::width(self, cfg, "Window", TEXT, Face::Text(450)).ceil() + 24.0;
@@ -529,14 +553,12 @@ impl Strip {
                         break;
                     }
                     let zone = Zone::Menu(i as u8);
-                    pill(s, zone, x, tw);
-                    draw::text(s, self, cfg, title, TEXT, Face::Text(450), ink_main, x + 12.0, mid, tw - 23.0, pango::Alignment::Left);
+                    pill(s, zone, x, tw, &|| draw::text(s, self, cfg, title, TEXT, Face::Text(450), ink_main, x + 12.0, mid, tw - 23.0, pango::Alignment::Left));
                     zones.push((zone, (x, 0.0, tw, reach)));
                     x += tw;
                 }
                 if x + ww < edge {
-                    pill(s, Zone::Win, x, ww);
-                    draw::text(s, self, cfg, "Window", TEXT, Face::Text(450), ink_main, x + 12.0, mid, ww - 23.0, pango::Alignment::Left);
+                    pill(s, Zone::Win, x, ww, &|| draw::text(s, self, cfg, "Window", TEXT, Face::Text(450), ink_main, x + 12.0, mid, ww - 23.0, pango::Alignment::Left));
                     zones.push((Zone::Win, (x, 0.0, ww, reach)));
                 }
             }
@@ -547,8 +569,7 @@ impl Strip {
         if !date.is_empty() {
             let width = date_w + 24.0;
             r -= width;
-            pill(s, Zone::Date, r, width);
-            draw::text(s, self, cfg, &date, TEXT, Face::Text(500), ink_meta, r + 12.0, mid, date_w + 1.0, pango::Alignment::Left);
+            pill(s, Zone::Date, r, width, &|| draw::text(s, self, cfg, &date, TEXT, Face::Text(500), ink_meta, r + 12.0, mid, date_w + 1.0, pango::Alignment::Left));
             zones.push((Zone::Date, (r, 0.0, width, reach)));
             r -= 4.0;
         }
@@ -576,15 +597,16 @@ impl Strip {
         let total = widths.iter().sum::<f64>() + 6.0 * (glyphs.len().saturating_sub(1)) as f64 + 20.0;
         if r - total >= w - edge {
             r -= total;
-            pill(s, Zone::Status, r, total);
-            let mut gx = r + 10.0;
-            for ((g, t), gw) in glyphs.iter().zip(widths.iter()) {
-                draw::icon(s, self, cfg, g, ICON, true, ink_main, gx + 11.0, mid);
-                if let Some(t) = t {
-                    draw::text(s, self, cfg, t, NUM, Face::Number(500), ink_meta, gx + 24.0, mid, gw - 23.0, pango::Alignment::Left);
+            pill(s, Zone::Status, r, total, &|| {
+                let mut gx = r + 10.0;
+                for ((g, t), gw) in glyphs.iter().zip(widths.iter()) {
+                    draw::icon(s, self, cfg, g, ICON, true, ink_main, gx + 11.0, mid);
+                    if let Some(t) = t {
+                        draw::text(s, self, cfg, t, NUM, Face::Number(500), ink_meta, gx + 24.0, mid, gw - 23.0, pango::Alignment::Left);
+                    }
+                    gx += gw + 6.0;
                 }
-                gx += gw + 6.0;
-            }
+            });
             zones.push((Zone::Status, (r, 0.0, total, reach)));
             let tray: Vec<(Option<gtk::gdk::Paintable>, String)> = app.sni.borrow().iter().map(|i| (i.icon.clone(), if i.id.is_empty() { i.title.clone() } else { i.id.clone() })).collect();
             r -= 4.0;
@@ -594,11 +616,10 @@ impl Strip {
                 }
                 r -= 30.0;
                 let zone = Zone::Tray(i as u8);
-                pill(s, zone, r, 30.0);
-                match icon {
+                pill(s, zone, r, 30.0, &|| match icon {
                     Some(p) => draw::paintable(s, p, r + 6.0, mid - 9.0, 18.0),
                     None => draw::monogram(s, self, cfg, name, r + 6.0, mid - 9.0, 18.0, ink_main.alpha(0.2), ink_main),
-                }
+                });
                 zones.push((zone, (r, 0.0, 30.0, reach)));
             }
         }
@@ -641,6 +662,8 @@ mod imp {
         pub(super) battery_at: Cell<Option<i64>>,
         pub(super) spaces: RefCell<super::Spaces>,
         pub(super) pointer: Cell<f64>,
+        pub(super) feel: crate::feel::Feel<super::Zone>,
+        pub(super) moving: std::rc::Rc<Cell<bool>>,
         #[allow(clippy::type_complexity)]
         pub(super) resize: RefCell<Option<Box<dyn Fn(i32)>>>,
     }
@@ -657,6 +680,15 @@ mod imp {
     impl WidgetImpl for Strip {
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
             self.obj().draw(snapshot);
+            // A pill it drew may have been let go since: it goes on from here.
+            if !self.moving.get() && self.feel.busy(crate::app::App::now()) {
+                let weak = self.obj().downgrade();
+                glib::idle_add_local_once(move || {
+                    if let Some(w) = weak.upgrade() {
+                        w.kick();
+                    }
+                });
+            }
         }
 
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
