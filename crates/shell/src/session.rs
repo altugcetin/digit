@@ -1,11 +1,12 @@
 use crate::app::App;
 use crate::draw::{self, Face};
+use crate::feel::{self, Feel};
 use crate::paint::Paint;
 use gtk::{gdk, gio, glib, graphene, gsk, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use kit::motion::{self, Tween};
 use kit::palette::Rgb;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 const CELL: f64 = 118.0;
@@ -73,6 +74,15 @@ struct Menu {
     fade: Tween,
     closing: bool,
     who: String,
+    feel: Feel<Part>,
+    ticking: Rc<Cell<bool>>,
+}
+
+/// What of a button moves on its own: the button, and the ring the keyboard puts around it.
+#[derive(Clone, Copy, PartialEq)]
+enum Part {
+    Button(usize),
+    Ring(usize),
 }
 
 thread_local! {
@@ -137,21 +147,21 @@ impl Menu {
             let on = self.hover == Some(i) || self.pick == Some(i);
             let pending = self.pending.filter(|(p, _)| *p == i);
             let danger = matches!(act, Act::PowerOff | Act::Restart);
-            let disc = if pending.is_some() {
-                if danger { pal.risk.alpha(0.9) } else { pal.accent }
-            } else if on {
-                white.alpha(0.26)
-            } else {
-                white.alpha(0.13)
-            };
-            draw::fill(s, &draw::round(cx - DISC / 2.0, cy - DISC / 2.0, DISC, DISC, DISC / 2.0), disc);
-            if self.pick == Some(i) && self.hover != Some(i) {
-                let ring = draw::round(cx - DISC / 2.0 - 4.0, cy - DISC / 2.0 - 4.0, DISC + 8.0, DISC + 8.0, DISC / 2.0 + 4.0);
-                let c = white.alpha(0.5).rgba();
-                s.append_border(&ring, &[2.0; 4], &[c, c, c, c]);
-            }
-            let ink = if pending.is_some() { if danger { white } else { pal.on_accent } } else { white };
-            draw::icon(s, &self.paint, cfg, glyph, 30.0, false, ink, cx, cy);
+            let key = Part::Button(i);
+            let ring = self.feel.on(Part::Ring(i), self.pick == Some(i) && self.hover != Some(i), now);
+            let set = self.feel.on(key, pending.is_some(), now);
+            let lit = self.feel.glow(key, now).max(ring);
+            feel::scaled(s, self.feel.scale(key, feel::SMALL, now), cx, cy, || {
+                let shape = draw::round(cx - DISC / 2.0, cy - DISC / 2.0, DISC, DISC, DISC / 2.0);
+                feel::flood(s, &shape, white.alpha(0.13 + 0.13 * lit), if danger { pal.risk.alpha(0.9) } else { pal.accent }, set, cx, cy);
+                if ring > 0.01 {
+                    let out = DISC + 8.0 * ring;
+                    let c = white.alpha(0.5 * ring).rgba();
+                    s.append_border(&draw::round(cx - out / 2.0, cy - out / 2.0, out, out, out / 2.0), &[2.0; 4], &[c, c, c, c]);
+                }
+                let ink = if danger { white } else { pal.on_accent }.mix(white, set);
+                feel::scaled(s, self.feel.icon(key, glyph, now), cx, cy, || draw::icon(s, &self.paint, cfg, glyph, 30.0, false, ink, cx, cy));
+            });
             let text = match pending {
                 Some((_, at)) => {
                     let left = ((COUNT - (now - at)).max(0) as f64 / 1_000_000.0).ceil() as i64;
@@ -223,6 +233,16 @@ fn tick(m: &Rc<RefCell<Menu>>) {
     });
 }
 
+/// Draws while the buttons move.
+fn kick(m: &Rc<RefCell<Menu>>) {
+    let (paint, ticking) = {
+        let m = m.borrow();
+        (m.paint.clone(), m.ticking.clone())
+    };
+    let weak = Rc::downgrade(m);
+    feel::run(&paint, &ticking, move |now| weak.upgrade().is_some_and(|m| m.try_borrow().map_or(true, |m| m.feel.busy(now))));
+}
+
 fn choose(m: &Rc<RefCell<Menu>>, i: usize) {
     let act = ACTS[i].0;
     let app = m.borrow().app.clone();
@@ -262,12 +282,16 @@ pub fn toggle(app: &Rc<App>) {
     window.set_child(Some(&paint));
     let mut fade = Tween::still(0.0);
     fade.go(1.0, glib::monotonic_time(), 220, motion::STANDARD);
-    let menu = Rc::new(RefCell::new(Menu { app: app.clone(), window: window.clone(), paint: paint.clone(), hover: None, pick: None, pending: None, fade, closing: false, who: real_name() }));
+    let menu = Rc::new(RefCell::new(Menu { app: app.clone(), window: window.clone(), paint: paint.clone(), hover: None, pick: None, pending: None, fade, closing: false, who: real_name(), feel: Feel::default(), ticking: Rc::default() }));
     let weak = Rc::downgrade(&menu);
     paint.on_draw(move |s| {
         if let Some(m) = weak.upgrade() {
             if let Ok(m) = m.try_borrow() {
                 m.draw(s);
+            }
+            // What it drew may have changed since: it goes on from here.
+            if m.try_borrow().is_ok_and(|m| !m.ticking.get() && m.feel.busy(glib::monotonic_time())) {
+                glib::idle_add_local_once(move || kick(&m));
             }
         }
     });
@@ -275,16 +299,37 @@ pub fn toggle(app: &Rc<App>) {
     let weak = Rc::downgrade(&menu);
     motion.connect_motion(move |_, x, y| {
         let Some(m) = weak.upgrade() else { return };
-        let Ok(mut mm) = m.try_borrow_mut() else { return };
-        let at = mm.at(x, y);
-        if at != mm.hover {
-            mm.hover = at;
-            mm.paint.set_cursor_from_name(at.map(|_| "pointer"));
-            mm.paint.queue_draw();
+        let changed = m.try_borrow_mut().is_ok_and(|mut mm| {
+            let at = mm.at(x, y);
+            let changed = at != mm.hover;
+            if changed {
+                mm.hover = at;
+                let keys: Vec<Part> = at.into_iter().map(Part::Button).collect();
+                mm.feel.hover(&keys, glib::monotonic_time());
+                mm.paint.set_cursor_from_name(at.map(|_| "pointer"));
+            }
+            changed
+        });
+        if changed {
+            kick(&m);
         }
     });
     paint.add_controller(motion);
     let click = gtk::GestureClick::new();
+    let weak = Rc::downgrade(&menu);
+    click.connect_pressed(move |_, _, x, y| {
+        let Some(m) = weak.upgrade() else { return };
+        if let Some(i) = m.borrow().at(x, y) {
+            m.borrow().feel.press(Part::Button(i), glib::monotonic_time());
+        }
+        kick(&m);
+    });
+    let weak = Rc::downgrade(&menu);
+    click.connect_end(move |_, _| {
+        let Some(m) = weak.upgrade() else { return };
+        m.borrow().feel.release(glib::monotonic_time());
+        kick(&m);
+    });
     let weak = Rc::downgrade(&menu);
     click.connect_released(move |_, _, x, y| {
         let Some(m) = weak.upgrade() else { return };
