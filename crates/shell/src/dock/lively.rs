@@ -3,6 +3,7 @@
 //! the marks under open apps.
 
 use super::*;
+use kit::motion::Part;
 
 const HOP: i64 = 520_000;
 const HOPS: i64 = 8;
@@ -197,9 +198,9 @@ impl State {
     }
 
     /// What is about to change, taken before `items` replace the ones shown. None when nothing
-    /// is shown yet, or motion is reduced.
+    /// is shown yet, or it keeps still.
     pub(super) fn before(&self, items: &[Item], now: i64) -> Option<Before> {
-        if self.items.is_empty() || motion::reduced() {
+        if self.items.is_empty() || !motion::on(Part::DockGlide) {
             return None;
         }
         let pal = self.app.palette_at(now);
@@ -228,7 +229,7 @@ impl State {
             }
             let was = old.iter().find(|o| o.key == key);
             let minimized = was.is_some_and(|o| self.items[i].windows.iter().any(|w| w.minimized && o.windows.iter().any(|x| x.id == w.id && !x.minimized)));
-            if animated && minimized {
+            if minimized && !self.items.is_empty() && motion::on(Part::DockClicks) {
                 self.lively.pulse(&key, now);
             }
             let mark = self.lively.marks.entry(key).or_insert_with(|| Mark { shown: Tween::still(0.0), focus: Tween::still(0.0) });

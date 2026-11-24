@@ -3,7 +3,7 @@
 //! changes. Each button is known by its panel's own key.
 
 use gtk::{glib, graphene, gsk, prelude::*};
-use kit::motion::{self, Tween};
+use kit::motion::{self, Curve, Part, Tween};
 use kit::palette::Rgb;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -35,6 +35,15 @@ impl<K> Default for Feel<K> {
     }
 }
 
+/// Takes `t` to `to`, at once where buttons keep still.
+fn go(t: &mut Tween, to: f64, now: i64, ms: i64, curve: Curve) {
+    if motion::on(Part::Buttons) {
+        t.go(to, now, ms, curve);
+    } else {
+        t.set(to);
+    }
+}
+
 impl<K: Copy + PartialEq> Feel<K> {
     fn with<R>(&self, key: K, f: impl FnOnce(&mut Mark<K>) -> R) -> R {
         let mut marks = self.0.borrow_mut();
@@ -61,18 +70,20 @@ impl<K: Copy + PartialEq> Feel<K> {
 
     fn light(&self, keys: &[K], on: i64, off: i64, now: i64) {
         for key in keys {
-            self.with(*key, |m| m.glow.go(1.0, now, on, motion::STANDARD));
+            self.with(*key, |m| go(&mut m.glow, 1.0, now, on, motion::STANDARD));
         }
-        self.0.borrow_mut().iter_mut().filter(|m| !keys.contains(&m.key)).for_each(|m| m.glow.go(0.0, now, off, motion::STANDARD));
+        self.0.borrow_mut().iter_mut().filter(|m| !keys.contains(&m.key)).for_each(|m| go(&mut m.glow, 0.0, now, off, motion::STANDARD));
     }
 
     pub fn press(&self, key: K, now: i64) {
-        self.with(key, |m| m.press.go(1.0, now, 90, motion::STANDARD));
+        if motion::on(Part::Buttons) {
+            self.with(key, |m| m.press.go(1.0, now, 90, motion::STANDARD));
+        }
     }
 
     /// Lets go of whatever is pressed.
     pub fn release(&self, now: i64) {
-        self.0.borrow_mut().iter_mut().for_each(|m| m.press.go(0.0, now, 280, motion::EMPHASIZED_DECEL));
+        self.0.borrow_mut().iter_mut().for_each(|m| go(&mut m.press, 0.0, now, 280, motion::EMPHASIZED_DECEL));
     }
 
     /// How lit it is.
@@ -91,7 +102,7 @@ impl<K: Copy + PartialEq> Feel<K> {
         self.with(key, |m| {
             let tween = m.on.get_or_insert_with(|| Tween::still(to));
             if (tween.target() - to).abs() > 0.5 {
-                tween.go(to, now, 280, motion::STANDARD);
+                go(tween, to, now, 280, motion::STANDARD);
                 m.swell = Some(now);
             }
             tween.value(now).clamp(0.0, 1.0)
@@ -138,7 +149,7 @@ pub fn run(w: &impl IsA<gtk::Widget>, ticking: &Rc<Cell<bool>>, busy: impl Fn(i6
 }
 
 fn swelling(dt: i64) -> bool {
-    !motion::reduced() && (0..SWELL).contains(&dt)
+    motion::on(Part::Buttons) && (0..SWELL).contains(&dt)
 }
 
 /// A short swell `dt` µs after it began, up to 1: up quickly, down slowly.
@@ -231,7 +242,7 @@ mod tests {
         assert!(!f.busy(0));
         assert_eq!(f.icon(1, "wifi", 0), 1.0);
         f.on(1, false, 1_000);
-        assert!(motion::reduced() || f.busy(1_000));
+        assert!(!motion::on(Part::Buttons) || f.busy(1_000));
         assert_eq!(f.on(1, false, 10_000_000), 0.0);
         // Forgotten, it starts anew from whatever it is then.
         f.retain(|_| false);
@@ -243,7 +254,9 @@ mod tests {
     fn a_press_gives_and_comes_back() {
         let f: Feel<u8> = Feel::default();
         f.press(1, 0);
-        assert!((f.scale(1, 0.1, 1_000_000) - 0.9).abs() < 1e-9);
+        if motion::on(Part::Buttons) {
+            assert!((f.scale(1, 0.1, 1_000_000) - 0.9).abs() < 1e-9);
+        }
         f.release(1_000_000);
         assert_eq!(f.scale(1, 0.1, 10_000_000), 1.0);
     }

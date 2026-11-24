@@ -1,5 +1,6 @@
 use crate::{prefs, ui};
 use gtk::{gio, glib, prelude::*};
+use kit::motion::Part;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -34,6 +35,8 @@ pub(crate) fn save_many(values: &[(&str, toml::Value)]) -> bool {
         kit::effects::invalidate();
         // Rebuild after the switch callback finishes; cached child pages must also be dropped.
         glib::idle_add_local_once(crate::reload_reductions);
+    } else if values.iter().any(|(key, _)| Part::ALL.iter().any(|p| p.key() == *key)) {
+        kit::motion::refresh();
     } else if values.iter().any(|(key, _)| *key == "compositor_motion") {
         glib::idle_add_local_once(refresh_controlled);
     }
@@ -106,6 +109,7 @@ pub(crate) fn controlled(key: &str) -> Option<&'static str> {
 fn controlled_in(key: &str, motion: bool, effects: bool, still: bool) -> Option<&'static str> {
     match key {
         "smooth_scroll" | "smooth_caret" | "intro" | "compositor_motion" | "hypr_window_anim" | "hypr_workspace_anim" | "niri_motion" | "desktop_motion" | "lock_motion" if motion => Some("Off while Reduce motion is on"),
+        key if motion && Part::ALL.iter().any(|p| p.key() == key) => Some("Off while Reduce motion is on"),
         "hypr_window_anim" | "hypr_workspace_anim" | "niri_motion" if still => Some("Off while Compositor animations is off"),
         "hypr_blur" | "hypr_shadow" | "menubar_look" if effects => Some("Off while Reduce effects is on"),
         _ => None,
@@ -1014,12 +1018,27 @@ fn effects(body: &gtk::Box, t: &toml::Table) {
     let motion_detail = if kit::motion::automatic() { "On automatically for software rendering" } else { "Turn off motion in Digit and compositor animations" };
     toggle(&look, "motion_photos_off", "Reduce motion", motion_detail, "reduce_motion", kit::motion::reduced());
     // The motion Reduce motion turns off, one by one.
-    for row in [
+    let mut rows: Vec<gtk::Box> = Part::ALL.into_iter().map(|part| {
+        let (icon, title, sub) = match part {
+            Part::Buttons => ("touch_app", "Buttons", "They light up softly under the pointer, give when pressed and fill as they turn on"),
+            Part::DockClicks => ("ads_click", "Dock clicks", "Icons in the dock give when pressed and swell when they answer"),
+            Part::DockLaunch => ("north", "App launch", "An app's icon in the dock hops until its window opens"),
+            Part::DockGlide => ("dock_to_bottom", "Dock movement", "The dock glides as apps open, close and change places"),
+            Part::Notifications => ("notifications", "Notification list", "Notifications slide out of Control Center and the rest move up"),
+            Part::AppGrid => ("apps", "App grid pages", "Pages glide as they turn"),
+            Part::Screenshot => ("screenshot_region", "Screenshot selection", "The highlight glides between windows, and the dark and the magnifier come softly"),
+        };
+        toggle(&look, icon, title, sub, part.key(), part.chosen(t))
+    }).collect();
+    rows.extend([
+        toggle(&look, "widgets", "Widget animations", "The clock's digits roll as they change, and the widgets' numbers and rings glide to new values", "desktop_motion", prefs::get_bool(t, "desktop_motion", true)),
+        toggle(&look, "lock_open", "Unlock animation", "On a screen without windows, the wallpaper clears and the clock settles onto the desktop", "lock_motion", prefs::get_bool(t, "lock_motion", true)),
         toggle(&look, "swipe_vertical", "Smooth scrolling", "Mouse wheel steps glide instead of jumping. Touchpads always scroll smoothly", "smooth_scroll", prefs::get_bool(&t, "smooth_scroll", true)),
         toggle(&look, "animation", "Compositor animations", "Windows opening and closing, and switching workspaces", "compositor_motion", prefs::get_bool(&t, "compositor_motion", true)),
         toggle(&look, "text_select_move_forward_character", "Smooth caret", "The caret in Spotlight glides as you type and blinks softly", "smooth_caret", prefs::get_bool(&t, "smooth_caret", true)),
         toggle(&look, "auto_awesome", "Startup animation", "Greet each start of the shell with a short full-screen animation", "intro", prefs::get_bool(&t, "intro", true)),
-    ] {
+    ]);
+    for row in rows {
         row.add_css_class("nested");
     }
     kit::effects::invalidate();
@@ -1404,7 +1423,6 @@ fn power(body: &gtk::Box, t: &toml::Table) {
         }
     }
     toggle(&power, "lock", "Lock before sleep", "The lock screen is ready before the computer suspends, so waking needs your password", "lock_on_sleep", prefs::get_bool(&t, "lock_on_sleep", true));
-    toggle(&power, "lock_open", "Unlock animation", "On a screen without windows, the wallpaper clears and the clock settles onto the desktop", "lock_motion", prefs::get_bool(t, "lock_motion", true));
     let mut said = Vec::new();
     if let Some(k) = keys("lock") {
         said.push(format!("{k} locks"));
@@ -1496,7 +1514,6 @@ fn desktop(body: &gtk::Box, t: &toml::Table) {
     field(&desk, "location_on", "Weather city", "Shown in Control Center, under the desktop clock and in the Weather widget. The city name goes to open-meteo.com over HTTPS; leave empty to keep weather off", "weather_city", &prefs::get_str(t, "weather_city", ""), "Istanbul", |_| true);
     choice(&desk, "device_thermostat", "Units", "", "weather_unit", &[("celsius", "°C"), ("fahrenheit", "°F")], &prefs::get_str(t, "weather_unit", "celsius"));
     toggle(&desk, "folder", "Desktop icons", "Show what's in your Desktop folder on the wallpaper", "desktop_icons", prefs::get_bool(t, "desktop_icons", true));
-    toggle(&desk, "animation", "Widget animations", "The clock's digits roll as they change, and the widgets' numbers and rings glide to new values", "desktop_motion", prefs::get_bool(t, "desktop_motion", true));
     toggle(&desk, "text_fields", "Draw widget text another way", "Can fix text that now and then disappears from the clock and the widgets, on some graphics setups. Leave it off unless that happens", "desktop_raster", prefs::get_bool(t, "desktop_raster", false));
 }
 
@@ -2593,7 +2610,7 @@ mod reduction_tests {
 
     #[test]
     fn each_child_is_controlled_only_by_its_own_master() {
-        for (key, motion) in [("smooth_scroll", true), ("smooth_caret", true), ("intro", true), ("compositor_motion", true), ("hypr_window_anim", true), ("hypr_workspace_anim", true), ("niri_motion", true), ("hypr_shadow", false), ("hypr_blur", false), ("menubar_look", false)] {
+        for (key, motion) in [("smooth_scroll", true), ("smooth_caret", true), ("intro", true), ("compositor_motion", true), ("hypr_window_anim", true), ("hypr_workspace_anim", true), ("niri_motion", true), ("button_motion", true), ("dock_glide_motion", true), ("snap_motion", true), ("hypr_shadow", false), ("hypr_blur", false), ("menubar_look", false)] {
             assert_eq!(controlled_in(key, false, false, false), None);
             assert_eq!(controlled_in(key, !motion, motion, false), None);
             assert_eq!(controlled_in(key, motion, !motion, false), Some(if motion { "Off while Reduce motion is on" } else { "Off while Reduce effects is on" }));

@@ -202,7 +202,7 @@ pub fn open(app: &gtk::Application, shots: Vec<Shot>, pick: bool) {
         layer.set_child(Some(&area));
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         bar.add_css_class("snapbar");
-        if !kit::motion::reduced() {
+        if kit::motion::on(kit::motion::Part::Screenshot) {
             bar.add_css_class("moves");
         }
         bar.set_halign(gtk::Align::Start);
@@ -255,7 +255,7 @@ pub fn open(app: &gtk::Application, shots: Vec<Shot>, pick: bool) {
         hint.set_valign(gtk::Align::End);
         hint.set_margin_bottom(40);
         hint.set_can_target(false);
-        if !kit::motion::reduced() {
+        if kit::motion::on(kit::motion::Part::Screenshot) {
             hint.add_css_class("moves");
         }
         come(&hint);

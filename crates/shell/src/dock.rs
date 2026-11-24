@@ -5,7 +5,7 @@ use crate::feel::{self, Feel};
 use crate::paint::Paint;
 use gtk::{cairo, gdk, gio, glib, graphene, gsk, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-use kit::motion::{self, Tween};
+use kit::motion::{self, Part, Tween};
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -1224,7 +1224,7 @@ fn rebuild(st: &Shared) {
     let after = s.centers(now);
     let dragged = s.drag.as_ref().filter(|d| d.moving).map(|d| d.key.clone());
     for (k, c) in &after {
-        if Some(k) == dragged.as_ref() {
+        if Some(k) == dragged.as_ref() || !motion::on(Part::DockGlide) {
             continue;
         }
         match before.get(k) {
@@ -1613,7 +1613,7 @@ fn open_in(st: &Shared, key: String, zone: kit::wm::Zone) {
 
 /// Glides an app let go at `at`, over the dock, into its place.
 fn land(st: &Shared, key: &str, at: Point, grab: Point) {
-    if motion::reduced() {
+    if !motion::on(Part::DockGlide) {
         return;
     }
     {
@@ -1695,7 +1695,7 @@ fn activate(st: &Shared, i: usize) {
     };
     // An app that starts hops instead.
     if kind != Kind::App || !windows.is_empty() {
-        answer(st, |l, now| l.pulse(&key, now));
+        answer(st, Part::DockClicks, |l, now| l.pulse(&key, now));
     }
     match kind {
         Kind::Trash => return kit::trash::open(),
@@ -1740,12 +1740,12 @@ fn launch_key(st: &Shared, key: String) {
 }
 
 fn bounce(st: &Shared, key: String) {
-    answer(st, |l, now| l.bounce(key, now));
+    answer(st, Part::DockLaunch, |l, now| l.bounce(key, now));
 }
 
-/// Starts an icon's answer to a click.
-fn answer(st: &Shared, start: impl FnOnce(&mut lively::Lively, i64)) {
-    if motion::reduced() {
+/// Starts an icon's answer to a click, unless that `part` keeps still.
+fn answer(st: &Shared, part: Part, start: impl FnOnce(&mut lively::Lively, i64)) {
+    if !motion::on(part) {
         return;
     }
     start(&mut st.borrow_mut().lively, glib::monotonic_time());
@@ -1759,7 +1759,7 @@ fn press(st: &Shared, x: f64, y: f64) {
         s.index_at(p.0, now).filter(|_| s.over_body(p, now)).map(|i| s.items[i].key.clone())
     };
     if let Some(key) = key {
-        answer(st, |l, now| l.press(&key, now));
+        answer(st, Part::DockClicks, |l, now| l.press(&key, now));
     }
 }
 

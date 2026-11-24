@@ -1,6 +1,55 @@
 use std::cell::Cell;
 
+/// What Settings can turn off on its own. The rest of the motion has settings from before, which
+/// their readers ask for themselves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    Buttons,
+    DockClicks,
+    DockLaunch,
+    DockGlide,
+    Notifications,
+    AppGrid,
+    Screenshot,
+}
+
+impl Part {
+    pub const ALL: [Part; 7] = [Part::Buttons, Part::DockClicks, Part::DockLaunch, Part::DockGlide, Part::Notifications, Part::AppGrid, Part::Screenshot];
+
+    /// Its setting, which is on unless it's turned off.
+    pub fn key(self) -> &'static str {
+        match self {
+            Part::Buttons => "button_motion",
+            Part::DockClicks => "dock_click_motion",
+            Part::DockLaunch => "dock_launch_motion",
+            Part::DockGlide => "dock_glide_motion",
+            Part::Notifications => "notification_motion",
+            Part::AppGrid => "appgrid_motion",
+            Part::Screenshot => "snap_motion",
+        }
+    }
+
+    pub fn chosen(self, prefs: &toml::Table) -> bool {
+        crate::prefs::flag(prefs, self.key(), true)
+    }
+
+    fn bit(self) -> u32 {
+        1 << self as u32
+    }
+}
+
+/// Whether `part` moves: its own setting, and Reduce motion over it.
+pub fn on(part: Part) -> bool {
+    !reduced() && OFF.get() & part.bit() == 0
+}
+
+fn off(prefs: &toml::Table) -> u32 {
+    Part::ALL.into_iter().filter(|p| !p.chosen(prefs)).map(Part::bit).sum()
+}
+
 thread_local! {
+    /// The parts that are turned off.
+    static OFF: Cell<u32> = const { Cell::new(0) };
     static LOADED: Cell<bool> = const { Cell::new(false) };
     static POLICY: Cell<(bool, u64)> = const { Cell::new((false, 0)) };
 }
@@ -13,7 +62,9 @@ pub fn reduced() -> bool {
 
 /// Read the effective master and apply it live. Returns whether the policy changed.
 pub fn refresh() -> bool {
-    let on = crate::effects::effective(&crate::prefs::read(), "reduce_motion", crate::effects::software());
+    let prefs = crate::prefs::read();
+    OFF.set(off(&prefs));
+    let on = crate::effects::effective(&prefs, "reduce_motion", crate::effects::software());
     let changed = POLICY.get().0 != on;
     apply(on);
     changed
@@ -177,6 +228,19 @@ impl Tween {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parts_move_unless_they_are_turned_off_one_by_one() {
+        assert_eq!(off(&toml::Table::new()), 0);
+        let mut keys = std::collections::HashSet::new();
+        for part in Part::ALL {
+            assert!(keys.insert(part.key()));
+            let prefs: toml::Table = format!("{} = false", part.key()).parse().unwrap();
+            assert_eq!(off(&prefs), part.bit());
+            assert!(Part::ALL.into_iter().all(|p| p.chosen(&prefs) == (p != part)));
+        }
+    }
+
 
     #[test]
     fn masters_honor_explicit_values_and_software_defaults_independently() {

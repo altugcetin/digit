@@ -2,10 +2,19 @@
 //! glides on to the next one, the dark opens over a selection, and the magnifier comes and goes.
 
 use crate::windows::Rect;
-use kit::motion::{self, Tween};
+use kit::motion::{self, Part, Tween};
 
 /// How dark the screen is outside the selection.
 pub const DARK: f64 = 0.45;
+
+/// Takes `t` to `to`, at once where the screen keeps still.
+fn go(t: &mut Tween, to: f64, now: i64, ms: i64) {
+    if motion::on(Part::Screenshot) {
+        t.go(to, now, ms, motion::GENTLE);
+    } else {
+        t.set(to);
+    }
+}
 
 /// One screen's movement.
 pub struct Moving {
@@ -41,7 +50,7 @@ pub struct Loupe {
 impl Moving {
     /// How dark it is; it gets dark as the screen opens.
     pub fn dark(&mut self, now: i64) -> f64 {
-        self.dark.go(1.0, now, 320, motion::GENTLE);
+        go(&mut self.dark, 1.0, now, 320);
         DARK * self.dark.value(now).clamp(0.0, 1.0)
     }
 
@@ -58,11 +67,11 @@ impl Moving {
                     }
                 }
                 for (t, v) in self.aim.iter_mut().zip([r.0, r.1, r.2, r.3]) {
-                    t.go(v, now, 400, motion::GENTLE);
+                    go(t, v, now, 400);
                 }
-                self.light.go(1.0, now, 260, motion::GENTLE);
+                go(&mut self.light, 1.0, now, 260);
             }
-            None => self.light.go(0.0, now, 240, motion::GENTLE),
+            None => go(&mut self.light, 0.0, now, 240),
         }
         let [x, y, w, h] = self.aim.map(|t| t.value(now));
         ((x, y, w, h), self.light.value(now).clamp(0.0, 1.0))
@@ -75,18 +84,18 @@ impl Moving {
             (None, Some(_)) => {
                 self.dropped = None;
                 self.open.set(if by_hand { 1.0 } else { 0.0 });
-                self.open.go(1.0, now, 320, motion::GENTLE);
+                go(&mut self.open, 1.0, now, 320);
             }
             (Some(was), None) => {
                 let mut back = Tween::still(0.0);
-                back.go(1.0, now, 280, motion::GENTLE);
+                go(&mut back, 1.0, now, 280);
                 self.dropped = Some((was, back));
             }
             _ => {}
         }
         self.part = part;
         if part.is_some() && !drawn {
-            self.grips.go(1.0, now, 300, motion::GENTLE);
+            go(&mut self.grips, 1.0, now, 300);
         } else {
             self.grips.set(0.0);
         }
@@ -118,13 +127,13 @@ impl Moving {
                     if fresh {
                         t.set(to);
                     } else {
-                        t.go(to, now, 340, motion::GENTLE);
+                        go(t, to, now, 340);
                     }
                 }
                 self.at = (x, y);
-                self.loupe.go(1.0, now, 220, motion::GENTLE);
+                go(&mut self.loupe, 1.0, now, 220);
             }
-            None => self.loupe.go(0.0, now, 180, motion::GENTLE),
+            None => go(&mut self.loupe, 0.0, now, 180),
         }
         let shown = self.loupe.value(now).clamp(0.0, 1.0);
         (shown > 0.01).then(|| Loupe { at: self.at, side: (self.side[0].value(now), self.side[1].value(now)), shown })
@@ -148,13 +157,13 @@ mod tests {
     fn the_light_grows_into_the_first_window_and_glides_to_the_next() {
         let mut m = Moving::default();
         let (first, shown) = m.light(Some(A), 0);
-        if !motion::reduced() {
+        if motion::on(Part::Screenshot) {
             assert!(shown < 0.01 && first.0 > A.0 && first.2 < A.2);
         }
         assert_eq!(m.light(Some(A), LATE), (A, 1.0));
         let (next, shown) = m.light(Some(B), LATE);
         assert_eq!(shown, 1.0, "it doesn't go out in between");
-        if !motion::reduced() {
+        if motion::on(Part::Screenshot) {
             assert_eq!(next, A);
         }
         assert_eq!(m.light(Some(B), 2 * LATE), (B, 1.0));
@@ -171,7 +180,7 @@ mod tests {
         m.select(Some(A), false, false, 0);
         assert_eq!((m.over(LATE), m.grips(LATE)), (0.0, 1.0));
         m.select(None, false, false, LATE);
-        if !motion::reduced() {
+        if motion::on(Part::Screenshot) {
             assert_eq!(m.dropped(LATE), Some((A, 0.0)));
             m.select(Some(B), false, false, LATE);
             assert_eq!(m.over(LATE), 1.0);

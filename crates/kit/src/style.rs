@@ -213,7 +213,7 @@ fn live_at(display: &gtk::gdk::Display, build: fn() -> String, changed: fn(), pr
             *loaded.borrow_mut() = css.clone();
             provider.load_from_string(&css);
         }
-        let css = format!("{RESETS}{}", reduction_css(crate::effects::reduced(), crate::motion::reduced()));
+        let css = format!("{RESETS}{}", reduction_css(crate::effects::reduced(), crate::motion::reduced(), !crate::motion::on(crate::motion::Part::Buttons)));
         let different = *loaded_overrides.borrow() != css;
         if different {
             *loaded_overrides.borrow_mut() = css.clone();
@@ -257,10 +257,11 @@ fn live_at(display: &gtk::gdk::Display, build: fn() -> String, changed: fn(), pr
     crate::tag::set(display, key, monitors);
 }
 
-fn reduction_css(effects: bool, motion: bool) -> String {
+fn reduction_css(effects: bool, motion: bool, buttons: bool) -> String {
     let mut css = String::new();
     if effects { css.push_str("* { box-shadow: none; }\n"); }
-    if motion { css.push_str("* { animation: none; transition-property: none; }\nbutton:active { transform: none; }\n"); }
+    if motion { css.push_str("* { animation: none; transition-property: none; }\n"); }
+    if buttons { css.push_str("button, .side row, .results .row, .lockup, .jobtile { transition-property: none; }\nbutton:active, .jobtile:active { transform: none; }\n"); }
     css
 }
 
@@ -510,12 +511,14 @@ mod glyph_tests {
     }
     #[test]
     fn effects_and_motion_css_are_independent() {
-        assert_eq!(reduction_css(false, false), "");
-        assert_eq!(reduction_css(true, false), "* { box-shadow: none; }\n");
-        assert!(!reduction_css(true, false).contains("animation"));
-        assert!(!reduction_css(true, false).contains("transition"));
-        assert!(reduction_css(false, true).contains("transition-property: none"));
-        assert!(!reduction_css(false, true).contains("box-shadow"));
+        assert_eq!(reduction_css(false, false, false), "");
+        assert_eq!(reduction_css(true, false, false), "* { box-shadow: none; }\n");
+        assert!(!reduction_css(true, false, false).contains("animation"));
+        assert!(!reduction_css(true, false, false).contains("transition"));
+        assert!(reduction_css(false, true, true).contains("transition-property: none"));
+        assert!(!reduction_css(false, true, true).contains("box-shadow"));
+        // Buttons alone keep still; the rest moves on.
+        assert!(reduction_css(false, false, true).contains("button:active") && !reduction_css(false, false, true).contains("* {"));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use super::ROW;
 use crate::app::Notice;
-use kit::motion::{self, Tween};
+use kit::motion::{self, Part, Tween};
 
 const LEAVE_MS: i64 = 220;
 /// Between one row's leaving and the next one's, when they all go.
@@ -52,7 +52,7 @@ impl Notes {
             return;
         }
         let place = |i: usize| i as f64 * ROW;
-        let still = !std::mem::replace(&mut self.known, true);
+        let still = !std::mem::replace(&mut self.known, true) || !motion::on(Part::Notifications);
         let old = std::mem::take(&mut self.here);
         if !still {
             let sweep = list.is_empty() && self.last.len() > 1;
@@ -64,14 +64,14 @@ impl Notes {
                 order += 1;
                 self.gone.push(Gone { notice: notice.clone(), at: place(i), shown });
             }
-            if sweep && !motion::reduced() {
+            if sweep {
                 self.hold = Some((place(self.last.len()), now + ((order - 1).min(STAGGERED) * STAGGER_MS + LEAVE_MS / 2) * 1000));
             }
         }
         self.gone.retain(|g| !list.iter().any(|n| n.id == g.notice.id));
         self.here = list.iter().enumerate().map(|(i, n)| {
             let was = old.iter().position(|h| h.id == n.id);
-            let mut shift = Tween::still(was.map_or(0.0, |w| place(w) + old[w].shift.value(now) - place(i)));
+            let mut shift = Tween::still(was.filter(|_| !still).map_or(0.0, |w| place(w) + old[w].shift.value(now) - place(i)));
             shift.go(0.0, now, 260, motion::STANDARD);
             let shown = match was {
                 Some(w) => old[w].shown,
@@ -138,7 +138,7 @@ mod tests {
         let rest = [note(1), note(3)];
         n.sync(&rest, 1_000);
         assert_eq!(n.held(), 0.0);
-        if !motion::reduced() {
+        if motion::on(Part::Notifications) {
             assert_eq!(ids(&n, &rest, 1_000), [(2, None), (1, Some(0)), (3, Some(1))]);
             assert_eq!(n.rows(&rest, 1_000)[2].at, 2.0 * ROW, "it starts from where it was");
         }
@@ -153,7 +153,7 @@ mod tests {
         let mut n = Notes::default();
         n.sync(&[note(1), note(2)], 0);
         n.sync(&[], 1_000);
-        if motion::reduced() {
+        if !motion::on(Part::Notifications) {
             return;
         }
         assert_eq!(n.held(), 2.0 * ROW);

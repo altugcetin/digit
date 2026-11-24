@@ -1007,6 +1007,14 @@ fn kick(st: &Shared) {
     });
 }
 
+fn turn_to(page: &mut Tween, to: usize, now: i64) {
+    if motion::on(motion::Part::AppGrid) {
+        page.go(to as f64, now, PAGE_MS, motion::GENTLE);
+    } else {
+        page.set(to as f64);
+    }
+}
+
 /// The pointer is on `hit`.
 fn point(st: &Shared, hit: Option<Hit>) {
     let changed = {
@@ -1030,7 +1038,7 @@ fn turn(st: &Shared, by: i32) {
     let pages = s.pages() as i32;
     let to = (s.current_page() as i32 + by).clamp(0, pages - 1);
     let now = glib::monotonic_time();
-    s.page.go(to as f64, now, PAGE_MS, motion::GENTLE);
+    turn_to(&mut s.page, to as usize, now);
     // Other items are under the pointer now; they start as they are.
     s.feel.retain(|h| !matches!(h, Hit::Item(_)));
     s.hover = None;
@@ -1340,7 +1348,7 @@ fn press_key(st: &Shared, key: gdk::Key) -> bool {
             let page = next / g.per_page();
             let now = glib::monotonic_time();
             if page != s.current_page() {
-                s.page.go(page as f64, now, PAGE_MS, motion::GENTLE);
+                turn_to(&mut s.page, page, now);
             }
             drop(s);
             kick(st);
