@@ -57,6 +57,12 @@ impl Geo {
         (self.base * 0.16).round().max(4.0)
     }
 
+    /// Between two parts of the dock: the dock's own padding on both sides of the line, so a
+    /// part has the same room at each end wherever it stands.
+    fn split(&self) -> f64 {
+        2.0 * self.pad() + 1.0
+    }
+
     fn body(&self) -> f64 {
         self.base + 2.0 * self.pad()
     }
@@ -1800,6 +1806,56 @@ fn kick(st: &Shared) {
     });
 }
 
+/// Where the dock's parts begin after the first: what's kept (the Apps button with it), the
+/// apps that are just open, and the stacks. A part with nothing in it has no line.
+fn splits(items: &[(Kind, bool)]) -> Vec<usize> {
+    let lead = items.iter().take_while(|i| i.0 == Kind::Apps).count();
+    let apps = lead + items[lead..].iter().position(|i| i.0 != Kind::App).unwrap_or(items.len() - lead);
+    let pinned = lead + items.iter().filter(|i| i.1).count();
+    let mut out = Vec::new();
+    if pinned > 0 && pinned < apps {
+        out.push(pinned);
+    }
+    if apps > 0 && apps < items.len() {
+        out.push(apps);
+    }
+    out
+}
+
+/// Where each of `n` icons starts along the dock and how big it is, with the dock in the middle
+/// of `len` and the icons magnified around `pointer` by `m` from 0 to 1.
+fn slots(g: Geo, n: usize, splits: &[usize], len: f64, pointer: Option<f64>, m: f64) -> Vec<(f64, f64)> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let room = |sizes: f64| sizes + (n - 1 - splits.len()) as f64 * g.gap() + splits.len() as f64 * g.split();
+    let before = |i: usize| if splits.contains(&i) { g.split() } else if i == 0 { 0.0 } else { g.gap() };
+    // On whole pixels at rest, so the body's edges and the lines stand as far from the icons as
+    // they should. The middle stays there as icons grow.
+    let start0 = (len / 2.0 - room(n as f64 * g.base) / 2.0).round();
+    let middle = start0 + room(n as f64 * g.base) / 2.0;
+    let mut at = start0;
+    let sizes: Vec<f64> = (0..n).map(|i| {
+        at += before(i);
+        let d = (pointer.unwrap_or(-1e4) - at - g.base / 2.0) / g.spread();
+        at += g.base;
+        g.base * (1.0 + (g.mag - 1.0) * m * (-d * d).exp())
+    }).collect();
+    let mut at = middle - room(sizes.iter().sum()) / 2.0;
+    sizes.into_iter().enumerate().map(|(i, size)| {
+        at += before(i);
+        let slot = (at, size);
+        at += size;
+        slot
+    }).collect()
+}
+
+/// The dock's body around its icons: where it starts and how long it is.
+fn span(g: Geo, slots: &[(f64, f64)]) -> Option<(f64, f64)> {
+    let (f, b) = (slots.first()?, slots.last()?);
+    Some((f.0 - g.pad(), b.0 + b.1 - f.0 + 2.0 * g.pad()))
+}
+
 impl State {
     fn along_len(&self) -> f64 {
         match self.geo.side {
@@ -1833,49 +1889,12 @@ impl State {
 
     /// Where separators go: after the kept apps, and before the stacks.
     fn separators(&self) -> Vec<usize> {
-        let lead = self.items.iter().take_while(|i| i.kind == Kind::Apps).count();
-        let apps = lead + self.items[lead..].iter().position(|i| i.kind != Kind::App).unwrap_or(self.items.len() - lead);
-        let pinned = lead + self.items.iter().filter(|i| i.pinned).count();
-        let mut out = Vec::new();
-        if pinned > 0 && pinned < apps {
-            out.push(pinned);
-        }
-        if apps > 0 && apps < self.items.len() {
-            out.push(apps);
-        }
-        out
+        splits(&self.items.iter().map(|i| (i.kind, i.pinned)).collect::<Vec<_>>())
     }
 
     fn layout(&self, now: i64) -> Vec<(f64, f64)> {
-        let n = self.items.len();
-        if n == 0 {
-            return Vec::new();
-        }
-        let g = self.geo;
-        let splits = self.separators();
-        let sep = g.gap() * 2.0 + 1.0;
-        let total0 = n as f64 * g.base + (n - 1) as f64 * g.gap() + sep * splits.len() as f64;
-        let start0 = self.along_len() / 2.0 - total0 / 2.0;
-        let m = if g.mag > 1.0 && !motion::reduced() { self.magnify.value(now).clamp(0.0, 1.0) } else { 0.0 };
-        let pa = self.pointer.map_or(-1e4, |p| p.0);
-        let mut sizes = Vec::with_capacity(n);
-        for i in 0..n {
-            let extra = sep * splits.iter().filter(|&&k| i >= k).count() as f64;
-            let c = start0 + i as f64 * (g.base + g.gap()) + extra + g.base / 2.0;
-            let d = (pa - c) / g.spread();
-            sizes.push(g.base * (1.0 + (g.mag - 1.0) * m * (-d * d).exp()));
-        }
-        let total = sizes.iter().sum::<f64>() + (n - 1) as f64 * g.gap() + sep * splits.len() as f64;
-        let mut a = self.along_len() / 2.0 - total / 2.0;
-        let mut out = Vec::with_capacity(n);
-        for (i, size) in sizes.into_iter().enumerate() {
-            if splits.contains(&i) {
-                a += sep;
-            }
-            out.push((a, size));
-            a += size + g.gap();
-        }
-        out
+        let m = if self.geo.mag > 1.0 && !motion::reduced() { self.magnify.value(now).clamp(0.0, 1.0) } else { 0.0 };
+        slots(self.geo, self.items.len(), &self.separators(), self.along_len(), self.pointer.map(|p| p.0), m)
     }
 
     fn centers(&self, now: i64) -> HashMap<String, f64> {
@@ -1883,23 +1902,11 @@ impl State {
     }
 
     fn rest_span(&self) -> (f64, f64) {
-        let n = self.items.len();
-        if n == 0 {
-            return (self.along_len() / 2.0, 0.0);
-        }
-        let g = self.geo;
-        let sep = (g.gap() * 2.0 + 1.0) * self.separators().len() as f64;
-        let total = n as f64 * g.base + (n - 1) as f64 * g.gap() + sep + 2.0 * g.pad();
-        (self.along_len() / 2.0 - total / 2.0, total)
+        span(self.geo, &slots(self.geo, self.items.len(), &self.separators(), self.along_len(), None, 0.0)).unwrap_or((self.along_len() / 2.0, 0.0))
     }
 
     fn body_span(&self, now: i64) -> (f64, f64) {
-        let l = self.layout(now);
-        let pad = self.geo.pad();
-        match (l.first(), l.last()) {
-            (Some(f), Some(b)) => (f.0 - pad, b.0 + b.1 - f.0 + 2.0 * pad),
-            _ => (self.along_len() / 2.0, 0.0),
-        }
+        span(self.geo, &self.layout(now)).unwrap_or((self.along_len() / 2.0, 0.0))
     }
 
     fn over_body(&self, p: (f64, f64), now: i64) -> bool {
@@ -1934,7 +1941,7 @@ impl State {
         let (b0, blen) = self.body_span(now);
         self.fill(s, b0, LIFT + off, blen, g.body(), g.radius(), pal.body.alpha(1.0));
         for k in self.separators() {
-            let a = (layout[k].0 - g.gap() - 0.5).round();
+            let a = (layout[k].0 - g.pad() - 1.0).round();
             let (x, y, w, h) = self.map(a, LIFT + off + g.pad() + 4.0, 1.0, g.base - 8.0);
             s.append_color(&pal.ink_main.alpha(0.16).rgba(), &graphene::Rect::new(x as f32, y as f32, w as f32, h as f32));
         }
@@ -2343,6 +2350,68 @@ mod target_tests {
         assert_eq!(target_window(&[b, Window { focused: true, ..a }, c]), Some(b));
         assert_eq!(target_window(&[b, a, Window { focused: true, ..c }]), Some(a));
         assert_eq!(target_window(&[b]), Some(b));
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    const KEPT: (Kind, bool) = (Kind::App, true);
+    const OPEN: (Kind, bool) = (Kind::App, false);
+
+    fn items(apps: bool, kept: usize, open: usize, recent: bool, trash: bool) -> Vec<(Kind, bool)> {
+        let mut out = Vec::new();
+        out.extend(apps.then_some((Kind::Apps, false)));
+        out.extend([KEPT].repeat(kept));
+        out.extend([OPEN].repeat(open));
+        out.extend(recent.then_some((Kind::Recent, false)));
+        out.extend(trash.then_some((Kind::Trash, false)));
+        out
+    }
+
+    #[test]
+    fn every_part_of_the_dock_has_the_same_room_at_both_ends() {
+        for (bits, base) in (0..16).flat_map(|b| [28.0, 50.0, 51.0, 96.0].map(|base| (b, base))) {
+            let on = |k: i32| bits & (1 << k) != 0;
+            for (kept, open) in [(0, 0), (0, 1), (0, 2), (1, 0), (3, 0), (3, 2)] {
+                let list = items(on(0), kept, open, on(1), on(2));
+                let g = Geo { side: Side::Bottom, base, mag: 1.5 };
+                let cuts = splits(&list);
+                let l = slots(g, list.len(), &cuts, if on(3) { 1920.0 } else { 1365.0 }, None, 0.0);
+                let Some((start, len)) = span(g, &l) else { continue };
+                assert_eq!(start.fract(), 0.0);
+                for (i, (a, size)) in l.iter().enumerate() {
+                    // What bounds it: the body's edge, a line or the next icon.
+                    let before = if i == 0 { a - start } else if cuts.contains(&i) { g.pad() } else { a - (l[i - 1].0 + l[i - 1].1) };
+                    let after = if i + 1 == l.len() { start + len - a - size } else { l[i + 1].0 - a - size };
+                    let line = cuts.contains(&(i + 1));
+                    assert_eq!(after, if i + 1 == l.len() { g.pad() } else if line { 2.0 * g.pad() + 1.0 } else { g.gap() });
+                    assert_eq!(before, if i == 0 || cuts.contains(&i) { g.pad() } else { g.gap() });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lines_stand_only_between_parts_that_hold_something() {
+        assert_eq!(splits(&items(true, 2, 2, true, true)), [3, 5]);
+        assert_eq!(splits(&items(true, 0, 2, true, true)), [1, 3]);
+        assert_eq!(splits(&items(true, 0, 0, false, true)), [1]);
+        assert_eq!(splits(&items(false, 0, 2, true, false)), [2]);
+        assert_eq!(splits(&items(false, 2, 0, false, false)), [0usize; 0]);
+        assert_eq!(splits(&items(false, 0, 0, true, true)), [0usize; 0]);
+        assert_eq!(splits(&items(true, 0, 0, false, false)), [0usize; 0]);
+        assert_eq!(splits(&[]), [0usize; 0]);
+    }
+
+    #[test]
+    fn magnifying_keeps_the_dock_centered() {
+        let g = Geo { side: Side::Bottom, base: 50.0, mag: 1.5 };
+        let rest = span(g, &slots(g, 5, &[2], 1365.0, None, 0.0)).unwrap();
+        let grown = span(g, &slots(g, 5, &[2], 1365.0, Some(690.0), 1.0)).unwrap();
+        assert!(grown.1 > rest.1);
+        assert!((rest.0 + rest.1 / 2.0 - grown.0 - grown.1 / 2.0).abs() < 1e-6);
     }
 }
 
