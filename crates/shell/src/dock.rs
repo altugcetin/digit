@@ -1742,15 +1742,12 @@ fn bounce(st: &Shared, key: String) {
     answer(st, |l, now| l.bounce(key, now));
 }
 
-/// Starts an icon's answer to a click, if the dock animates.
+/// Starts an icon's answer to a click.
 fn answer(st: &Shared, start: impl FnOnce(&mut lively::Lively, i64)) {
-    {
-        let mut s = st.borrow_mut();
-        if !s.animated() {
-            return;
-        }
-        start(&mut s.lively, glib::monotonic_time());
+    if motion::reduced() {
+        return;
     }
+    start(&mut st.borrow_mut().lively, glib::monotonic_time());
     kick(st);
 }
 

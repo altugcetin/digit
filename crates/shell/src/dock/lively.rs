@@ -180,11 +180,6 @@ fn glide(from: f64, now: i64) -> Tween {
 }
 
 impl State {
-    /// Whether the dock animates: its setting, and Reduce motion over it.
-    pub(super) fn animated(&self) -> bool {
-        self.app.prefs.borrow().dock.motion && !motion::reduced()
-    }
-
     /// Where the body is drawn, on its way to `body_span`.
     fn drawn_span(&self, now: i64) -> (f64, f64) {
         let (start, len) = self.body_span(now);
@@ -202,9 +197,9 @@ impl State {
     }
 
     /// What is about to change, taken before `items` replace the ones shown. None when nothing
-    /// is shown yet, or the dock doesn't animate.
+    /// is shown yet, or motion is reduced.
     pub(super) fn before(&self, items: &[Item], now: i64) -> Option<Before> {
-        if self.items.is_empty() || !self.animated() {
+        if self.items.is_empty() || motion::reduced() {
             return None;
         }
         let pal = self.app.palette_at(now);
