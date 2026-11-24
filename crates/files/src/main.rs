@@ -14,6 +14,19 @@ mod thumbs;
 mod tools;
 mod unpack;
 
+/// Runs the test `name` in a process of its own, and says whether this is that process. GTK
+/// belongs to one thread and tests run on many, so each one that starts GTK does it alone.
+#[cfg(test)]
+fn alone(name: &str) -> bool {
+    const MARK: &str = "DIGIT_TEST_ALONE";
+    if std::env::var(MARK).is_ok_and(|v| v == name) {
+        return true;
+    }
+    let out = std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact", name, "--nocapture"]).env(MARK, name).output().unwrap();
+    assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    false
+}
+
 use gtk::{gdk, gio, glib, pango, prelude::*};
 use pane::{Pane, View};
 use std::cell::{Cell, RefCell};

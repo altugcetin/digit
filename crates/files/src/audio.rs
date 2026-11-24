@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn tagged_audio_plays_without_aborting() {
-        if gtk::init().is_err() {
+        if !crate::alone("audio::tests::tagged_audio_plays_without_aborting") || gtk::init().is_err() {
             return;
         }
         let mut bytes = tag(64, 0);

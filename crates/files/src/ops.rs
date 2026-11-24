@@ -1625,7 +1625,7 @@ mod tests {
 
     #[test]
     fn a_job_hands_over_when_it_is_done_not_when_every_job_is() {
-        if gtk::init().is_err() {
+        if !crate::alone("ops::tests::a_job_hands_over_when_it_is_done_not_when_every_job_is") || gtk::init().is_err() {
             return;
         }
         let sh = |script: &str| vec!["sh".to_string(), "-c".to_string(), script.to_string()];
