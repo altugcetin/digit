@@ -33,6 +33,39 @@ struct Shared {
     answer: Option<(Answer, bool)>,
     undo: Option<Undo>,
     refused: Vec<gio::File>,
+    wrong: bool,
+}
+
+/// A password on its way to a tool, wiped when it has been used.
+pub struct Secret(Vec<u8>);
+
+impl Secret {
+    pub fn new(text: &str) -> Self {
+        // In one allocation, so no copy is left where it grew.
+        let mut line = Vec::with_capacity(text.len() + 1);
+        line.extend_from_slice(text.as_bytes());
+        line.push(b'\n');
+        Self(line)
+    }
+}
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        kit::secret::wipe(&mut self.0);
+    }
+}
+
+/// Starts `cmd` away from the terminal Files itself may belong to. A tool that asks something
+/// there, as unzip does for a password, would wait for an answer nobody sees it needs.
+pub fn detach(cmd: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the child only calls setsid, which is async-signal-safe and touches no memory.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
 }
 
 type State = Arc<(Mutex<Shared>, Condvar)>;
@@ -113,12 +146,12 @@ fn same_fs(a: &gio::File, b: &gio::File) -> bool {
 }
 
 pub fn run(label: &str, plan: Plan) {
-    run_with(label, plan, None);
+    run_with(label, plan, None, None);
 }
 
 /// Runs `plan` as a job, and `after` once this job is over (done, failed or cancelled), whatever
-/// other jobs are still going.
-fn run_with(label: &str, plan: Plan, after: Option<Box<dyn FnOnce()>>) {
+/// other jobs are still going. A tool is given `password`, and `after` told whether it was wrong.
+fn run_with(label: &str, plan: Plan, password: Option<Secret>, after: Option<Box<dyn FnOnce(bool)>>) {
     let mut after = after;
     let mut seen = std::collections::HashSet::new();
     let flights = match &plan {
@@ -131,7 +164,7 @@ fn run_with(label: &str, plan: Plan, after: Option<Box<dyn FnOnce()>>) {
     let st = state.clone();
     let c = cancel.clone();
     std::thread::spawn(move || {
-        work(plan, &st, &c, flights);
+        work_with(plan, password, &st, &c, flights);
         let (m, _) = &*st;
         if let Ok(mut s) = m.lock() {
             s.finished = true;
@@ -169,6 +202,7 @@ fn run_with(label: &str, plan: Plan, after: Option<Box<dyn FnOnce()>>) {
         let errors = std::mem::take(&mut s.errors);
         let undo = s.undo.take();
         let refused = std::mem::take(&mut s.refused);
+        let wrong = s.wrong;
         drop(s);
         crate::jobs_done(&row.0);
         if let Some(u) = undo {
@@ -182,7 +216,7 @@ fn run_with(label: &str, plan: Plan, after: Option<Box<dyn FnOnce()>>) {
         }
         crate::refresh_all();
         if let Some(after) = after.take() {
-            after();
+            after(wrong);
         }
         glib::ControlFlow::Break
     });
@@ -503,7 +537,12 @@ fn inside(child: &gio::File, parent: &gio::File) -> bool {
     child.equal(parent) || child.has_prefix(parent)
 }
 
+#[cfg(test)]
 fn work(plan: Plan, st: &State, cancel: &gio::Cancellable, flights: Vec<crate::pane::TrashFlight>) {
+    work_with(plan, None, st, cancel, flights);
+}
+
+fn work_with(plan: Plan, password: Option<Secret>, st: &State, cancel: &gio::Cancellable, flights: Vec<crate::pane::TrashFlight>) {
     let mut ctx = Ctx { st, cancel, policy: None, made: Vec::new(), moved: Vec::new(), base: 0 };
     let mut errors = Vec::new();
     match plan {
@@ -608,46 +647,7 @@ fn work(plan: Plan, st: &State, cancel: &gio::Cancellable, flights: Vec<crate::p
             }
         }
         Plan::Run(argv, cwd, made) => {
-            note(st, |s| s.now = argv.first().cloned().unwrap_or_default());
-            match std::process::Command::new(&argv[0]).args(&argv[1..]).current_dir(&cwd).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn() {
-                Ok(mut child) => {
-                    // Read while it runs: a full pipe would stop the tool for good.
-                    let complaint = child.stderr.take().map(|e| std::thread::spawn(move || last_line(e)));
-                    loop {
-                        if cancel.is_cancelled() {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            if let Some(m) = &made {
-                                let _ = remove_tree(&gio::File::for_path(m), &gio::Cancellable::new());
-                            }
-                            break;
-                        }
-                        match child.try_wait() {
-                            Ok(Some(status)) => {
-                                if !status.success() {
-                                    let err = complaint.and_then(|c| c.join().ok()).flatten();
-                                    errors.push(err.unwrap_or_else(|| format!("{} failed", argv[0])));
-                                    // What a tool that gave up had begun writing (often nothing
-                                    // yet: an empty file) goes, as on a cancel. It is always a
-                                    // new name this job made, never something that was there.
-                                    if let Some(m) = &made {
-                                        let _ = remove_tree(&gio::File::for_path(m), &gio::Cancellable::new());
-                                    }
-                                } else if let Some(m) = made {
-                                    note(st, |s| s.undo = Some(Undo::Created(vec![gio::File::for_path(m)])));
-                                }
-                                break;
-                            }
-                            Ok(None) => std::thread::sleep(Duration::from_millis(80)),
-                            Err(e) => {
-                                errors.push(e.to_string());
-                                break;
-                            }
-                        }
-                    }
-                }
-                Err(e) => errors.push(format!("{}: {e}", argv[0])),
-            }
+            tool(&argv, &cwd, made, password, st, cancel, &mut errors);
         }
     }
     if cancel.is_cancelled() {
@@ -707,10 +707,73 @@ pub fn empty_trash() {
     });
 }
 
-fn last_line(stream: impl std::io::Read) -> Option<String> {
+/// Runs a tool to its end, giving it `password` if it has one to read.
+fn tool(argv: &[String], cwd: &std::path::Path, made: Option<PathBuf>, password: Option<Secret>, st: &State, cancel: &gio::Cancellable, errors: &mut Vec<String>) {
+    use std::process::Stdio;
+    note(st, |s| s.now = argv.first().cloned().unwrap_or_default());
+    let mut cmd = std::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..]).current_dir(cwd).stdin(if password.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::null()).stderr(Stdio::piped());
+    detach(&mut cmd);
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => return errors.push(format!("{}: {e}", argv[0])),
+    };
+    // Read while it runs: a full pipe would stop the tool for good.
+    let complaint = child.stderr.take().map(|e| std::thread::spawn(move || complaint(e)));
+    let locked = password.is_some();
+    if let (Some(password), Some(mut stdin)) = (password, child.stdin.take()) {
+        use std::io::Write;
+        let _ = stdin.write_all(&password.0);
+    }
+    let unmake = || {
+        if let Some(m) = &made {
+            let _ = remove_tree(&gio::File::for_path(m), &gio::Cancellable::new());
+        }
+    };
+    loop {
+        if cancel.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return unmake();
+        }
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                if let Some(m) = made {
+                    note(st, |s| s.undo = Some(Undo::Created(vec![gio::File::for_path(m)])));
+                }
+                return;
+            }
+            Ok(Some(_)) => {
+                let (last, wrong) = complaint.and_then(|c| c.join().ok()).unwrap_or_default();
+                if locked && wrong {
+                    note(st, |s| s.wrong = true);
+                } else {
+                    errors.push(last.map_or_else(|| format!("{} failed", argv[0]), plainly));
+                }
+                // What a tool that gave up had begun writing (often nothing yet: an empty
+                // file) goes, as on a cancel. It is always a new name this job made, never
+                // something that was there.
+                return unmake();
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(80)),
+            Err(e) => return errors.push(e.to_string()),
+        }
+    }
+}
+
+/// What a tool said last, and whether it ever said its password was wrong.
+fn complaint(stream: impl std::io::Read) -> (Option<String>, bool) {
     use std::io::BufRead;
     let lines = std::io::BufReader::new(stream).split(b'\n').map_while(Result::ok);
-    lines.map(|l| String::from_utf8_lossy(&l).trim().to_string()).filter(|l| !l.is_empty()).last()
+    lines.map(|l| String::from_utf8_lossy(&l).trim().to_string()).filter(|l| !l.is_empty()).fold((None, false), |(_, wrong), l| {
+        let wrong = wrong || l.contains("Wrong password");
+        (Some(l), wrong)
+    })
+}
+
+/// A tool's words, where they say little to someone who didn't start it.
+fn plainly(said: String) -> String {
+    if said.contains("unable to get password") || said.contains("need PK compat") { "This archive needs 7-Zip to open (install 7zip)".into() } else { said }
 }
 
 pub fn undo() {
@@ -1187,49 +1250,17 @@ pub fn install(file: &gio::File) {
     }
 }
 
-pub fn extract(files: Vec<gio::File>) {
-    for f in files {
-        let (Some(path), Some(dir)) = (f.path(), f.parent().and_then(|p| p.path())) else { continue };
-        let n = name(&f);
-        let lower = n.to_lowercase();
-        let stem = split_ext(&n).0;
-        let target = unique(&gio::File::for_path(&dir), &stem);
-        let Some(out) = target.path() else { continue };
-        let p = path.to_string_lossy().into_owned();
-        let o = out.to_string_lossy().into_owned();
-        let argv: Vec<String> = if lower.contains(".tar") || lower.ends_with(".tgz") || lower.ends_with(".txz") || lower.ends_with(".tbz2") {
-            if !has("tar") {
-                crate::toast("tar isn't installed");
-                continue;
-            }
-            vec!["sh_mkdir".into(), o.clone(), "tar".into(), "-x".into(), "-f".into(), p, "-C".into(), o.clone()]
-        } else if lower.ends_with(".zip") && has("unzip") {
-            vec!["unzip".into(), "-q".into(), "-n".into(), p, "-d".into(), o.clone()]
-        } else if has("7z") {
-            vec!["7z".into(), "x".into(), "-bd".into(), "-y".into(), format!("-o{o}"), "--".into(), p]
-        } else {
-            crate::toast("No tool can open this archive (install 7-Zip)");
-            continue;
-        };
-        let argv = if argv[0] == "sh_mkdir" {
-            if std::fs::create_dir_all(&argv[1]).is_err() {
-                crate::toast("Couldn't create the folder");
-                continue;
-            }
-            argv[2..].to_vec()
-        } else {
-            argv
-        };
-        run_then("Extracting", Plan::Run(argv, dir.clone(), Some(out.clone())), move || flatten(&out));
-    }
-}
-
 /// Runs `plan` as a job, then `after` when this job is over.
 pub fn run_then(label: &str, plan: Plan, after: impl FnOnce() + 'static) {
-    run_with(label, plan, Some(Box::new(after)));
+    run_with(label, plan, None, Some(Box::new(move |_| after())));
 }
 
-fn flatten(out: &std::path::Path) {
+/// Runs `plan`, a tool that reads `password`, as a job. `after` is told whether it was wrong.
+pub fn run_unlocking(label: &str, plan: Plan, password: Secret, after: impl FnOnce(bool) + 'static) {
+    run_with(label, plan, Some(password), Some(Box::new(after)));
+}
+
+pub fn flatten(out: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(out).map(|r| r.flatten().collect::<Vec<_>>()) else { return };
     if let [only] = entries.as_slice() {
         let Some(parent) = out.parent() else { return };
@@ -1557,6 +1588,15 @@ pub fn is_trash(f: &gio::File) -> bool {
     f.uri_scheme().is_some_and(|s| s == "trash")
 }
 
+
+/// Runs `plan` with `password` here and now: whether it was wrong, and how many errors came.
+#[cfg(test)]
+pub fn unlocked(plan: Plan, password: Secret) -> (bool, usize) {
+    let st: State = Arc::new((Mutex::new(Shared::default()), Condvar::new()));
+    work_with(plan, Some(password), &st, &gio::Cancellable::new(), Vec::new());
+    let s = st.0.lock().unwrap();
+    (s.wrong, s.errors.len())
+}
 
 #[cfg(test)]
 mod tests {

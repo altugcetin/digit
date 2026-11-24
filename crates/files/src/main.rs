@@ -11,6 +11,7 @@ mod search;
 mod side;
 mod thumbs;
 mod tools;
+mod unpack;
 
 use gtk::{gdk, gio, glib, pango, prelude::*};
 use pane::{Pane, View};
@@ -855,7 +856,7 @@ fn actions(window: &gtk::ApplicationWindow) {
     });
     action(window, "extract", || {
         if let Some(p) = active() {
-            ops::extract(p.selected().iter().filter(|i| ops::archive(i)).filter_map(pane::file_of).collect());
+            unpack::extract(p.selected().iter().filter(|i| ops::archive(i)).filter_map(pane::file_of).collect());
         }
     });
     action(window, "undo", || {

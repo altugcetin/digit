@@ -33,6 +33,7 @@ optdepends=(
   'scrcpy: mirroring a phone screen'
   'android-tools: mirroring a phone over USB'
   'bubblewrap: thumbnails from other apps in Digit Files'
+  '7zip: 7z, RAR and password-protected archives in Digit Files'
   'libjxl: JPEG XL app icons in Digit Store'
   'flatpak: apps from Flathub in Digit Store'
   'archlinux-appstream-data: system apps in Digit Store'
