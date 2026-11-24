@@ -267,6 +267,10 @@ pub fn round(x: f64, y: f64, w: f64, h: f64, r: f64) -> gsk::RoundedRect {
 }
 
 pub fn fill(s: &gtk::Snapshot, shape: &gsk::RoundedRect, color: Rgb) {
+    // Buttons at rest have nothing behind them.
+    if color.a < 0.002 {
+        return;
+    }
     s.push_rounded_clip(shape);
     s.append_color(&color.rgba(), shape.bounds());
     s.pop();

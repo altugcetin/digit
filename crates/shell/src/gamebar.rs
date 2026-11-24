@@ -2,6 +2,7 @@ use crate::app::App;
 use crate::audio;
 use crate::compositor;
 use crate::draw::{self, Face};
+use crate::feel::{self, Feel};
 use crate::gsr::{self, Mode};
 use crate::paint::Paint;
 use gtk::{cairo, gdk, gio, glib, graphene, pango, prelude::*};
@@ -171,6 +172,7 @@ struct State {
     cards: Vec<Card>,
     aim: Aim,
     hot: Option<Hit>,
+    feel: Feel<Hit>,
     drag: Option<Drag>,
     dragged: bool,
     ticking: bool,
@@ -323,6 +325,7 @@ fn build(app: &Rc<App>) -> Shared {
         cards: saved.cards.iter().map(|c| Card { kind: c.kind, x: c.x, y: c.y, open: c.open, pinned: c.pinned, w: c.w, h: c.h, vis: Tween::still(if c.open { 1.0 } else { 0.0 }) }).collect(),
         aim: saved.crosshair,
         hot: None,
+        feel: Feel::default(),
         drag: None,
         dragged: false,
         ticking: false,
@@ -335,6 +338,10 @@ fn build(app: &Rc<App>) -> Shared {
         if let Some(st) = weak.upgrade() {
             if let Ok(st) = st.try_borrow() {
                 st.draw(s);
+            }
+            // Something it drew has changed since the last time, and goes on from here.
+            if st.try_borrow().is_ok_and(|s| !s.ticking && s.feel.busy(glib::monotonic_time())) {
+                glib::idle_add_local_once(move || kick(&st));
             }
         }
     });
@@ -447,6 +454,7 @@ fn show(st: &Shared) {
     {
         let mut s = st.borrow_mut();
         s.open = true;
+        s.feel.retain(|_| false);
         s.hot = None;
         let now = glib::monotonic_time();
         s.rise.go(1.0, now, IN_MS, OPEN);
@@ -608,6 +616,7 @@ fn refresh_mix(st: &Shared) {
                 return;
             }
             s.data.mix = mix;
+            s.data.faces.borrow_mut().clear();
             s.paint.queue_draw();
         }
         region(&st);
@@ -648,6 +657,8 @@ fn hover(st: &Shared, x: f64, y: f64) {
         return;
     }
     s.hot = at;
+    let keys: Vec<Hit> = at.into_iter().collect();
+    s.feel.hover(&keys, glib::monotonic_time());
     let cursor = match at {
         Some(Hit::Head(_)) => Some("grab"),
         Some(Hit::Resize(_, e)) => Some(match e {
@@ -660,7 +671,8 @@ fn hover(st: &Shared, x: f64, y: f64) {
         Some(_) => Some("pointer"),
     };
     s.paint.set_cursor_from_name(cursor);
-    s.paint.queue_draw();
+    drop(s);
+    kick(st);
 }
 
 fn raise(s: &mut State, kind: Kind) {
@@ -674,6 +686,11 @@ fn drag_begin(st: &Shared, x: f64, y: f64) {
     let mut s = st.borrow_mut();
     s.dragged = false;
     let Some(hit) = s.hit_at(x, y) else { return };
+    if !matches!(hit, Hit::Bare | Hit::Head(_) | Hit::Body(_) | Hit::Resize(..) | Hit::Level(_)) {
+        s.feel.press(hit, glib::monotonic_time());
+        drop(s);
+        return kick(st);
+    }
     match hit {
         Hit::Head(kind) | Hit::Body(kind) => {
             raise(&mut s, kind);
@@ -749,7 +766,7 @@ fn drag_to(st: &Shared, x: f64, y: f64, moved: f64) {
         }
         Some(Drag::Slide { row, x0, w }) => {
             let level = ((x - x0) / w).clamp(0.0, 1.0);
-            s.data.sliding = Some((row, (level * 100.0).round() / 100.0));
+            s.data.sliding = Some((row, level));
             s.data.held = true;
             s.paint.queue_draw();
             drop(s);
@@ -763,8 +780,14 @@ fn drag_end(st: &Shared) {
     let slide = {
         let mut s = st.borrow_mut();
         let drag = s.drag.take();
-        s.paint.set_cursor_from_name(None);
-        s.hot = None;
+        let now = glib::monotonic_time();
+        s.feel.release(now);
+        // A plain press leaves the pointer on its button.
+        if drag.is_some() {
+            s.paint.set_cursor_from_name(None);
+            s.hot = None;
+            s.feel.hover(&[], now);
+        }
         match drag {
             Some(Drag::Move { .. } | Drag::Resize { .. }) => {
                 s.save();
@@ -777,6 +800,7 @@ fn drag_end(st: &Shared) {
             None => false,
         }
     };
+    kick(st);
     if slide {
         push_level(st);
     } else {
@@ -792,9 +816,12 @@ fn push_level(st: &Shared) {
         if s.data.pushing {
             return;
         }
-        let Some((row, level)) = s.data.sliding else { return };
+        // The knob follows the pointer; the server gets whole percents.
+        let Some((row, level)) = s.data.sliding.map(|(row, v)| (row, (v * 100.0).round() / 100.0)) else { return };
         if s.data.sent == Some(level) {
             if !s.data.held {
+                // Its row keeps the level until the server's answer is read.
+                s.data.set_level(row, level);
                 s.data.sliding = None;
                 s.data.sent = None;
                 drop(s);
@@ -1026,7 +1053,7 @@ fn kick(st: &Shared) {
         let now = clock.frame_time();
         s.place_notes(now);
         w.queue_draw();
-        if !s.rise.settled(now) || s.cards.iter().any(|c| !c.vis.settled(now)) || (s.needed() && s.app.palette_moving(now)) {
+        if s.feel.busy(now) || !s.rise.settled(now) || s.cards.iter().any(|c| !c.vis.settled(now)) || (s.needed() && s.app.palette_moving(now)) {
             return glib::ControlFlow::Continue;
         }
         s.ticking = false;
@@ -1219,7 +1246,7 @@ impl State {
             s.save();
             s.translate(&graphene::Point::new(x as f32, (y + dy) as f32));
             s.push_opacity(alpha);
-            self.draw_card(s, c, &pal, w, h);
+            self.draw_card(s, c, &pal, w, h, now);
             s.pop();
             s.restore();
         }
@@ -1227,7 +1254,7 @@ impl State {
             s.save();
             s.translate(&graphene::Point::new(0.0, (-(1.0 - rise) * (BAR_TOP + BAR_H + 12.0)) as f32));
             s.push_opacity(rise);
-            self.draw_bar(s, &pal);
+            self.draw_bar(s, &pal, now);
             s.pop();
             s.restore();
         }
@@ -1236,7 +1263,7 @@ impl State {
         }
     }
 
-    fn draw_card(&self, s: &gtk::Snapshot, c: &Card, pal: &Palette, w: f64, h: f64) {
+    fn draw_card(&self, s: &gtk::Snapshot, c: &Card, pal: &Palette, w: f64, h: f64, now: i64) {
         let cfg = &self.app.cfg;
         let shape = draw::round(0.0, 0.0, w, h, RADIUS * self.app.round());
         // App card surface with a soft shadow to lift it off windows.
@@ -1248,19 +1275,22 @@ impl State {
         draw::icon(s, &self.paint, cfg, c.kind.glyph(), 18.0, false, pal.ink_meta, PAD + 9.0, mid);
         draw::text(s, &self.paint, cfg, c.kind.title(), 14.0, Face::Text(600), pal.ink_main, PAD + 26.0, mid, w - 2.0 * PAD - 100.0, pango::Alignment::Left);
         for item in cards::head_items(c.kind, w) {
-            let hot = self.hot == Some(item.hit);
             let (glyph, on) = match item.hit {
                 Hit::Pin(_) => ("keep", c.pinned),
                 _ => ("close", false),
             };
-            let back = if on { pal.accent } else if hot { pal.tile(0.12) } else { pal.body.alpha(0.0) };
-            draw::fill(s, &draw::round(item.x, item.y, item.w, item.h, item.h / 2.0), back);
-            draw::icon(s, &self.paint, cfg, glyph, 18.0, on, if on { pal.on_accent } else { pal.ink_meta }, item.x + item.w / 2.0, item.y + item.h / 2.0);
+            let lit = self.feel.on(item.hit, on, now);
+            let (cx, cy) = (item.x + item.w / 2.0, item.y + item.h / 2.0);
+            feel::scaled(s, self.feel.scale(item.hit, feel::SMALL, now), cx, cy, || {
+                let shape = draw::round(item.x, item.y, item.w, item.h, item.h / 2.0);
+                feel::flood(s, &shape, feel::faint(pal.tile(0.12), self.feel.glow(item.hit, now)), pal.accent, lit, cx, cy);
+                feel::scaled(s, self.feel.icon(item.hit, glyph, now), cx, cy, || draw::icon(s, &self.paint, cfg, glyph, 18.0, on, pal.on_accent.mix(pal.ink_meta, lit), cx, cy));
+            });
         }
-        cards::draw(self, s, c.kind, pal, w, h);
+        cards::draw(self, s, c.kind, pal, w, h, now);
     }
 
-    fn draw_bar(&self, s: &gtk::Snapshot, pal: &Palette) {
+    fn draw_bar(&self, s: &gtk::Snapshot, pal: &Palette, now: i64) {
         let cfg = &self.app.cfg;
         let (x0, w, slots) = self.bar();
         let shape = draw::round(x0, BAR_TOP, w, BAR_H, BAR_H / 2.0);
@@ -1271,12 +1301,16 @@ impl State {
         let mid = BAR_TOP + BAR_H / 2.0;
         for (kind, sx) in &slots {
             let on = self.cards.iter().any(|c| c.kind == *kind && c.open);
-            let hot = self.hot == Some(Hit::Bar(*kind));
-            let back = if on { pal.accent } else if hot { pal.tile(0.12) } else { pal.body.alpha(0.0) };
-            draw::fill(s, &draw::round(x0 + sx, mid - SLOT / 2.0, SLOT, SLOT, SLOT / 2.0), back);
+            let key = Hit::Bar(*kind);
+            let lit = self.feel.on(key, on, now);
             let glyph = if *kind == Kind::Recorder && gsr::status().is_some() { "radio_button_checked" } else { kind.glyph() };
-            let ink = if *kind == Kind::Recorder && gsr::status().is_some() { RED } else if on { pal.on_accent } else { pal.ink_main };
-            draw::icon(s, &self.paint, cfg, glyph, 20.0, on, ink, x0 + sx + SLOT / 2.0, mid);
+            let ink = if *kind == Kind::Recorder && gsr::status().is_some() { RED } else { pal.on_accent.mix(pal.ink_main, lit) };
+            let cx = x0 + sx + SLOT / 2.0;
+            feel::scaled(s, self.feel.scale(key, feel::SMALL, now), cx, mid, || {
+                let shape = draw::round(x0 + sx, mid - SLOT / 2.0, SLOT, SLOT, SLOT / 2.0);
+                feel::flood(s, &shape, feel::faint(pal.tile(0.12), self.feel.glow(key, now)), pal.accent, lit, cx, mid);
+                feel::scaled(s, self.feel.icon(key, glyph, now), cx, mid, || draw::icon(s, &self.paint, cfg, glyph, 20.0, on, ink, cx, mid));
+            });
         }
         let mut x = x0 + 10.0 + KINDS.len() as f64 * (SLOT + 4.0) + 4.0;
         x += 10.0;
