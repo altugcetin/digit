@@ -1466,7 +1466,10 @@ fn drag_at(st: &Shared, p: Point) {
                 let item = s.items.iter().find(|i| i.key == key);
                 let was = item.is_some_and(|i| i.pinned);
                 let closed = item.is_some_and(|i| i.windows.is_empty());
-                let side = if past { std::cmp::Ordering::Greater } else { t.cmp(&others) };
+                let front = others == 0 && !was && s.layout(now).get(lead).is_some_and(|&first| {
+                    in_front(s.geo, p.0, s.drag.as_ref().map_or(p.0, |d| d.origin.0), first, lead > 0)
+                });
+                let side = if past { std::cmp::Ordering::Greater } else if front { std::cmp::Ordering::Less } else { t.cmp(&others) };
                 let pin = match side {
                     std::cmp::Ordering::Less => true,
                     std::cmp::Ordering::Greater => was && closed,
@@ -1854,6 +1857,13 @@ fn slots(g: Geo, n: usize, splits: &[usize], len: f64, pointer: Option<f64>, m: 
 fn span(g: Geo, slots: &[(f64, f64)]) -> Option<(f64, f64)> {
     let (f, b) = (slots.first()?, slots.last()?);
     Some((f.0 - g.pad(), b.0 + b.1 - f.0 + 2.0 * g.pad()))
+}
+
+/// Whether an app dragged to `at` from `origin` is taken in front of the open apps, to be the
+/// first one kept, when none is: past the line to the Apps button's side, or with no such line,
+/// onto the first app's near half. `first` is the first app's place.
+fn in_front(g: Geo, at: f64, origin: f64, first: (f64, f64), line: bool) -> bool {
+    if line { at < first.0 - g.pad() } else { at < first.0 + first.1 / 2.0 && origin - at >= first.1 * 0.25 }
 }
 
 impl State {
@@ -2412,6 +2422,20 @@ mod layout_tests {
         let grown = span(g, &slots(g, 5, &[2], 1365.0, Some(690.0), 1.0)).unwrap();
         assert!(grown.1 > rest.1);
         assert!((rest.0 + rest.1 / 2.0 - grown.0 - grown.1 / 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_first_app_is_kept_by_taking_it_in_front_of_the_open_ones() {
+        let g = Geo { side: Side::Bottom, base: 50.0, mag: 1.0 };
+        let first = (100.0, 50.0);
+        // Past the line beside the Apps button.
+        assert!(in_front(g, 85.0, 180.0, first, true));
+        assert!(!in_front(g, 95.0, 180.0, first, true));
+        // With no line, the first place's near half, but not by a small pull of the app there.
+        assert!(in_front(g, 110.0, 180.0, first, false));
+        assert!(!in_front(g, 130.0, 180.0, first, false));
+        assert!(!in_front(g, 106.0, 115.0, first, false));
+        assert!(in_front(g, 102.0, 115.0, first, false));
     }
 }
 
