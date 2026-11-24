@@ -1,6 +1,7 @@
 use crate::app::App;
 use crate::compositor;
 use crate::draw::{self, Face};
+use crate::feel::{self, Feel};
 use crate::paint::Paint;
 use crate::panel_corner;
 use gtk::{cairo, gdk, gio, glib, graphene, pango, prelude::*};
@@ -114,6 +115,7 @@ struct State {
     dropped: bool,
     hot: Option<Spot>,
     glow: Vec<Tween>,
+    feel: Feel<Spot>,
     rise: Tween,
     fade: Tween,
     ticking: bool,
@@ -229,6 +231,7 @@ fn build(app: &Rc<App>) -> Shared {
         dropped: false,
         hot: None,
         glow: Vec::new(),
+        feel: Feel::default(),
         rise: Tween::still(0.0),
         fade: Tween::still(0.0),
         ticking: false,
@@ -297,6 +300,22 @@ fn build(app: &Rc<App>) -> Shared {
     });
     paint.add_controller(motion);
     let click = gtk::GestureClick::new();
+    let weak = Rc::downgrade(&st);
+    click.connect_pressed(move |_, _, x, y| {
+        if let Some(st) = weak.upgrade() {
+            if let Some(spot) = st.borrow().spot_at(x, y) {
+                st.borrow().feel.press(spot, glib::monotonic_time());
+            }
+            kick(&st);
+        }
+    });
+    let weak = Rc::downgrade(&st);
+    click.connect_end(move |_, _| {
+        if let Some(st) = weak.upgrade() {
+            st.borrow().feel.release(glib::monotonic_time());
+            kick(&st);
+        }
+    });
     let weak = Rc::downgrade(&st);
     click.connect_released(move |_, _, x, y| {
         if let Some(st) = weak.upgrade() {
@@ -533,6 +552,8 @@ fn hover(st: &Shared, at: Option<Spot>) {
             let on = card == Some(i);
             g.go(if on { 1.0 } else { 0.0 }, now, if on { 160 } else { 260 }, motion::STANDARD);
         }
+        let keys: Vec<Spot> = at.into_iter().collect();
+        s.feel.hover(&keys, now);
         let pointer = matches!(at, Some(_));
         s.paint.set_cursor_from_name(pointer.then_some("pointer"));
     }
@@ -580,7 +601,7 @@ fn kick(st: &Shared) {
             surface.set_input_region(Some(&s.input_region(now)));
         }
         w.queue_draw();
-        let busy = [&s.rise, &s.fade].into_iter().chain(s.glow.iter()).any(|t| !t.settled(now));
+        let busy = s.feel.busy(now) || [&s.rise, &s.fade].into_iter().chain(s.glow.iter()).any(|t| !t.settled(now));
         if busy {
             return glib::ControlFlow::Continue;
         }
@@ -589,6 +610,7 @@ fn kick(st: &Shared) {
             let window = s.window.clone();
             s.cards.clear();
             s.glow.clear();
+            s.feel.retain(|_| false);
             draw::forget(&s.paint);
             drop(s);
             window.set_visible(false);
@@ -713,7 +735,10 @@ impl State {
             let (x, y) = self.card_rect(i);
             let glow = self.glow.get(i).map_or(0.0, |g| g.value(now).clamp(0.0, 1.0));
             let base = if card.active { 0.15 } else { 0.08 };
-            draw::fill(s, &draw::round(x, y, CARD_W, CARD_H, 20.0 * self.app.round()), pal.ink_main.alpha(base + 0.06 * glow));
+            let give = self.feel.scale(Spot::Card(i), feel::TILE, now);
+            feel::scaled(s, give, x + CARD_W / 2.0, y + CARD_H / 2.0, || {
+                draw::fill(s, &draw::round(x, y, CARD_W, CARD_H, 20.0 * self.app.round()), pal.ink_main.alpha(base + 0.06 * glow));
+            });
             let ink = if card.active { pal.accent } else { pal.ink_main };
             draw::text(s, &self.paint, cfg, &card.idx.to_string(), 17.0, Face::Number(600), ink, x + 14.0, y + 22.0, 40.0, left);
             let count = match card.windows.len() {
@@ -728,17 +753,19 @@ impl State {
             }
             for (j, (id, app_id, icon)) in card.windows.iter().take(4).enumerate() {
                 let (ix, iy) = self.icon_rect(i, j);
-                if self.hot == Some(Spot::Window(i, j)) {
-                    draw::fill(s, &draw::round(ix - 4.0, iy - 4.0, ICON + 8.0, ICON + 8.0, 10.0), pal.ink_main.alpha(0.12));
+                let key = Spot::Window(i, j);
+                let lit = self.feel.glow(key, now);
+                if lit > 0.01 {
+                    draw::fill(s, &draw::round(ix - 4.0, iy - 4.0, ICON + 8.0, ICON + 8.0, 10.0), pal.ink_main.alpha(0.12 * lit));
                 }
                 let lifted = self.drag.as_ref().is_some_and(|d| d.moving && d.space == card.target && d.window == *id);
                 if lifted {
                     s.push_opacity(0.3);
                 }
-                match icon {
+                feel::scaled(s, self.feel.scale(key, feel::SMALL, now), ix + ICON / 2.0, iy + ICON / 2.0, || match icon {
                     Some(p) => draw::paintable(s, p, ix, iy, ICON),
                     None => draw::monogram(s, &self.paint, cfg, &crate::apps::pretty(app_id), ix, iy, ICON, pal.raised, pal.ink_main),
-                }
+                });
                 if lifted {
                     s.pop();
                 }
@@ -762,9 +789,11 @@ impl State {
         }
         for (k, chip) in self.chips.iter().enumerate() {
             let (x, y, cw) = self.chip_rect(k);
-            let hot = self.hot == Some(Spot::Special(k));
+            let key = Spot::Special(k);
             let base = if chip.shown { 0.15 } else { 0.08 };
-            draw::fill(s, &draw::round(x, y, cw, CHIP_H, CHIP_H / 2.0), pal.ink_main.alpha(base + if hot { 0.06 } else { 0.0 }));
+            feel::scaled(s, self.feel.scale(key, feel::PILL, now), x + cw / 2.0, y + CHIP_H / 2.0, || {
+                draw::fill(s, &draw::round(x, y, cw, CHIP_H, CHIP_H / 2.0), pal.ink_main.alpha(base + 0.06 * self.feel.glow(key, now)));
+            });
             let ink = if chip.shown { pal.accent } else { pal.ink_main };
             draw::icon(s, &self.paint, cfg, "stacks", 16.0, false, ink, x + 22.0, y + CHIP_H / 2.0);
             let room = cw - 40.0 - chip.icons.len() as f64 * (CHIP_ICON + 4.0) - 12.0;

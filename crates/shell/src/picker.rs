@@ -1,6 +1,7 @@
 use crate::app::App;
 use crate::compositor;
 use crate::draw::{self, Face};
+use crate::feel::{self, Feel};
 use crate::wallpaper;
 use gtk::subclass::prelude::*;
 use gtk::{cairo, gdk, gio, glib, graphene, gsk, pango, prelude::*};
@@ -94,6 +95,8 @@ struct State {
     scroll: Tween,
     preview_wait: u64,
     hits: Vec<(Hit, graphene::Rect)>,
+    feel: Rc<Feel<Hit>>,
+    hover: Option<Hit>,
     region: bool,
     ticking: bool,
 }
@@ -485,6 +488,8 @@ impl Picker {
             scroll: Tween::still(0.0),
             preview_wait: 0,
             hits: Vec::new(),
+            feel: Rc::default(),
+            hover: None,
             region: false,
             ticking: false,
         }));
@@ -548,7 +553,40 @@ impl Picker {
             glib::Propagation::Stop
         });
         window.add_controller(keys);
+        let motion = gtk::EventControllerMotion::new();
+        let weak = Rc::downgrade(&self.0);
+        motion.connect_motion(move |_, x, y| {
+            if let Some(s) = weak.upgrade() {
+                let me = Picker(s);
+                let hit = me.hit(x, y);
+                me.hover(hit);
+            }
+        });
+        let weak = Rc::downgrade(&self.0);
+        motion.connect_leave(move |_| {
+            if let Some(s) = weak.upgrade() {
+                Picker(s).hover(None);
+            }
+        });
+        canvas.add_controller(motion);
         let click = gtk::GestureClick::new();
+        let weak = Rc::downgrade(&self.0);
+        click.connect_pressed(move |_, _, x, y| {
+            if let Some(s) = weak.upgrade() {
+                let me = Picker(s);
+                if let Some(hit) = me.hit(x, y) {
+                    me.0.borrow().feel.press(hit, glib::monotonic_time());
+                }
+                me.kick();
+            }
+        });
+        let weak = Rc::downgrade(&self.0);
+        click.connect_end(move |_, _| {
+            if let Some(s) = weak.upgrade() {
+                s.borrow().feel.release(glib::monotonic_time());
+                Picker(s).kick();
+            }
+        });
         let weak = Rc::downgrade(&self.0);
         click.connect_released(move |_, n, x, y| {
             let Some(s) = weak.upgrade() else { return };
@@ -1032,6 +1070,19 @@ impl Picker {
         s.hits.iter().rev().find(|(_, r)| r.contains_point(&p)).map(|(h, _)| *h)
     }
 
+    fn hover(&self, hit: Option<Hit>) {
+        {
+            let mut s = self.0.borrow_mut();
+            if s.hover == hit {
+                return;
+            }
+            s.hover = hit;
+            let keys: Vec<Hit> = hit.into_iter().collect();
+            s.feel.hover(&keys, glib::monotonic_time());
+        }
+        self.kick();
+    }
+
     fn kick(&self) {
         let (canvas, already) = {
             let mut s = self.0.borrow_mut();
@@ -1085,7 +1136,7 @@ impl State {
 
     fn step(&mut self, now: i64) -> bool {
         self.born.retain(|_, t| !motion::reduced() && now - *t < BORN);
-        let moving = [&self.fade, &self.focus, &self.rise, &self.scroll].iter().any(|t| !t.settled(now)) || !self.born.is_empty();
+        let moving = [&self.fade, &self.focus, &self.rise, &self.scroll].iter().any(|t| !t.settled(now)) || !self.born.is_empty() || self.feel.busy(now);
         if !moving && !self.open {
             self.thumbs.clear();
             self.thumbs.shrink_to_fit();
@@ -1155,21 +1206,24 @@ impl State {
         self.hits.push((Hit::Bar, *bar.bounds()));
         let mid = bar_y + BAR_H / 2.0;
         let mut x = bx + 8.0;
-        let chip = |s: &gtk::Snapshot, x: f64, mid: f64, w: f64, on: bool| {
+        let buttons = self.feel.clone();
+        let chip = |s: &gtk::Snapshot, hit: Hit, x: f64, mid: f64, w: f64, on: bool, inside: &dyn Fn(Rgb)| {
             let r = rounded(x, mid - CHIP / 2.0 - 1.0, w, CHIP + 2.0, 9.0);
-            s.push_rounded_clip(&r);
-            s.append_color(&(if on { pal.accent } else { pal.raised }).rgba(), r.bounds());
-            s.pop();
+            let lit = buttons.on(hit, on, now);
+            let cx = x + w / 2.0;
+            feel::scaled(s, buttons.scale(hit, feel::PILL, now), cx, mid, || {
+                feel::flood(s, &r, ink.mix(pal.raised, 0.10 * buttons.glow(hit, now)), pal.accent, lit, cx, mid);
+                inside(pal.on_accent.mix(ink, lit));
+            });
             *r.bounds()
         };
-        let r = chip(s, x, mid, label_w, false);
-        draw::text(s, &canvas, &cfg, &label, 13.0, Face::Text(560), ink, x, mid, label_w, pango::Alignment::Center);
+        let r = chip(s, Hit::Source, x, mid, label_w, false, &|ink| draw::text(s, &canvas, &cfg, &label, 13.0, Face::Text(560), ink, x, mid, label_w, pango::Alignment::Center));
         self.hits.push((Hit::Source, r));
         x += label_w + 8.0;
         let timer = self.timer;
         for (hit, icon, on) in [(Hit::Grid, if self.grid { "view_carousel" } else { "grid_view" }, self.grid), (Hit::Timer, "timer", timer), (Hit::Shuffle, "shuffle", false)] {
-            let r = chip(s, x, mid, CHIP, on);
-            draw::icon(s, &canvas, &cfg, icon, 18.0, on, if on { pal.on_accent } else { ink }, x + CHIP / 2.0, mid);
+            let cx = x + CHIP / 2.0;
+            let r = chip(s, hit, x, mid, CHIP, on, &|ink| feel::scaled(s, buttons.icon(hit, icon, now), cx, mid, || draw::icon(s, &canvas, &cfg, icon, 18.0, on, ink, cx, mid)));
             self.hits.push((hit, r));
             x += CHIP + 6.0;
         }
@@ -1178,21 +1232,20 @@ impl State {
             let c = Rgb::hex(hex).unwrap_or(pal.accent);
             let on = self.hue == Some(i);
             let size = CHIP - 2.0;
-            if on {
-                let ring = rounded(x - 2.0, mid - size / 2.0 - 3.0, size + 4.0, size + 4.0, 10.0);
-                s.push_rounded_clip(&ring);
-                s.append_color(&ink.rgba(), ring.bounds());
-                s.pop();
-            }
+            let hit = Hit::Hue(i);
+            let ring_on = buttons.on(hit, on, now).max(0.5 * buttons.glow(hit, now));
             let r = rounded(x, mid - size / 2.0 - 1.0, size, size, 8.0);
-            s.push_rounded_clip(&r);
-            s.append_color(&c.rgba(), r.bounds());
-            s.pop();
+            feel::scaled(s, buttons.scale(hit, feel::SMALL, now), x + size / 2.0, mid - 1.0, || {
+                if ring_on > 0.01 {
+                    let out = 2.0 * ring_on;
+                    draw::fill(s, &rounded(x - out, mid - size / 2.0 - 1.0 - out, size + 2.0 * out, size + 2.0 * out, 8.0 + out), feel::faint(ink, ring_on));
+                }
+                draw::fill(s, &r, c);
+            });
             self.hits.push((Hit::Hue(i), *r.bounds()));
             x += CHIP + 6.0;
         }
-        let r = chip(s, x, mid, CHIP, !self.query.is_empty());
-        draw::icon(s, &canvas, &cfg, "search", 18.0, false, if self.query.is_empty() { ink } else { pal.on_accent }, x + CHIP / 2.0, mid);
+        let r = chip(s, Hit::Search, x, mid, CHIP, !self.query.is_empty(), &|ink| draw::icon(s, &canvas, &cfg, "search", 18.0, false, ink, x + CHIP / 2.0, mid));
         self.hits.push((Hit::Search, r));
         if self.items.is_empty() {
             let msg = if self.all.is_empty() { "No pictures here" } else { "Nothing matches" };

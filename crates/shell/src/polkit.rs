@@ -364,6 +364,8 @@ window.digit-auth {{ background: rgba(0,0,0,0.55); }}
 .auth-card passwordentry:focus-within {{ background: #1c1c1c; outline: none; box-shadow: inset 0 0 0 1px alpha({accent}, 0.55); }}
 .auth-card passwordentry text {{ outline: none; box-shadow: none; }}
 .auth-card button.pill {{ background: alpha({main}, 0.10); color: {main}; border-radius: 999px; padding: 7px 18px; border: none; box-shadow: none; font-weight: 520; }}
+.auth-card button.pill {{ transition: background-color 160ms, transform 240ms cubic-bezier(0.05, 0.7, 0.1, 1); }}
+.auth-card button.pill:active {{ transform: scale(0.95); transition-duration: 160ms, 80ms; }}
 .auth-card button.pill:hover {{ background: alpha({main}, 0.16); }}
 .auth-card button.pill.accent {{ background: {accent}; color: {on}; }}
 .auth-card button.pill:disabled {{ opacity: 0.5; }}

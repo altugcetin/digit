@@ -1,6 +1,7 @@
 use crate::app::App;
 use crate::compositor;
 use crate::draw::{self, Face};
+use crate::feel::{self, Feel};
 use crate::paint::Paint;
 use gtk::{gdk, gio, glib, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
@@ -55,6 +56,7 @@ struct State {
     target: Option<u64>,
     selected: usize,
     glow: Vec<Tween>,
+    feel: Feel<usize>,
     fade: Tween,
     seen: bool,
     area: (f64, f64),
@@ -215,6 +217,7 @@ pub fn toggle(app: &Rc<App>) {
         target,
         selected: 0,
         glow: (0..LAYOUTS.len()).map(|i| Tween::still(if i == 0 { 1.0 } else { 0.0 })).collect(),
+        feel: Feel::default(),
         fade,
         seen: false,
         area: working_area(app),
@@ -240,6 +243,20 @@ pub fn toggle(app: &Rc<App>) {
     });
     paint.add_controller(motion);
     let click = gtk::GestureClick::new();
+    let weak = Rc::downgrade(&st);
+    click.connect_pressed(move |_, _, x, y| {
+        if let (Some(st), Some(i)) = (weak.upgrade(), tile_at(x, y)) {
+            st.borrow().feel.press(i, glib::monotonic_time());
+            kick(&st);
+        }
+    });
+    let weak = Rc::downgrade(&st);
+    click.connect_end(move |_, _| {
+        if let Some(st) = weak.upgrade() {
+            st.borrow().feel.release(glib::monotonic_time());
+            kick(&st);
+        }
+    });
     let weak = Rc::downgrade(&st);
     click.connect_released(move |_, _, x, y| {
         if let Some(st) = weak.upgrade() {
@@ -345,7 +362,7 @@ fn kick(st: &Shared) {
         let Ok(s) = st.try_borrow() else { return glib::ControlFlow::Continue };
         w.queue_draw();
         let now = clock.frame_time();
-        if s.fade.settled(now) && s.glow.iter().all(|g| g.settled(now)) { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+        if s.fade.settled(now) && s.glow.iter().all(|g| g.settled(now)) && !s.feel.busy(now) { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
     });
 }
 
@@ -454,12 +471,14 @@ impl State {
         for (i, l) in LAYOUTS.iter().enumerate() {
             let (x, y) = tile_rect(i);
             let glow = self.glow[i].value(now).clamp(0.0, 1.0);
-            draw::fill(s, &draw::round(x - 4.0, y - 4.0, TILE_W + 8.0, TILE_H + 8.0, 16.0), pal.ink_main.alpha(0.05 + 0.09 * glow));
-            let (sx, sy, sw, sh) = (x + 6.0, y + 6.0, TILE_W - 12.0, TILE_H - 12.0);
-            for (k, (rx, ry, rw, rh)) in l.regions.iter().enumerate() {
-                let ink = if k == 0 { pal.accent.mix(pal.ink_meta, 0.35 + 0.65 * glow) } else { pal.ink_main.alpha(0.2 + 0.08 * glow) };
-                draw::fill(s, &draw::round(sx + rx * sw + 1.5, sy + ry * sh + 1.5, rw * sw - 3.0, rh * sh - 3.0, 5.0), ink);
-            }
+            feel::scaled(s, self.feel.scale(i, feel::TILE, now), x + TILE_W / 2.0, y + TILE_H / 2.0, || {
+                draw::fill(s, &draw::round(x - 4.0, y - 4.0, TILE_W + 8.0, TILE_H + 8.0, 16.0), pal.ink_main.alpha(0.05 + 0.09 * glow));
+                let (sx, sy, sw, sh) = (x + 6.0, y + 6.0, TILE_W - 12.0, TILE_H - 12.0);
+                for (k, (rx, ry, rw, rh)) in l.regions.iter().enumerate() {
+                    let ink = if k == 0 { pal.accent.mix(pal.ink_meta, 0.35 + 0.65 * glow) } else { pal.ink_main.alpha(0.2 + 0.08 * glow) };
+                    draw::fill(s, &draw::round(sx + rx * sw + 1.5, sy + ry * sh + 1.5, rw * sw - 3.0, rh * sh - 3.0, 5.0), ink);
+                }
+            });
         }
         let l = &LAYOUTS[self.selected];
         let key = if self.selected == 9 { "0".to_string() } else { (self.selected + 1).to_string() };
