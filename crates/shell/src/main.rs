@@ -29,6 +29,7 @@ mod devices;
 mod dock;
 mod draw;
 mod emoji;
+mod feel;
 mod filemanager;
 mod free;
 mod gamebar;

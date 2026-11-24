@@ -1,9 +1,10 @@
 //! Control Center's sound details, under the volume slider: the output and input devices to
 //! choose between and a mixer with each app that is playing.
 
-use super::{Control, Hit, State, fill, rounded};
+use super::{Control, Hit, State, bar_fill, fill, rounded};
 use crate::audio::{self, Channel, Device};
 use crate::draw::{self, Face};
+use crate::feel::{self, faint};
 use gtk::{glib, graphene, pango, prelude::*};
 use kit::motion::{Curve, Tween};
 use std::rc::Rc;
@@ -53,13 +54,9 @@ impl State {
     }
 
     /// The chevron at the end of the volume row that shows the sound details.
-    pub(super) fn draw_sound_more(&self, s: &gtk::Snapshot, cx: f64, cy: f64, shift: f64, hits: &mut Vec<(Hit, f64, f64, f64, f64)>) {
-        let pal = self.app.palette_at(glib::monotonic_time());
-        if self.hover == Some(Hit::SoundMore) {
-            fill(s, &rounded(cx - 13.0, cy - 13.0, 26.0, 26.0, 13.0), pal.ink_main.alpha(0.10));
-        }
-        let open = self.sound.open;
-        draw::icon(s, &self.canvas, &self.app.cfg, if open { "expand_less" } else { "expand_more" }, 18.0, false, pal.ink_meta, cx, cy);
+    pub(super) fn draw_sound_more(&self, s: &gtk::Snapshot, now: i64, cx: f64, cy: f64, shift: f64, hits: &mut Vec<(Hit, f64, f64, f64, f64)>) {
+        let pal = self.app.palette_at(now);
+        self.chevron(s, Hit::SoundMore, self.sound.reveal.value(now).clamp(0.0, 1.0), pal.ink_main.alpha(0.10), pal.ink_meta, cx, cy, now);
         hits.push((Hit::SoundMore, cx - 15.0, cy - 15.0 + shift, 30.0, 30.0));
     }
 
@@ -111,15 +108,15 @@ impl State {
             }
             for (i, d) in list.iter().enumerate() {
                 let hit = if input { Hit::In(i) } else { Hit::Out(i) };
-                if self.hover == Some(hit) {
-                    fill(s, &rounded(cx, iy + 2.0, cw, DEVICE - 4.0, 12.0), pal.ink_main.alpha(0.07));
-                }
-                let tint = if d.default { pal.accent } else { pal.ink_main };
-                draw::icon(s, &canvas, &cfg, d.glyph, 19.0, d.default, tint, cx + 20.0, iy + DEVICE / 2.0);
-                draw::text(s, &canvas, &cfg, &d.desc, 13.5, Face::Text(if d.default { 560 } else { 450 }), pal.ink_main, cx + 40.0, iy + DEVICE / 2.0, cw - 76.0, left);
-                if d.default {
-                    draw::icon(s, &canvas, &cfg, "check", 18.0, false, pal.accent, cx + cw - 18.0, iy + DEVICE / 2.0);
-                }
+                let (chosen, mid) = (self.feel.on(hit, d.default, now), iy + DEVICE / 2.0);
+                feel::scaled(s, self.feel.scale(hit, feel::ROW, now), cx + cw / 2.0, mid, || {
+                    fill(s, &rounded(cx, iy + 2.0, cw, DEVICE - 4.0, 12.0), pal.ink_main.alpha(0.07 * self.feel.glow(hit, now)));
+                    draw::icon(s, &canvas, &cfg, d.glyph, 19.0, d.default, pal.accent.mix(pal.ink_main, chosen), cx + 20.0, mid);
+                    draw::text(s, &canvas, &cfg, &d.desc, 13.5, Face::Text(if d.default { 560 } else { 450 }), pal.ink_main, cx + 40.0, mid, cw - 76.0, left);
+                    if chosen > 0.01 {
+                        feel::scaled(s, 0.6 + 0.4 * chosen, cx + cw - 18.0, mid, || draw::icon(s, &canvas, &cfg, "check", 18.0, false, faint(pal.accent, chosen), cx + cw - 18.0, mid));
+                    }
+                });
                 local.push((hit, cx, iy, cw, DEVICE));
                 iy += DEVICE;
             }
@@ -147,17 +144,19 @@ impl State {
             let ty = iy + 36.0;
             let frac = level.clamp(0.0, 1.0);
             fill(s, &rounded(sx, ty - 3.0, sw, 6.0, 3.0), pal.ink_main.alpha(0.12));
-            let tint = if ch.muted { pal.ink_faint } else { pal.accent };
-            fill(s, &rounded(sx, ty - 3.0, (sw * frac).max(6.0), 6.0, 3.0), tint);
+            let quiet = self.feel.on(Hit::AppMute(i), ch.muted, now);
+            let tint = pal.ink_faint.mix(pal.accent, quiet);
+            bar_fill(s, sx, ty, sw * frac * (1.0 - quiet), tint);
             let hot = self.hover == Some(Hit::AppLevel(i)) || matches!(self.sound.sliding, Some((r, _)) if r == i);
-            let knob = if hot { 16.0 } else { 14.0 };
+            let knob = 14.0 + 2.0 * self.feel.on(Hit::AppLevel(i), hot, now);
             fill(s, &rounded(sx + sw * frac - knob / 2.0, ty - knob / 2.0, knob, knob, knob / 2.0), tint);
             local.push((Hit::AppLevel(i), sx - 10.0, ty - 12.0, sw + 20.0, 24.0));
             let (mx, my) = (cx + cw - 20.0, mid);
-            if self.hover == Some(Hit::AppMute(i)) {
-                fill(s, &rounded(mx - 16.0, my - 16.0, 32.0, 32.0, 16.0), pal.ink_main.alpha(0.09));
-            }
-            draw::icon(s, &canvas, &cfg, if ch.muted { "volume_off" } else { "volume_up" }, 19.0, false, if ch.muted { super::RED } else { pal.ink_meta }, mx, my);
+            let (key, speaker) = (Hit::AppMute(i), if ch.muted { "volume_off" } else { "volume_up" });
+            feel::scaled(s, self.feel.scale(key, feel::SMALL, now), mx, my, || {
+                fill(s, &rounded(mx - 16.0, my - 16.0, 32.0, 32.0, 16.0), pal.ink_main.alpha(0.09 * self.feel.glow(key, now)));
+                feel::scaled(s, self.feel.icon(key, speaker, now), mx, my, || draw::icon(s, &canvas, &cfg, speaker, 19.0, false, super::RED.mix(pal.ink_meta, quiet), mx, my));
+            });
             local.push((Hit::AppMute(i), mx - 16.0, my - 16.0, 32.0, 32.0));
             iy += APP;
         }
@@ -177,6 +176,7 @@ impl Control {
             let opening = !s.sound.open;
             s.sound.open = opening;
             if opening {
+                s.feel.retain(|h| !matches!(h, Hit::Out(_) | Hit::In(_) | Hit::AppMute(_) | Hit::AppLevel(_)));
                 s.sound.reveal.go(1.0, now, 420, OPEN);
             } else {
                 s.sound.reveal.go(0.0, now, 240, SHUT);

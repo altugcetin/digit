@@ -2,6 +2,7 @@ use crate::app::App;
 use crate::audio::{self, Ask};
 use crate::compositor;
 use crate::draw::{self, Face};
+use crate::feel::{self, Feel, faint};
 use crate::panel_corner;
 use gtk::subclass::prelude::*;
 use gtk::{cairo, gdk, glib, graphene, gsk, pango, prelude::*};
@@ -17,6 +18,7 @@ use std::rc::{Rc, Weak};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
 mod detail;
+mod notes;
 mod sound;
 
 const W: f64 = 380.0;
@@ -197,6 +199,8 @@ struct State {
     /// wheel notch adds a step that glides in; a touchpad fling coasts out more slowly.
     glide: Glide,
     hover: Option<Hit>,
+    feel: Feel<Hit>,
+    notes: notes::Notes,
     dragging: bool,
     hits: Vec<(Hit, f64, f64, f64, f64)>,
     slider: (f64, f64),
@@ -301,6 +305,13 @@ fn fill(s: &gtk::Snapshot, r: &gsk::RoundedRect, c: Rgb) {
     s.pop();
 }
 
+/// The filled part of a slider's track, from its start; nothing at all when there's none.
+fn bar_fill(s: &gtk::Snapshot, x: f64, mid: f64, w: f64, ink: Rgb) {
+    if w >= 1.0 {
+        fill(s, &rounded(x, mid - 3.0, w.max(6.0), 6.0, 3.0), ink);
+    }
+}
+
 fn ago(at: i64) -> String {
     let d = (glib::real_time() / 1_000_000 - at).max(0);
     match d {
@@ -391,6 +402,8 @@ impl Control {
             scroll: 0.0,
             glide: Glide::default(),
             hover: None,
+            feel: Feel::default(),
+            notes: notes::Notes::default(),
             dragging: false,
             hits: Vec::new(),
             slider: (0.0, 0.0),
@@ -435,7 +448,12 @@ impl Control {
         drag.connect_drag_begin(move |_, x, y| {
             if let Some(s) = weak.upgrade() {
                 let me = Control(s);
-                match me.hit(x, y) {
+                let hit = me.hit(x, y);
+                if let Some(h) = hit.filter(|h| !matches!(h, Hit::Slider | Hit::AppLevel(_))) {
+                    me.0.borrow().feel.press(h, glib::monotonic_time());
+                    me.kick();
+                }
+                match hit {
                     Some(Hit::Slider) => {
                         me.0.borrow_mut().dragging = true;
                         me.slide(x);
@@ -460,6 +478,8 @@ impl Control {
         drag.connect_drag_end(move |g, dx, dy| {
             let Some(s) = weak.upgrade() else { return };
             let me = Control(s);
+            me.0.borrow().feel.release(glib::monotonic_time());
+            me.kick();
             let was = std::mem::replace(&mut me.0.borrow_mut().dragging, false);
             if was {
                 return;
@@ -494,23 +514,14 @@ impl Control {
             if let Some(s) = weak.upgrade() {
                 let me = Control(s);
                 let h = me.hit(x, y);
-                let changed = {
-                    let mut st = me.0.borrow_mut();
-                    let changed = st.hover != h;
-                    st.hover = h;
-                    changed
-                };
-                if changed {
-                    me.0.borrow().canvas.queue_draw();
-                }
+                me.hover(h);
             }
         });
         let weak = Rc::downgrade(&self.0);
         motion.connect_leave(move |_| {
             if let Some(s) = weak.upgrade() {
-                if let Ok(mut st) = s.try_borrow_mut() {
-                    st.hover = None;
-                    st.canvas.queue_draw();
+                if s.try_borrow_mut().is_ok() {
+                    Control(s).hover(None);
                 }
             }
         });
@@ -569,6 +580,26 @@ impl Control {
         canvas.add_controller(wheel);
     }
 
+    fn hover(&self, hit: Option<Hit>) {
+        {
+            let mut s = self.0.borrow_mut();
+            if s.hover == hit {
+                return;
+            }
+            s.hover = hit;
+            // A row stays lit under its own buttons.
+            let row = match hit {
+                Some(Hit::Close(i)) => Some(Hit::Row(i)),
+                Some(Hit::Detail(detail::D::Trust(i) | detail::D::Remove(i))) => Some(Hit::Detail(detail::D::Device(i))),
+                Some(Hit::Detail(detail::D::Forget(i))) => Some(Hit::Detail(detail::D::Net(i))),
+                _ => None,
+            };
+            let keys: Vec<Hit> = hit.into_iter().chain(row).collect();
+            s.feel.hover(&keys, glib::monotonic_time());
+        }
+        self.kick();
+    }
+
     pub fn changed(&self) {
         let open = self.0.borrow().open;
         if open {
@@ -606,6 +637,8 @@ impl Control {
             }
             s.reposition();
             s.open = true;
+            s.feel.retain(|_| false);
+            s.notes.reset();
             s.scroll = 0.0;
             s.glide.stop();
             s.expand = None;
@@ -741,8 +774,11 @@ impl Control {
 
     fn resize_with(&self, ms: i64, curve: motion::Curve) {
         let mut s = self.0.borrow_mut();
-        let target = s.content().min(s.max_h);
         let now = glib::monotonic_time();
+        // First, as rows that are swept away keep their room for a while.
+        let history = s.app.history.borrow().clone();
+        s.notes.sync(&history, now);
+        let target = s.content().min(s.max_h);
         if s.height.target() < 1.0 {
             s.height.set(target);
         } else if (s.height.target() - target).abs() > 0.5 {
@@ -1039,7 +1075,7 @@ impl State {
         let rows = self.tiles().len().div_ceil(2) as f64;
         let tiles = rows * TILE_H + (rows - 1.0).max(0.0) * TILE_GAP;
         let n = self.app.history.borrow().len();
-        let list = if n == 0 { EMPTY } else { n as f64 * ROW };
+        let list = if n == 0 { EMPTY } else { n as f64 * ROW }.max(self.notes.held());
         let detail = self.expand.map(|t| self.detail_height(t) * self.reveal.target()).unwrap_or(0.0);
         let cells = crate::batteries::list(&self.app).len();
         let batteries = if cells == 0 { 0.0 } else { HEAD + cells.div_ceil(PER_ROW) as f64 * CELL + 6.0 };
@@ -1072,7 +1108,13 @@ impl State {
                 self.glide.stop();
             }
         }
-        let moving = [&self.rise, &self.fade, &self.height, &self.reveal, &self.sound.reveal].iter().any(|t| !t.settled(now)) || self.glide.left != 0.0 || self.app.palette_moving(now);
+        if self.notes.step(now) {
+            // Swept away: the panel closes over the room they took.
+            let target = self.content().min(self.max_h);
+            self.height.go(target, now, 260, motion::STANDARD);
+            self.scroll_by(0.0);
+        }
+        let moving = self.feel.busy(now) || self.notes.busy(now) || [&self.rise, &self.fade, &self.height, &self.reveal, &self.sound.reveal].iter().any(|t| !t.settled(now)) || self.glide.left != 0.0 || self.app.palette_moving(now);
         if !moving && !self.open && self.window.is_visible() {
             let window = self.window.clone();
             glib::idle_add_local_once(move || window.set_visible(false));
@@ -1132,6 +1174,15 @@ impl State {
         }
     }
 
+    /// An arrow that turns over as what it opens unfolds.
+    #[allow(clippy::too_many_arguments)]
+    fn chevron(&self, s: &gtk::Snapshot, key: Hit, open: f64, back: Rgb, ink: Rgb, cx: f64, cy: f64, now: i64) {
+        feel::scaled(s, self.feel.scale(key, feel::SMALL, now), cx, cy, || {
+            fill(s, &rounded(cx - 13.0, cy - 13.0, 26.0, 26.0, 13.0), faint(back, self.feel.glow(key, now)));
+            feel::turned(s, 180.0 * open, cx, cy, || draw::icon(s, &self.canvas, &self.app.cfg, "expand_more", 18.0, false, ink, cx, cy));
+        });
+    }
+
     fn draw(&mut self, s: &gtk::Snapshot, now: i64) {
         let rise = self.rise.value(now);
         if rise <= 0.001 {
@@ -1140,6 +1191,8 @@ impl State {
         let pal = self.app.palette_at(now);
         let cfg = self.app.cfg.clone();
         let canvas = self.canvas.clone();
+        let history = self.app.history.borrow().clone();
+        self.notes.sync(&history, now);
         let h = self.height.value(now).max(1.0);
         let placed = self.placement(now);
         let shift = placed.y - self.placement_at(1.0, h).y;
@@ -1199,24 +1252,27 @@ impl State {
             let tx = x0 + (i % 2) as f64 * (tile_w + TILE_GAP);
             let ty = y + (i / 2) as f64 * (TILE_H + TILE_GAP) + if i >= 2 { opened } else { 0.0 };
             let (icon, title, state, on) = self.tile_look(*tile);
-            let hovered = self.hover == Some(Hit::Tile(*tile));
-            let base = if on { pal.accent } else { pal.tile(if hovered { 0.11 } else { 0.06 }) };
-            fill(s, &rounded(tx, ty, tile_w, TILE_H, (18.0 * self.app.round()).min(TILE_H / 2.0)), base);
-            let (ink, sub) = if on { (pal.on_accent, pal.on_accent.mix(pal.accent, 0.72)) } else { (pal.ink_main, pal.ink_meta) };
-            draw::icon(s, &canvas, &cfg, icon, 22.0, on, ink, tx + 30.0, ty + TILE_H / 2.0);
+            let key = Hit::Tile(*tile);
+            let lit = self.feel.on(key, on, now);
+            let base = pal.tile(0.06 + 0.05 * self.feel.glow(key, now));
+            let (ink, sub) = (pal.on_accent.mix(pal.ink_main, lit), pal.on_accent.mix(pal.accent, 0.72).mix(pal.ink_meta, lit));
             let more = matches!(tile, Tile::Network | Tile::Bluetooth);
             let text_w = tile_w - 62.0 - if more { 22.0 } else { 0.0 };
-            draw::text(s, &canvas, &cfg, &title, 14.0, Face::Text(560), ink, tx + 54.0, ty + 24.0, text_w, pango::Alignment::Left);
-            draw::text(s, &canvas, &cfg, &state, 12.5, Face::Text(420), sub, tx + 54.0, ty + 42.0, text_w, pango::Alignment::Left);
-            hits.push((Hit::Tile(*tile), tx, ty + shift, tile_w, TILE_H));
-            if more {
-                let (cx, cy) = (tx + tile_w - 20.0, ty + TILE_H / 2.0);
-                let hot = self.hover == Some(Hit::Detail(detail::D::Expand(*tile)));
-                if hot {
-                    fill(s, &rounded(cx - 13.0, cy - 13.0, 26.0, 26.0, 13.0), if on { pal.on_accent.alpha(0.18) } else { pal.ink_main.alpha(0.10) });
+            let (ix, mid) = (tx + 30.0, ty + TILE_H / 2.0);
+            feel::scaled(s, self.feel.scale(key, feel::TILE, now), tx + tile_w / 2.0, mid, || {
+                let shape = rounded(tx, ty, tile_w, TILE_H, (18.0 * self.app.round()).min(TILE_H / 2.0));
+                feel::flood(s, &shape, base, pal.accent, lit, ix, mid);
+                feel::scaled(s, self.feel.icon(key, icon, now), ix, mid, || draw::icon(s, &canvas, &cfg, icon, 22.0, on, ink, ix, mid));
+                draw::text(s, &canvas, &cfg, &title, 14.0, Face::Text(560), ink, tx + 54.0, ty + 24.0, text_w, pango::Alignment::Left);
+                draw::text(s, &canvas, &cfg, &state, 12.5, Face::Text(420), sub, tx + 54.0, ty + 42.0, text_w, pango::Alignment::Left);
+                if more {
+                    let open = if self.expand == Some(*tile) { self.reveal.value(now).clamp(0.0, 1.0) } else { 0.0 };
+                    self.chevron(s, Hit::Detail(detail::D::Expand(*tile)), open, pal.on_accent.alpha(0.18).mix(pal.ink_main.alpha(0.10), lit), sub, tx + tile_w - 20.0, mid, now);
                 }
-                let open = self.expand == Some(*tile) && self.reveal.target() > 0.5;
-                draw::icon(s, &canvas, &cfg, if open { "expand_less" } else { "expand_more" }, 18.0, false, sub, cx, cy);
+            });
+            hits.push((key, tx, ty + shift, tile_w, TILE_H));
+            if more {
+                let (cx, cy) = (tx + tile_w - 20.0, mid);
                 hits.push((Hit::Detail(detail::D::Expand(*tile)), cx - 15.0, cy - 15.0 + shift, 30.0, 30.0));
             }
         }
@@ -1259,81 +1315,65 @@ impl State {
         }
         let (level, muted) = self.app.volume.get().unwrap_or((0.0, false));
         let mid = y + SOUND / 2.0;
-        let mute_hover = self.hover == Some(Hit::Mute);
-        fill(s, &rounded(x0, mid - 18.0, 36.0, 36.0, 18.0), pal.tile(if mute_hover { 0.12 } else { 0.06 }));
+        let quiet = self.feel.on(Hit::Mute, muted, now);
         let speaker = if muted { "volume_off" } else if level < 0.01 { "volume_mute" } else if level < 0.5 { "volume_down" } else { "volume_up" };
-        draw::icon(s, &canvas, &cfg, speaker, 20.0, true, if muted { pal.ink_meta } else { pal.ink_main }, x0 + 18.0, mid);
+        let mx = x0 + 18.0;
+        feel::scaled(s, self.feel.scale(Hit::Mute, feel::SMALL, now), mx, mid, || {
+            fill(s, &rounded(x0, mid - 18.0, 36.0, 36.0, 18.0), pal.tile(0.06 + 0.06 * self.feel.glow(Hit::Mute, now)));
+            feel::scaled(s, self.feel.icon(Hit::Mute, if muted { "muted" } else { "sound" }, now), mx, mid, || {
+                draw::icon(s, &canvas, &cfg, speaker, 20.0, true, pal.ink_meta.mix(pal.ink_main, quiet), mx, mid)
+            });
+        });
         hits.push((Hit::Mute, x0, mid - 18.0 + shift, 36.0, 36.0));
         let sx = x0 + 50.0;
         let sw = inner - 50.0 - 48.0 - 30.0;
         let shown = level.clamp(0.0, 1.0);
         let track = rounded(sx, mid - 3.0, sw, 6.0, 3.0);
         fill(s, &track, pal.ink_main.alpha(0.15));
-        let fill_ink = if muted { pal.ink_meta } else { pal.accent };
-        fill(s, &rounded(sx, mid - 3.0, (sw * shown).max(6.0), 6.0, 3.0), fill_ink);
-        let knob_r = if self.dragging || self.hover == Some(Hit::Slider) { 9.0 } else { 7.0 };
+        let fill_ink = pal.ink_meta.mix(pal.accent, quiet);
+        // Muted, it runs dry; the knob keeps the level it comes back to.
+        bar_fill(s, sx, mid, sw * shown * (1.0 - quiet), fill_ink);
+        let knob_r = 7.0 + 2.0 * self.feel.on(Hit::Slider, self.dragging || self.hover == Some(Hit::Slider), now);
         fill(s, &rounded(sx + sw * shown - knob_r, mid - knob_r, 2.0 * knob_r, 2.0 * knob_r, knob_r), fill_ink);
         draw::text(s, &canvas, &cfg, &format!("{}%", (level * 100.0).round()), 13.0, Face::Number(500), pal.ink_meta, sx + sw + 8.0, mid, 40.0, pango::Alignment::Right);
         hits.push((Hit::Slider, sx - 10.0, mid - 14.0 + shift, sw + 20.0, 28.0));
         self.slider = (sx, sw);
-        self.draw_sound_more(s, x0 + inner - 15.0, mid, shift, &mut hits);
+        self.draw_sound_more(s, now, x0 + inner - 15.0, mid, shift, &mut hits);
         y += SOUND;
         y += self.draw_sound(s, now, x0, y, inner, shift, &mut hits);
         y += 16.0;
-        let history = self.app.history.borrow().clone();
         draw::text(s, &canvas, &cfg, "Notifications", 14.0, Face::Text(600), pal.ink_main, x0, y + HEAD / 2.0, 200.0, pango::Alignment::Left);
         if !history.is_empty() {
             let cw = draw::width(&canvas, &cfg, "Clear", 13.0, Face::Text(500)) + 20.0;
             let cx = x0 + inner - cw;
-            if self.hover == Some(Hit::Clear) {
-                fill(s, &rounded(cx, y + 4.0, cw, HEAD - 8.0, (HEAD - 8.0) / 2.0), pal.tile(0.08));
-            }
-            draw::text(s, &canvas, &cfg, "Clear", 13.0, Face::Text(500), pal.ink_meta, cx + 10.0, y + HEAD / 2.0, cw - 20.0, pango::Alignment::Left);
+            feel::scaled(s, self.feel.scale(Hit::Clear, feel::PILL, now), cx + cw / 2.0, y + HEAD / 2.0, || {
+                fill(s, &rounded(cx, y + 4.0, cw, HEAD - 8.0, (HEAD - 8.0) / 2.0), faint(pal.tile(0.08), self.feel.glow(Hit::Clear, now)));
+                draw::text(s, &canvas, &cfg, "Clear", 13.0, Face::Text(500), pal.ink_meta, cx + 10.0, y + HEAD / 2.0, cw - 20.0, pango::Alignment::Left);
+            });
             hits.push((Hit::Clear, cx, y + 4.0 + shift, cw, HEAD - 8.0));
         }
         y += HEAD;
-        if history.is_empty() {
-            draw::text(s, &canvas, &cfg, "No notifications", 13.5, Face::Text(420), pal.ink_faint, x0, y + EMPTY / 2.0, inner, pango::Alignment::Center);
+        let none = if history.is_empty() { 1.0 - self.notes.leaving(now) } else { 0.0 };
+        if none > 0.01 {
+            draw::text(s, &canvas, &cfg, "No notifications", 13.5, Face::Text(420), faint(pal.ink_faint, none), x0, y + EMPTY / 2.0, inner, pango::Alignment::Center);
         }
-        for (i, n) in history.iter().enumerate() {
-            let ry = y + i as f64 * ROW;
+        let aside = if self.corner.is_left() { -1.0 } else { 1.0 };
+        for row in self.notes.rows(&history, now) {
+            let ry = y + row.at;
             if ry > bottom || ry + ROW < bottom - h {
                 continue;
             }
-            let hovered = matches!(self.hover, Some(Hit::Row(j)) | Some(Hit::Close(j)) if j == i);
-            if hovered {
-                fill(s, &rounded(x0 - 6.0, ry + 2.0, inner + 12.0, ROW - 4.0, 14.0), pal.tile(0.07));
+            s.push_opacity(row.shown);
+            s.save();
+            s.translate(&graphene::Point::new((aside * 64.0 * (1.0 - row.shown) * f64::from(u8::from(row.index.is_none()))).round() as f32, 0.0));
+            self.draw_note(s, &pal, row.notice, row.index, x0, ry, inner, now);
+            s.restore();
+            s.pop();
+            if let Some(i) = row.index {
+                let rx = x0 + inner - 36.0;
+                hits.push((Hit::Row(i), x0 - 6.0, ry + 2.0 + shift, inner + 12.0, ROW - 4.0));
+                hits.push((Hit::Close(i), rx + 4.0, ry + ROW / 2.0 - 14.0 + shift, 28.0, 28.0));
             }
-            let icon_box = rounded(x0 + 2.0, ry + ROW / 2.0 - 16.0, 32.0, 32.0, 9.0);
-            match &n.icon {
-                Some(p) => {
-                    s.push_rounded_clip(&icon_box);
-                    s.save();
-                    s.translate(&graphene::Point::new(icon_box.bounds().x(), icon_box.bounds().y()));
-                    p.snapshot(s, 32.0, 32.0);
-                    s.restore();
-                    s.pop();
-                }
-                None => {
-                    fill(s, &icon_box, pal.raised);
-                    draw::icon(s, &canvas, &cfg, "notifications", 18.0, true, pal.ink_meta, x0 + 18.0, ry + ROW / 2.0);
-                }
-            }
-            let tx = x0 + 46.0;
-            let tw = inner - 46.0 - 44.0;
-            let line2 = if n.body.is_empty() { n.app.clone() } else { n.body.clone() };
-            draw::text(s, &canvas, &cfg, &n.summary, 14.0, Face::Text(560), pal.ink_main, tx, ry + 22.0, tw, pango::Alignment::Left);
-            draw::text(s, &canvas, &cfg, &line2, 12.5, Face::Text(420), pal.ink_meta, tx, ry + 42.0, tw, pango::Alignment::Left);
-            let rx = x0 + inner - 36.0;
-            if hovered {
-                let close_hover = self.hover == Some(Hit::Close(i));
-                fill(s, &rounded(rx + 4.0, ry + ROW / 2.0 - 14.0, 28.0, 28.0, 14.0), pal.tile(if close_hover { 0.14 } else { 0.08 }));
-                draw::icon(s, &canvas, &cfg, "close", 16.0, false, pal.ink_sec, rx + 18.0, ry + ROW / 2.0);
-            } else {
-                draw::text(s, &canvas, &cfg, &ago(n.at), 12.0, Face::Number(450), pal.ink_faint, rx - 4.0, ry + 22.0, 40.0, pango::Alignment::Right);
-            }
-            hits.push((Hit::Row(i), x0 - 6.0, ry + 2.0 + shift, inner + 12.0, ROW - 4.0));
-            hits.push((Hit::Close(i), rx + 4.0, ry + ROW / 2.0 - 14.0 + shift, 28.0, 28.0));
         }
         s.pop();
         s.pop();
@@ -1347,12 +1387,62 @@ impl State {
     }
 }
 
+impl State {
+    /// One notification; one that's leaving has no `index` and answers nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_note(&self, s: &gtk::Snapshot, pal: &kit::palette::Palette, n: &crate::app::Notice, index: Option<usize>, x0: f64, ry: f64, inner: f64, now: i64) {
+        let (canvas, cfg) = (&self.canvas, &self.app.cfg);
+        let mid = ry + ROW / 2.0;
+        let (lit, close, press) = index.map_or((0.0, 0.0, 1.0), |i| {
+            (self.feel.glow(Hit::Row(i), now), self.feel.glow(Hit::Close(i), now), self.feel.scale(Hit::Row(i), feel::ROW, now))
+        });
+        feel::scaled(s, press, x0 + inner / 2.0, mid, || {
+            if lit > 0.01 {
+                fill(s, &rounded(x0 - 6.0, ry + 2.0, inner + 12.0, ROW - 4.0, 14.0), faint(pal.tile(0.07), lit));
+            }
+            let icon_box = rounded(x0 + 2.0, mid - 16.0, 32.0, 32.0, 9.0);
+            match &n.icon {
+                Some(p) => {
+                    s.push_rounded_clip(&icon_box);
+                    s.save();
+                    s.translate(&graphene::Point::new(icon_box.bounds().x(), icon_box.bounds().y()));
+                    p.snapshot(s, 32.0, 32.0);
+                    s.restore();
+                    s.pop();
+                }
+                None => {
+                    fill(s, &icon_box, pal.raised);
+                    draw::icon(s, canvas, cfg, "notifications", 18.0, true, pal.ink_meta, x0 + 18.0, mid);
+                }
+            }
+            let tx = x0 + 46.0;
+            let tw = inner - 46.0 - 44.0;
+            let line2 = if n.body.is_empty() { &n.app } else { &n.body };
+            draw::text(s, canvas, cfg, &n.summary, 14.0, Face::Text(560), pal.ink_main, tx, ry + 22.0, tw, pango::Alignment::Left);
+            draw::text(s, canvas, cfg, line2, 12.5, Face::Text(420), pal.ink_meta, tx, ry + 42.0, tw, pango::Alignment::Left);
+            let rx = x0 + inner - 36.0;
+            if lit < 0.99 {
+                draw::text(s, canvas, cfg, &ago(n.at), 12.0, Face::Number(450), faint(pal.ink_faint, 1.0 - lit), rx - 4.0, ry + 22.0, 40.0, pango::Alignment::Right);
+            }
+            if lit > 0.01 {
+                let give = index.map_or(1.0, |i| self.feel.scale(Hit::Close(i), feel::SMALL, now));
+                s.push_opacity(lit);
+                feel::scaled(s, give, rx + 18.0, mid, || {
+                    fill(s, &rounded(rx + 4.0, mid - 14.0, 28.0, 28.0, 14.0), pal.tile(0.08 + 0.06 * close));
+                    draw::icon(s, canvas, cfg, "close", 16.0, false, pal.ink_sec, rx + 18.0, mid);
+                });
+                s.pop();
+            }
+        });
+    }
+}
+
 mod imp {
     use super::State;
     use gtk::subclass::prelude::*;
     use gtk::{glib, prelude::*};
     use std::cell::RefCell;
-    use std::rc::Weak;
+    use std::rc::{Rc, Weak};
 
     #[derive(Default)]
     pub struct Canvas {
@@ -1377,6 +1467,15 @@ mod imp {
             };
             let now = self.obj().frame_clock().map(|c| c.frame_time()).unwrap_or_else(glib::monotonic_time);
             s.draw(snapshot, now);
+            // Something it drew has changed since the last time, and goes on from here.
+            if !s.ticking && (s.feel.busy(now) || s.notes.busy(now)) {
+                let weak = Rc::downgrade(&state);
+                glib::idle_add_local_once(move || {
+                    if let Some(state) = weak.upgrade() {
+                        super::Control(state).kick();
+                    }
+                });
+            }
         }
     }
 }

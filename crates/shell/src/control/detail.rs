@@ -1,5 +1,6 @@
 use super::{Control, Hit, State, Tile, fill, rounded};
 use crate::draw::{self, Face};
+use crate::feel::{self, faint};
 use futures_util::{FutureExt, StreamExt};
 use gtk::{gdk, glib, graphene, pango, prelude::*};
 use kit::motion::Curve;
@@ -152,7 +153,7 @@ impl State {
         let mut local: Vec<(D, f64, f64, f64, f64)> = Vec::new();
         for item in self.items(t) {
             let h = height(item);
-            self.item(s, &pal, t, item, cx, iy, cw, h, &mut local);
+            self.item(s, &pal, t, item, cx, iy, cw, h, now, &mut local);
             iy += h;
         }
         s.pop();
@@ -162,26 +163,33 @@ impl State {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn small(&self, s: &gtk::Snapshot, pal: &Palette, cx: f64, cy: f64, icon: &str, tint: Option<kit::palette::Rgb>, d: D, hits: &mut Vec<(D, f64, f64, f64, f64)>) {
-        let hot = self.hover == Some(Hit::Detail(d));
+    fn small(&self, s: &gtk::Snapshot, pal: &Palette, cx: f64, cy: f64, icon: &'static str, tint: Option<kit::palette::Rgb>, d: D, now: i64, hits: &mut Vec<(D, f64, f64, f64, f64)>) {
+        let key = Hit::Detail(d);
+        let glow = self.feel.glow(key, now);
         let bg = match tint {
-            Some(t) => t.alpha(if hot { 0.30 } else { 0.20 }),
-            None => pal.ink_main.alpha(if hot { 0.14 } else { 0.07 }),
+            Some(t) => t.alpha(0.20 + 0.10 * glow),
+            None => pal.ink_main.alpha(0.07 + 0.07 * glow),
         };
-        fill(s, &rounded(cx - 14.0, cy - 14.0, 28.0, 28.0, 14.0), bg);
-        draw::icon(s, &self.canvas, &self.app.cfg, icon, 16.0, tint.is_some(), tint.unwrap_or(pal.ink_sec), cx, cy);
+        feel::scaled(s, self.feel.scale(key, feel::SMALL, now), cx, cy, || {
+            fill(s, &rounded(cx - 14.0, cy - 14.0, 28.0, 28.0, 14.0), bg);
+            self.feel.on(key, tint.is_some(), now);
+            feel::scaled(s, self.feel.icon(key, icon, now), cx, cy, || draw::icon(s, &self.canvas, &self.app.cfg, icon, 16.0, tint.is_some(), tint.unwrap_or(pal.ink_sec), cx, cy));
+        });
         hits.push((d, cx - 14.0, cy - 14.0, 28.0, 28.0));
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn pill(&self, s: &gtk::Snapshot, pal: &Palette, right: f64, cy: f64, label: &str, accent: bool, d: D, hits: &mut Vec<(D, f64, f64, f64, f64)>) {
+    fn pill(&self, s: &gtk::Snapshot, pal: &Palette, right: f64, cy: f64, label: &str, accent: bool, d: D, now: i64, hits: &mut Vec<(D, f64, f64, f64, f64)>) {
         let (canvas, cfg) = (&self.canvas, &self.app.cfg);
         let w = draw::width(canvas, cfg, label, 12.5, Face::Text(560)).ceil() + 24.0;
         let x = right - w;
-        let hot = self.hover == Some(Hit::Detail(d));
-        let bg = if accent { if hot { pal.accent.mix(pal.on_accent, 0.88) } else { pal.accent } } else { pal.ink_main.alpha(if hot { 0.16 } else { 0.10 }) };
-        fill(s, &rounded(x, cy - 14.0, w, 28.0, 14.0), bg);
-        draw::text(s, canvas, cfg, label, 12.5, Face::Text(560), if accent { pal.on_accent } else { pal.ink_main }, x, cy, w, pango::Alignment::Center);
+        let key = Hit::Detail(d);
+        let glow = self.feel.glow(key, now);
+        let bg = if accent { pal.accent.mix(pal.on_accent, 1.0 - 0.12 * glow) } else { pal.ink_main.alpha(0.10 + 0.06 * glow) };
+        feel::scaled(s, self.feel.scale(key, feel::PILL, now), x + w / 2.0, cy, || {
+            fill(s, &rounded(x, cy - 14.0, w, 28.0, 14.0), bg);
+            draw::text(s, canvas, cfg, label, 12.5, Face::Text(560), if accent { pal.on_accent } else { pal.ink_main }, x, cy, w, pango::Alignment::Center);
+        });
         hits.push((d, x, cy - 14.0, w, 28.0));
     }
 
@@ -190,7 +198,7 @@ impl State {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn item(&self, s: &gtk::Snapshot, pal: &Palette, t: Tile, item: Item, x: f64, y: f64, w: f64, h: f64, hits: &mut Vec<(D, f64, f64, f64, f64)>) {
+    fn item(&self, s: &gtk::Snapshot, pal: &Palette, t: Tile, item: Item, x: f64, y: f64, w: f64, h: f64, now: i64, hits: &mut Vec<(D, f64, f64, f64, f64)>) {
         let (canvas, cfg) = (&self.canvas, &self.app.cfg);
         let mid = y + h / 2.0;
         match item {
@@ -213,8 +221,9 @@ impl State {
                 let busy = self.busy.contains(&d.path);
                 let armed = self.armed.as_ref() == Some(&d.path);
                 let hovered = matches!(self.hover, Some(Hit::Detail(D::Device(j) | D::Trust(j) | D::Remove(j))) if j == i);
-                if hovered {
-                    fill(s, &rounded(x, y + 2.0, w, h - 4.0, 14.0), pal.tile(0.07));
+                let lit = self.feel.glow(Hit::Detail(D::Device(i)), now);
+                if lit > 0.01 {
+                    fill(s, &rounded(x, y + 2.0, w, h - 4.0, 14.0), faint(pal.tile(0.07), lit));
                 }
                 hits.push((D::Device(i), x, y + 2.0, w, h - 4.0));
                 fill(s, &rounded(x + 6.0, mid - 16.0, 32.0, 32.0, 16.0), if d.connected { pal.accent.alpha(0.22) } else { pal.raised });
@@ -246,21 +255,23 @@ impl State {
                 draw::text(s, canvas, cfg, &sub, 12.5, Face::Text(420), if armed { pal.risk } else { pal.ink_meta }, x + 48.0, y + 33.0, tw, pango::Alignment::Left);
                 if !paired {
                     if !busy {
-                        self.pill(s, pal, x + w - 6.0, mid, "Pair", true, D::Device(i), hits);
+                        self.pill(s, pal, x + w - 6.0, mid, "Pair", true, D::Device(i), now, hits);
                     }
                     return;
                 }
                 let (sw_w, sw_h) = (40.0, 24.0);
                 let sx = x + w - sw_w - 8.0;
                 let sy = mid - sw_h / 2.0;
-                let on = d.connected != busy;
-                fill(s, &rounded(sx, sy, sw_w, sw_h, sw_h / 2.0), if on { pal.accent } else { pal.ink_main.alpha(0.18) });
+                let on = self.feel.on(Hit::Detail(D::Device(i)), d.connected != busy, now);
+                fill(s, &rounded(sx, sy, sw_w, sw_h, sw_h / 2.0), pal.accent.mix(pal.ink_main.alpha(0.18), on));
                 let knob = sw_h - 6.0;
-                let kx = if on { sx + sw_w - knob - 3.0 } else { sx + 3.0 };
-                fill(s, &rounded(kx, sy + 3.0, knob, knob, knob / 2.0), if on { pal.on_accent } else { pal.ink_main });
+                let kx = sx + 3.0 + (sw_w - knob - 6.0) * on;
+                fill(s, &rounded(kx, sy + 3.0, knob, knob, knob / 2.0), pal.on_accent.mix(pal.ink_main, on));
                 if hovered || armed {
-                    self.small(s, pal, sx - 22.0, mid, "delete", armed.then_some(pal.risk), D::Remove(i), hits);
-                    self.small(s, pal, sx - 56.0, mid, "verified_user", d.trusted.then_some(pal.accent), D::Trust(i), hits);
+                    s.push_opacity(if armed { 1.0 } else { lit });
+                    self.small(s, pal, sx - 22.0, mid, "delete", armed.then_some(pal.risk), D::Remove(i), now, hits);
+                    self.small(s, pal, sx - 56.0, mid, "verified_user", d.trusted.then_some(pal.accent), D::Trust(i), now, hits);
+                    s.pop();
                 }
             }
             Item::WifiNote => {
@@ -278,7 +289,7 @@ impl State {
                 let tw = w - 50.0 - 110.0;
                 draw::text(s, canvas, cfg, &c.ssid, 14.0, Face::Text(600), pal.ink_main, x + 48.0, y + 17.0, tw, pango::Alignment::Left);
                 draw::text(s, canvas, cfg, &meta.join(" · "), 12.5, Face::Text(420), pal.ink_meta, x + 48.0, y + 33.0, tw, pango::Alignment::Left);
-                self.pill(s, pal, x + w - 6.0, mid, "Disconnect", false, D::Disconnect, hits);
+                self.pill(s, pal, x + w - 6.0, mid, "Disconnect", false, D::Disconnect, now, hits);
             }
             Item::Info(n) => {
                 let Some(c) = &self.wifi.current else { return };
@@ -305,8 +316,9 @@ impl State {
                 let joining = self.joining.as_ref() == Some(&n.ssid);
                 let armed = n.saved.is_some() && self.armed == n.saved;
                 let hovered = matches!(self.hover, Some(Hit::Detail(D::Net(j) | D::Forget(j))) if j == i);
-                if hovered || self.pass.as_ref().is_some_and(|p| p.ssid == n.ssid) {
-                    fill(s, &rounded(x, y + 2.0, w, h - 4.0, 14.0), pal.tile(0.07));
+                let lit = if self.pass.as_ref().is_some_and(|p| p.ssid == n.ssid) { 1.0 } else { self.feel.glow(Hit::Detail(D::Net(i)), now) };
+                if lit > 0.01 {
+                    fill(s, &rounded(x, y + 2.0, w, h - 4.0, 14.0), faint(pal.tile(0.07), lit));
                 }
                 hits.push((D::Net(i), x, y + 2.0, w, h - 4.0));
                 draw::icon(s, canvas, cfg, nm::bars(n.strength), 20.0, false, pal.ink_main, x + 22.0, mid);
@@ -331,7 +343,9 @@ impl State {
                     draw::icon(s, canvas, cfg, "lock", 15.0, false, pal.ink_meta, x + w - 16.0, mid);
                 }
                 if (hovered && n.saved.is_some()) || armed {
-                    self.small(s, pal, x + w - 48.0, mid, "delete", armed.then_some(pal.risk), D::Forget(i), hits);
+                    s.push_opacity(if armed { 1.0 } else { lit });
+                    self.small(s, pal, x + w - 48.0, mid, "delete", armed.then_some(pal.risk), D::Forget(i), now, hits);
+                    s.pop();
                 }
             }
             Item::Field => {
@@ -356,10 +370,11 @@ impl State {
                 }
                 s.pop();
                 hits.push((D::Field, fx, fy, fw, 34.0));
-                let hot = self.hover == Some(Hit::Detail(D::Reveal));
-                draw::icon(s, canvas, cfg, if p.shown { "visibility_off" } else { "visibility" }, 17.0, false, if hot { pal.ink_main } else { pal.ink_meta }, fx + fw - 18.0, mid);
+                let (key, eye) = (Hit::Detail(D::Reveal), if p.shown { "visibility_off" } else { "visibility" });
+                let k = self.feel.scale(key, feel::SMALL, now) * self.feel.icon(key, eye, now);
+                feel::scaled(s, k, fx + fw - 18.0, mid, || draw::icon(s, canvas, cfg, eye, 17.0, false, pal.ink_main.mix(pal.ink_meta, self.feel.glow(key, now)), fx + fw - 18.0, mid));
                 hits.push((D::Reveal, fx + fw - 34.0, fy, 34.0, 34.0));
-                self.pill(s, pal, x + w - 6.0, mid, "Join", !p.text.is_empty(), D::Join, hits);
+                self.pill(s, pal, x + w - 6.0, mid, "Join", !p.text.is_empty(), D::Join, now, hits);
             }
             Item::Foot => {
                 fill(s, &rounded(x + 6.0, y + 3.0, w - 12.0, 1.0, 0.5), pal.hairline);
@@ -367,17 +382,17 @@ impl State {
                 let fm = y + 5.0 + (h - 5.0) / 2.0;
                 let step = 36.0;
                 let mut gx = x + 18.0;
-                self.small(s, pal, gx, fm, "settings", None, D::More, hits);
+                self.small(s, pal, gx, fm, "settings", None, D::More, now, hits);
                 if t == Tile::Bluetooth {
                     if let Some(a) = self.bt.chosen().filter(|a| a.powered) {
                         gx += step;
-                        self.small(s, pal, gx, fm, if a.discoverable { "visibility" } else { "visibility_off" }, a.discoverable.then_some(pal.accent), D::Visible, hits);
+                        self.small(s, pal, gx, fm, if a.discoverable { "visibility" } else { "visibility_off" }, a.discoverable.then_some(pal.accent), D::Visible, now, hits);
                         gx += step;
-                        self.small(s, pal, gx, fm, "bluetooth_searching", a.discovering.then_some(pal.accent), D::Scan, hits);
+                        self.small(s, pal, gx, fm, "bluetooth_searching", a.discovering.then_some(pal.accent), D::Scan, now, hits);
                     }
                 } else if self.wifi.enabled && self.wifi.device.is_some() {
                     gx += step;
-                    self.small(s, pal, gx, fm, "sync", None, D::WifiScan, hits);
+                    self.small(s, pal, gx, fm, "sync", None, D::WifiScan, now, hits);
                 }
             }
         }
@@ -394,6 +409,8 @@ impl Control {
             s.armed = None;
             s.watch_gen += 1;
             if opening {
+                // The tiles' arrows stay; what unfolds starts as it is.
+                s.feel.retain(|h| !matches!(h, Hit::Detail(d) if !matches!(d, D::Expand(_))));
                 s.expand = Some(t);
                 s.reveal.go(1.0, now, 420, OPEN);
             } else {
