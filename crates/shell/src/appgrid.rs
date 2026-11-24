@@ -5,6 +5,7 @@
 
 use crate::app::App;
 use crate::draw::{self, Face};
+use crate::feel::{self, Feel};
 use crate::paint::Paint;
 use gtk::{gdk, glib, graphene, gsk, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
@@ -95,6 +96,9 @@ fn folder_name(app: &App, ids: &[String]) -> String {
     NAMES.iter().find(|(c, _)| !cats.is_empty() && cats.iter().all(|all| all.split(';').any(|x| x == *c))).map_or("Folder", |(_, n)| n).to_string()
 }
 
+/// How long a page takes to turn.
+const PAGE_MS: i64 = 460;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Hit {
     /// An item of the grid (or of the open folder), by its index there.
@@ -162,6 +166,8 @@ struct State {
     moving: bool,
     search: gtk::Text,
     press: Option<(f64, f64, Hit)>,
+    feel: Feel<Hit>,
+    hover: Option<Hit>,
     /// The dock as seen when the grid opened: how far it reaches in at the bottom, and its apps'
     /// icon centres, which apps found by the search fly in from.
     dock_room: f64,
@@ -371,6 +377,8 @@ fn build(app: &Rc<App>) -> Shared {
         moving: false,
         search: search.clone(),
         press: None,
+        feel: Feel::default(),
+        hover: None,
         dock_room: 0.0,
         dock_apps: HashMap::new(),
         ghost: None,
@@ -418,6 +426,10 @@ fn build(app: &Rc<App>) -> Shared {
         if let Some(st) = weak.upgrade() {
             let hit = st.borrow().hit(x, y);
             st.borrow_mut().press = Some((x, y, hit));
+            if matches!(hit, Hit::Item(_) | Hit::Dot(_)) {
+                st.borrow().feel.press(hit, glib::monotonic_time());
+                kick(&st);
+            }
         }
     });
     let weak = Rc::downgrade(&st);
@@ -429,10 +441,27 @@ fn build(app: &Rc<App>) -> Shared {
     let weak = Rc::downgrade(&st);
     drag.connect_drag_end(move |g, dx, dy| {
         let Some(st) = weak.upgrade() else { return };
+        st.borrow().feel.release(glib::monotonic_time());
+        kick(&st);
         let Some((x, y)) = g.start_point() else { return };
         released(&st, x + dx, y + dy, dx.hypot(dy) < 8.0);
     });
     paint.add_controller(drag);
+    let motion = gtk::EventControllerMotion::new();
+    let weak = Rc::downgrade(&st);
+    motion.connect_motion(move |_, x, y| {
+        if let Some(st) = weak.upgrade() {
+            let hit = st.borrow().hit(x, y);
+            point(&st, Some(hit));
+        }
+    });
+    let weak = Rc::downgrade(&st);
+    motion.connect_leave(move |_| {
+        if let Some(st) = weak.upgrade() {
+            point(&st, None);
+        }
+    });
+    paint.add_controller(motion);
     // A right click on an app or a folder offers what can be done with it.
     let menu = gtk::GestureClick::new();
     menu.set_button(3);
@@ -572,8 +601,8 @@ impl State {
     }
 
     /// A folder's face: a frosted tile with its first apps in small.
-    fn folder_face(&self, s: &gtk::Snapshot, apps: &[String], x: f64, y: f64, size: f64, lit: bool) {
-        draw::fill(s, &draw::round(x, y, size, size, size * 0.24), Rgb::new(1.0, 1.0, 1.0).alpha(if lit { 0.34 } else { 0.2 }));
+    fn folder_face(&self, s: &gtk::Snapshot, apps: &[String], x: f64, y: f64, size: f64, lit: f64) {
+        draw::fill(s, &draw::round(x, y, size, size, size * 0.24), Rgb::new(1.0, 1.0, 1.0).alpha(0.2 + 0.14 * lit));
         let mini = size * 0.24;
         let gap = (size - 3.0 * mini) / 4.0;
         for (k, id) in apps.iter().take(9).enumerate() {
@@ -687,7 +716,11 @@ impl State {
             if self.selected == Some(i) {
                 draw::fill(s, &draw::round(x - 10.0, y - 10.0, g.icon + 20.0, g.icon + 20.0, (g.icon + 20.0) * 0.24), white.alpha(0.16));
             }
-            let grow = if lit { g.icon * 0.08 } else { 0.0 };
+            let hit = Hit::Item(i);
+            // The open folder's apps are the ones under the pointer then.
+            let (glow, give) = if self.folder.is_some() { (0.0, 1.0) } else { (self.feel.glow(hit, now), self.feel.scale(hit, feel::SMALL, now)) };
+            let over = self.feel.on(Hit::Dot(usize::MAX - i), lit, now);
+            let grow = g.icon * (0.08 * over + 0.02 * glow) + (give - 1.0) * size / 2.0;
             // Apps that just came in with the search grow and fade in.
             let young = born < 1.0 && fade(s, born);
             let name = match slot {
@@ -696,7 +729,7 @@ impl State {
                     names.get(id).cloned().unwrap_or_default()
                 }
                 Slot::Folder { name, apps } => {
-                    self.folder_face(s, apps, x - grow, y - grow, size + 2.0 * grow, lit);
+                    self.folder_face(s, apps, x - grow, y - grow, size + 2.0 * grow, over.max(0.4 * glow));
                     name.clone()
                 }
             };
@@ -714,7 +747,8 @@ impl State {
             let x0 = w / 2.0 - (pages - 1) as f64 * 9.0;
             for p in 0..pages {
                 let near = 1.0 - (page - p as f64).abs().min(1.0);
-                let r = 3.5;
+                let dot = Hit::Dot(p);
+                let r = 3.5 * self.feel.scale(dot, feel::SMALL, now) + self.feel.glow(dot, now);
                 draw::fill(s, &draw::round(x0 + p as f64 * 18.0 - r, h - self.dock_room - DOTS - r, 2.0 * r, 2.0 * r, r), white.alpha(0.35 + 0.55 * near));
             }
         }
@@ -742,7 +776,9 @@ impl State {
                     continue;
                 }
                 let (x, y) = fg.spot(n);
-                self.icon_of(s, id, x, y, g.icon);
+                let hit = Hit::Item(n);
+                let grow = g.icon * (0.02 * self.feel.glow(hit, now) + (self.feel.scale(hit, feel::SMALL, now) - 1.0) / 2.0);
+                self.icon_of(s, id, x - grow, y - grow, g.icon + 2.0 * grow);
                 self.label(s, names.get(id).map_or("", String::as_str), x + g.icon / 2.0, y + g.icon + 18.0, g.cell_w - 10.0, 1.0);
             }
             s.pop();
@@ -762,7 +798,7 @@ impl State {
             s.push_shadow(&[gsk::Shadow::new(gdk::RGBA::new(0.0, 0.0, 0.0, 0.35), 0.0, 6.0, 14.0)]);
             match &d.slot {
                 Slot::App(id) => self.icon_of(s, id, x, y, size),
-                Slot::Folder { apps, .. } => self.folder_face(s, apps, x, y, size, false),
+                Slot::Folder { apps, .. } => self.folder_face(s, apps, x, y, size, 0.0),
             }
             s.pop();
         }
@@ -949,7 +985,7 @@ fn kick(st: &Shared) {
         let t = s.fade.value(now).clamp(0.0, 1.0);
         s.search.set_opacity(t);
         let folder = s.folder.as_ref().is_some_and(|f| !f.open.settled(now));
-        if !s.fade.settled(now) || !s.page.settled(now) || folder || s.drag.is_some() || s.moving {
+        if !s.fade.settled(now) || !s.page.settled(now) || folder || s.drag.is_some() || s.moving || s.feel.busy(now) {
             return glib::ControlFlow::Continue;
         }
         s.ticking = false;
@@ -971,12 +1007,33 @@ fn kick(st: &Shared) {
     });
 }
 
+/// The pointer is on `hit`.
+fn point(st: &Shared, hit: Option<Hit>) {
+    let changed = {
+        let Ok(mut s) = st.try_borrow_mut() else { return };
+        let hit = hit.filter(|h| s.drag.is_none() && matches!(h, Hit::Item(_) | Hit::Dot(_)));
+        let changed = s.hover != hit;
+        if changed {
+            s.hover = hit;
+            let keys: Vec<Hit> = hit.into_iter().collect();
+            s.feel.hover(&keys, glib::monotonic_time());
+        }
+        changed
+    };
+    if changed {
+        kick(st);
+    }
+}
+
 fn turn(st: &Shared, by: i32) {
     let mut s = st.borrow_mut();
     let pages = s.pages() as i32;
     let to = (s.current_page() as i32 + by).clamp(0, pages - 1);
     let now = glib::monotonic_time();
-    s.page.go(to as f64, now, if motion::reduced() { 1 } else { 380 }, motion::EMPHASIZED_DECEL);
+    s.page.go(to as f64, now, PAGE_MS, motion::GENTLE);
+    // Other items are under the pointer now; they start as they are.
+    s.feel.retain(|h| !matches!(h, Hit::Item(_)));
+    s.hover = None;
     drop(s);
     kick(st);
 }
@@ -1283,7 +1340,7 @@ fn press_key(st: &Shared, key: gdk::Key) -> bool {
             let page = next / g.per_page();
             let now = glib::monotonic_time();
             if page != s.current_page() {
-                s.page.go(page as f64, now, if motion::reduced() { 1 } else { 380 }, motion::EMPHASIZED_DECEL);
+                s.page.go(page as f64, now, PAGE_MS, motion::GENTLE);
             }
             drop(s);
             kick(st);
