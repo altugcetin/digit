@@ -2,10 +2,11 @@
 //! under it, give when pressed, fill when turned on and swell a little when what they show
 //! changes. Each button is known by its panel's own key.
 
-use gtk::{graphene, gsk, prelude::*};
+use gtk::{glib, graphene, gsk, prelude::*};
 use kit::motion::{self, Tween};
 use kit::palette::Rgb;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 const SWELL: i64 = 340_000;
 
@@ -50,10 +51,19 @@ impl<K: Copy + PartialEq> Feel<K> {
 
     /// The pointer is on `keys`: a button, and what it stands on.
     pub fn hover(&self, keys: &[K], now: i64) {
+        self.light(keys, 160, 280, now);
+    }
+
+    /// `hover` for the rows of a menu, which the pointer runs over quickly.
+    pub fn hover_row(&self, row: Option<K>, now: i64) {
+        self.light(&row.into_iter().collect::<Vec<_>>(), 80, 110, now);
+    }
+
+    fn light(&self, keys: &[K], on: i64, off: i64, now: i64) {
         for key in keys {
-            self.with(*key, |m| m.glow.go(1.0, now, 160, motion::STANDARD));
+            self.with(*key, |m| m.glow.go(1.0, now, on, motion::STANDARD));
         }
-        self.0.borrow_mut().iter_mut().filter(|m| !keys.contains(&m.key)).for_each(|m| m.glow.go(0.0, now, 280, motion::STANDARD));
+        self.0.borrow_mut().iter_mut().filter(|m| !keys.contains(&m.key)).for_each(|m| m.glow.go(0.0, now, off, motion::STANDARD));
     }
 
     pub fn press(&self, key: K, now: i64) {
@@ -109,6 +119,22 @@ impl<K: Copy + PartialEq> Feel<K> {
             !m.glow.settled(now) || !m.press.settled(now) || m.on.as_ref().is_some_and(|t| !t.settled(now)) || m.swell.is_some_and(|t| swelling(now - t))
         })
     }
+}
+
+/// Draws `w` each frame while it's `busy`; once at a time, as `ticking` tells.
+pub fn run(w: &impl IsA<gtk::Widget>, ticking: &Rc<Cell<bool>>, busy: impl Fn(i64) -> bool + 'static) {
+    if ticking.replace(true) {
+        return;
+    }
+    let ticking = ticking.clone();
+    w.add_tick_callback(move |w, clock| {
+        w.queue_draw();
+        if busy(clock.frame_time()) {
+            return glib::ControlFlow::Continue;
+        }
+        ticking.set(false);
+        glib::ControlFlow::Break
+    });
 }
 
 fn swelling(dt: i64) -> bool {

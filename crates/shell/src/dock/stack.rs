@@ -3,6 +3,7 @@
 
 use super::{Kind, LIFT, Shared, Side, State, kick};
 use crate::draw::{self, Face};
+use crate::feel::{self, Feel};
 use crate::paint::Paint;
 use gtk::{cairo, gdk, gio, glib, graphene, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
@@ -129,6 +130,8 @@ struct Stack {
     entries: Vec<Entry>,
     more: f64,
     hover: Option<usize>,
+    feel: Feel<usize>,
+    ticking: Rc<std::cell::Cell<bool>>,
     opened: i64,
     closing: Option<i64>,
 }
@@ -223,8 +226,8 @@ impl Stack {
             }
             let (tx, ty, tilt) = self.slot(i);
             let (cx, cy) = (self.from.0 + (tx - self.from.0) * p, self.from.1 + (ty - self.from.1) * p);
-            let scale = 0.3 + 0.7 * p;
-            let hot = self.hover == Some(i);
+            let scale = (0.3 + 0.7 * p) * self.feel.scale(i, feel::PILL, now);
+            let glow = self.feel.glow(i, now);
             s.push_opacity(p);
             s.save();
             s.translate(&graphene::Point::new(cx as f32, cy as f32));
@@ -237,8 +240,8 @@ impl Stack {
             // The label sits on the side of the tile away from the screen edge.
             let lw = self.label(i);
             let lx = if self.side == Side::Left { TILE / 2.0 + 10.0 } else { -TILE / 2.0 - 10.0 - lw };
-            draw::fill(s, &draw::round(lx, -14.0, lw, 28.0, 14.0), if hot { pal.accent } else { pal.body.alpha(1.0).mix(pal.ink_main, 0.9) });
-            draw::text(s, &self.paint, cfg, text, 13.0, Face::Text(520), if hot { pal.on_accent } else { pal.ink_main }, lx + 12.0, 0.0, lw - 24.0, pango::Alignment::Left);
+            draw::fill(s, &draw::round(lx, -14.0, lw, 28.0, 14.0), pal.accent.mix(pal.body.alpha(1.0).mix(pal.ink_main, 0.9), glow));
+            draw::text(s, &self.paint, cfg, text, 13.0, Face::Text(520), pal.on_accent.mix(pal.ink_main, glow), lx + 12.0, 0.0, lw - 24.0, pango::Alignment::Left);
             match (self.slot_kind(i), icon) {
                 (Slot::File(_), Some(icon)) => fit(s, icon, 0.0, 0.0, TILE),
                 _ => {
@@ -251,6 +254,16 @@ impl Stack {
         }
         s.restore();
     }
+}
+
+/// Draws while the pointer's marks move.
+fn light(m: &Rc<RefCell<Stack>>) {
+    let (paint, ticking) = {
+        let m = m.borrow();
+        (m.paint.clone(), m.ticking.clone())
+    };
+    let weak = Rc::downgrade(m);
+    feel::run(&paint, &ticking, move |now| weak.upgrade().is_some_and(|m| m.try_borrow().map_or(true, |m| m.feel.busy(now))));
 }
 
 /// Opens the Recent Files stack above (or beside) dock item `i`; a second click closes it.
@@ -355,6 +368,8 @@ fn show(st: &Shared, monitor: Option<gdk::Monitor>, from: ((f64, f64), f64), sid
         entries,
         more,
         hover: None,
+        feel: Feel::default(),
+        ticking: Rc::default(),
         opened: glib::monotonic_time(),
         closing: None,
     }));
@@ -370,16 +385,32 @@ fn show(st: &Shared, monitor: Option<gdk::Monitor>, from: ((f64, f64), f64), sid
     let weak = Rc::downgrade(&stack);
     motion.connect_motion(move |_, x, y| {
         let Some(m) = weak.upgrade() else { return };
-        let mut m = m.borrow_mut();
-        let at = if m.closing.is_none() { m.at(x, y) } else { None };
-        if at != m.hover {
-            m.hover = at;
-            m.paint.set_cursor_from_name(at.map(|_| "pointer"));
-            m.paint.queue_draw();
+        let changed = {
+            let mut m = m.borrow_mut();
+            let at = if m.closing.is_none() { m.at(x, y) } else { None };
+            let changed = at != m.hover;
+            if changed {
+                m.hover = at;
+                let keys: Vec<usize> = at.into_iter().collect();
+                m.feel.hover(&keys, glib::monotonic_time());
+                m.paint.set_cursor_from_name(at.map(|_| "pointer"));
+            }
+            changed
+        };
+        if changed {
+            light(&m);
         }
     });
     paint.add_controller(motion);
     let click = gtk::GestureClick::new();
+    let weak = Rc::downgrade(&stack);
+    click.connect_pressed(move |_, _, x, y| {
+        let Some(m) = weak.upgrade() else { return };
+        if let Some(i) = m.borrow().at(x, y) {
+            m.borrow().feel.press(i, glib::monotonic_time());
+        }
+        light(&m);
+    });
     let weak = Rc::downgrade(&stack);
     click.connect_released(move |_, _, x, y| {
         let Some(m) = weak.upgrade() else { return };

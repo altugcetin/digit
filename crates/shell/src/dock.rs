@@ -1,6 +1,7 @@
 use crate::app::App;
 use crate::compositor;
 use crate::draw::{self, Face};
+use crate::feel::{self, Feel};
 use crate::paint::Paint;
 use gtk::{cairo, gdk, gio, glib, graphene, gsk, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
@@ -2144,6 +2145,8 @@ struct Menu {
     key: String,
     rows: Vec<(String, Act, bool)>,
     hover: Option<usize>,
+    feel: Feel<usize>,
+    ticking: Rc<std::cell::Cell<bool>>,
     fade: Tween,
 }
 
@@ -2228,7 +2231,7 @@ fn open_menu(st: &Shared, i: usize) {
     let mut fade = Tween::still(0.0);
     fade.go(1.0, glib::monotonic_time(), 160, motion::STANDARD);
     let scrim = crate::paint::scrim(monitor.as_ref(), close_menu);
-    let menu = Rc::new(RefCell::new(Menu { dock: Rc::downgrade(st), window: window.clone(), scrim, paint: paint.clone(), title, key, rows, hover: None, fade }));
+    let menu = Rc::new(RefCell::new(Menu { dock: Rc::downgrade(st), window: window.clone(), scrim, paint: paint.clone(), title, key, rows, hover: None, feel: Feel::default(), ticking: Rc::default(), fade }));
     let weak = Rc::downgrade(&menu);
     paint.on_draw(move |s| {
         if let Some(m) = weak.upgrade() {
@@ -2241,24 +2244,37 @@ fn open_menu(st: &Shared, i: usize) {
     let weak = Rc::downgrade(&menu);
     motion.connect_motion(move |_, _, y| {
         if let Some(m) = weak.upgrade() {
-            let mut m = m.borrow_mut();
-            let at = m.row_at(y);
-            if at != m.hover {
-                m.hover = at;
-                m.paint.set_cursor_from_name(at.map(|_| "pointer"));
-                m.paint.queue_draw();
+            let at = m.borrow().row_at(y);
+            if at != m.borrow().hover {
+                m.borrow().paint.set_cursor_from_name(at.map(|_| "pointer"));
+                aim_menu(&m, at);
             }
         }
     });
     let weak = Rc::downgrade(&menu);
     motion.connect_leave(move |_| {
         if let Some(m) = weak.upgrade() {
-            m.borrow_mut().hover = None;
-            m.borrow().paint.queue_draw();
+            aim_menu(&m, None);
         }
     });
     paint.add_controller(motion);
     let click = gtk::GestureClick::new();
+    let weak = Rc::downgrade(&menu);
+    click.connect_pressed(move |_, _, _, y| {
+        if let Some(m) = weak.upgrade() {
+            if let Some(i) = m.borrow().row_at(y) {
+                m.borrow().feel.press(i, glib::monotonic_time());
+            }
+            kick_menu(&m);
+        }
+    });
+    let weak = Rc::downgrade(&menu);
+    click.connect_end(move |_, _| {
+        if let Some(m) = weak.upgrade() {
+            m.borrow().feel.release(glib::monotonic_time());
+            kick_menu(&m);
+        }
+    });
     let weak = Rc::downgrade(&menu);
     click.connect_released(move |_, _, _, y| {
         if let Some(m) = weak.upgrade() {
@@ -2277,10 +2293,8 @@ fn open_menu(st: &Shared, i: usize) {
         match key {
             gdk::Key::Escape => close_menu(),
             gdk::Key::Down | gdk::Key::Up => {
-                let mut mm = m.borrow_mut();
-                let cur = mm.hover.map_or(if key == gdk::Key::Down { n - 1 } else { 0 }, |h| h);
-                mm.hover = Some(if key == gdk::Key::Down { (cur + 1) % n } else { (cur + n - 1) % n });
-                mm.paint.queue_draw();
+                let cur = m.borrow().hover.map_or(if key == gdk::Key::Down { n - 1 } else { 0 }, |h| h);
+                aim_menu(&m, Some(if key == gdk::Key::Down { (cur + 1) % n } else { (cur + n - 1) % n }));
             }
             gdk::Key::Return | gdk::Key::KP_Enter => {
                 let at = m.borrow().hover;
@@ -2308,6 +2322,25 @@ fn open_menu(st: &Shared, i: usize) {
         w.queue_draw();
         if m.borrow().fade.settled(clock.frame_time()) { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
     });
+}
+
+/// Highlights the menu's row `at`.
+fn aim_menu(m: &Rc<RefCell<Menu>>, at: Option<usize>) {
+    {
+        let mut m = m.borrow_mut();
+        m.hover = at;
+        m.feel.hover_row(at, glib::monotonic_time());
+    }
+    kick_menu(m);
+}
+
+fn kick_menu(m: &Rc<RefCell<Menu>>) {
+    let (paint, ticking) = {
+        let m = m.borrow();
+        (m.paint.clone(), m.ticking.clone())
+    };
+    let weak = Rc::downgrade(m);
+    feel::run(&paint, &ticking, move |now| weak.upgrade().is_some_and(|m| m.try_borrow().map_or(true, |m| m.feel.busy(now))));
 }
 
 fn run(m: &Rc<RefCell<Menu>>, r: usize) {
@@ -2369,8 +2402,10 @@ impl Menu {
         draw::text(s, &self.paint, cfg, &self.title, 13.0, Face::Text(600), pal.ink_meta, 16.0, 9.0 + 15.0, w - 32.0, pango::Alignment::Left);
         for (i, (label, _, danger)) in self.rows.iter().enumerate() {
             let y = 9.0 + 30.0 + i as f64 * ROW;
-            if self.hover == Some(i) {
-                draw::fill(s, &draw::round(6.0, y + 1.0, w - 12.0, ROW - 2.0, 11.0), if *danger { pal.risk.alpha(0.18) } else { pal.ink_main.alpha(0.1) });
+            let lit = self.feel.glow(i, now);
+            if lit > 0.01 {
+                let tint = if *danger { pal.risk.alpha(0.18) } else { pal.ink_main.alpha(0.1) };
+                feel::scaled(s, self.feel.scale(i, feel::ROW, now), w / 2.0, y + ROW / 2.0, || draw::fill(s, &draw::round(6.0, y + 1.0, w - 12.0, ROW - 2.0, 11.0), feel::faint(tint, lit)));
             }
             let ink = if *danger { pal.risk } else { pal.ink_main };
             draw::text(s, &self.paint, cfg, label, 14.0, Face::Text(450), ink, 16.0, y + ROW / 2.0, w - 32.0, pango::Alignment::Left);

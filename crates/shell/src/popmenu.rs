@@ -1,10 +1,11 @@
 use crate::app::App;
 use crate::draw::{self, Face};
+use crate::feel::{self, Feel};
 use crate::paint::Paint;
 use gtk::{gdk, glib, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use kit::motion::{self, Tween};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 const ROW: f64 = 32.0;
@@ -65,6 +66,8 @@ struct Menu {
     title: String,
     rows: Vec<Row>,
     hover: Option<usize>,
+    feel: Feel<usize>,
+    ticking: Rc<Cell<bool>>,
     width: f64,
     fade: Tween,
     limit: f64,
@@ -134,6 +137,12 @@ impl Menu {
         }
     }
 
+    /// Highlights the row `at`.
+    fn aim(&mut self, at: Option<usize>) {
+        self.hover = at;
+        self.feel.hover_row(at, glib::monotonic_time());
+    }
+
     fn row_at(&self, y: f64) -> Option<usize> {
         let y = y + self.scroll;
         let mut top = self.top();
@@ -170,27 +179,27 @@ impl Menu {
                     draw::fill(s, &draw::round(12.0, y + SEP / 2.0, w - 24.0, 1.0, 0.0), pal.ink_main.alpha(0.08));
                 }
                 Row::Item { glyph, label, hint, danger, enabled, .. } => {
-                    let on = self.hover == Some(i);
-                    if on {
-                        draw::fill(s, &draw::round(5.0, y + 1.0, w - 10.0, ROW - 2.0, 9.0), if *danger { pal.risk.alpha(0.85) } else { pal.accent });
+                    let lit = if *enabled { self.feel.glow(i, now) } else { 0.0 };
+                    if lit > 0.01 {
+                        let tint = if *danger { pal.risk.alpha(0.85) } else { pal.accent };
+                        feel::scaled(s, self.feel.scale(i, feel::ROW, now), w / 2.0, y + ROW / 2.0, || draw::fill(s, &draw::round(5.0, y + 1.0, w - 10.0, ROW - 2.0, 9.0), feel::faint(tint, lit)));
                     }
-                    let ink = if !enabled {
+                    let rest = if !enabled {
                         pal.ink_faint
-                    } else if on {
-                        pal.on_accent
                     } else if *danger {
                         pal.risk
                     } else {
                         pal.ink_main
                     };
+                    let ink = pal.on_accent.mix(rest, lit);
                     let text_x = if glyph.is_empty() { 14.0 } else {
-                        let tint = if on || *danger || !enabled { ink } else { pal.ink_sec };
+                        let tint = if *danger || !enabled { ink } else { pal.on_accent.mix(pal.ink_sec, lit) };
                         draw::icon(s, &self.paint, cfg, glyph, 18.0, false, tint, 23.0, y + ROW / 2.0);
                         42.0
                     };
-                    draw::text(s, &self.paint, cfg, label, 14.5, Face::Text(if on { 520 } else { 450 }), ink, text_x, y + ROW / 2.0, w - text_x - 14.0, pango::Alignment::Left);
+                    draw::text(s, &self.paint, cfg, label, 14.5, Face::Text(450), ink, text_x, y + ROW / 2.0, w - text_x - 14.0, pango::Alignment::Left);
                     if !hint.is_empty() {
-                        let hink = if on { pal.on_accent.alpha(0.75) } else { pal.ink_meta };
+                        let hink = pal.on_accent.alpha(0.75).mix(pal.ink_meta, lit);
                         draw::text(s, &self.paint, cfg, hint, 13.0, Face::Text(450), hink, 14.0, y + ROW / 2.0, w - 28.0, pango::Alignment::Right);
                     }
                 }
@@ -201,6 +210,15 @@ impl Menu {
         s.pop();
         s.pop();
     }
+}
+
+fn kick(m: &Rc<RefCell<Menu>>) {
+    let (paint, ticking) = {
+        let m = m.borrow();
+        (m.paint.clone(), m.ticking.clone())
+    };
+    let weak = Rc::downgrade(m);
+    feel::run(&paint, &ticking, move |now| weak.upgrade().is_some_and(|m| m.try_borrow().map_or(true, |m| m.feel.busy(now))));
 }
 
 pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, x: f64, y: f64, title: &str, rows: Vec<Row>) {
@@ -255,7 +273,7 @@ fn show_inner(app: &Rc<App>, monitor: Option<gdk::Monitor>, x: f64, y: f64, titl
     let screen_w = monitor.as_ref().map(|m| m.geometry().width() as f64).unwrap_or(1920.0);
     let screen_h = monitor.as_ref().map(|m| m.geometry().height() as f64).unwrap_or(1080.0);
     let limit = (screen_h - y - 16.0).max(160.0);
-    let menu = Rc::new(RefCell::new(Menu { app: app.clone(), window: window.clone(), paint: paint.clone(), title: title.to_string(), rows, hover: None, width, fade, limit, scroll: 0.0 }));
+    let menu = Rc::new(RefCell::new(Menu { app: app.clone(), window: window.clone(), paint: paint.clone(), title: title.to_string(), rows, hover: None, feel: Feel::default(), ticking: Rc::default(), width, fade, limit, scroll: 0.0 }));
     let h = menu.borrow().shown();
     window.set_margin(Edge::Left, x.clamp(6.0, (screen_w - width - 6.0).max(6.0)) as i32);
     window.set_margin(Edge::Top, y as i32);
@@ -274,31 +292,39 @@ fn show_inner(app: &Rc<App>, monitor: Option<gdk::Monitor>, x: f64, y: f64, titl
     let weak = Rc::downgrade(&menu);
     motion.connect_motion(move |_, _, y| {
         let Some(m) = weak.upgrade() else { return };
-        let Ok(mut m) = m.try_borrow_mut() else { return };
-        let at = m.row_at(y);
-        if at != m.hover {
-            m.hover = at;
-            m.paint.set_cursor_from_name(at.map(|_| "pointer"));
-            m.paint.queue_draw();
+        let changed = m.try_borrow_mut().is_ok_and(|mut m| {
+            let at = m.row_at(y);
+            let changed = at != m.hover;
+            if changed {
+                m.aim(at);
+                m.paint.set_cursor_from_name(at.map(|_| "pointer"));
+            }
+            changed
+        });
+        if changed {
+            kick(&m);
         }
     });
     let weak = Rc::downgrade(&menu);
     motion.connect_leave(move |_| {
         let Some(m) = weak.upgrade() else { return };
-        let Ok(mut m) = m.try_borrow_mut() else { return };
-        m.hover = None;
-        m.paint.queue_draw();
+        if let Ok(mut m) = m.try_borrow_mut() {
+            m.aim(None);
+        }
+        kick(&m);
     });
     paint.add_controller(motion);
     let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
     let weak = Rc::downgrade(&menu);
     wheel.connect_scroll(move |_, _, dy| {
         let Some(m) = weak.upgrade() else { return glib::Propagation::Proceed };
-        let Ok(mut m) = m.try_borrow_mut() else { return glib::Propagation::Proceed };
-        let max = (m.height() - m.limit).max(0.0);
-        m.scroll = (m.scroll + dy * 36.0).clamp(0.0, max);
-        m.hover = None;
-        m.paint.queue_draw();
+        {
+            let Ok(mut m) = m.try_borrow_mut() else { return glib::Propagation::Proceed };
+            let max = (m.height() - m.limit).max(0.0);
+            m.scroll = (m.scroll + dy * 36.0).clamp(0.0, max);
+            m.aim(None);
+        }
+        kick(&m);
         glib::Propagation::Stop
     });
     paint.add_controller(wheel);
@@ -313,6 +339,20 @@ fn show_inner(app: &Rc<App>, monitor: Option<gdk::Monitor>, x: f64, y: f64, titl
         }
     };
     let click = gtk::GestureClick::new();
+    let weak = Rc::downgrade(&menu);
+    click.connect_pressed(move |_, _, _, y| {
+        let Some(m) = weak.upgrade() else { return };
+        if let Some(i) = m.borrow().row_at(y) {
+            m.borrow().feel.press(i, glib::monotonic_time());
+        }
+        kick(&m);
+    });
+    let weak = Rc::downgrade(&menu);
+    click.connect_end(move |_, _| {
+        let Some(m) = weak.upgrade() else { return };
+        m.borrow().feel.release(glib::monotonic_time());
+        kick(&m);
+    });
     let weak = Rc::downgrade(&menu);
     click.connect_released(move |_, _, _, y| {
         let Some(m) = weak.upgrade() else { return };
@@ -341,9 +381,10 @@ fn show_inner(app: &Rc<App>, monitor: Option<gdk::Monitor>, x: f64, y: f64, titl
                     (Some(a), true) => (a + 1) % picks.len(),
                     (Some(a), false) => (a + picks.len() - 1) % picks.len(),
                 };
-                mm.hover = Some(picks[next]);
+                mm.aim(Some(picks[next]));
                 mm.reveal(picks[next]);
-                mm.paint.queue_draw();
+                drop(mm);
+                kick(&m);
             }
             gdk::Key::Return | gdk::Key::KP_Enter => {
                 let at = m.borrow().hover;
