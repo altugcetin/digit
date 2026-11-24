@@ -1,3 +1,4 @@
+mod ark;
 mod art;
 mod audio;
 mod info;
@@ -407,6 +408,8 @@ fn crumbs(f: &Files, loc: &gio::File) {
             true
         });
         b.add_controller(drop);
+        let dest = c.clone();
+        b.add_controller(ark::target(move || Some(dest.clone())));
         f.crumbs.append(&b);
     }
     f.path_stack.set_visible_child_name("crumbs");

@@ -925,6 +925,12 @@ impl Pane {
         });
         w.add_controller(click);
         kit::tag::set(w, "digit-item", item.clone());
+        let me = self.weak();
+        let it = item.clone();
+        w.add_controller(crate::ark::target(move || {
+            let p = me.upgrade()?;
+            position(&it).and_then(|pos| p.sorted.item(pos).and_downcast::<gio::FileInfo>()).filter(is_dir).and_then(|i| target_of(&i))
+        }));
         let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY | gdk::DragAction::MOVE);
         let me = self.weak();
         let it = item.clone();
@@ -1121,6 +1127,8 @@ impl Pane {
                 true
             });
             w.add_controller(drop);
+            let me = self.weak();
+            w.add_controller(crate::ark::target(move || me.upgrade().map(|p| p.location()).filter(|d| d.is_native())));
             let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
             wheel.set_propagation_phase(gtk::PropagationPhase::Capture);
             let me = self.weak();

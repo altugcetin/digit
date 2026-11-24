@@ -365,6 +365,8 @@ impl Side {
                 true
             });
             row.add_controller(drop);
+            let dest = f.clone();
+            row.add_controller(crate::ark::target(move || Some(dest.clone()).filter(|d| d.uri_scheme().is_none_or(|s| s != "trash"))));
         }
         row
     }
