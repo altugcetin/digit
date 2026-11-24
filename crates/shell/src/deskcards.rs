@@ -6,6 +6,7 @@
 use crate::app::App;
 use crate::batterywidget::CardRect;
 use crate::draw::{self, Face};
+use crate::feel::Feel;
 use crate::paint::Paint;
 use gtk::{cairo, gdk, glib, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
@@ -181,6 +182,7 @@ struct Card {
 /// frames are being drawn until all of that settles.
 struct Live {
     glow: [Tween; 3],
+    feel: Feel<usize>,
     glides: crate::glide::Glides,
     track: Swap,
     ticking: bool,
@@ -188,13 +190,13 @@ struct Live {
 
 impl Default for Live {
     fn default() -> Self {
-        Self { glow: std::array::from_fn(|_| Tween::still(0.0)), glides: Default::default(), track: Swap::default(), ticking: false }
+        Self { glow: std::array::from_fn(|_| Tween::still(0.0)), feel: Feel::default(), glides: Default::default(), track: Swap::default(), ticking: false }
     }
 }
 
 impl Live {
     fn moving(&self, now: i64) -> bool {
-        self.glow.iter().any(|t| !t.settled(now)) || self.glides.moving(now) || self.track.moving(now)
+        self.glow.iter().any(|t| !t.settled(now)) || self.feel.busy(now) || self.glides.moving(now) || self.track.moving(now)
     }
 }
 
@@ -481,6 +483,21 @@ pub fn apply(app: &Rc<App>) {
                     p.press(cmd);
                 }
             });
+            let (weak, l) = (paint.downgrade(), live.clone());
+            click.connect_pressed(move |_, _, x, y| {
+                let Some(p) = weak.upgrade() else { return };
+                let (x, y) = (AIR + (x - AIR) / k, AIR + (y - AIR) / k);
+                if let Some(i) = buttons().iter().position(|(_, r)| contains(*r, x, y)) {
+                    l.borrow().feel.press(i, glib::monotonic_time());
+                    keep_going(&p, &l);
+                }
+            });
+            let (weak, l) = (paint.downgrade(), live.clone());
+            click.connect_end(move |_, _| {
+                let Some(p) = weak.upgrade() else { return };
+                l.borrow().feel.release(glib::monotonic_time());
+                keep_going(&p, &l);
+            });
             paint.add_controller(click);
             // The buttons glow under the pointer, as the shell's other round buttons do.
             let motion = gtk::EventControllerMotion::new();
@@ -609,7 +626,7 @@ fn draw(s: &gtk::Snapshot, p: &Paint, app: &App, kind: Kind, output: &str, top: 
     }
     // Under the shadow, which must keep still while the glow comes and goes.
     if kind == Kind::Media && controls {
-        media_glow(s, app, look.ink, &live.glow);
+        media_glow(s, app, look.ink, &live.glow, &live.feel);
     }
     if let Some(shade) = look.shade {
         s.push_shadow(&[gtk::gsk::Shadow::new(shade, 0.0, 1.0, 12.0)]);
@@ -715,21 +732,23 @@ fn note_shown(shown: &mut Vec<String>, output: &str, on: bool) -> bool {
     on != was
 }
 
-/// The glow under the Now playing buttons that can be pressed, as the pointer left it.
-fn media_glow(s: &gtk::Snapshot, app: &App, ink: Rgb, glow: &[Tween; 3]) {
+/// The glow under the Now playing buttons that can be pressed, as the pointer left it. It alone
+/// answers a press: the glyphs stand in the widget's blurred shadow and under its scale, where
+/// they can't be drawn smaller for a moment without jumping.
+fn media_glow(s: &gtk::Snapshot, app: &App, ink: Rgb, glow: &[Tween; 3], feel: &Feel<usize>) {
     let m = app.media.borrow();
     let now = glib::monotonic_time();
-    for ((cmd, (x, y, w, h)), t) in buttons().into_iter().zip(glow) {
+    for (i, ((cmd, (x, y, w, h)), t)) in buttons().into_iter().zip(glow).enumerate() {
         use crate::media::Command;
         let on = match cmd {
             Command::Previous => m.can_prev,
             Command::Next => m.can_next,
             Command::PlayPause => true,
         };
-        let v = t.value(now);
+        let (v, pressed) = (t.value(now), 1.0 - feel.scale(i, 1.0, now));
         if on && v > 0.0 {
-            let r = w / 2.0 + 1.5 * v;
-            draw::fill(s, &draw::round(x + w / 2.0 - r, y + h / 2.0 - r, 2.0 * r, 2.0 * r, r), ink.alpha(0.14 * v));
+            let r = w / 2.0 + 1.5 * v - 3.0 * pressed;
+            draw::fill(s, &draw::round(x + w / 2.0 - r, y + h / 2.0 - r, 2.0 * r, 2.0 * r, r), ink.alpha((0.14 + 0.12 * pressed) * v));
         }
     }
 }
