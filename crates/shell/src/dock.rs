@@ -142,6 +142,8 @@ struct Drag {
     key: String,
     origin: (f64, f64),
     at: (f64, f64),
+    /// Where the icon was taken, from its centre, so it doesn't jump under the pointer.
+    grab: (f64, f64),
     moving: bool,
     dock_span: (f64, f64),
     /// Where the app opens if dropped now, out on the screen (see `kit::wm::Zone`).
@@ -205,6 +207,8 @@ struct State {
     leave: u64,
     drag: Option<Drag>,
     drag_target: Option<gtk::Window>,
+    /// An app let go over the dock, coming down into its place.
+    landing: Option<(String, Tween)>,
     menu: bool,
     ticking: bool,
     region: Option<(i32, i32, i32, i32)>,
@@ -393,7 +397,7 @@ pub fn incoming(app: Option<(&str, Point, Point)>) {
                 let before = s.items.iter().zip(s.layout(now)).filter(|(i, (x, size))| i.pinned && i.key != id && x + size / 2.0 < p.0).count();
                 let had = s.pins.iter().position(|k| k == id);
                 let kept = (s.pins.clone(), s.order.clone());
-                s.drag = Some(Drag { key: id.to_string(), origin: p, at: p, moving: true, dock_span: s.rest_span(), zone: None, preview: None, out: false, before: kept });
+                s.drag = Some(Drag { key: id.to_string(), origin: p, at: p, grab: (0.0, 0.0), moving: true, dock_span: s.rest_span(), zone: None, preview: None, out: false, before: kept });
                 if had == Some(before) {
                     false
                 } else {
@@ -921,6 +925,7 @@ fn build(app: &Rc<App>, geo: Geo, monitor: Option<&gdk::Monitor>, output: String
         leave: 0,
         drag: None,
         drag_target: None,
+        landing: None,
         menu: false,
         ticking: false,
         region: None,
@@ -1367,10 +1372,13 @@ fn left(st: &Shared) {
 
 fn drag_from(s: &State, x: f64, y: f64) -> Option<Drag> {
     let p = s.local(x, y);
-    let item = s.items.get(s.index_at(p.0, glib::monotonic_time())?)?;
-    item.entry.as_ref()?;
+    let now = glib::monotonic_time();
+    let i = s.index_at(p.0, now)?;
+    let item = s.items.get(i).filter(|it| it.kind == Kind::App)?;
+    let (a, size) = *s.layout(now).get(i)?;
+    let grab = (p.0 - a - size / 2.0, p.1 - s.row() - size / 2.0);
     let before = (s.pins.clone(), s.order.clone());
-    Some(Drag { key: item.key.clone(), origin: p, at: p, moving: false, dock_span: s.rest_span(), zone: None, preview: None, out: false, before })
+    Some(Drag { key: item.key.clone(), origin: p, at: p, grab, moving: false, dock_span: s.rest_span(), zone: None, preview: None, out: false, before })
 }
 
 fn drag_to(st: &Shared, x: f64, y: f64) {
@@ -1393,7 +1401,7 @@ fn drag_at(st: &Shared, p: Point) {
     let reorder = {
         let mut s = st.borrow_mut();
         // Out over the open app grid, it draws the app under the pointer.
-        if let Some(d) = s.drag.as_ref().filter(|d| d.moving) {
+        if let Some(d) = s.drag.as_ref().filter(|d| d.moving && s.installed(&d.key)) {
             let side = s.geo.side;
             let out = p.1 > s.geo.reach() + 24.0;
             crate::appgrid::ghost(out.then(|| (d.key.clone(), Box::new(move |screen| to_screen(side, p, screen)) as crate::appgrid::Place)));
@@ -1418,28 +1426,40 @@ fn drag_at(st: &Shared, p: Point) {
         let key = s.drag.as_ref().map(|d| d.key.clone()).unwrap_or_default();
         let now = glib::monotonic_time();
         let target = s.index_at(p.0, now).or_else(|| {
-            let l = s.layout(now);
-            let first = l.first().map_or(0.0, |f| f.0);
-            Some(if p.0 < first { 0 } else { l.len().saturating_sub(1) })
+            // Beside the dock or on a separator: the nearest one.
+            let away = |(a, size): (f64, f64)| (a + size / 2.0 - p.0).abs();
+            s.layout(now).into_iter().map(away).enumerate().min_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| i)
         });
         // The Apps button stays first: places count from after it.
         let lead = s.items.iter().take_while(|i| i.kind == Kind::Apps).count();
+        // It stays among the apps, and one that can't be pinned among the unpinned ones.
+        let apps = s.items.iter().filter(|i| i.kind == Kind::App).count();
+        let least = if s.installed(&key) { 0 } else { s.items.iter().filter(|i| i.pinned).count() };
         let target = target.map(|t| t.saturating_sub(lead));
+        // Over Recent Files or the Trash, past the apps.
+        let past = target.is_some_and(|t| t >= apps);
+        let target = target.map(|t| t.min(apps.saturating_sub(1)).max(least));
         let mut order: Vec<String> = s.items.iter().filter(|i| i.kind != Kind::Apps).map(|i| i.key.clone()).collect();
         match (target, order.iter().position(|k| *k == key)) {
-            (Some(t), Some(c)) if t != c => {
-                let k = order.remove(c);
-                let t = t.min(order.len());
-                order.insert(t, k);
+            (Some(t), Some(c)) => {
                 // Landing among the other pinned apps pins it, among the unpinned ones unpins it, and on the border keeps it as it was.
                 let others = s.items.iter().filter(|i| i.pinned && i.key != key).count();
                 let item = s.items.iter().find(|i| i.key == key);
                 let was = item.is_some_and(|i| i.pinned);
-                let pin = match t.cmp(&others) {
+                let closed = item.is_some_and(|i| i.windows.is_empty());
+                let side = if past { std::cmp::Ordering::Greater } else { t.cmp(&others) };
+                let pin = match side {
                     std::cmp::Ordering::Less => true,
-                    std::cmp::Ordering::Greater => was && item.is_some_and(|i| i.windows.is_empty()),
+                    std::cmp::Ordering::Greater => was && closed,
                     std::cmp::Ordering::Equal => was,
-                };
+                } && item.is_some_and(|i| i.entry.is_some());
+                let t = if pin { t.min(others) } else { t };
+                if t == c && pin == was {
+                    s.paint.queue_draw();
+                    return;
+                }
+                let k = order.remove(c);
+                order.insert(t.min(order.len()), k);
                 let pinned = |k: &String| if *k == key { pin } else { s.items.iter().any(|i| i.key == *k && i.pinned) };
                 let stale: Vec<String> = s.pins.iter().filter(|k| !order.contains(k)).cloned().collect();
                 let pins: Vec<String> = order.iter().filter(|k| pinned(k)).cloned().chain(stale).collect();
@@ -1540,8 +1560,30 @@ fn open_in(st: &Shared, key: String, zone: kit::wm::Zone) {
     });
 }
 
+/// Glides an app let go at `at`, over the dock, into its place.
+fn land(st: &Shared, key: &str, at: Point, grab: Point) {
+    if motion::reduced() {
+        return;
+    }
+    {
+        let mut s = st.borrow_mut();
+        let now = glib::monotonic_time();
+        let Some(i) = s.items.iter().position(|it| it.key == key) else { return };
+        let Some(&(a, size)) = s.layout(now).get(i) else { return };
+        let glide = |from: f64| {
+            let mut t = Tween::still(from);
+            t.go(0.0, now, 300, motion::EMPHASIZED_DECEL);
+            t
+        };
+        let (along, across) = (at.0 - grab.0 - size / 2.0 - a, (at.1 - grab.1 - size / 2.0 - s.row()).max(0.0));
+        s.slide.insert(key.to_string(), glide(along));
+        s.landing = Some((key.to_string(), glide(across)));
+    }
+    kick(st);
+}
+
 fn drop_drag(st: &Shared, released: bool) {
-    let note = {
+    let (note, landed) = {
         let mut s = st.borrow_mut();
         let Some(d) = s.drag.take() else { return };
         if !d.moving {
@@ -1567,7 +1609,7 @@ fn drop_drag(st: &Shared, released: bool) {
         let name = s.items.iter().find(|i| i.key == d.key).map(|i| i.name.clone()).unwrap_or_default();
         // Over the open app grid, the app goes into it where it's let go, quietly.
         let side = s.geo.side;
-        let into_grid = far && crate::appgrid::take_from_dock(&d.key, |screen| to_screen(side, d.at, screen));
+        let into_grid = far && s.installed(&d.key) && crate::appgrid::take_from_dock(&d.key, |screen| to_screen(side, d.at, screen));
         let note = if far && s.pins.contains(&d.key) {
             s.pins.retain(|k| *k != d.key);
             (!into_grid).then(|| format!("{name} removed from Dock"))
@@ -1575,9 +1617,12 @@ fn drop_drag(st: &Shared, released: bool) {
             None
         };
         save_pins(&s.pins);
-        note
+        (note, (!far).then_some((d.key, d.at, d.grab)))
     };
     rebuild(st);
+    if let Some((key, at, grab)) = landed {
+        land(st, &key, at, grab);
+    }
     settle(st);
     if let Some(text) = note {
         let app = st.borrow().app.clone();
@@ -1713,12 +1758,14 @@ fn kick(st: &Shared) {
         let gulping = s.gulp.is_some_and(|t| now - t < stack::GULP);
         let busy = gulping || [&s.magnify, &s.shown, &s.tip].iter().any(|t| !t.settled(now))
             || s.slide.values().chain(s.appear.values()).chain(s.away.values()).any(|t| !t.settled(now))
+            || s.landing.as_ref().is_some_and(|(_, t)| !t.settled(now))
             || bouncing;
         if busy {
             return glib::ControlFlow::Continue;
         }
         s.slide.clear();
         s.appear.clear();
+        s.landing = None;
         s.ticking = false;
         glib::ControlFlow::Break
     });
@@ -1730,6 +1777,11 @@ impl State {
             Side::Bottom => self.paint.width().max(1) as f64,
             _ => self.paint.height().max(1) as f64,
         }
+    }
+
+    /// How far in from the edge the icons stand in the shown dock.
+    fn row(&self) -> f64 {
+        LIFT + self.geo.pad()
     }
 
     fn local(&self, x: f64, y: f64) -> (f64, f64) {
@@ -1870,7 +1922,8 @@ impl State {
                 top = Some((i, c, *size));
                 continue;
             }
-            self.draw_item(s, item, a + slide, c, *size, 1.0, &pal, now);
+            let rise = self.landing.as_ref().filter(|(k, _)| *k == item.key).map_or(0.0, |(_, t)| t.value(now));
+            self.draw_item(s, item, a + slide, c + rise, *size, 1.0, &pal, now);
             if !item.windows.is_empty() {
                 let r = (g.base * 0.045).max(2.0);
                 let center = a + slide + size / 2.0;
@@ -1886,14 +1939,19 @@ impl State {
         }
         if let (Some((i, c, size)), Some(d)) = (top, self.drag.as_ref()) {
             let item = &self.items[i];
-            let along = d.at.0 - size / 2.0;
-            let across = (d.at.1 - size / 2.0).max(c);
+            let along = d.at.0 - d.grab.0 - size / 2.0;
+            let across = (d.at.1 - d.grab.1 - size / 2.0).max(c);
             let far = d.at.1 > g.reach() + 24.0 && item.pinned;
             self.draw_item(s, item, along, across, size, if far { 0.55 } else { 1.0 }, &pal, now);
             if far {
                 self.draw_tip(s, "Remove", along + size / 2.0, across + size, &pal, 1.0);
             }
         }
+    }
+
+    /// Whether `key` is an installed app, and not just a window no app entry matches.
+    fn installed(&self, key: &str) -> bool {
+        self.items.iter().any(|i| i.key == key && i.entry.is_some())
     }
 
     #[allow(clippy::too_many_arguments)]
