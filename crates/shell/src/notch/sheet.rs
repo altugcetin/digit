@@ -1,6 +1,7 @@
 //! The open sheet's Nook tab: media player or call card, calendar and tools.
 
 use super::*;
+use crate::feel::{self, faint};
 
 impl View {
     pub(super) fn day_rects(&self) -> Vec<(Rect, crate::calendar::Day)> {
@@ -41,11 +42,14 @@ impl View {
         let pal = self.pal.get();
         let r = self.switch_rect();
         let glow = self.glow[10].value(now).clamp(0.0, 1.0);
-        s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), (r.h / 2.0) as f32));
-        s.append_color(&pal.ink_main.alpha(0.09 + 0.07 * glow).rgba(), &r.graphene());
-        s.pop();
         let icon = if self.showing_call(now) { "music_note" } else { "call" };
-        self.icon(s, icon, 18.0, true, pal.ink_main, r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        feel::scaled(s, self.feel.scale(Hot::CallSwitch, feel::SMALL, now), cx, cy, || {
+            s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), (r.h / 2.0) as f32));
+            s.append_color(&pal.ink_main.alpha(0.09 + 0.07 * glow).rgba(), &r.graphene());
+            s.pop();
+            feel::scaled(s, self.feel.icon(Hot::CallSwitch, icon, now), cx, cy, || self.icon(s, icon, 18.0, true, pal.ink_main, cx, cy));
+        });
     }
 
     pub(super) fn call_buttons(&self) -> (Rect, Rect) {
@@ -104,14 +108,17 @@ impl View {
         }
         let muted = self.app.mic_muted.get().unwrap_or(false);
         let (mute, open) = self.call_buttons();
-        for (i, (r, icon, label, tint)) in [(mute, if muted { "mic_off" } else { "mic" }, if muted { "Unmute" } else { "Mute" }, if muted { RED } else { pal.ink_main }), (open, "open_in_new", "Show", pal.ink_main)].into_iter().enumerate() {
-            let glow = self.glow[i].value(now).clamp(0.0, 1.0);
-            let fill = if i == 0 && muted { RED.alpha(0.18 + 0.08 * glow) } else { pal.ink_main.alpha(0.09 + 0.07 * glow) };
-            s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), self.corner(17.0, r.h)));
-            s.append_color(&fill.rgba(), &r.graphene());
-            s.pop();
-            self.icon(s, icon, 17.0, true, tint, r.x + 22.0, r.y + r.h / 2.0);
-            self.text(s, label, 13.0, POINT, tint, r.x + 36.0, r.y + r.h / 2.0, r.w - 42.0, start);
+        let off = self.feel.on(Hot::CallMute, muted, now);
+        for (key, r, icon, label, off) in [(Hot::CallMute, mute, if muted { "mic_off" } else { "mic" }, if muted { "Unmute" } else { "Mute" }, off), (Hot::CallOpen, open, "open_in_new", "Show", 0.0)] {
+            let glow = self.feel.glow(key, now);
+            let tint = RED.mix(pal.ink_main, off);
+            let (ix, mid) = (r.x + 22.0, r.y + r.h / 2.0);
+            feel::scaled(s, self.feel.scale(key, feel::PILL, now), r.x + r.w / 2.0, mid, || {
+                let shape = gsk::RoundedRect::from_rect(r.graphene(), self.corner(17.0, r.h));
+                feel::flood(s, &shape, pal.ink_main.alpha(0.09 + 0.07 * glow), RED.alpha(0.18 + 0.08 * glow), off, ix, mid);
+                feel::scaled(s, self.feel.icon(key, icon, now), ix, mid, || self.icon(s, icon, 17.0, true, tint, ix, mid));
+                self.text(s, label, 13.0, POINT, tint, r.x + 36.0, mid, r.w - 42.0, start);
+            });
         }
     }
 
@@ -245,6 +252,8 @@ impl View {
             };
             let glow = if enabled { self.glow[i].value(now).clamp(0.0, 1.0) } else { 0.0 };
             let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+            let key = Hot::Control(i);
+            let give = if enabled { self.feel.scale(key, feel::SMALL, now) * self.feel.icon(key, name, now) } else { 1.0 };
             if glow > 0.01 {
                 let rad = r.w / 2.0 + 3.0 * glow;
                 let halo = graphene::Rect::new((cx - rad) as f32, (cy - rad) as f32, (2.0 * rad) as f32, (2.0 * rad) as f32);
@@ -253,7 +262,7 @@ impl View {
                 s.pop();
             }
             let ink = if enabled { pal.ink_main } else { pal.ink_main.alpha(0.28) };
-            self.icon(s, name, px, true, ink, cx, cy);
+            feel::scaled(s, give, cx, cy, || self.icon(s, name, px, true, ink, cx, cy));
         }
     }
 
@@ -267,10 +276,9 @@ impl View {
         let sel = (3 + self.day).clamp(0, 6) as usize;
         let center = pango::Alignment::Center;
         self.text(s, &crate::calendar::month(&days[sel].1), 24.0, Face::Text(650), pal.ink_main, CAL_X, top + 23.0, 64.0, pango::Alignment::Left);
-        let glow = self.glow[9].value(now).clamp(0.0, 1.0);
         for (i, (r, d)) in days.iter().enumerate() {
-            let hot = self.hot == Some(Hot::Day(i));
-            let back = if i == sel && !d.today { 0.11 } else { 0.0 } + if hot && !d.today { 0.06 * glow } else { 0.0 };
+            let key = Hot::Day(i);
+            let back = 0.11 * self.feel.on(key, i == sel && !d.today, now) + if d.today { 0.0 } else { 0.06 * self.feel.glow(key, now) };
             if back > 0.005 {
                 let pill = graphene::Rect::new((r.x + 1.0) as f32, (r.y - 2.0) as f32, (r.w - 2.0) as f32, (r.h + 4.0) as f32);
                 s.push_rounded_clip(&gsk::RoundedRect::from_rect(pill, 10.0));
@@ -313,7 +321,6 @@ impl View {
 
     pub(super) fn draw_tools(&self, s: &gtk::Snapshot, now: i64) {
         let pal = self.pal.get();
-        let glow = self.glow[9].value(now).clamp(0.0, 1.0);
         let awake = self.app.awake.borrow().as_ref().is_some_and(|a| a.on());
         let mut label = None;
         for (i, (icon, name)) in TOOLS.iter().enumerate() {
@@ -323,20 +330,21 @@ impl View {
                 3 => awake,
                 _ => false,
             };
-            let hot = self.hot == Some(Hot::Tool(i));
-            if hot {
-                label = Some(*name);
+            let key = Hot::Tool(i);
+            let (glow, lit) = (self.feel.glow(key, now), self.feel.on(key, on, now));
+            if glow > label.map_or(0.0, |(_, g)| g) {
+                label = Some((*name, glow));
             }
-            let fill = if on { pal.accent } else { pal.ink_main.alpha(0.1 + if hot { 0.08 * glow } else { 0.0 }) };
-            s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), self.corner(15.0, r.h)));
-            s.append_color(&fill.rgba(), &r.graphene());
-            s.pop();
-            let ink = if on { pal.on_accent } else { pal.ink_main };
-            self.icon(s, icon, 20.0, on, ink, r.x + r.w / 2.0, r.y + r.h / 2.0);
+            let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+            feel::scaled(s, self.feel.scale(key, feel::SMALL, now), cx, cy, || {
+                let shape = gsk::RoundedRect::from_rect(r.graphene(), self.corner(15.0, r.h));
+                feel::flood(s, &shape, pal.ink_main.alpha(0.1 + 0.08 * glow), pal.accent, lit, cx, cy);
+                feel::scaled(s, self.feel.icon(key, icon, now), cx, cy, || self.icon(s, icon, 20.0, on, pal.on_accent.mix(pal.ink_main, lit), cx, cy));
+            });
         }
-        if let Some(name) = label {
+        if let Some((name, glow)) = label {
             let r = self.tool_rect(2);
-            self.text(s, name, 11.0, REST, pal.ink_meta.alpha(glow), TOOLS_X - 6.0, r.y + r.h + 13.0, RIGHT - TOOLS_X + 12.0, pango::Alignment::Center);
+            self.text(s, name, 11.0, REST, faint(pal.ink_meta, glow), TOOLS_X - 6.0, r.y + r.h + 13.0, RIGHT - TOOLS_X + 12.0, pango::Alignment::Center);
         }
     }
 }

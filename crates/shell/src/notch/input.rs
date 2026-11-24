@@ -69,6 +69,13 @@ impl Notch {
                     let on = hot.map(Hot::index) == Some(i);
                     v.glow[i].go(if on { 1.0 } else { 0.0 }, now, if on { 160 } else { 280 }, motion::STANDARD);
                 }
+                // A tile stays lit under its own button.
+                let tile = match hot {
+                    Some(Hot::Remove(i)) => Some(Hot::Tile(i)),
+                    _ => None,
+                };
+                let keys: Vec<Hot> = hot.into_iter().chain(tile).collect();
+                v.feel.hover(&keys, now);
             }
             (v.canvas.clone(), changed.then_some(hot.is_some()), inside, was)
         };
@@ -81,6 +88,25 @@ impl Notch {
         }
     }
 
+    pub(super) fn press(&self, x: f64, y: f64) {
+        {
+            let v = self.0.borrow();
+            let now = App::now();
+            match v.hot_at(x, y, now) {
+                // The bars are dragged, not pressed; what's on them is.
+                Some(Hot::Seek) | None => return,
+                Some(Hot::Volume) if v.tuning && !v.tuner(now).is_some_and(|t| t.icon.contains(x, y)) => return,
+                Some(hot) => v.feel.press(hot, now),
+            }
+        }
+        self.kick();
+    }
+
+    pub(super) fn release(&self) {
+        self.0.borrow().feel.release(App::now());
+        self.kick();
+    }
+
     pub(super) fn switch_tab(&self, tab: Tab) {
         let app = {
             let mut v = self.0.borrow_mut();
@@ -90,6 +116,8 @@ impl Notch {
             v.tab = tab;
             v.tab_fade.set(0.0);
             v.tab_fade.go(1.0, App::now(), 240, motion::STANDARD);
+            // The other tab's buttons start as they are.
+            v.feel.retain(|h| matches!(h, Hot::Tab(_) | Hot::Gear | Hot::Volume));
             v.hot = None;
             v.app.clone()
         };

@@ -1,6 +1,7 @@
 //! The open sheet's Phone tab.
 
 use super::*;
+use crate::feel;
 
 impl View {
     pub(super) fn phone_rect(&self) -> Rect {
@@ -56,14 +57,16 @@ impl View {
         let next = crate::phone::next();
         let name_w = p.w - 80.0 - if next.is_some() { 36.0 } else { 0.0 };
         self.text(s, &phone.name, 16.0, Face::Text(620), pal.ink_main, p.x + 66.0, p.y + 25.0, name_w, start);
-        let glow = self.glow[9].value(now).clamp(0.0, 1.0);
         if next.is_some() {
             let r = self.phone_switch_rect();
-            let hot = self.hot == Some(Hot::PhoneSwitch);
-            s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), self.corner(15.0, r.h)));
-            s.append_color(&pal.ink_main.alpha(if hot { 0.09 + 0.08 * glow } else { 0.07 }).rgba(), &r.graphene());
-            s.pop();
-            self.icon(s, "swap_horiz", 17.0, false, if hot { pal.ink_main } else { pal.ink_meta }, r.x + r.w / 2.0, r.y + r.h / 2.0);
+            let glow = self.feel.glow(Hot::PhoneSwitch, now);
+            let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+            feel::scaled(s, self.feel.scale(Hot::PhoneSwitch, feel::SMALL, now), cx, cy, || {
+                s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), self.corner(15.0, r.h)));
+                s.append_color(&pal.ink_main.alpha(0.07 + 0.10 * glow).rgba(), &r.graphene());
+                s.pop();
+                self.icon(s, "swap_horiz", 17.0, false, pal.ink_main.mix(pal.ink_meta, glow), cx, cy);
+            });
         }
         let mut status = Vec::new();
         if !phone.reachable {
@@ -85,13 +88,16 @@ impl View {
         self.text(s, &line, 12.0, REST, if phone.reachable { pal.ink_meta } else { pal.ink_faint }, p.x + 66.0, p.y + 45.0, p.w - 80.0, start);
         for (i, (_, icon, _)) in crate::phone::ACTIONS.iter().enumerate() {
             let r = self.phone_action_rect(i);
-            let hot = self.hot == Some(Hot::PhoneAction(i));
-            let fill = if !phone.reachable { 0.04 } else if hot { 0.09 + 0.08 * glow } else { 0.09 };
-            s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), self.corner(18.0, r.h)));
-            s.append_color(&pal.ink_main.alpha(fill).rgba(), &r.graphene());
-            s.pop();
+            let key = Hot::PhoneAction(i);
+            let fill = if phone.reachable { 0.09 + 0.08 * self.feel.glow(key, now) } else { 0.04 };
             let ink = if phone.reachable { pal.ink_main } else { pal.ink_faint };
-            self.icon(s, icon, 18.0, true, ink, r.x + r.w / 2.0, r.y + r.h / 2.0);
+            let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+            feel::scaled(s, self.feel.scale(key, feel::SMALL, now), cx, cy, || {
+                s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), self.corner(18.0, r.h)));
+                s.append_color(&pal.ink_main.alpha(fill).rgba(), &r.graphene());
+                s.pop();
+                self.icon(s, icon, 18.0, true, ink, cx, cy);
+            });
         }
         let card = self.phone_section_rect();
         s.push_rounded_clip(&gsk::RoundedRect::from_rect(card.graphene(), self.corner(CARD_RADIUS, card.h)));
@@ -116,7 +122,6 @@ impl View {
         for (row, i) in phone_rows(call.is_some(), phone.notes.len()) {
             let n = &phone.notes[i];
             let r = self.note_rect(row);
-            let hot = self.hot == Some(Hot::PhoneDismiss(i));
             let mid = r.y + r.h / 2.0;
             match &n.icon {
                 Some(t) => self.draw_paintable(s, t.upcast_ref(), r.x + 4.0, mid - 12.0, 24.0, 6.0),
@@ -128,13 +133,16 @@ impl View {
             self.text(s, &n.text, 12.0, REST, pal.ink_meta, r.x + 36.0, mid + 9.0, room, start);
             if n.dismissable {
                 let cx = r.x + r.w - 14.0;
-                if hot {
-                    let d = graphene::Rect::new((cx - 11.0) as f32, (mid - 11.0) as f32, 22.0, 22.0);
-                    s.push_rounded_clip(&gsk::RoundedRect::from_rect(d, 11.0));
-                    s.append_color(&pal.ink_main.alpha(0.1 + 0.06 * glow).rgba(), &d);
-                    s.pop();
-                }
-                self.icon(s, "close", 14.0, false, if hot { pal.ink_main } else { pal.ink_faint }, cx, mid);
+                let glow = self.feel.glow(Hot::PhoneDismiss(i), now);
+                feel::scaled(s, self.feel.scale(Hot::PhoneDismiss(i), feel::SMALL, now), cx, mid, || {
+                    if glow > 0.01 {
+                        let d = graphene::Rect::new((cx - 11.0) as f32, (mid - 11.0) as f32, 22.0, 22.0);
+                        s.push_rounded_clip(&gsk::RoundedRect::from_rect(d, 11.0));
+                        s.append_color(&pal.ink_main.alpha(0.16 * glow).rgba(), &d);
+                        s.pop();
+                    }
+                    self.icon(s, "close", 14.0, false, pal.ink_main.mix(pal.ink_faint, glow), cx, mid);
+                });
             }
         }
         let more = phone.notes.len() + call.is_some() as usize;

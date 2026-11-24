@@ -1,6 +1,7 @@
 //! The island's head: clock, privacy lights, volume, notifications and the call/media peeks.
 
 use super::*;
+use crate::feel;
 
 impl View {
     pub(super) fn draw_clock(&self, s: &gtk::Snapshot, now: i64) {
@@ -157,6 +158,8 @@ impl View {
         let t = self.tune.value(now).clamp(0.0, 1.0);
         let glow = self.glow[4].value(now).clamp(0.0, 1.0);
         let icon = if muted { "volume_off" } else if level < 0.5 { "volume_down" } else { "volume_up" };
+        let quiet = self.feel.on(Hot::Volume, muted, now);
+        let give = self.feel.scale(Hot::Volume, feel::SMALL, now) * self.feel.icon(Hot::Volume, if muted { "muted" } else { "sound" }, now);
         if t < 0.99 {
             s.push_opacity(1.0 - t);
             if let Some(z) = self.volume_zone(now).filter(|_| !self.tuning) {
@@ -171,19 +174,21 @@ impl View {
             let tw = self.text_width(&text, 15.0, Face::Number(450));
             let ink = pal.ink_meta.mix(pal.ink_main, 1.0 - glow);
             self.text(s, &text, 15.0, Face::Number(450), ink, r1 - tw - 2.0, mid, tw + 2.0, pango::Alignment::Right);
-            self.icon(s, icon, 18.0, false, ink, r1 - tw - 14.0, mid);
+            feel::scaled(s, give, r1 - tw - 14.0, mid, || self.icon(s, icon, 18.0, false, ink, r1 - tw - 14.0, mid));
             s.pop();
         }
         let Some(tuner) = self.tuner(now) else { return };
         if t > 0.01 {
             s.push_opacity(t);
-            let ink = if muted { pal.ink_meta } else { pal.ink_main };
-            self.icon(s, icon, 18.0, false, ink, tuner.icon.x + tuner.icon.w / 2.0, mid);
+            let ink = pal.ink_meta.mix(pal.ink_main, quiet);
+            let ix = tuner.icon.x + tuner.icon.w / 2.0;
+            feel::scaled(s, give, ix, mid, || self.icon(s, icon, 18.0, false, ink, ix, mid));
             let end = tuner.track.x + tuner.track.w;
             let w = tuner.track.w * (0.3 + 0.7 * t);
             let track = Rect { x: end - w, w, ..tuner.track };
             let value = level.clamp(0.0, 1.0);
-            self.bar(s, &track, value, pal.ink_main.alpha(0.15), ink);
+            // Muted, it runs dry; the knob keeps the level it comes back to.
+            self.bar(s, &track, value * (1.0 - quiet), pal.ink_main.alpha(0.15), ink);
             let r = if self.sliding { 6.5 } else { 5.0 + glow };
             let knob = graphene::Rect::new((track.x + track.w * value - r) as f32, (mid - r) as f32, (2.0 * r) as f32, (2.0 * r) as f32);
             s.push_rounded_clip(&gsk::RoundedRect::from_rect(knob, r as f32));
@@ -218,24 +223,29 @@ impl View {
                 for (i, (r, icon, label)) in self.tab_rects().iter().enumerate() {
                     let on = TABS[i].0 == self.tab;
                     let glow = self.glow[Hot::Tab(i).index()].value(now).clamp(0.0, 1.0);
-                    let fill = if on { 0.14 } else { 0.0 } + 0.07 * glow;
-                    if fill > 0.005 {
-                        s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), 13.0));
-                        s.append_color(&pal.ink_main.alpha(fill).rgba(), &r.graphene());
-                        s.pop();
-                    }
-                    let ink = if on { pal.ink_main } else { pal.ink_meta.mix(pal.ink_main, 1.0 - glow) };
-                    self.icon(s, icon, 17.0, on, ink, r.x + 21.0, mid);
-                    self.text(s, label, 14.0, POINT, ink, r.x + 34.0, mid, r.w - 38.0, start);
+                    let chosen = self.feel.on(Hot::Tab(i), on, now);
+                    let fill = 0.14 * chosen + 0.07 * glow;
+                    let ink = pal.ink_main.mix(pal.ink_meta, glow.max(chosen));
+                    feel::scaled(s, self.feel.scale(Hot::Tab(i), feel::PILL, now), r.x + r.w / 2.0, mid, || {
+                        if fill > 0.005 {
+                            s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), 13.0));
+                            s.append_color(&pal.ink_main.alpha(fill).rgba(), &r.graphene());
+                            s.pop();
+                        }
+                        self.icon(s, icon, 17.0, on, ink, r.x + 21.0, mid);
+                        self.text(s, label, 14.0, POINT, ink, r.x + 34.0, mid, r.w - 38.0, start);
+                    });
                 }
                 let g = self.gear_rect(now);
                 let glow = self.glow[7].value(now).clamp(0.0, 1.0);
-                if glow > 0.01 {
-                    s.push_rounded_clip(&gsk::RoundedRect::from_rect(g.graphene(), 13.0));
-                    s.append_color(&pal.ink_main.alpha(0.1 * glow).rgba(), &g.graphene());
-                    s.pop();
-                }
-                self.icon(s, "settings", 18.0, true, pal.ink_meta.mix(pal.ink_main, 1.0 - glow), g.x + g.w / 2.0, mid);
+                feel::scaled(s, self.feel.scale(Hot::Gear, feel::SMALL, now), g.x + g.w / 2.0, mid, || {
+                    if glow > 0.01 {
+                        s.push_rounded_clip(&gsk::RoundedRect::from_rect(g.graphene(), 13.0));
+                        s.append_color(&pal.ink_main.alpha(0.1 * glow).rgba(), &g.graphene());
+                        s.pop();
+                    }
+                    self.icon(s, "settings", 18.0, true, pal.ink_meta.mix(pal.ink_main, 1.0 - glow), g.x + g.w / 2.0, mid);
+                });
                 self.draw_volume(s, now);
             }
             Head::Peek(Peek::Volume { level, muted }) => {
@@ -267,12 +277,15 @@ impl View {
                 self.draw_note(s, top + content / 2.0, summary, body, app, icon.as_ref(), avatar.as_ref());
                 for (i, (r, label)) in self.note_buttons(peek).into_iter().enumerate() {
                     let last = i + 1 == actions.len();
-                    let glow = if self.hot == Some(Hot::Action(i)) { 1.0 } else { 0.0 };
+                    let key = Hot::Action(i);
+                    let glow = self.feel.glow(key, now);
                     let fill = if last { ACTION_BLUE.alpha(0.9 + 0.1 * glow) } else { pal.ink_main.alpha(0.14 + 0.08 * glow) };
-                    s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), (r.h / 2.0) as f32));
-                    s.append_color(&fill.rgba(), &r.graphene());
-                    s.pop();
-                    self.text(s, &label, 14.0, POINT, Rgb::new(1.0, 1.0, 1.0), r.x, r.y + r.h / 2.0, r.w, pango::Alignment::Center);
+                    feel::scaled(s, self.feel.scale(key, feel::PILL, now), r.x + r.w / 2.0, r.y + r.h / 2.0, || {
+                        s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), (r.h / 2.0) as f32));
+                        s.append_color(&fill.rgba(), &r.graphene());
+                        s.pop();
+                        self.text(s, &label, 14.0, POINT, Rgb::new(1.0, 1.0, 1.0), r.x, r.y + r.h / 2.0, r.w, pango::Alignment::Center);
+                    });
                 }
             }
             Head::Peek(Peek::Osd { icon, text, level }) => {

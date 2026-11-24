@@ -1,6 +1,7 @@
 //! The open sheet's Tray tab: dropped files, sharing and devices.
 
 use super::*;
+use crate::feel;
 
 impl View {
     pub(super) fn files_rect(&self) -> Rect {
@@ -51,14 +52,13 @@ impl View {
             self.text(s, "Files Tray", 15.0, POINT, pal.accent, f.x + 24.0, f.y + 78.0, 200.0, start);
             self.text(s, "Drop files here to keep them close", 12.0, REST, pal.ink_faint, f.x + 24.0, f.y + 98.0, f.w - 48.0, start);
         } else {
-            let glow = self.glow[9].value(now).clamp(0.0, 1.0);
             crate::tray::each(|i, item| {
                 if i >= TILES {
                     return;
                 }
                 let t = self.tile_rect(i);
-                let hot = matches!(self.hot, Some(Hot::Tile(j) | Hot::Remove(j)) if j == i);
-                if hot {
+                let glow = self.feel.glow(Hot::Tile(i), now);
+                if glow > 0.01 {
                     s.push_rounded_clip(&gsk::RoundedRect::from_rect(t.graphene(), self.corner(14.0, t.h)));
                     s.append_color(&pal.ink_main.alpha(0.08 * glow).rgba(), &t.graphene());
                     s.pop();
@@ -68,13 +68,17 @@ impl View {
                     None => self.icon(s, "draft", 40.0, false, pal.ink_meta, t.x + t.w / 2.0, t.y + 34.0),
                 }
                 self.text(s, &item.name, 11.0, REST, pal.ink_main, t.x + 4.0, t.y + 76.0, t.w - 8.0, center);
-                if hot {
+                if glow > 0.01 {
                     let x = self.remove_rect(i);
-                    let on = self.hot == Some(Hot::Remove(i));
-                    s.push_rounded_clip(&gsk::RoundedRect::from_rect(x.graphene(), 10.0));
-                    s.append_color(&(if on { pal.risk } else { pal.ink_main.alpha(0.85) }).rgba(), &x.graphene());
+                    let (cx, cy) = (x.x + x.w / 2.0, x.y + x.h / 2.0);
+                    s.push_opacity(glow);
+                    feel::scaled(s, self.feel.scale(Hot::Remove(i), feel::SMALL, now), cx, cy, || {
+                        s.push_rounded_clip(&gsk::RoundedRect::from_rect(x.graphene(), 10.0));
+                        s.append_color(&pal.risk.mix(pal.ink_main.alpha(0.85), self.feel.glow(Hot::Remove(i), now)).rgba(), &x.graphene());
+                        s.pop();
+                        self.icon(s, "close", 13.0, false, pal.body.alpha(1.0), cx, cy);
+                    });
                     s.pop();
-                    self.icon(s, "close", 13.0, false, pal.body.alpha(1.0), x.x + x.w / 2.0, x.y + x.h / 2.0);
                 }
             });
             if count > TILES {
@@ -112,28 +116,31 @@ impl View {
         }
         for (i, sender) in senders.iter().take(CHIPS).enumerate() {
             let r = self.chip_rect(i);
-            let on = self.hot == Some(Hot::Sender(i)) || self.landing == Some(Landing::Sender(i));
-            s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), 9.0));
-            s.append_color(&pal.ink_main.alpha(if on { 0.2 } else { 0.08 }).rgba(), &r.graphene());
-            s.pop();
-            match &sender.icon {
-                Some(p) => self.draw_paintable(s, p, r.x + 4.0, r.y + 4.0, r.w - 8.0, 4.0),
-                None => self.icon(s, "language", 17.0, false, pal.ink_main, r.x + r.w / 2.0, r.y + r.h / 2.0),
-            }
+            let on = if self.landing == Some(Landing::Sender(i)) { 1.0 } else { self.feel.glow(Hot::Sender(i), now) };
+            feel::scaled(s, self.feel.scale(Hot::Sender(i), feel::SMALL, now), r.x + r.w / 2.0, r.y + r.h / 2.0, || {
+                s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), 9.0));
+                s.append_color(&pal.ink_main.alpha(0.08 + 0.12 * on).rgba(), &r.graphene());
+                s.pop();
+                match &sender.icon {
+                    Some(p) => self.draw_paintable(s, p, r.x + 4.0, r.y + 4.0, r.w - 8.0, 4.0),
+                    None => self.icon(s, "language", 17.0, false, pal.ink_main, r.x + r.w / 2.0, r.y + r.h / 2.0),
+                }
+            });
         }
-        let glow = self.glow[9].value(now).clamp(0.0, 1.0);
         for (i, d) in devices.iter().take(DEVICES).enumerate() {
             let r = self.device_rect(i);
-            let fill = if self.landing == Some(Landing::Device(i)) { 0.3 } else if self.hot == Some(Hot::Device(i)) { 0.12 * glow } else { 0.0 };
-            if fill > 0.005 {
-                s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), 10.0));
-                s.append_color(&pal.accent.alpha(fill).rgba(), &r.graphene());
-                s.pop();
-            }
+            let fill = if self.landing == Some(Landing::Device(i)) { 0.3 } else { 0.12 * self.feel.glow(Hot::Device(i), now) };
             let mid = r.y + r.h / 2.0;
-            self.icon(s, d.icon(), 16.0, false, pal.ink_main, r.x + 16.0, mid);
-            self.text(s, &d.name, 13.0, REST, pal.ink_main, r.x + 30.0, mid, r.w - 120.0, start);
-            self.text(s, d.service(), 11.0, REST, pal.ink_faint, r.x + r.w - 92.0, mid, 84.0, pango::Alignment::Right);
+            feel::scaled(s, self.feel.scale(Hot::Device(i), feel::ROW, now), r.x + r.w / 2.0, mid, || {
+                if fill > 0.005 {
+                    s.push_rounded_clip(&gsk::RoundedRect::from_rect(r.graphene(), 10.0));
+                    s.append_color(&pal.accent.alpha(fill).rgba(), &r.graphene());
+                    s.pop();
+                }
+                self.icon(s, d.icon(), 16.0, false, pal.ink_main, r.x + 16.0, mid);
+                self.text(s, &d.name, 13.0, REST, pal.ink_main, r.x + 30.0, mid, r.w - 120.0, start);
+                self.text(s, d.service(), 11.0, REST, pal.ink_faint, r.x + r.w - 92.0, mid, 84.0, pango::Alignment::Right);
+            });
         }
         s.pop();
     }

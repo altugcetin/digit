@@ -231,6 +231,7 @@ struct View {
     pointer: Option<(f64, f64)>,
     hot: Option<Hot>,
     glow: [Tween; 12],
+    feel: crate::feel::Feel<Hot>,
     /// The open notch shows the player instead of the call it would normally show; cleared when the call ends.
     media_over_call: std::cell::Cell<bool>,
     /// Scrolling over the workspace dots: wheel travel not yet turned into a step, and the
@@ -352,6 +353,7 @@ impl Notch {
             pointer: None,
             hot: None,
             glow: [Tween::still(0.0); 12],
+            feel: crate::feel::Feel::default(),
             media_over_call: std::cell::Cell::new(false),
             space_scroll: Cell::new(0.0),
             pill: crate::strip::Spaces::default(),
@@ -508,6 +510,19 @@ impl Notch {
             if let Some(v) = weak.upgrade() {
                 let y = lifted(&v, y);
                 Notch(v).click(x, y);
+            }
+        });
+        let weak = Rc::downgrade(&self.0);
+        click.connect_pressed(move |_, _, x, y| {
+            if let Some(v) = weak.upgrade() {
+                let y = lifted(&v, y);
+                Notch(v).press(x, y);
+            }
+        });
+        let weak = Rc::downgrade(&self.0);
+        click.connect_end(move |_, _| {
+            if let Some(v) = weak.upgrade() {
+                Notch(v).release();
             }
         });
         canvas.add_controller(click);
@@ -915,6 +930,9 @@ impl Notch {
             v.open = open;
             v.dwell += 1;
             v.leave += 1;
+            if open {
+                v.feel.retain(|_| false);
+            }
             if !open {
                 v.tuning = false;
                 v.sliding = false;
@@ -1360,7 +1378,7 @@ impl View {
             self.glass.go(glass, now, 360, motion::STANDARD);
         }
         let tweens = [&self.w, &self.depth, &self.r, &self.fade, &self.sheet, &self.back, &self.meter, &self.art_scale, &self.fill, &self.tune, &self.hush, &self.tab_fade, &self.flip, &self.float, &self.widen, &self.menu, &self.glass];
-        let moving = tweens.into_iter().chain(self.glow.iter()).chain(self.dots.iter()).any(|t| !t.settled(now));
+        let moving = self.feel.busy(now) || tweens.into_iter().chain(self.glow.iter()).chain(self.dots.iter()).any(|t| !t.settled(now));
         let rolling = !motion::reduced() && self.roll.iter().flatten().any(|t| now < t + ROLL);
         let showing = self.pill.showing();
         let pill = self.pill.step(now);
@@ -1671,6 +1689,16 @@ mod imp {
                 return;
             };
             v.draw(&self.obj(), snapshot);
+            // Something it drew has changed since the last time, and goes on from here.
+            let now = self.obj().frame_clock().map(|c| c.frame_time()).unwrap_or_else(glib::monotonic_time);
+            if !v.ticking && v.feel.busy(now) {
+                let weak = std::rc::Rc::downgrade(&view);
+                glib::idle_add_local_once(move || {
+                    if let Some(view) = weak.upgrade() {
+                        super::Notch(view).kick();
+                    }
+                });
+            }
         }
     }
 }
