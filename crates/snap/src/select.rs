@@ -1,4 +1,5 @@
 use crate::capture::Shot;
+use crate::moving::{Loupe, Moving};
 use crate::windows::Rect;
 use crate::{draw, out};
 use gtk::{cairo, gdk, glib, graphene, gsk, pango, prelude::*, subclass::prelude::*};
@@ -23,6 +24,7 @@ pub struct Screen {
     loupe_label: pango::Layout,
     bar: gtk::Box,
     hint: gtk::Label,
+    moving: RefCell<Moving>,
 }
 
 mod canvas {
@@ -200,6 +202,9 @@ pub fn open(app: &gtk::Application, shots: Vec<Shot>, pick: bool) {
         layer.set_child(Some(&area));
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         bar.add_css_class("snapbar");
+        if !kit::motion::reduced() {
+            bar.add_css_class("moves");
+        }
         bar.set_halign(gtk::Align::Start);
         bar.set_valign(gtk::Align::Start);
         bar.set_visible(false);
@@ -250,6 +255,10 @@ pub fn open(app: &gtk::Application, shots: Vec<Shot>, pick: bool) {
         hint.set_valign(gtk::Align::End);
         hint.set_margin_bottom(40);
         hint.set_can_target(false);
+        if !kit::motion::reduced() {
+            hint.add_css_class("moves");
+        }
+        come(&hint);
         layer.add_overlay(&hint);
         window.set_child(Some(&layer));
         let label = area.create_pango_layout(None);
@@ -257,7 +266,7 @@ pub fn open(app: &gtk::Application, shots: Vec<Shot>, pick: bool) {
         let loupe_label = area.create_pango_layout(None);
         loupe_label.set_font_description(Some(&pango::FontDescription::from_string("Rubik Medium 11px")));
         wire(&ov, i, &window, &area);
-        screens.push(Screen { name: shot.name, x: ox, y: oy, w: shot.w as f64, h: shot.h as f64, base, wins, window, area, layer, texture, label, loupe_label, bar, hint });
+        screens.push(Screen { name: shot.name, x: ox, y: oy, w: shot.w as f64, h: shot.h as f64, base, wins, window, area, layer, texture, label, loupe_label, bar, hint, moving: RefCell::default() });
     }
     *ov.screens.borrow_mut() = screens;
     let windows: Vec<gtk::Window> = ov.screens.borrow().iter().map(|s| s.window.clone()).collect();
@@ -265,6 +274,28 @@ pub fn open(app: &gtk::Application, shots: Vec<Shot>, pick: bool) {
     for w in windows {
         w.present();
     }
+}
+
+/// Shows `w`, coming in from a little below if it wasn't there.
+fn come(w: &impl IsA<gtk::Widget>) {
+    w.set_visible(true);
+    // Once it has been drawn without it, so there's something to come in from.
+    let frames = Cell::new(0);
+    w.add_tick_callback(move |w, _| {
+        frames.set(frames.get() + 1);
+        if frames.get() < 3 && w.is_visible() {
+            return glib::ControlFlow::Continue;
+        }
+        if w.is_visible() {
+            w.add_css_class("in");
+        }
+        glib::ControlFlow::Break
+    });
+}
+
+fn go(w: &impl IsA<gtk::Widget>) {
+    w.set_visible(false);
+    w.remove_css_class("in");
 }
 
 fn wire(ov: &Rc<Overlay>, i: usize, window: &gtk::Window, area: &Canvas) {
@@ -509,8 +540,8 @@ impl Overlay {
     fn hide_bars(&self) {
         if let Ok(s) = self.screens.try_borrow() {
             for sc in s.iter() {
-                sc.bar.set_visible(false);
-                sc.hint.set_visible(self.sel.get().is_none());
+                go(&sc.bar);
+                if self.sel.get().is_none() { come(&sc.hint) } else { go(&sc.hint) }
             }
         }
     }
@@ -519,8 +550,8 @@ impl Overlay {
         let Some(i) = self.bar_screen() else { return };
         let s = self.screens.borrow();
         for (k, sc) in s.iter().enumerate() {
-            sc.hint.set_visible(false);
-            sc.bar.set_visible(k == i);
+            go(&sc.hint);
+            if k == i { come(&sc.bar) } else { go(&sc.bar) }
         }
         let Some(sc) = s.get(i) else { return };
         sc.layer.queue_allocate();
@@ -733,6 +764,8 @@ impl Overlay {
         let Some(sc) = s.get(i) else { return };
         let (w, h) = (sc.w, sc.h);
         let k = sc.base.w as f64 / w;
+        let now = sc.area.frame_clock().map_or_else(glib::monotonic_time, |c| c.frame_time());
+        let mut moving = sc.moving.borrow_mut();
         // The frozen screenshot is uploaded once, then reused by both the
         // background and magnifier. No full-screen Cairo raster/upload per frame.
         snapshot.append_texture(&sc.texture, &bounds((0.0, 0.0, w, h)));
@@ -740,12 +773,27 @@ impl Overlay {
         // edges and handles past this screen's edges fall off it.
         let part = self.sel.get().and_then(|r| meet(r, (sc.x, sc.y, w, h))).map(|r| (r.0 - sc.x, r.1 - sc.y, r.2, r.3));
         let sel = self.sel.get().filter(|_| part.is_some()).map(|r| (r.0 - sc.x, r.1 - sc.y, r.2, r.3));
+        let dragging = self.drag.get().is_some_and(|(di, d)| di == i && matches!(d, Drag::Create(..)));
+        // The drag may have started on another screen.
+        moving.select(part, self.drag.get().is_some(), self.drag.get().is_some_and(|(_, d)| matches!(d, Drag::Create(..))), now);
         if !self.pick {
-            let dim = gdk::RGBA::new(0.0, 0.0, 0.0, 0.45);
+            let dark = moving.dark(now);
+            let shade = |k: f64| gdk::RGBA::new(0.0, 0.0, 0.0, (dark * k) as f32);
+            let dim = shade(1.0);
             if let Some((x, y, sw, sh)) = part {
                 for r in [(0.0, 0.0, w, y), (0.0, y, x, sh), (x + sw, y, w - x - sw, sh), (0.0, y + sh, w, h - y - sh)] {
                     if r.2 > 0.0 && r.3 > 0.0 {
                         snapshot.append_color(&dim, &bounds(r));
+                    }
+                }
+                let over = moving.over(now);
+                if over > 0.01 {
+                    snapshot.append_color(&shade(over), &bounds((x, y, sw, sh)));
+                }
+            } else if let Some(((x, y, sw, sh), back)) = moving.dropped(now) {
+                for (r, k) in [((0.0, 0.0, w, y), 1.0), ((0.0, y, x, sh), 1.0), ((x + sw, y, w - x - sw, sh), 1.0), ((0.0, y + sh, w, h - y - sh), 1.0), ((x, y, sw, sh), back)] {
+                    if r.2 > 0.0 && r.3 > 0.0 {
+                        snapshot.append_color(&shade(k), &bounds(r));
                     }
                 }
             } else {
@@ -753,24 +801,28 @@ impl Overlay {
             }
         }
         let hover = self.hover.get().filter(|(hi, _, _)| *hi == i);
-        let dragging = self.drag.get().is_some_and(|(di, d)| di == i && matches!(d, Drag::Create(..)));
-        if sel.is_none() && !dragging && let Some((_, x, y)) = hover && let Some(r) = self.window_at(i, x, y) {
+        // It stays lit while it's pressed: until there's a selection, that is a click on it.
+        let window = hover.filter(|_| sel.is_none()).and_then(|(_, x, y)| self.window_at(i, x, y));
+        let (r, light) = moving.light(window, now);
+        if light > 0.01 {
             // GSK draws the preview without a monitor-sized Cairo node.
+            let light = light as f32;
             let shape = gsk::RoundedRect::from_rect(bounds((r.0 - 1.0, r.1 - 1.0, r.2 + 2.0, r.3 + 2.0)), 13.0);
-            fill(snapshot, &gsk::RoundedRect::from_rect(bounds(r), 12.0), gdk::RGBA::new(1.0, 1.0, 1.0, 0.10));
-            snapshot.append_border(&shape, &[2.0; 4], &[gdk::RGBA::new(1.0, 1.0, 1.0, 0.9); 4]);
+            fill(snapshot, &gsk::RoundedRect::from_rect(bounds(r), 12.0), gdk::RGBA::new(1.0, 1.0, 1.0, 0.10 * light));
+            snapshot.append_border(&shape, &[2.0; 4], &[gdk::RGBA::new(1.0, 1.0, 1.0, 0.9 * light); 4]);
         }
         if let Some(r) = sel {
             // Cairo strokes are centred on the path; GSK borders are inset.
             let edge = (r.0.round() - 0.5, r.1.round() - 0.5, r.2.round() + 1.0, r.3.round() + 1.0);
             let shape = gsk::RoundedRect::from_rect(bounds(edge), 0.0);
             snapshot.append_border(&shape, &[1.5; 4], &[gdk::RGBA::new(1.0, 1.0, 1.0, 0.95); 4]);
-            if !dragging {
+            let grip = moving.grips(now);
+            if grip > 0.01 {
                 for (hx, hy) in handles(r) {
                     // Small Cairo nodes preserve the exact existing circular
                     // handles without allocating a surface spanning the selection.
                     let cr = snapshot.append_cairo(&bounds((hx - 6.0, hy - 6.0, 12.0, 12.0)));
-                    cr.arc(hx, hy, 5.0, 0.0, std::f64::consts::TAU);
+                    cr.arc(hx, hy, 5.0 * grip, 0.0, std::f64::consts::TAU);
                     cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
                     let _ = cr.fill_preserve();
                     cr.set_source_rgba(0.0, 0.0, 0.0, 0.5);
@@ -793,8 +845,12 @@ impl Overlay {
                 pill(snapshot, &sc.label, at.0 + 2.0, if at.1 > 34.0 { at.1 - 30.0 } else { at.1 + 6.0 }, w);
             }
         }
-        if (self.prefs.loupe || self.pick) && (sel.is_none() || dragging) && let Some((_, x, y)) = hover {
-            loupe(snapshot, sc, x, y, k, self.pick);
+        let at = hover.filter(|_| (self.prefs.loupe || self.pick) && (sel.is_none() || dragging)).map(|(_, x, y)| (x, y));
+        if let Some(l) = moving.loupe(at, |x, y| loupe_sides(sc, x, y), now) {
+            loupe(snapshot, sc, &l, k, self.pick);
+        }
+        if moving.busy(now) {
+            self.redraw(i);
         }
     }
 }
@@ -831,17 +887,26 @@ fn pill(snapshot: &gtk::Snapshot, layout: &pango::Layout, x: f64, y: f64, maxw: 
     text(snapshot, layout, x + 8.0, y + 4.0);
 }
 
-fn loupe(snapshot: &gtk::Snapshot, sc: &Screen, x: f64, y: f64, k: f64, color: bool) {
-    let r = 62.0;
+const LOUPE_R: f64 = 62.0;
+
+/// Whether the magnifier goes to the pointer's left and above it, for want of room.
+fn loupe_sides(sc: &Screen, x: f64, y: f64) -> (bool, bool) {
+    (x + 26.0 + LOUPE_R * 2.0 > sc.w - 4.0, y + 26.0 + LOUPE_R * 2.0 + 30.0 > sc.h - 4.0)
+}
+
+fn loupe(snapshot: &gtk::Snapshot, sc: &Screen, l: &Loupe, k: f64, color: bool) {
+    let r = LOUPE_R;
     let zoom = 9.0;
-    let mut lx = x + 26.0;
-    let mut ly = y + 26.0;
-    if lx + r * 2.0 > sc.w - 4.0 {
-        lx = x - 26.0 - r * 2.0;
-    }
-    if ly + r * 2.0 + 30.0 > sc.h - 4.0 {
-        ly = y - 26.0 - r * 2.0 - 30.0;
-    }
+    let (x, y) = l.at;
+    let lx = x + 26.0 - l.side.0 * (52.0 + r * 2.0);
+    let ly = y + 26.0 - l.side.1 * (52.0 + r * 2.0 + 30.0);
+    let (mx, my) = ((lx + r) as f32, (ly + r) as f32);
+    let size = (0.85 + 0.15 * l.shown) as f32;
+    snapshot.save();
+    snapshot.translate(&graphene::Point::new(mx, my));
+    snapshot.scale(size, size);
+    snapshot.translate(&graphene::Point::new(-mx, -my));
+    snapshot.push_opacity(l.shown);
     let (px, py) = ((x * k).floor(), (y * k).floor());
     let circle = gsk::RoundedRect::from_rect(bounds((lx, ly, r * 2.0, r * 2.0)), r as f32);
     snapshot.push_rounded_clip(&circle);
@@ -878,6 +943,8 @@ fn loupe(snapshot: &gtk::Snapshot, sc: &Screen, x: f64, y: f64, k: f64, color: b
         let _ = cr.stroke();
     }
     text(snapshot, &sc.loupe_label, if color { bx + 22.0 } else { bx + 15.0 }, by + 4.0);
+    snapshot.pop();
+    snapshot.restore();
 }
 
 #[cfg(test)]

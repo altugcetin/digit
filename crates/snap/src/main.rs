@@ -1,6 +1,7 @@
 mod capture;
 mod draw;
 mod editor;
+mod moving;
 mod out;
 mod select;
 mod windows;
@@ -30,6 +31,11 @@ window.pin, window.pin.background {{ background: transparent; }}
 .pinned {{ border-radius: 14px; box-shadow: 0 10px 34px rgba(0,0,0,0.55), 0 0 0 1px alpha(#ffffff, 0.10); margin: 18px; }}
 .snapbar {{ background: alpha(@d_pop, 0.94); border-radius: 999px; padding: 5px 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }}
 .snapbar button.ctl {{ color: {main}; min-width: 36px; min-height: 36px; }}
+.snapbar, .snaphint {{ opacity: 0; transform: translateY(8px); }}
+.snapbar.in, .snaphint.in {{ opacity: 1; transform: none; }}
+.moves.in {{ transition: opacity 260ms cubic-bezier(0.33, 0, 0.15, 1), transform 360ms cubic-bezier(0.33, 0, 0.15, 1); }}
+.moves button.ctl {{ transition: transform 200ms cubic-bezier(0.05, 0.7, 0.1, 1), background-color 160ms, color 160ms; }}
+.moves button.ctl:active {{ transform: scale(0.9); transition-duration: 70ms, 160ms, 160ms; }}
 .snapbar button.ctl .sym {{ font-size: 20px; }}
 .snaphint {{ background: alpha(@d_pop, 0.86); color: {main}; border-radius: 999px; padding: 10px 18px; font-size: 13px; font-family: "Readex Pro", sans-serif; }}
 button.ctl.act {{ color: {main}; min-width: 36px; min-height: 36px; }}

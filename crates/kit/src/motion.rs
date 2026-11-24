@@ -60,6 +60,8 @@ pub const DEFAULT_SPATIAL: Curve = Curve(0.38, 1.21, 0.22, 1.0);
 pub const FAST_EFFECTS: Curve = Curve(0.31, 0.94, 0.34, 1.0);
 pub const STANDARD: Curve = Curve(0.2, 0.0, 0.0, 1.0);
 pub const IN_OUT_CUBIC: Curve = Curve(0.65, 0.0, 0.35, 1.0);
+/// Sets off gently and settles gently, for what crosses much of the screen.
+pub const GENTLE: Curve = Curve(0.33, 0.0, 0.15, 1.0);
 pub const REVEAL: Curve = Curve(0.45, 0.0, 0.15, 1.0);
 
 impl Curve {
