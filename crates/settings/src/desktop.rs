@@ -1070,8 +1070,8 @@ fn dock(body: &gtk::Box, t: &toml::Table) {
     slider(&dock, "photo_size_select_small", "Icon size", "", "dock_size", (32.0, 80.0, 2.0), prefs::get_f64(&t, "dock_size", 50.0), 50.0, 0);
     slider(&dock, "zoom_in", "Magnification", "1.0 turns it off", "dock_magnify", (1.0, 2.0, 0.05), prefs::get_f64(&t, "dock_magnify", 1.5), 1.5, 2);
     toggle(&dock, "apps", "Show running apps", "Apps that are open but not kept in the dock", "dock_running", prefs::get_bool(&t, "dock_running", true));
-    let detail = if kit::wm::can_place() { "Center opens floating. Other highlighted areas use the workspace layout" } else { "Available on Hyprland" };
-    toggle(&dock, "open_with", "Drag to open", detail, "dock_drag_to_open", prefs::get_bool(t, "dock_drag_to_open", true)).set_sensitive(kit::wm::can_place());
+    let detail = if kit::wm::can_place() { "Dragging an app out opens it there, or moves its window if it's open, instead of removing it. In the middle it floats" } else { "Available on Hyprland" };
+    toggle(&dock, "open_with", "Drag to open", detail, "dock_drag_to_open", prefs::get_bool(t, "dock_drag_to_open", false)).set_sensitive(kit::wm::can_place());
     // The Trash, and a hidden dock sliding in while something flies to it, as one choice.
     {
         let (row, end) = ui::row(Some("delete"), "Trash", "At the end of the dock. A hidden dock slides in while a deleted file flies to it");

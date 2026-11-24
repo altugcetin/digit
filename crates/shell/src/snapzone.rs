@@ -3,7 +3,7 @@
 use crate::app::App;
 use crate::draw;
 use crate::paint::Paint;
-use gtk::{cairo, gdk, glib, prelude::*};
+use gtk::{cairo, glib, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use kit::motion::{self, Tween};
 use std::cell::RefCell;
@@ -48,7 +48,7 @@ pub fn show(app: &Rc<App>, output: &str, rect: [f64; 4]) {
         return;
     }
     remove();
-    let Some(monitor) = monitor(output) else { return };
+    let Some(monitor) = kit::screens::by_name(output) else { return };
     let window = gtk::Window::new();
     window.init_layer_shell();
     window.set_layer(Layer::Top);
@@ -134,9 +134,4 @@ fn remove() {
         let window = zone.borrow().window.clone();
         window.destroy();
     }
-}
-
-fn monitor(output: &str) -> Option<gdk::Monitor> {
-    let display = gdk::Display::default()?;
-    display.monitors().iter::<gdk::Monitor>().filter_map(Result::ok).find(|m| m.connector().as_deref() == Some(output))
 }

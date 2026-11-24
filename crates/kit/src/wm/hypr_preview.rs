@@ -1,4 +1,4 @@
-use super::{Zone, hypr_float_rect, hypr_json, hypr_monitor, hypr_work_area};
+use super::{Zone, hex, hypr_float_rect, hypr_json, hypr_monitor, hypr_work_area};
 use serde_json::Value;
 
 type Rect = [f64; 4];
@@ -38,7 +38,8 @@ enum Layout {
 }
 
 impl HyprPreview {
-    pub fn read(output: &str) -> Option<Self> {
+    /// `moving` is the window that is moved, when the drop opens no new one.
+    pub fn read(output: &str, moving: Option<u64>) -> Option<Self> {
         let monitor = hypr_monitor(output)?;
         let work = hypr_work_area(&monitor)?;
         let ox = monitor["x"].as_f64()?;
@@ -78,7 +79,12 @@ impl HyprPreview {
         let layout_name = info["tiledLayout"].as_str().map(str::to_owned)
             .or_else(|| Some(option("general:layout")?["str"].as_str()?.to_owned()))?;
         let fullscreen = info["hasfullscreen"].as_bool() == Some(true);
-        let layout = if tiled[2] <= 0.0 || tiled[3] <= 0.0 || (fullscreen && layout_name != "dwindle") {
+        // A window tiled here already stays in its tile, so only floating it is offered.
+        let stays = moving.is_some_and(|id| clients.as_array().is_some_and(|list| list.iter().any(|w| {
+            hex(w) == Some(id) && w["floating"].as_bool() != Some(true)
+                && w["workspace"]["address"].as_str().or_else(|| w["workspace"]["name"].as_str()) == Some(workspace)
+        })));
+        let layout = if stays || tiled[2] <= 0.0 || tiled[3] <= 0.0 || (fullscreen && layout_name != "dwindle") {
             Layout::Unavailable
         } else if layout_name == "monocle" || (!fullscreen && windows.is_empty() && layout_name == "dwindle") {
             Layout::Full
@@ -258,7 +264,7 @@ impl Master {
             "right" => (0, true),
             "top" => (1, false),
             "bottom" => (1, true),
-            // ponytail: center splits the stack into two columns; add it if someone uses it.
+            // Center splits the stack into two columns, which isn't predicted.
             _ => return None,
         };
         let (size, cross) = (axis + 2, 1 - axis);
@@ -289,7 +295,7 @@ impl Master {
             _ => return None,
         };
         if tiles.len() == 1 {
-            // ponytail: the master's share is mfact; a share resized by hand isn't visible while it's alone.
+            // The master's share is mfact; a share resized by hand isn't visible while it's alone.
             let len = area[size] * self.mfact;
             if new_master {
                 rect[size] = len;

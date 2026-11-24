@@ -5,8 +5,22 @@ use super::*;
 
 const MIME: &str = "application/x-digit-dock-app";
 
+/// The picture that follows the pointer. The dock draws the app while it's over the dock, so
+/// the picture is empty there; GTK puts up its first frames late and off their place.
+pub(super) struct Visual {
+    picture: gtk::Picture,
+    icon: gdk::Paintable,
+    empty: gdk::Paintable,
+}
+
+impl Visual {
+    fn show(&self, on: bool) {
+        self.picture.set_paintable(Some(if on { &self.icon } else { &self.empty }));
+    }
+}
+
 pub(super) fn enabled(s: &State) -> bool {
-    kit::wm::which() == kit::wm::Wm::Hyprland && placement_enabled(s)
+    s.lifted.is_none() && s.app.prefs.borrow().dock.drag_to_open && kit::wm::can_place()
 }
 
 pub(super) fn wire(st: &Shared, paint: &Paint) {
@@ -28,14 +42,19 @@ pub(super) fn wire(st: &Shared, paint: &Paint) {
     let weak = Rc::downgrade(st);
     source.connect_drag_begin(move |_, system| {
         let (Some(st), Some(mut drag)) = (weak.upgrade(), pending.borrow_mut().take()) else { return };
+        let icon = st.borrow().drag_icon(&drag);
+        let visual = icon.map(|(icon, spot)| {
+            let picture = kit::drag::set_icon(system, &icon, spot);
+            let empty = gdk::Paintable::new_empty(icon.intrinsic_width(), icon.intrinsic_height());
+            let visual = Visual { picture, icon, empty };
+            visual.show(false);
+            visual
+        });
         {
             let mut s = st.borrow_mut();
-            if let Some(icon) = s.icons.get(&drag.key).and_then(Option::as_ref) {
-                let half = (s.geo.base / 2.0) as i32;
-                kit::drag::set_icon(system, icon, (half, half));
-            }
             drag.moving = true;
             s.drag = Some(drag);
+            s.drag_visual = visual;
             s.hover = None;
             s.tip.set(0.0);
             begin_placement(&st, &mut s);
@@ -46,8 +65,77 @@ pub(super) fn wire(st: &Shared, paint: &Paint) {
     source.connect_drag_end(move |_, _, _| {
         let Some(st) = weak.upgrade() else { return };
         close(&st);
+        let visual = st.borrow_mut().drag_visual.take();
+        drop(visual);
+        // With no drop target to close, the drag still ends here.
+        drop_drag(&st, false);
+        watch(&st);
     });
     paint.add_controller(source);
+}
+
+/// Keeps the dock as if the pointer were on it or off it, which it doesn't see itself while
+/// the drop target covers it. A drop then leaves it open under the pointer.
+fn hold(st: &Shared) {
+    let mut s = st.borrow_mut();
+    let Some(over) = s.drag.as_ref().map(|d| aimed_at_dock(&s, d)) else { return };
+    if over != s.inside {
+        s.inside = over;
+        s.reveal = over;
+        // A leave from before doesn't count any more.
+        s.leave += 1;
+    }
+}
+
+/// After a drag, until the pointer is known to enter the dock or to be away from it: a
+/// pointer that moved off meanwhile never leaves a dock it didn't enter.
+fn watch(st: &Shared) {
+    let (generation, output) = {
+        let s = st.borrow();
+        (s.leave, s.output.clone())
+    };
+    let weak = Rc::downgrade(st);
+    glib::spawn_future_local(async move {
+        loop {
+            glib::timeout_future(Duration::from_millis(400)).await;
+            let out = output.clone();
+            let at = gio::spawn_blocking(move || kit::wm::pointer_on(&out)).await.ok().flatten();
+            let Some(st) = weak.upgrade() else { return };
+            let over = {
+                let Ok(s) = st.try_borrow() else { continue };
+                if s.leave != generation || s.drag.is_some() {
+                    return;
+                }
+                let screen = kit::screens::by_name(&s.output).map(|m| (f64::from(m.geometry().width()), f64::from(m.geometry().height())));
+                s.inside && at.zip(screen).is_some_and(|(at, screen)| s.over_body(from_screen(s.geo.side, at, screen), glib::monotonic_time()))
+            };
+            if !over {
+                return left(&st);
+            }
+        }
+    });
+}
+
+/// Passes the app's icon between the dock and the drag as it leaves the dock or comes back.
+fn hand_over(st: &Shared) {
+    let visual = {
+        let mut s = st.borrow_mut();
+        let Some(out) = s.drag.as_ref().map(|d| !aimed_at_dock(&s, d)) else { return };
+        let Some(d) = s.drag.as_mut().filter(|d| d.away.is_some() != out) else { return };
+        d.away = out.then(glib::monotonic_time);
+        s.paint.queue_draw();
+        let Some(visual) = s.drag_visual.take() else { return };
+        visual
+    };
+    visual.show(st.borrow().drag.as_ref().is_some_and(|d| d.away.is_some()));
+    st.borrow_mut().drag_visual = Some(visual);
+    // The dock lets go of it once the drag's icon is up.
+    let weak = Rc::downgrade(st);
+    glib::timeout_add_local_once(Duration::from_millis(100), move || {
+        if let Some(st) = weak.upgrade() && let Ok(s) = st.try_borrow() {
+            s.paint.queue_draw();
+        }
+    });
 }
 
 fn show_target(st: &Shared) {
@@ -70,9 +158,15 @@ fn show_target(st: &Shared) {
         let (Some(st), Some(widget)) = (weak.upgrade(), target.widget()) else { return gdk::DragAction::empty() };
         let point = from_screen(st.borrow().geo.side, (x, y), (f64::from(widget.width()), f64::from(widget.height())));
         drag_at(&st, point);
+        // The dock itself doesn't see the pointer under this surface.
+        moved_to(&st, point);
+        hand_over(&st);
+        hold(&st);
         action
     };
-    target.connect_drag_enter(motion.clone());
+    // Hyprland enters a surface at its middle, wherever the pointer is; the motion after it
+    // tells the place.
+    target.connect_drag_enter(move |_, _, _, _| action);
     target.connect_drag_motion(motion);
     let weak = Rc::downgrade(st);
     target.connect_drop(move |_, drop, _, _| {

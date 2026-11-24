@@ -150,6 +150,10 @@ struct Drag {
     zone: Option<kit::wm::Zone>,
     /// The compositor state for this drag's preview.
     preview: Option<Rc<OnceCell<Option<kit::wm::HyprPreview>>>>,
+    /// Since when the drag's own icon shows the app, out on the screen, instead of the dock.
+    away: Option<i64>,
+    /// Whether a drop here, among the apps that aren't kept, takes a closed app off the dock.
+    unpin: bool,
     /// Whether the drag went out onto the screen; a drop out there never unpins.
     out: bool,
     /// The pins and order before the drag, put back when the app is dropped on the screen.
@@ -207,6 +211,7 @@ struct State {
     leave: u64,
     drag: Option<Drag>,
     drag_target: Option<gtk::Window>,
+    drag_visual: Option<launch_drag::Visual>,
     /// An app let go over the dock, coming down into its place.
     landing: Option<(String, Tween)>,
     menu: bool,
@@ -227,6 +232,8 @@ thread_local! {
     /// An always shown dock the shortcut has hidden, until the setting changes or the shell
     /// starts again.
     static HIDDEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The windows `open_in` has put where their app was dropped.
+    static PLACED: RefCell<std::collections::BTreeSet<u64>> = const { RefCell::new(std::collections::BTreeSet::new()) };
 }
 
 /// The dock's mode as it is now: as set, unless the shortcut has hidden an always shown one.
@@ -397,7 +404,7 @@ pub fn incoming(app: Option<(&str, Point, Point)>) {
                 let before = s.items.iter().zip(s.layout(now)).filter(|(i, (x, size))| i.pinned && i.key != id && x + size / 2.0 < p.0).count();
                 let had = s.pins.iter().position(|k| k == id);
                 let kept = (s.pins.clone(), s.order.clone());
-                s.drag = Some(Drag { key: id.to_string(), origin: p, at: p, grab: (0.0, 0.0), moving: true, dock_span: s.rest_span(), zone: None, preview: None, out: false, before: kept });
+                s.drag = Some(Drag { key: id.to_string(), origin: p, at: p, grab: (0.0, 0.0), moving: true, dock_span: s.rest_span(), zone: None, preview: None, away: None, unpin: false, out: false, before: kept });
                 if had == Some(before) {
                     false
                 } else {
@@ -925,6 +932,7 @@ fn build(app: &Rc<App>, geo: Geo, monitor: Option<&gdk::Monitor>, output: String
         leave: 0,
         drag: None,
         drag_target: None,
+        drag_visual: None,
         landing: None,
         menu: false,
         ticking: false,
@@ -1321,9 +1329,13 @@ fn enter(st: &Shared, x: f64, y: f64) {
 }
 
 fn moved(st: &Shared, x: f64, y: f64) {
+    let Ok(p) = st.try_borrow().map(|s| s.local(x, y)) else { return };
+    moved_to(st, p);
+}
+
+fn moved_to(st: &Shared, p: Point) {
     {
         let Ok(mut s) = st.try_borrow_mut() else { return };
-        let p = s.local(x, y);
         s.pointer = Some(p);
         let now = glib::monotonic_time();
         let over = s.over_body(p, now) && s.geo.mag > 1.0;
@@ -1353,7 +1365,10 @@ fn left(st: &Shared) {
         // Keep the last pointer position: the magnification shrinks around it as `magnify` fades.
         s.leave += 1;
         let now = glib::monotonic_time();
-        s.magnify.go(0.0, now, 300, motion::STANDARD);
+        // A drag's drop target covers the dock and tells it where the pointer is.
+        if !s.drag.as_ref().is_some_and(|d| d.preview.is_some()) {
+            s.magnify.go(0.0, now, 300, motion::STANDARD);
+        }
         s.tip.go(0.0, now, 120, motion::FAST_EFFECTS);
         s.leave
     };
@@ -1378,7 +1393,7 @@ fn drag_from(s: &State, x: f64, y: f64) -> Option<Drag> {
     let (a, size) = *s.layout(now).get(i)?;
     let grab = (p.0 - a - size / 2.0, p.1 - s.row() - size / 2.0);
     let before = (s.pins.clone(), s.order.clone());
-    Some(Drag { key: item.key.clone(), origin: p, at: p, grab, moving: false, dock_span: s.rest_span(), zone: None, preview: None, out: false, before })
+    Some(Drag { key: item.key.clone(), origin: p, at: p, grab, moving: false, dock_span: s.rest_span(), zone: None, preview: None, away: None, unpin: false, out: false, before })
 }
 
 fn drag_to(st: &Shared, x: f64, y: f64) {
@@ -1408,6 +1423,7 @@ fn drag_at(st: &Shared, p: Point) {
         }
         let Some(d) = s.drag.as_mut() else { return };
         d.at = p;
+        d.unpin = false;
         if !d.moving {
             if (p.0 - d.origin.0).hypot(p.1 - d.origin.1) < 8.0 {
                 return;
@@ -1415,9 +1431,6 @@ fn drag_at(st: &Shared, p: Point) {
             d.moving = true;
             s.hover = None;
             s.tip.set(0.0);
-            if placement_enabled(&s) {
-                begin_placement(st, &mut s);
-            }
         }
         if aim(&mut s) {
             s.paint.queue_draw();
@@ -1453,7 +1466,12 @@ fn drag_at(st: &Shared, p: Point) {
                     std::cmp::Ordering::Greater => was && closed,
                     std::cmp::Ordering::Equal => was,
                 } && item.is_some_and(|i| i.entry.is_some());
+                // A closed app isn't among the others until it's dropped there.
+                let unpin = side == std::cmp::Ordering::Greater && was && closed;
                 let t = if pin { t.min(others) } else { t };
+                if let Some(d) = s.drag.as_mut() {
+                    d.unpin = unpin && d.preview.is_some();
+                }
                 if t == c && pin == was {
                     s.paint.queue_draw();
                     return;
@@ -1480,17 +1498,23 @@ fn drag_at(st: &Shared, p: Point) {
 /// Whether a drag point is on the dock's body, where a drop rearranges the dock.
 fn aimed_at_dock(s: &State, drag: &Drag) -> bool {
     let (a, c) = drag.at;
-    // The dock's body stays this tall as its icons shrink or the pointer leaves.
+    // At least the resting dock, and as much more as its magnified icons take.
     let (start, width) = drag.dock_span;
-    (0.0..=s.geo.reserve()).contains(&c) && (start..=start + width).contains(&a)
+    let now = glib::monotonic_time();
+    let grown = s.magnify.target() > 0.5 && c >= 0.0 && s.over_body(drag.at, now);
+    grown || (0.0..=s.geo.reserve()).contains(&c) && (start..=start + width).contains(&a)
 }
 
 fn begin_placement(st: &Shared, s: &mut State) {
     let preview = Rc::new(OnceCell::new());
-    s.drag.as_mut().unwrap().preview = Some(preview.clone());
+    let Some(key) = s.drag.as_ref().map(|d| d.key.clone()) else { return };
+    let moving = s.moves(&key).map(|w| w.id);
+    if let Some(d) = s.drag.as_mut() {
+        d.preview = Some(preview.clone());
+    }
     let (weak, output) = (Rc::downgrade(st), s.output.clone());
     glib::spawn_future_local(async move {
-        let _ = preview.set(gio::spawn_blocking(move || kit::wm::HyprPreview::read(&output)).await.ok().flatten());
+        let _ = preview.set(gio::spawn_blocking(move || kit::wm::HyprPreview::read(&output, moving)).await.ok().flatten());
         if let Some(st) = weak.upgrade() {
             let mut s = st.borrow_mut();
             if s.drag.as_ref().and_then(|d| d.preview.as_ref()).is_some_and(|p| Rc::ptr_eq(p, &preview)) {
@@ -1500,15 +1524,12 @@ fn begin_placement(st: &Shared, s: &mut State) {
     });
 }
 
-fn placement_enabled(s: &State) -> bool {
-    s.lifted.is_none() && s.app.prefs.borrow().dock.drag_to_open && kit::wm::can_place()
-}
-
 /// Shows the drop zone while an app is dragged off the dock.
 fn aim(s: &mut State) -> bool {
     // Out means off the dock's body, not just above its band: the band spans the whole
     // edge, and the bottom corners of the screen are in it.
-    let out = placement_enabled(s) && s.drag.as_ref().is_some_and(|d| !aimed_at_dock(s, d));
+    // Only a drag that opens apps has a preview; any other keeps its own way off the dock.
+    let out = s.drag.as_ref().is_some_and(|d| d.preview.is_some() && !aimed_at_dock(s, d));
     let monitor = if out { kit::screens::by_name(&s.output).or_else(crate::screens::main) } else { None };
     let Some(g) = monitor.map(|m| m.geometry()) else {
         if s.drag.as_mut().and_then(|d| d.zone.take()).is_some() {
@@ -1539,23 +1560,28 @@ fn aim(s: &mut State) -> bool {
     true
 }
 
-/// Opens the app and, once its new window shows up, puts that window in `zone`.
+/// Moves an open app's window to `zone`. Otherwise opens the app and, once its window shows
+/// up, puts that window there.
 fn open_in(st: &Shared, key: String, zone: kit::wm::Zone) {
-    let (app, output) = { let s = st.borrow(); (s.app.clone(), s.output.clone()) };
-    let before: std::collections::HashSet<u64> = app.running.borrow().iter().map(|r| r.id).collect();
+    let (app, output, moves) = { let s = st.borrow(); (s.app.clone(), s.output.clone(), s.moves(&key)) };
+    if let Some(w) = moves {
+        gio::spawn_blocking(move || kit::wm::bring(w.id, zone, &output));
+        return;
+    }
+    let windows = move |key: &str| -> Vec<u64> {
+        let list = app.apps.list();
+        app.running.borrow().iter().filter(|r| app.apps.find(&r.app_id).and_then(|i| list.get(i)).is_some_and(|e| e.id == key)).map(|r| r.id).collect()
+    };
     launch_key(st, key.clone());
     let started = glib::monotonic_time();
     glib::timeout_add_local(Duration::from_millis(150), move || {
-        let list = app.apps.list();
-        let new = app.running.borrow().iter()
-            .find(|r| !before.contains(&r.id) && app.apps.find(&r.app_id).and_then(|i| list.get(i)).is_some_and(|e| e.id == key))
-            .map(|r| r.id);
+        // Two drops of one app each take a window of their own.
+        let new = windows(&key).into_iter().find(|id| PLACED.with(|p| p.borrow_mut().insert(*id)));
         if let Some(id) = new {
             let output = output.clone();
             gio::spawn_blocking(move || kit::wm::place(id, zone, &output));
             return glib::ControlFlow::Break;
         }
-        // shortcut: An app can reuse a window, so wait only for a new match until launch tracking is available.
         if glib::monotonic_time() - started > 15_000_000 { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
     });
 }
@@ -1593,12 +1619,15 @@ fn drop_drag(st: &Shared, released: bool) {
         if d.out {
             crate::snapzone::hide();
         }
-        let outside = d.out && placement_enabled(&s) && !aimed_at_dock(&s, &d);
+        let outside = d.out && !aimed_at_dock(&s, &d);
         if outside || (!released && d.preview.is_some()) {
             // Reordering during the drag was only a preview of the drop.
             (s.pins, s.order) = d.before;
             drop(s);
             rebuild(st);
+            if !outside {
+                land(st, &d.key, d.at, d.grab);
+            }
             settle(st);
             if released && let Some(zone) = d.zone {
                 open_in(st, d.key, zone);
@@ -1610,14 +1639,14 @@ fn drop_drag(st: &Shared, released: bool) {
         // Over the open app grid, the app goes into it where it's let go, quietly.
         let side = s.geo.side;
         let into_grid = far && s.installed(&d.key) && crate::appgrid::take_from_dock(&d.key, |screen| to_screen(side, d.at, screen));
-        let note = if far && s.pins.contains(&d.key) {
+        let note = if (far || d.unpin) && s.pins.contains(&d.key) {
             s.pins.retain(|k| *k != d.key);
             (!into_grid).then(|| format!("{name} removed from Dock"))
         } else {
             None
         };
         save_pins(&s.pins);
-        (note, (!far).then_some((d.key, d.at, d.grab)))
+        (note, (!far && !d.unpin).then_some((d.key, d.at, d.grab)))
     };
     rebuild(st);
     if let Some((key, at, grab)) = landed {
@@ -1937,21 +1966,55 @@ impl State {
                 self.draw_tip(s, &tip, a + slide + size / 2.0, c + size, &pal, self.tip.value(now).clamp(0.0, 1.0));
             }
         }
-        if let (Some((i, c, size)), Some(d)) = (top, self.drag.as_ref()) {
+        // Out on the screen the drag's own icon shows it. The two overlap for a moment, so
+        // neither is missing while the other comes up.
+        let here = |d: &&Drag| d.away.is_none_or(|t| now - t < 80_000);
+        if let (Some((i, c, size)), Some(d)) = (top, self.drag.as_ref().filter(here)) {
             let item = &self.items[i];
             let along = d.at.0 - d.grab.0 - size / 2.0;
             let across = (d.at.1 - d.grab.1 - size / 2.0).max(c);
-            let far = d.at.1 > g.reach() + 24.0 && item.pinned;
+            let far = d.preview.is_none() && d.at.1 > g.reach() + 24.0 && item.pinned;
             self.draw_item(s, item, along, across, size, if far { 0.55 } else { 1.0 }, &pal, now);
-            if far {
+            if far || d.unpin {
                 self.draw_tip(s, "Remove", along + size / 2.0, across + size, &pal, 1.0);
             }
         }
     }
 
+    /// The window dragging `key` out of the dock moves, when the app is open.
+    fn moves(&self, key: &str) -> Option<Window> {
+        self.items.iter().find(|i| i.key == key).and_then(|i| target_window(&i.windows))
+    }
+
     /// Whether `key` is an installed app, and not just a window no app entry matches.
     fn installed(&self, key: &str) -> bool {
         self.items.iter().any(|i| i.key == key && i.entry.is_some())
+    }
+
+    fn draw_icon(&self, s: &gtk::Snapshot, item: &Item, x: f64, y: f64, w: f64, pal: &kit::palette::Palette) {
+        match (self.art.get(&item.key), self.icons.get(&item.key).and_then(|p| p.as_ref())) {
+            (Some(t), _) => s.append_scaled_texture(t, gsk::ScalingFilter::Trilinear, &graphene::Rect::new(x.round() as f32, y.round() as f32, w as f32, w as f32)),
+            (None, Some(p)) => draw::paintable(s, p, x.round(), y.round(), w),
+            (None, None) => draw::monogram(s, &self.paint, &self.app.cfg, &item.name, x, y, w, pal.raised, pal.ink_main),
+        }
+    }
+
+    /// The icon of the dragged app as the dock draws it now, and where on it the pointer is.
+    fn drag_icon(&self, drag: &Drag) -> Option<(gdk::Paintable, (i32, i32))> {
+        let now = glib::monotonic_time();
+        let i = self.items.iter().position(|i| i.key == drag.key)?;
+        let size = self.layout(now).get(i)?.1.round();
+        let s = gtk::Snapshot::new();
+        self.draw_icon(&s, &self.items[i], 0.0, 0.0, size, &self.app.palette_at(now));
+        let icon = s.to_paintable(Some(&graphene::Size::new(size as f32, size as f32)))?;
+        let (a, c) = drag.grab;
+        let (x, y) = match self.geo.side {
+            Side::Bottom => (a, -c),
+            Side::Left => (c, a),
+            Side::Right => (-c, a),
+        };
+        let spot = |v: f64| (size / 2.0 + v).clamp(0.0, size).round() as i32;
+        Some((icon, (spot(x), spot(y))))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1967,11 +2030,7 @@ impl State {
         }
         let away = self.away.get(&item.key).map_or(0.0, |t| t.value(now));
         s.push_opacity(1.0 - 0.5 * away);
-        match (self.art.get(&item.key), self.icons.get(&item.key).and_then(|p| p.as_ref())) {
-            (Some(t), _) => s.append_scaled_texture(t, gsk::ScalingFilter::Trilinear, &graphene::Rect::new(x.round() as f32, y.round() as f32, w as f32, w as f32)),
-            (None, Some(p)) => draw::paintable(s, p, x.round(), y.round(), w),
-            (None, None) => draw::monogram(s, &self.paint, &self.app.cfg, &item.name, x, y, w, pal.raised, pal.ink_main),
-        }
+        self.draw_icon(s, item, x, y, w, pal);
         s.pop();
         if self.badges && item.badge > 0 {
             let text = if item.badge > 99 { "99+".to_string() } else { item.badge.to_string() };

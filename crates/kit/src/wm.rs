@@ -1,13 +1,13 @@
 use serde_json::{Value, json};
-
-mod hypr_preview;
-pub use hypr_preview::HyprPreview;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
+
+mod hypr_preview;
+pub use hypr_preview::HyprPreview;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Wm {
@@ -546,6 +546,54 @@ pub fn place(id: u64, zone: Zone, output: &str) -> bool {
         && hypr_dispatch(&format!("movewindowpixel exact {x} {y},{address}"), &format!(r#"hl.dsp.window.move({{ x = {x}, y = {y}, relative = false, window = "{address}" }})"#))
 }
 
+/// Where the pointer is on `output`, from its top left corner.
+pub fn pointer_on(output: &str) -> Option<(f64, f64)> {
+    if which() != Wm::Hyprland {
+        return None;
+    }
+    let (monitor, at) = (hypr_monitor(output)?, hypr_json("cursorpos")?);
+    Some((at["x"].as_f64()? - monitor["x"].as_f64()?, at["y"].as_f64()? - monitor["y"].as_f64()?))
+}
+
+/// Moves the window `id` to the workspace shown on `output`, then places it as `place` does.
+pub fn bring(id: u64, zone: Zone, output: &str) -> bool {
+    if which() != Wm::Hyprland {
+        return false;
+    }
+    let Some(monitor) = hypr_monitor(output) else { return false };
+    let Some(clients) = hypr_json("clients") else { return false };
+    let Some(client) = clients.as_array().and_then(|list| list.iter().find(|c| hex(c) == Some(id))) else { return false };
+    let Some(space) = hypr_shown_space(&monitor) else { return false };
+    let name = |v: &Value| v["name"].as_str().map(str::to_owned);
+    if name(&client["workspace"]) != name(space) {
+        let Some(selector) = hypr_space_selector(space) else { return false };
+        let address = format!("address:0x{id:x}");
+        // As the other dispatchers here: a numbered workspace as a number, a named one as text.
+        let lua = if selector.parse::<u64>().is_ok() { selector.clone() } else { serde_json::to_string(&selector).unwrap_or_default() };
+        if !hypr_dispatch(
+            &format!("movetoworkspacesilent {selector},{address}"),
+            &format!(r#"hl.dsp.window.move({{ workspace = {lua}, follow = false, window = "{address}" }})"#),
+        ) {
+            return false;
+        }
+    }
+    place(id, zone, output) && focus(id)
+}
+
+/// The workspace a new window opens on: the special one shown over a screen, else its own.
+fn hypr_shown_space(monitor: &Value) -> Option<&Value> {
+    [&monitor["specialWorkspace"], &monitor["activeWorkspace"]].into_iter().find(|w| w["name"].as_str().is_some_and(|n| !n.is_empty()))
+}
+
+fn hypr_space_selector(space: &Value) -> Option<String> {
+    let name = space["name"].as_str().filter(|n| !n.is_empty())?;
+    Some(match space["id"].as_i64() {
+        Some(id) if id > 0 => id.to_string(),
+        _ if name.starts_with("special:") => name.to_owned(),
+        _ => format!("name:{name}"),
+    })
+}
+
 /// Restore to the focused monitor's normal workspace, then focus without opening a special workspace.
 pub fn restore(id: u64) -> bool {
     if which() != Wm::Hyprland { return false; }
@@ -674,9 +722,10 @@ pub fn layouts() -> Option<(Vec<String>, usize)> {
 
 #[cfg(test)]
 mod minimized_tests {
+    use super::*;
+
     #[test]
     fn the_center_floats_and_the_rest_of_the_screen_tiles() {
-        use super::Zone;
         let at = |x, y| Zone::at(x, y, 1280.0, 720.0);
         assert_eq!(at(640.0, 504.0), Some(Zone::Float));
         for y in [505.0, 540.0, 580.0, 635.0, 719.0] {
@@ -687,15 +736,26 @@ mod minimized_tests {
     }
 
     #[test]
+    fn a_window_is_brought_to_the_workspace_on_top_of_its_screen() {
+        let shown = |special: &str, id: i64, name: &str| {
+            let m = json!({ "specialWorkspace": { "name": special }, "activeWorkspace": { "id": id, "name": name } });
+            hypr_shown_space(&m).and_then(hypr_space_selector)
+        };
+        assert_eq!(shown("", 3, "3").as_deref(), Some("3"));
+        assert_eq!(shown("", -1337, "mail").as_deref(), Some("name:mail"));
+        assert_eq!(shown("special:scratchpad", 3, "3").as_deref(), Some("special:scratchpad"));
+        assert_eq!(shown("", 0, ""), None);
+    }
+
+    #[test]
     fn hypr_work_area_uses_scaled_rotated_dimensions_and_logical_reservations() {
         let mut monitor = serde_json::json!({"scale": 1.25, "width": 2560, "height": 1600, "transform": 0, "reserved": [10, 38, 12, 20]});
-        assert_eq!(super::hypr_work_area(&monitor), Some([10.0, 38.0, 2026.0, 1222.0]));
+        assert_eq!(hypr_work_area(&monitor), Some([10.0, 38.0, 2026.0, 1222.0]));
         monitor["transform"] = 3.into();
-        assert_eq!(super::hypr_work_area(&monitor), Some([10.0, 38.0, 1258.0, 1990.0]));
+        assert_eq!(hypr_work_area(&monitor), Some([10.0, 38.0, 1258.0, 1990.0]));
         monitor["scale"] = 0.into();
-        assert_eq!(super::hypr_work_area(&monitor), None);
+        assert_eq!(hypr_work_area(&monitor), None);
     }
-    use super::*;
 
     #[test]
     fn only_the_minimized_special_workspace_is_minimized() {

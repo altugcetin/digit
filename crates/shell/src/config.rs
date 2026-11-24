@@ -189,7 +189,7 @@ impl Default for Config {
             dock_magnify: 1.5,
             dock_output: None,
             dock_running: true,
-            dock_drag_to_open: true,
+            dock_drag_to_open: false,
             dock_trash: true,
             dock_recent: true,
             dock_trash_reveal: true,
@@ -659,11 +659,11 @@ mod persistence_tests {
     use super::*;
 
     #[test]
-    fn dock_drag_to_open_defaults_on_and_honors_an_explicit_off() {
+    fn dock_drag_to_open_is_off_until_turned_on() {
         let old: Config = toml::from_str("dock_side = 'left'").unwrap();
-        assert!(Prefs::from(&old).dock.drag_to_open);
-        let off: Config = toml::from_str("dock_drag_to_open = false").unwrap();
-        assert!(!Prefs::from(&off).dock.drag_to_open);
+        assert!(!Prefs::from(&old).dock.drag_to_open);
+        let on: Config = toml::from_str("dock_drag_to_open = true").unwrap();
+        assert!(Prefs::from(&on).dock.drag_to_open);
     }
 
     #[test]
