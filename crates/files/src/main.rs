@@ -1356,6 +1356,9 @@ fn css() -> String {
         r#"{base}
 .topbar {{ padding: 8px 10px 8px 10px; }}
 button.crumb {{ background: transparent; border: none; box-shadow: none; color: {meta}; padding: 4px 8px; border-radius: 10px; min-height: 22px; font-weight: 520; }}
+button.crumb, button.pm-row, button.flat-row {{ transition: background 160ms ease, color 160ms ease, transform 260ms cubic-bezier(0.05, 0.7, 0.1, 1); }}
+button.crumb:active {{ transform: scale(0.95); }}
+button.flat-row:active {{ transform: scale(0.98); }}
 button.crumb:hover {{ background: alpha({main}, 0.08); color: {main}; }}
 button.crumb.here {{ color: {main}; }}
 .crumb-sep {{ font-size: 16px; color: alpha({meta}, 0.6); }}

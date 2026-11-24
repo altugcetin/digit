@@ -260,7 +260,7 @@ fn live_at(display: &gtk::gdk::Display, build: fn() -> String, changed: fn(), pr
 fn reduction_css(effects: bool, motion: bool) -> String {
     let mut css = String::new();
     if effects { css.push_str("* { box-shadow: none; }\n"); }
-    if motion { css.push_str("* { animation: none; transition-property: none; }\n"); }
+    if motion { css.push_str("* { animation: none; transition-property: none; }\nbutton:active { transform: none; }\n"); }
     css
 }
 
@@ -369,9 +369,15 @@ button.ctl {{ background: transparent; border: none; box-shadow: none; outline: 
 button.ctl:hover {{ background: alpha({main}, 0.10); color: {main}; }}
 button.ctl.close:hover {{ background: alpha({risk}, 0.22); color: {risk}; }}
 button.ctl .sym {{ font-size: 18px; }}
+/* Buttons light up softly and give when they're pressed, as the shell's do. */
+button.ctl, button.pill, .seg > button, dropdown.picker > button, menubutton > button, button.style-card, .badge, button.swatch {{ transition: background 160ms ease, color 160ms ease, opacity 120ms ease, box-shadow 160ms ease, transform 260ms cubic-bezier(0.05, 0.7, 0.1, 1); }}
+button.ctl:active, menubutton.ctl-menu > button:active, button.swatch:active {{ transform: scale(0.9); }}
+button.pill:active, .seg > button:active, dropdown.picker > button:active {{ transform: scale(0.95); }}
+button.style-card:active {{ transform: scale(0.97); }}
+.side row, .results > row .row {{ transition: background-color 160ms ease, color 160ms ease; }}
 /* A row's secondary controls (adding keys, back to the default): shown with the row under the
    pointer or the keyboard on them. */
-.row button.on-hover {{ opacity: 0; transition: opacity 120ms ease; }}
+.row button.on-hover {{ opacity: 0; }}
 .row:hover button.on-hover, .row button.on-hover:focus-visible {{ opacity: 1; }}
 .side list, .side listview {{ background: transparent; }}
 .side row {{ border-radius: var(--r-row); padding: 9px 12px; margin: 2px 0; background: transparent; color: {meta}; }}
@@ -469,7 +475,7 @@ progressbar progress {{ background: {accent}; min-height: 4px; border-radius: 4p
 .welcome-title {{ font-size: 24px; font-weight: 650; }}
 .step-dot {{ min-width: 7px; min-height: 7px; border-radius: 99px; background: alpha({main}, 0.18); transition: min-width 260ms ease, background-color 260ms ease; }}
 .step-dot.on {{ min-width: 22px; background: {accent}; }}
-button.style-card {{ background: @d_card; border-radius: var(--r-card); padding: 12px 12px 14px 12px; border: none; box-shadow: inset 0 0 0 1px alpha({main}, 0.06); transition: box-shadow 200ms ease, background-color 200ms ease; }}
+button.style-card {{ background: @d_card; border-radius: var(--r-card); padding: 12px 12px 14px 12px; border: none; box-shadow: inset 0 0 0 1px alpha({main}, 0.06); transition: box-shadow 200ms ease, background-color 200ms ease, transform 260ms cubic-bezier(0.05, 0.7, 0.1, 1); }}
 button.style-card:hover {{ background: mix(@d_card, {main}, 0.04); }}
 button.style-card:checked {{ background: alpha({accent}, 0.10); box-shadow: inset 0 0 0 2px {accent}; }}
 .hero-card {{ background: linear-gradient(120deg, alpha({accent}, 0.16), alpha({accent}, 0.03) 55%, @d_card); border-radius: var(--r-hero); padding: 22px 24px; margin-top: 6px; box-shadow: inset 0 0 0 1px alpha({accent}, 0.10); }}

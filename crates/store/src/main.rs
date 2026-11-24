@@ -620,6 +620,9 @@ button.dot {{ min-width: 8px; min-height: 8px; padding: 0; border-radius: 999px;
 button.dot.on {{ background: {main}; min-width: 22px; }}
 button.arrow {{ min-width: 38px; min-height: 38px; padding: 0; border-radius: 999px; background: rgba(0,0,0,0.42); color: #ffffff; border: none; box-shadow: none; opacity: 0; }}
 .carousel:hover button.arrow {{ opacity: 1; }}
+button.arrow, button.dot {{ transition: opacity 160ms ease, background 160ms ease, min-width 260ms ease, transform 260ms cubic-bezier(0.05, 0.7, 0.1, 1); }}
+button.arrow:active {{ transform: scale(0.9); }}
+button.chip:active, .jobtile:active {{ transform: scale(0.97); }}
 button.arrow:hover {{ background: rgba(0,0,0,0.62); }}
 .light {{ color: #ffffff; }}
 .lead.light, .sub.light {{ color: alpha(#ffffff, 0.82); }}
@@ -638,7 +641,7 @@ button.chip .tile {{ border-radius: 999px; }}
 .pick {{ background: @d_card; border-radius: var(--r-card); padding: 18px; min-width: 220px; }}
 .lockup {{ padding: 10px 12px; border-radius: max(4px, calc(var(--r-card) - 6px)); }}
 /* One hover for everything that opens something: the same faint ink over it, eased in and out. */
-.lockup, button.chip, .jobtile {{ transition: background-color 200ms ease-out; }}
+.lockup, button.chip, .jobtile {{ transition: background-color 200ms ease-out, transform 260ms cubic-bezier(0.05, 0.7, 0.1, 1); }}
 .lockup:hover {{ background-color: alpha({main}, 0.06); }}
 .lockup:active {{ background-color: alpha({main}, 0.10); }}
 button.chip:hover {{ background: mix(@d_field, {main}, 0.06); }}
