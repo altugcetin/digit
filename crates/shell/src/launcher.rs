@@ -1,6 +1,7 @@
 use crate::app::App;
 use crate::compositor;
 use crate::draw::{self, Face};
+use crate::feel::{self, Feel};
 use crate::providers;
 use gtk::subclass::prelude::*;
 use gtk::{cairo, gdk, gio, glib, graphene, gsk, pango, prelude::*};
@@ -274,6 +275,14 @@ impl Line {
     }
 }
 
+/// What gives when it's pressed.
+#[derive(Clone, Copy, PartialEq)]
+enum Part {
+    Bubble(usize),
+    Clear,
+    Chip(usize, usize),
+}
+
 /// A part of the color card under the pointer.
 #[derive(Clone, Copy, PartialEq)]
 enum CardHit {
@@ -310,6 +319,7 @@ struct State {
     /// The clear button shows under the clipboard list while nothing is typed.
     clear_on: bool,
     clear_glow: Tween,
+    feel: Feel<Part>,
     windows: Vec<compositor::Window>,
     fade: Tween,
     panel: Tween,
@@ -538,6 +548,7 @@ impl Launcher {
             clear_hot: false,
             clear_on: false,
             clear_glow: Tween::still(0.0),
+            feel: Feel::default(),
             windows: Vec::new(),
             fade: Tween::still(0.0),
             panel: Tween::still(0.0),
@@ -654,6 +665,29 @@ impl Launcher {
         }
         let click = gtk::GestureClick::new();
         let weak = Rc::downgrade(&self.0);
+        click.connect_pressed(move |_, _, x, y| {
+            let Some(s) = weak.upgrade() else { return };
+            let me = Launcher(s);
+            let part = if let Some(m) = me.bubble_at(x, y) {
+                MODES.iter().position(|e| e.0 == m).map(Part::Bubble)
+            } else if let Some((at, CardHit::Format(i))) = me.card_hit(x, y) {
+                Some(Part::Chip(at, i))
+            } else {
+                me.clear_hit(x, y).then_some(Part::Clear)
+            };
+            if let Some(part) = part {
+                me.0.borrow().feel.press(part, glib::monotonic_time());
+                me.kick();
+            }
+        });
+        let weak = Rc::downgrade(&self.0);
+        click.connect_end(move |_, _| {
+            if let Some(s) = weak.upgrade() {
+                s.borrow().feel.release(glib::monotonic_time());
+                Launcher(s).kick();
+            }
+        });
+        let weak = Rc::downgrade(&self.0);
         click.connect_released(move |_, _, x, y| {
             let Some(s) = weak.upgrade() else { return };
             let me = Launcher(s);
@@ -700,6 +734,13 @@ impl Launcher {
                 }
                 s.card_hot = card;
                 s.clear_hot = clear;
+                if changed {
+                    let chip = match card {
+                        Some((at, CardHit::Format(i))) => vec![Part::Chip(at, i)],
+                        _ => Vec::new(),
+                    };
+                    s.feel.hover(&chip, glib::monotonic_time());
+                }
                 changed
             };
             if redraw {
@@ -733,6 +774,7 @@ impl Launcher {
                 {
                     let mut st = s.borrow_mut();
                     st.card_hot = None;
+                    st.feel.hover(&[], glib::monotonic_time());
                     if st.clear_hot {
                         st.clear_glow.go(0.0, glib::monotonic_time(), 240, motion::STANDARD);
                     }
@@ -1722,6 +1764,7 @@ impl State {
             || self.glow.iter().any(|t| !t.settled(now))
             || (self.caret_shown && !self.caret.settled(now))
             || !self.clear_glow.settled(now)
+            || self.feel.busy(now)
             || self.app.palette_moving(now);
         if !moving && !self.open && self.window.is_visible() {
             let window = self.window.clone();
@@ -1785,14 +1828,18 @@ impl State {
                 let x = (PAD + WIDTH - (n - i) as f64 * BUBBLE - (n - 1 - i) as f64 * BUBBLE_GAP + (1.0 - shown) * 18.0 + (1.0 - enter) * 14.0).round();
                 let on = *mode == self.mode;
                 let glow = self.glow[i].value(now).clamp(0.0, 1.0);
-                let grow = if motion::reduced() { 0.0 } else { 1.5 * glow };
-                let fill = if on { pal.accent } else { pal.tile(0.09 * glow) };
+                let key = Part::Bubble(i);
+                let lit = self.feel.on(key, on, now);
+                let give = (self.feel.scale(key, feel::SMALL, now) - 1.0) * BUBBLE / 2.0;
+                let grow = if motion::reduced() { 0.0 } else { 1.5 * glow + give };
                 // The shadow keeps the resting size: a blurred shadow whose size changes every frame
                 // gets re-rendered by the GL renderer and flickers, so only the face grows on hover.
                 shadow(s, &rounded(x, PAD, BUBBLE, BUBBLE, BUBBLE / 2.0));
-                face(s, &rounded(x - grow, PAD - grow, BUBBLE + 2.0 * grow, BUBBLE + 2.0 * grow, BUBBLE / 2.0 + grow), fill);
-                let ink = if on { pal.on_accent } else { pal.ink_main.mix(pal.ink_sec, glow) };
-                draw::icon(s, &canvas, &cfg, icon, 24.0, on, ink, x + BUBBLE / 2.0, mid);
+                let (cx, cy) = (x + BUBBLE / 2.0, PAD + BUBBLE / 2.0);
+                feel::flood(s, &rounded(x - grow, PAD - grow, BUBBLE + 2.0 * grow, BUBBLE + 2.0 * grow, BUBBLE / 2.0 + grow), pal.tile(0.09 * glow), pal.accent, lit, cx, cy);
+                let ink = pal.on_accent.mix(pal.ink_main.mix(pal.ink_sec, glow), lit);
+                let size = self.feel.scale(key, feel::SMALL, now) * self.feel.icon(key, icon, now);
+                feel::scaled(s, size, cx, mid, || draw::icon(s, &canvas, &cfg, icon, 24.0, on, ink, cx, mid));
                 s.pop();
             }
             s.pop();
@@ -1808,11 +1855,12 @@ impl State {
                 // Drawn like the mode bubbles: same size, shadow, hover growth and tint.
                 let (cx, cy) = Launcher::clear_center(height);
                 let glow = self.clear_glow.value(now).clamp(0.0, 1.0);
-                let grow = if motion::reduced() { 0.0 } else { 1.5 * glow };
+                let size = self.feel.scale(Part::Clear, feel::SMALL, now);
+                let grow = if motion::reduced() { 0.0 } else { 1.5 * glow + (size - 1.0) * BUBBLE / 2.0 };
                 let (x, y) = (cx - BUBBLE / 2.0, cy - BUBBLE / 2.0);
                 shadow(s, &rounded(x, y, BUBBLE, BUBBLE, BUBBLE / 2.0));
                 face(s, &rounded(x - grow, y - grow, BUBBLE + 2.0 * grow, BUBBLE + 2.0 * grow, BUBBLE / 2.0 + grow), pal.tile(0.09 * glow));
-                draw::icon(s, &canvas, &cfg, "delete_sweep", 24.0, false, pal.ink_main.mix(pal.ink_sec, glow), cx, cy);
+                feel::scaled(s, size, cx, cy, || draw::icon(s, &canvas, &cfg, "delete_sweep", 24.0, false, pal.ink_main.mix(pal.ink_sec, glow), cx, cy));
             }
         }
         let tip = self.tip.value(now).clamp(0.0, 1.0) * shown;
@@ -1864,13 +1912,16 @@ impl State {
         };
         draw::text(s, &canvas, &cfg, &line, 12.5, Face::Text(420), detail_ink, x, mid + 10.0, text_w, pango::Alignment::Left);
         for (i, r) in g.formats.iter().enumerate() {
-            let lit = hot == Some(CardHit::Format(i));
-            let chip = rounded(r.x, r.y, r.w, r.h, r.h / 2.0);
-            s.push_rounded_clip(&chip);
-            s.append_color(&chip_ink.alpha(if lit { 0.2 } else { 0.08 }).rgba(), chip.bounds());
-            s.pop();
+            let now = glib::monotonic_time();
+            let key = Part::Chip(at, i);
             let label = formats.get(i).map(|f| f.0).unwrap_or("");
-            draw::text(s, &canvas, &cfg, label, 12.0, Face::Text(520), chip_ink, r.x, r.y + r.h / 2.0, r.w, pango::Alignment::Center);
+            feel::scaled(s, self.feel.scale(key, feel::PILL, now), r.x + r.w / 2.0, r.y + r.h / 2.0, || {
+                let chip = rounded(r.x, r.y, r.w, r.h, r.h / 2.0);
+                s.push_rounded_clip(&chip);
+                s.append_color(&chip_ink.alpha(0.08 + 0.12 * self.feel.glow(key, now)).rgba(), chip.bounds());
+                s.pop();
+                draw::text(s, &canvas, &cfg, label, 12.0, Face::Text(520), chip_ink, r.x, r.y + r.h / 2.0, r.w, pango::Alignment::Center);
+            });
         }
     }
 
