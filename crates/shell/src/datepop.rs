@@ -1,6 +1,7 @@
 use crate::app::App;
 use crate::calendar;
 use crate::draw::{self, Face};
+use crate::feel::{self, Feel};
 use crate::paint::Paint;
 use gtk::{cairo, gdk, glib, graphene, pango, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
@@ -34,6 +35,8 @@ struct Pop {
     month: i32,
     pick: i64,
     hover: Option<Spot>,
+    feel: Feel<Spot>,
+    ticking: Rc<std::cell::Cell<bool>>,
     slide: Tween,
     fade: Tween,
     open: bool,
@@ -166,6 +169,8 @@ impl Pop {
         let m = self.month - 1 + by;
         self.year += m.div_euclid(12);
         self.month = m.rem_euclid(12) + 1;
+        // The cells hold other days now: they start as they are.
+        self.feel.retain(|s| !matches!(s, Spot::Day(_)));
     }
 
     fn home(&mut self) {
@@ -197,7 +202,7 @@ impl Pop {
         let pal = self.app.palette_at(now);
         let cfg = &self.app.cfg;
         let h = height(self.agenda);
-        let hot = |spot: Spot| self.hover == Some(spot);
+        let glow = |spot: Spot| self.feel.glow(spot, now);
         s.save();
         if self.floating {
             // A card under the island drops in and fades, as Control Center does.
@@ -246,12 +251,12 @@ impl Pop {
         s.push_opacity(fade);
         let mid = 28.0;
         let title = midnight(self.year, self.month, 1).and_then(|d| d.format("%B %Y").ok()).map(|t| t.to_string()).unwrap_or_default();
-        draw::text(s, &self.paint, cfg, &title, 17.0, Face::Text(650), if hot(Spot::Title) { pal.accent } else { pal.ink_main }, PAD + 4.0, mid, W - 2.0 * PAD - 74.0, pango::Alignment::Left);
+        draw::text(s, &self.paint, cfg, &title, 17.0, Face::Text(650), pal.accent.mix(pal.ink_main, glow(Spot::Title)), PAD + 4.0, mid, W - 2.0 * PAD - 74.0, pango::Alignment::Left);
         for (spot, glyph, cx) in [(Spot::Back, "chevron_left", W - PAD - 46.0), (Spot::Ahead, "chevron_right", W - PAD - 15.0)] {
-            if hot(spot) {
-                draw::fill(s, &draw::round(cx - 14.0, mid - 14.0, 28.0, 28.0, 14.0), pal.ink_main.alpha(0.08));
-            }
-            draw::icon(s, &self.paint, cfg, glyph, 22.0, false, pal.ink_sec, cx, mid);
+            feel::scaled(s, self.feel.scale(spot, feel::SMALL, now), cx, mid, || {
+                draw::fill(s, &draw::round(cx - 14.0, mid - 14.0, 28.0, 28.0, 14.0), pal.ink_main.alpha(0.08 * glow(spot)));
+                draw::icon(s, &self.paint, cfg, glyph, 22.0, false, pal.ink_sec, cx, mid);
+            });
         }
         let cells = self.cells();
         for (i, d) in cells.iter().take(7).enumerate() {
@@ -268,13 +273,15 @@ impl Pop {
             let inside = d.month() == self.month;
             let now_day = Some(at) == today;
             let dot = draw::round(x + CELL_W / 2.0 - 18.0, cy - 18.0, 36.0, 36.0, 18.0);
-            if now_day {
-                draw::fill(s, &dot, pal.accent);
-            } else if at == self.pick {
-                draw::fill(s, &dot, pal.ink_main.alpha(0.13));
-            } else if hot(Spot::Day(i)) {
-                draw::fill(s, &dot, pal.ink_main.alpha(0.07));
-            }
+            let spot = Spot::Day(i);
+            let lit = (0.13 * self.feel.on(spot, at == self.pick, now)).max(0.07 * glow(spot));
+            feel::scaled(s, self.feel.scale(spot, feel::SMALL, now), x + CELL_W / 2.0, cy, || {
+                if now_day {
+                    draw::fill(s, &dot, pal.accent);
+                } else if lit > 0.002 {
+                    draw::fill(s, &dot, pal.ink_main.alpha(lit));
+                }
+            });
             let ink = if now_day {
                 pal.on_accent
             } else if !inside {
@@ -332,6 +339,27 @@ fn changed(p: &Rc<RefCell<Pop>>) {
     }
 }
 
+/// Draws while the days and arrows move.
+fn kick(p: &Rc<RefCell<Pop>>) {
+    let (paint, ticking) = {
+        let p = p.borrow();
+        (p.paint.clone(), p.ticking.clone())
+    };
+    let weak = Rc::downgrade(p);
+    feel::run(&paint, &ticking, move |now| weak.upgrade().is_some_and(|p| p.try_borrow().map_or(true, |p| p.feel.busy(now))));
+}
+
+/// The pointer is on `at`.
+fn point(p: &Rc<RefCell<Pop>>, at: Option<Spot>) {
+    {
+        let mut p = p.borrow_mut();
+        p.hover = at;
+        let keys: Vec<Spot> = at.into_iter().collect();
+        p.feel.hover(&keys, glib::monotonic_time());
+    }
+    kick(p);
+}
+
 /// Opens the calendar as a panel sliding in from the right edge, under the bar.
 pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, right: f64, y: f64) {
     crate::popmenu::close();
@@ -384,6 +412,8 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, right: f64, y: f64) {
         month: now.month(),
         pick: now.to_unix(),
         hover: None,
+        feel: Feel::default(),
+        ticking: Rc::default(),
         slide,
         fade,
         open: true,
@@ -402,26 +432,27 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, right: f64, y: f64) {
             if let Ok(p) = p.try_borrow() {
                 p.draw(s);
             }
+            // Another day may have been picked: it goes on from here.
+            if p.try_borrow().is_ok_and(|p| !p.ticking.get() && p.feel.busy(glib::monotonic_time())) {
+                glib::idle_add_local_once(move || kick(&p));
+            }
         }
     });
     let motion = gtk::EventControllerMotion::new();
     let weak = Rc::downgrade(&pop);
     motion.connect_motion(move |_, x, y| {
         let Some(p) = weak.upgrade() else { return };
-        let Ok(mut p) = p.try_borrow_mut() else { return };
-        let at = p.spot_at(x, y);
-        if at != p.hover {
-            p.hover = at;
-            p.paint.set_cursor_from_name(at.map(|_| "pointer"));
-            p.paint.queue_draw();
+        let at = p.borrow().spot_at(x, y);
+        if at != p.borrow().hover {
+            p.borrow().paint.set_cursor_from_name(at.map(|_| "pointer"));
+            point(&p, at);
         }
     });
     let weak = Rc::downgrade(&pop);
     motion.connect_leave(move |_| {
-        let Some(p) = weak.upgrade() else { return };
-        let Ok(mut p) = p.try_borrow_mut() else { return };
-        p.hover = None;
-        p.paint.queue_draw();
+        if let Some(p) = weak.upgrade() {
+            point(&p, None);
+        }
     });
     paint.add_controller(motion);
     // "leave" mode: the panel slides away shortly after the pointer leaves it.
@@ -455,6 +486,20 @@ pub fn show(app: &Rc<App>, monitor: Option<gdk::Monitor>, right: f64, y: f64) {
     });
     paint.add_controller(wheel);
     let click = gtk::GestureClick::new();
+    let weak = Rc::downgrade(&pop);
+    click.connect_pressed(move |_, _, x, y| {
+        let Some(p) = weak.upgrade() else { return };
+        if let Some(spot) = p.borrow().spot_at(x, y) {
+            p.borrow().feel.press(spot, glib::monotonic_time());
+        }
+        kick(&p);
+    });
+    let weak = Rc::downgrade(&pop);
+    click.connect_end(move |_, _| {
+        let Some(p) = weak.upgrade() else { return };
+        p.borrow().feel.release(glib::monotonic_time());
+        kick(&p);
+    });
     let weak = Rc::downgrade(&pop);
     click.connect_released(move |_, _, x, y| {
         let Some(p) = weak.upgrade() else { return };
