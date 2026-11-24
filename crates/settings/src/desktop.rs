@@ -105,7 +105,7 @@ pub(crate) fn controlled(key: &str) -> Option<&'static str> {
 /// `still`: Compositor animations is off, which stops the compositor's animations on its own.
 fn controlled_in(key: &str, motion: bool, effects: bool, still: bool) -> Option<&'static str> {
     match key {
-        "smooth_scroll" | "smooth_caret" | "intro" | "compositor_motion" | "hypr_window_anim" | "hypr_workspace_anim" | "niri_motion" | "desktop_motion" | "lock_motion" if motion => Some("Off while Reduce motion is on"),
+        "smooth_scroll" | "smooth_caret" | "intro" | "compositor_motion" | "hypr_window_anim" | "hypr_workspace_anim" | "niri_motion" | "desktop_motion" | "lock_motion" | "dock_motion" if motion => Some("Off while Reduce motion is on"),
         "hypr_window_anim" | "hypr_workspace_anim" | "niri_motion" if still => Some("Off while Compositor animations is off"),
         "hypr_blur" | "hypr_shadow" | "menubar_look" if effects => Some("Off while Reduce effects is on"),
         _ => None,
@@ -1070,6 +1070,7 @@ fn dock(body: &gtk::Box, t: &toml::Table) {
     slider(&dock, "photo_size_select_small", "Icon size", "", "dock_size", (32.0, 80.0, 2.0), prefs::get_f64(&t, "dock_size", 50.0), 50.0, 0);
     slider(&dock, "zoom_in", "Magnification", "1.0 turns it off", "dock_magnify", (1.0, 2.0, 0.05), prefs::get_f64(&t, "dock_magnify", 1.5), 1.5, 2);
     toggle(&dock, "apps", "Show running apps", "Apps that are open but not kept in the dock", "dock_running", prefs::get_bool(&t, "dock_running", true));
+    toggle(&dock, "animation", "Dock animations", "Icons answer clicks, and the dock glides as apps open and close", "dock_motion", prefs::get_bool(t, "dock_motion", true));
     let detail = if kit::wm::can_place() { "Dragging an app out opens it there, or moves its window if it's open, instead of removing it. In the middle it floats" } else { "Available on Hyprland" };
     toggle(&dock, "open_with", "Drag to open", detail, "dock_drag_to_open", prefs::get_bool(t, "dock_drag_to_open", false)).set_sensitive(kit::wm::can_place());
     // The Trash, and a hidden dock sliding in while something flies to it, as one choice.
@@ -2593,7 +2594,7 @@ mod reduction_tests {
 
     #[test]
     fn each_child_is_controlled_only_by_its_own_master() {
-        for (key, motion) in [("smooth_scroll", true), ("smooth_caret", true), ("intro", true), ("compositor_motion", true), ("hypr_window_anim", true), ("hypr_workspace_anim", true), ("niri_motion", true), ("hypr_shadow", false), ("hypr_blur", false), ("menubar_look", false)] {
+        for (key, motion) in [("smooth_scroll", true), ("smooth_caret", true), ("intro", true), ("compositor_motion", true), ("hypr_window_anim", true), ("hypr_workspace_anim", true), ("niri_motion", true), ("dock_motion", true), ("hypr_shadow", false), ("hypr_blur", false), ("menubar_look", false)] {
             assert_eq!(controlled_in(key, false, false, false), None);
             assert_eq!(controlled_in(key, !motion, motion, false), None);
             assert_eq!(controlled_in(key, motion, !motion, false), Some(if motion { "Off while Reduce motion is on" } else { "Off while Reduce effects is on" }));

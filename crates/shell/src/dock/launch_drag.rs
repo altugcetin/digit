@@ -55,6 +55,7 @@ pub(super) fn wire(st: &Shared, paint: &Paint) {
             drag.moving = true;
             s.drag = Some(drag);
             s.drag_visual = visual;
+            s.lively.release(glib::monotonic_time());
             s.hover = None;
             s.tip.set(0.0);
             begin_placement(&st, &mut s);

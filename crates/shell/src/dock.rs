@@ -11,10 +11,10 @@ use std::rc::Rc;
 use std::time::Duration;
 
 mod launch_drag;
+mod lively;
 mod stack;
 
 const LIFT: f64 = 8.0;
-const BOUNCE: i64 = 1_400_000;
 const MENU_W: f64 = 236.0;
 const ROW: f64 = 34.0;
 
@@ -211,7 +211,7 @@ struct State {
     shown: Tween,
     tip: Tween,
     hover: Option<usize>,
-    bounce: Vec<(String, i64)>,
+    lively: lively::Lively,
     inside: bool,
     reveal: bool,
     leave: u64,
@@ -932,7 +932,7 @@ fn build(app: &Rc<App>, geo: Geo, monitor: Option<&gdk::Monitor>, output: String
         shown: Tween::still(0.0),
         tip: Tween::still(0.0),
         hover: None,
-        bounce: Vec::new(),
+        lively: lively::Lively::default(),
         inside: false,
         reveal: false,
         leave: 0,
@@ -990,8 +990,22 @@ fn wire(st: &Shared) {
     let click = gtk::GestureClick::new();
     click.set_button(0);
     let weak = Rc::downgrade(st);
+    click.connect_pressed(move |g, _, x, y| {
+        let Some(st) = weak.upgrade() else { return };
+        if g.current_button() == 1 {
+            press(&st, x, y);
+        }
+    });
+    let weak = Rc::downgrade(st);
+    click.connect_end(move |_, _| {
+        if let Some(st) = weak.upgrade() {
+            release(&st);
+        }
+    });
+    let weak = Rc::downgrade(st);
     click.connect_released(move |g, _, x, y| {
         let Some(st) = weak.upgrade() else { return };
+        release(&st);
         let at = {
             let s = st.borrow();
             let now = glib::monotonic_time();
@@ -1190,8 +1204,6 @@ fn rebuild(st: &Shared) {
         }
     }
     let mut s = st.borrow_mut();
-    let live: Vec<String> = items.iter().filter(|i| !i.windows.is_empty()).map(|i| i.key.clone()).collect();
-    s.bounce.retain(|(k, t)| !live.contains(k) && now - t < 4 * BOUNCE);
     if s.icons.len() > 64 {
         let keep: Vec<String> = items.iter().map(|i| i.key.clone()).collect();
         s.icons.retain(|k, _| keep.contains(k));
@@ -1205,7 +1217,9 @@ fn rebuild(st: &Shared) {
         let tween = s.away.entry(item.key.clone()).or_insert_with(|| Tween::still(0.0));
         tween.go(away, now, 200, motion::STANDARD);
     }
-    s.items = items;
+    let was = s.before(&items, now);
+    let old = std::mem::replace(&mut s.items, items);
+    s.changed(was, &old, now);
     let after = s.centers(now);
     let dragged = s.drag.as_ref().filter(|d| d.moving).map(|d| d.key.clone());
     for (k, c) in &after {
@@ -1435,6 +1449,7 @@ fn drag_at(st: &Shared, p: Point) {
                 return;
             }
             d.moving = true;
+            s.lively.release(glib::monotonic_time());
             s.hover = None;
             s.tip.set(0.0);
         }
@@ -1655,10 +1670,13 @@ fn drop_drag(st: &Shared, released: bool) {
             None
         };
         save_pins(&s.pins);
-        (note, (!far && !d.unpin).then_some((d.key, d.at, d.grab)))
+        (note, (d.key, d.at, d.grab, far, d.unpin))
     };
     rebuild(st);
-    if let Some((key, at, grab)) = landed {
+    let (key, at, grab, far, unpin) = landed;
+    if far || unpin {
+        st.borrow_mut().lively.leave_from(&key, (!far).then_some(at.0 - grab.0));
+    } else {
         land(st, &key, at, grab);
     }
     settle(st);
@@ -1674,6 +1692,10 @@ fn activate(st: &Shared, i: usize) {
         let Some(it) = s.items.get(i) else { return };
         (s.app.clone(), it.windows.clone(), it.key.clone(), it.kind)
     };
+    // An app that starts hops instead.
+    if kind != Kind::App || !windows.is_empty() {
+        answer(st, |l, now| l.pulse(&key, now));
+    }
     match kind {
         Kind::Trash => return kit::trash::open(),
         Kind::Recent => return stack::open(st, i),
@@ -1717,8 +1739,35 @@ fn launch_key(st: &Shared, key: String) {
 }
 
 fn bounce(st: &Shared, key: String) {
-    if !motion::reduced() {
-        st.borrow_mut().bounce.push((key, glib::monotonic_time()));
+    answer(st, |l, now| l.bounce(key, now));
+}
+
+/// Starts an icon's answer to a click, if the dock animates.
+fn answer(st: &Shared, start: impl FnOnce(&mut lively::Lively, i64)) {
+    {
+        let mut s = st.borrow_mut();
+        if !s.animated() {
+            return;
+        }
+        start(&mut s.lively, glib::monotonic_time());
+    }
+    kick(st);
+}
+
+fn press(st: &Shared, x: f64, y: f64) {
+    let key = {
+        let s = st.borrow();
+        let (p, now) = (s.local(x, y), glib::monotonic_time());
+        s.index_at(p.0, now).filter(|_| s.over_body(p, now)).map(|i| s.items[i].key.clone())
+    };
+    if let Some(key) = key {
+        answer(st, |l, now| l.press(&key, now));
+    }
+}
+
+fn release(st: &Shared) {
+    let held = st.try_borrow_mut().is_ok_and(|mut s| s.lively.release(glib::monotonic_time()));
+    if held {
         kick(st);
     }
 }
@@ -1790,20 +1839,20 @@ fn kick(st: &Shared) {
         let now = glib::monotonic_time().max(clock.frame_time());
         w.queue_draw();
         if motion::reduced() {
-            s.bounce.clear();
+            s.lively.still();
         }
-        let bouncing = s.bounce.iter().any(|(_, t)| now - t < 3 * BOUNCE);
         let gulping = s.gulp.is_some_and(|t| now - t < stack::GULP);
         let busy = gulping || [&s.magnify, &s.shown, &s.tip].iter().any(|t| !t.settled(now))
             || s.slide.values().chain(s.appear.values()).chain(s.away.values()).any(|t| !t.settled(now))
             || s.landing.as_ref().is_some_and(|(_, t)| !t.settled(now))
-            || bouncing;
+            || s.lively.busy(now);
         if busy {
             return glib::ControlFlow::Continue;
         }
         s.slide.clear();
         s.appear.clear();
         s.landing = None;
+        s.lively.tidy(now);
         s.ticking = false;
         glib::ControlFlow::Break
     });
@@ -1948,21 +1997,12 @@ impl State {
         let g = self.geo;
         let off = -((1.0 - shown) * (LIFT + g.body() + 36.0)).round();
         let layout = self.layout(now);
-        let (b0, blen) = self.body_span(now);
-        self.fill(s, b0, LIFT + off, blen, g.body(), g.radius(), pal.body.alpha(1.0));
-        for k in self.separators() {
-            let a = (layout[k].0 - g.pad() - 1.0).round();
-            let (x, y, w, h) = self.map(a, LIFT + off + g.pad() + 4.0, 1.0, g.base - 8.0);
-            s.append_color(&pal.ink_main.alpha(0.16).rgba(), &graphene::Rect::new(x as f32, y as f32, w as f32, h as f32));
-        }
+        self.draw_body(s, off, &pal, now);
         let dragged = self.drag.as_ref().filter(|d| d.moving).map(|d| d.key.clone());
         let mut top: Option<(usize, f64, f64)> = None;
         for (i, (item, (a, size))) in self.items.iter().zip(layout.iter()).enumerate() {
             let slide = self.slide.get(&item.key).map_or(0.0, |t| t.value(now));
-            let hop = self.bounce.iter().find(|(k, _)| *k == item.key).map_or(0.0, |(_, t)| {
-                let p = (now - t) as f64 / BOUNCE as f64;
-                if p >= 3.0 { 0.0 } else { (p * std::f64::consts::PI).sin().abs() * g.base * 0.32 * (1.0 - p / 3.0) }
-            });
+            let hop = self.lively.hop(&item.key, now) * g.base * 0.32;
             let c = LIFT + off + g.pad() + hop;
             if Some(&item.key) == dragged.as_ref() {
                 top = Some((i, c, *size));
@@ -1970,14 +2010,7 @@ impl State {
             }
             let rise = self.landing.as_ref().filter(|(k, _)| *k == item.key).map_or(0.0, |(_, t)| t.value(now));
             self.draw_item(s, item, a + slide, c + rise, *size, 1.0, &pal, now);
-            if !item.windows.is_empty() {
-                let r = (g.base * 0.045).max(2.0);
-                let center = a + slide + size / 2.0;
-                let (x, y, w, h) = self.map(center - r, LIFT + off + 3.5, 2.0 * r, 2.0 * r);
-                let away = self.away.get(&item.key).map_or(0.0, |t| t.value(now));
-                let ink = if item.focused() { pal.ink_main } else { pal.ink_meta.alpha(0.7) };
-                draw::fill(s, &draw::round(x, y, w, h, r), ink.mix(pal.ink_faint, 1.0 - away));
-            }
+            self.draw_mark(s, &item.key, a + slide + size / 2.0, off, &pal, now);
             if self.hover == Some(i) {
                 let tip = if self.badges && item.badge > 0 { format!("{} · {} new notification{}", item.name, item.badge, if item.badge == 1 { "" } else { "s" }) } else { item.name.clone() };
                 self.draw_tip(s, &tip, a + slide + size / 2.0, c + size, &pal, self.tip.value(now).clamp(0.0, 1.0));
@@ -2016,14 +2049,18 @@ impl State {
         }
     }
 
+    fn icon_of(&self, item: &Item, size: f64, pal: &kit::palette::Palette) -> Option<gdk::Paintable> {
+        let s = gtk::Snapshot::new();
+        self.draw_icon(&s, item, 0.0, 0.0, size, pal);
+        s.to_paintable(Some(&graphene::Size::new(size as f32, size as f32)))
+    }
+
     /// The icon of the dragged app as the dock draws it now, and where on it the pointer is.
     fn drag_icon(&self, drag: &Drag) -> Option<(gdk::Paintable, (i32, i32))> {
         let now = glib::monotonic_time();
         let i = self.items.iter().position(|i| i.key == drag.key)?;
         let size = self.layout(now).get(i)?.1.round();
-        let s = gtk::Snapshot::new();
-        self.draw_icon(&s, &self.items[i], 0.0, 0.0, size, &self.app.palette_at(now));
-        let icon = s.to_paintable(Some(&graphene::Size::new(size as f32, size as f32)))?;
+        let icon = self.icon_of(&self.items[i], size, &self.app.palette_at(now))?;
         let (a, c) = drag.grab;
         let (x, y) = match self.geo.side {
             Side::Bottom => (a, -c),
@@ -2038,7 +2075,7 @@ impl State {
     fn draw_item(&self, s: &gtk::Snapshot, item: &Item, a: f64, c: f64, size: f64, alpha: f64, pal: &kit::palette::Palette, now: i64) {
         let grow = self.appear.get(&item.key).map_or(1.0, |t| t.value(now).clamp(0.0, 1.0));
         let gulp = if item.kind == Kind::Trash { self.gulp.map_or(0.0, |t| stack::gulp(now - t)) } else { 0.0 };
-        let shown = size * (0.4 + 0.6 * grow) * (1.0 + gulp);
+        let shown = size * (0.4 + 0.6 * grow) * (1.0 + gulp) * self.lively.scale(&item.key, now);
         let (a, c) = (a + (size - shown) / 2.0, c + (size - shown) / 2.0);
         let (x, y, w, _) = self.map(a, c, shown, shown);
         let alpha = alpha * grow;
@@ -2046,7 +2083,7 @@ impl State {
             s.push_opacity(alpha);
         }
         let away = self.away.get(&item.key).map_or(0.0, |t| t.value(now));
-        s.push_opacity(1.0 - 0.5 * away);
+        s.push_opacity((1.0 - 0.5 * away) * self.lively.opacity(&item.key, now));
         self.draw_icon(s, item, x, y, w, pal);
         s.pop();
         if self.badges && item.badge > 0 {
