@@ -95,13 +95,17 @@ overwrites them.
 - **Portals:** Hyprland gets `xdg-desktop-portal-hyprland`, niri gets
   `xdg-desktop-portal-gnome`, and both get `xdg-desktop-portal-gtk`. They handle
   screen sharing and file pickers.
-- **Fedora:** when Hyprland isn't in the enabled repositories, the `solopasha/hyprland`
-  COPR is enabled. For `gpu-screen-recorder`, the installer enables
+- **X11 apps:** niri gets `xwayland-satellite`, and openSUSE's Hyprland gets `xwayland`.
+- **Fedora:** niri comes from Fedora itself. Hyprland isn't in Fedora, so the
+  [`lionheartp/Hyprland`](https://copr.fedorainfracloud.org/coprs/lionheartp/Hyprland/)
+  COPR is enabled for it (Fedora 44 and newer). For `gpu-screen-recorder`, when no
+  enabled repository has it, the installer enables
   [`brycensranch/gpu-screen-recorder-git`](https://copr.fedorainfracloud.org/coprs/brycensranch/gpu-screen-recorder-git/),
   the COPR that [upstream links](https://git.dec05eba.com/gpu-screen-recorder/about/#unofficial-install-methods).
-- **Missing packages:** when `gpu-screen-recorder` or `cava` isn't available (on
-  openSUSE Slowroll, for example), the installer warns and installs everything else.
-  Get them later from Digit Store.
+- **Missing packages:** when `gpu-screen-recorder` or `cava` isn't available, the
+  installer warns and installs everything else. Get them later from Digit Store.
+- **openSUSE:** `adw-gtk3` isn't in the official repositories, so GTK 3 apps keep their
+  own theme unless you install it yourself.
 - **Arch:** the installer downloads pacman's file lists (`pacman -Fy`), which Digit
   Store uses to tell apps from libraries.
 

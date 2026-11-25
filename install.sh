@@ -268,6 +268,12 @@ explain_setup() {
     info "Your normal Hyprland and niri configs are not touched."
 }
 
+# Turns on the Fedora COPR $1. Minimal installs don't have dnf's copr command.
+copr() {
+    if ! dnf copr --help >/dev/null 2>&1; then install_pkgs dnf5-plugins || return 1; fi
+    superuser dnf copr enable -y "$1"
+}
+
 install_wm() {
     step compositor "Compositor: $WM"
     # The portal may need the same COPR even when Hyprland is already installed.
@@ -276,7 +282,7 @@ install_wm() {
         mapfile -t missing < <(missing_pkgs hyprland xdg-desktop-portal-hyprland)
         for p in "${missing[@]}"; do
             if ! has_pkg "$p"; then
-                superuser dnf copr enable -y solopasha/hyprland
+                copr lionheartp/Hyprland || die "Could not enable the lionheartp/Hyprland COPR, where $p comes from. It may have no packages for $NAME_SHOWN; update Fedora or pick niri."
                 break
             fi
         done
@@ -291,7 +297,7 @@ install_wm() {
     case "$FAMILY:$WM" in
         suse:niri|arch:niri|suse:hyprland|arch:hyprland) install_pkgs "$WM" ;;
         fedora:niri)
-            has_pkg niri || superuser dnf copr enable -y yalter/niri
+            has_pkg niri || copr yalter/niri || die "Could not enable the yalter/niri COPR, where niri comes from."
             install_pkgs niri ;;
         fedora:hyprland)
             install_pkgs hyprland ;;
@@ -332,7 +338,7 @@ package_lists() {
     case $FAMILY in
         suse)
             build=(gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel wayland-devel)
-            run_pkgs=(wtype curl upower polkit flatpak playerctl breeze6-style adw-gtk3 adw-gtk3-dark gpu-screen-recorder cava slurp squashfs-tools libfuse2 gvfs-backends) ;;
+            run_pkgs=(wtype curl upower polkit flatpak playerctl breeze6-style gpu-screen-recorder cava slurp squashfs libfuse2 gvfs-backends) ;;
         fedora)
             build=(gcc pkgconf-pkg-config gtk4-devel gtk4-layer-shell-devel wayland-devel)
             run_pkgs=(wtype curl upower polkit flatpak playerctl plasma-breeze-qt6 plasma-breeze-common adw-gtk3-theme gpu-screen-recorder cava slurp squashfs-tools fuse-libs gvfs-mtp) ;;
@@ -349,9 +355,20 @@ package_lists() {
     fi
     run_pkgs+=(xdg-desktop-portal-gtk)
     case $WM in
-        hyprland) run_pkgs+=(xdg-desktop-portal-hyprland) ;;
-        niri) run_pkgs+=(xdg-desktop-portal-gnome) ;;
+        hyprland)
+            run_pkgs+=(xdg-desktop-portal-hyprland)
+            # X11 apps: only openSUSE's Hyprland doesn't bring it along.
+            [ "$FAMILY" != suse ] || run_pkgs+=(xwayland) ;;
+        niri) run_pkgs+=(xdg-desktop-portal-gnome xwayland-satellite) ;;
     esac
+    # Digit Store's system packages.
+    case $FAMILY in
+        fedora) run_pkgs+=(PackageKit) ;;
+        # The backend by name: PackageKit takes any, dnf's included.
+        suse) installed_pkg PackageKit || run_pkgs+=(PackageKit PackageKit-backend-zypp) ;;
+    esac
+    # wl-clipboard-rs has it too, and conflicts with wl-clipboard.
+    command -v wl-copy >/dev/null 2>&1 || run_pkgs+=(wl-clipboard)
     # Install kitty even if another terminal is available for Super+Return.
     command -v kitty >/dev/null 2>&1 || run_pkgs+=(kitty)
 }
@@ -375,13 +392,13 @@ deps() {
         # Upstream lists this community COPR for Fedora:
         # https://git.dec05eba.com/gpu-screen-recorder/about/#unofficial-install-methods
         if [ "$FAMILY" = fedora ] && [[ " ${missing[*]} " == *" gpu-screen-recorder "* ]] && ! has_pkg gpu-screen-recorder; then
-            superuser dnf copr enable -y brycensranch/gpu-screen-recorder-git
+            copr brycensranch/gpu-screen-recorder-git || warn "Could not enable the brycensranch/gpu-screen-recorder-git COPR."
         fi
         for p in "${missing[@]}"; do
             case $p in
-                gpu-screen-recorder|cava|adw-gtk3|adw-gtk3-dark|adw-gtk3-theme)
+                gpu-screen-recorder|cava|adw-gtk3-theme)
                     if ! has_pkg "$p"; then
-                        warn "Optional package $p is not available in the enabled repositories; skipping it. GTK will keep its current theme."
+                        warn "Optional package $p is not available in the enabled repositories; skipping it."
                         continue
                     fi ;;
             esac
