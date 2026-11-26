@@ -171,7 +171,7 @@ pub fn scaled(s: &gtk::Snapshot, k: f64, cx: f64, cy: f64, draw: impl FnOnce()) 
     s.translate(&at(cx, cy));
     s.scale(k as f32, k as f32);
     s.translate(&at(-cx, -cy));
-    draw();
+    crate::draw::grown(k, draw);
     s.restore();
 }
 

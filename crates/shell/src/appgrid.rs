@@ -769,7 +769,7 @@ impl State {
             };
             let title = if f.renaming { format!("{name}│") } else { name };
             s.push_shadow(&[gsk::Shadow::new(gdk::RGBA::new(0.0, 0.0, 0.0, 0.4), 0.0, 1.0, 6.0)]);
-            draw::text(s, &self.paint, &cfg, &title, 26.0, Face::Text(600), white.alpha(0.96), 0.0, py - 24.0, w, pango::Alignment::Center);
+            draw::grown(k, || draw::text(s, &self.paint, &cfg, &title, 26.0, Face::Text(600), white.alpha(0.96), 0.0, py - 24.0, w, pango::Alignment::Center));
             s.pop();
             for (n, id) in self.folder_apps().iter().enumerate() {
                 if dragged.as_deref() == Some(id.as_str()) {
@@ -779,7 +779,7 @@ impl State {
                 let hit = Hit::Item(n);
                 let grow = g.icon * (0.02 * self.feel.glow(hit, now) + (self.feel.scale(hit, feel::SMALL, now) - 1.0) / 2.0);
                 self.icon_of(s, id, x - grow, y - grow, g.icon + 2.0 * grow);
-                self.label(s, names.get(id).map_or("", String::as_str), x + g.icon / 2.0, y + g.icon + 18.0, g.cell_w - 10.0, 1.0);
+                draw::grown(k, || self.label(s, names.get(id).map_or("", String::as_str), x + g.icon / 2.0, y + g.icon + 18.0, g.cell_w - 10.0, 1.0));
             }
             s.pop();
             s.restore();

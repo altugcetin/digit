@@ -22,6 +22,7 @@ thread_local! {
     static LAYOUTS: RefCell<HashMap<Key, (glib::WeakRef<gtk::Widget>, pango::Layout)>> = RefCell::new(HashMap::new());
     static RASTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static ZOOM: std::cell::Cell<f64> = const { std::cell::Cell::new(1.0) };
+    static GROWN: std::cell::Cell<f64> = const { std::cell::Cell::new(1.0) };
     /// The family text and numbers are drawn in instead of the shell's own, while [`in_font`] runs.
     static FAMILY: RefCell<String> = const { RefCell::new(String::new()) };
 }
@@ -46,6 +47,27 @@ pub fn zoomed(k: f64, draw: impl FnOnce()) {
 
 fn zoom() -> f64 {
     ZOOM.with(|z| z.get())
+}
+
+/// The nearest size text is drawn at while it's scaled by `k`. GSK makes the fonts and glyphs of
+/// each size anew and keeps them, so an animation through sizes that are all different only adds
+/// to memory; these steps are too small to see.
+pub fn step(k: f64) -> f64 {
+    (k * 64.0).round() / 64.0
+}
+
+/// Runs `draw` for a snapshot scaled by `k` while something animates: its text and icons keep to
+/// the sizes of [`step`], the rest is drawn at just the size it's scaled to.
+pub fn grown(k: f64, draw: impl FnOnce()) {
+    let was = GROWN.with(|g| g.get());
+    GROWN.with(|g| g.set(was * k));
+    draw();
+    GROWN.with(|g| g.set(was));
+}
+
+/// How much [`put`] scales text by, to bring it to a size of [`step`].
+fn evened(grown: f64) -> f64 {
+    if grown > 0.0 && step(grown) > 0.0 { step(grown) / grown } else { 1.0 }
 }
 
 
@@ -76,6 +98,15 @@ fn put(s: &gtk::Snapshot, l: &pango::Layout, color: Rgb, k: f64) {
     if !RASTER.with(|r| r.get()) {
         if k != 1.0 {
             s.scale(1.0 / k as f32, 1.0 / k as f32);
+        }
+        let even = evened(GROWN.with(|g| g.get()));
+        if (even - 1.0).abs() > 1e-6 {
+            // Around its middle, so it stays where it is on what it's drawn on.
+            let (_, r) = l.pixel_extents();
+            let (cx, cy) = (r.x() as f32 + r.width() as f32 / 2.0, r.y() as f32 + r.height() as f32 / 2.0);
+            s.translate(&graphene::Point::new(cx, cy));
+            s.scale(even as f32, even as f32);
+            s.translate(&graphene::Point::new(-cx, -cy));
         }
         s.append_layout(l, &color.rgba());
         return;
@@ -300,4 +331,32 @@ pub fn monogram(s: &gtk::Snapshot, widget: &impl IsA<gtk::Widget>, cfg: &Config,
     fill(s, &round(x, y, size, size, size * 0.26), back);
     let letter: String = name.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().collect()).unwrap_or_else(|| "·".into());
     text(s, widget, cfg, &letter, (size * 0.45).round(), Face::Text(650), ink, x, y + size / 2.0, size, pango::Alignment::Center);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_keeps_to_few_sizes_while_it_grows() {
+        let sizes: std::collections::BTreeSet<i64> = (0..10_000)
+            .map(|i| {
+                let k = 0.9 + 0.26 * i as f64 / 10_000.0;
+                (k * evened(k) * 1e6).round() as i64
+            })
+            .collect();
+        assert!(sizes.len() <= 18, "{} sizes", sizes.len());
+        assert_eq!(evened(1.0), 1.0);
+        assert_eq!(evened(0.0), 1.0);
+    }
+
+    #[test]
+    fn growing_inside_something_that_grows_multiplies() {
+        let now = || GROWN.with(|g| g.get());
+        grown(0.5, || {
+            grown(0.5, || assert_eq!(now(), 0.25));
+            assert_eq!(now(), 0.5);
+        });
+        assert_eq!(now(), 1.0);
+    }
 }

@@ -37,7 +37,7 @@ impl View {
         }
         // The clock shrinks a little and drops back as it gives way.
         let give = ease(open / 0.7);
-        let k = 1.0 - 0.12 * give;
+        let k = draw::step(1.0 - 0.12 * give);
         s.save();
         s.translate(&graphene::Point::new(CX as f32, (mid - 3.0 * give) as f32));
         s.scale(k as f32, k as f32);

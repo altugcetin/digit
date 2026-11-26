@@ -241,12 +241,12 @@ impl Stack {
             let lw = self.label(i);
             let lx = if self.side == Side::Left { TILE / 2.0 + 10.0 } else { -TILE / 2.0 - 10.0 - lw };
             draw::fill(s, &draw::round(lx, -14.0, lw, 28.0, 14.0), pal.accent.mix(pal.body.alpha(1.0).mix(pal.ink_main, 0.9), glow));
-            draw::text(s, &self.paint, cfg, text, 13.0, Face::Text(520), pal.on_accent.mix(pal.ink_main, glow), lx + 12.0, 0.0, lw - 24.0, pango::Alignment::Left);
+            draw::grown(scale, || draw::text(s, &self.paint, cfg, text, 13.0, Face::Text(520), pal.on_accent.mix(pal.ink_main, glow), lx + 12.0, 0.0, lw - 24.0, pango::Alignment::Left));
             match (self.slot_kind(i), icon) {
                 (Slot::File(_), Some(icon)) => fit(s, icon, 0.0, 0.0, TILE),
                 _ => {
                     draw::fill(s, &draw::round(-TILE / 2.0, -TILE / 2.0, TILE, TILE, TILE * 0.28), pal.raised);
-                    draw::text(s, &self.paint, cfg, "\u{2197}", 22.0, Face::Text(600), pal.ink_main, -TILE / 2.0, 0.0, TILE, pango::Alignment::Center);
+                    draw::grown(scale, || draw::text(s, &self.paint, cfg, "\u{2197}", 22.0, Face::Text(600), pal.ink_main, -TILE / 2.0, 0.0, TILE, pango::Alignment::Center));
                 }
             }
             s.restore();
