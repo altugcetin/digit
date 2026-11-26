@@ -34,7 +34,7 @@ fn item(path: PathBuf) -> Option<Item> {
     let icon: Option<gdk::Paintable> = match thumb {
         Some(t) => gdk::Texture::from_filename(t).ok().map(|t| t.upcast()),
         None if image => crate::wallpaper::thumbnail(&path.to_string_lossy()).map(|t| t.upcast()),
-        None => info.icon().map(|i| theme.lookup_by_gicon(&i, 48, 2, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty()).upcast()),
+        None => info.icon().map(|i| kit::svgicon::steady(theme.lookup_by_gicon(&i, 48, 2, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty()).upcast_ref())),
     };
     Some(Item { name: info.display_name().to_string(), path, icon })
 }

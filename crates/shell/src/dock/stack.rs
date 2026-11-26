@@ -60,7 +60,7 @@ fn paintable(widget: &impl IsA<gtk::Widget>, icon: Option<&gio::Icon>, px: f64) 
     let scale = widget.scale_factor().max(1);
     let fallback: gio::Icon = gio::ThemedIcon::from_names(&["text-x-generic", "application-x-generic"]).upcast();
     let icon = icon.unwrap_or(&fallback);
-    Some(theme.lookup_by_gicon(icon, px.ceil() as i32, scale, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty()).upcast())
+    Some(kit::svgicon::steady(theme.lookup_by_gicon(icon, px.ceil() as i32, scale, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty()).upcast_ref()))
 }
 
 /// Draws `p` inside a `size` square centred on (cx, cy), keeping its aspect (thumbnails aren't square).

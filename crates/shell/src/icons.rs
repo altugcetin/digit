@@ -80,7 +80,8 @@ pub fn dock_icon(theme: &gtk::IconTheme, icon: Option<&gio::Icon>, app_id: &str,
             theme.lookup_icon(&name, &[], key.px, key.scale, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty())
         }
     };
-    Some(paintable.upcast())
+    // The dock magnifies its icons and the grid draws them at two sizes.
+    Some(kit::svgicon::steady(paintable.upcast_ref()))
 }
 
 #[cfg(test)]

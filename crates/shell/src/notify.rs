@@ -289,7 +289,7 @@ async fn load_files(mut look: Look, px: i32) -> Look {
 async fn bake(p: Option<gdk::Paintable>, px: i32) -> Option<gdk::Paintable> {
     use futures_util::future::{Either, select};
     let p = p?;
-    let Some(path) = p.downcast_ref::<gtk::IconPaintable>().filter(|i| !i.is_symbolic()).and_then(|i| i.file()).and_then(|f| f.path()) else { return Some(p) };
+    let Some(path) = p.downcast_ref::<gtk::IconPaintable>().filter(|i| !i.is_symbolic()).and_then(|i| i.file()).and_then(|f| f.path()) else { return Some(kit::svgicon::steady(&p)) };
     let job = gio::spawn_blocking(move || {
         let bytes = std::fs::read(&path).ok().filter(|b| (b.len() as u64) <= FILE_MAX)?;
         crate::images::decode(&bytes, px)
@@ -298,7 +298,8 @@ async fn bake(p: Option<gdk::Paintable>, px: i32) -> Option<gdk::Paintable> {
     futures_util::pin_mut!(job, timeout);
     match select(job, timeout).await {
         Either::Left((Ok(Some(t)), _)) => Some(t.upcast()),
-        _ => Some(p),
+        // Kept as it is: the island grows and shrinks it.
+        _ => Some(kit::svgicon::steady(&p)),
     }
 }
 

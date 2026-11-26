@@ -285,7 +285,7 @@ pub fn app_icon(apps: &crate::apps::Apps, app_id: &str, px: i32, scale: i32) -> 
         None if !app_id.is_empty() && theme.has_icon(app_id) => theme.lookup_icon(app_id, &[], px, scale, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty()),
         None => return None,
     };
-    Some(paintable.upcast())
+    Some(kit::svgicon::steady(paintable.upcast_ref()))
 }
 
 pub fn paintable(s: &gtk::Snapshot, p: &gdk::Paintable, x: f64, y: f64, size: f64) {

@@ -302,6 +302,7 @@ pub fn plain(widget: &impl IsA<gtk::Widget>, key: &str, icon: &gdk::Paintable, p
     if let Some(t) = CACHE.with(|c| c.borrow().get(&id).cloned()) {
         return Some(t);
     }
+    let icon = crate::svgicon::steady(icon);
     let tex = render(&cpu()?, size, |s| icon.snapshot(s, size, size))?;
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
@@ -315,7 +316,7 @@ pub fn plain(widget: &impl IsA<gtk::Widget>, key: &str, icon: &gdk::Paintable, p
 
 /// Which file an icon came from; other paintables go by object identity.
 fn source_of(p: &gdk::Paintable) -> String {
-    p.downcast_ref::<gtk::IconPaintable>().and_then(|p| p.file()).map(|f| f.uri().to_string()).unwrap_or_else(|| format!("{:p}", p.as_ptr()))
+    crate::svgicon::file(p).map(|f| f.uri().to_string()).unwrap_or_else(|| format!("{:p}", p.as_ptr()))
 }
 
 /// Textures kept, enough for a long list of apps.
@@ -338,6 +339,9 @@ pub fn texture(widget: &impl IsA<gtk::Widget>, key: &str, icon: Option<&gdk::Pai
     if let Some(t) = CACHE.with(|c| c.borrow().get(&id).cloned()) {
         return Some(t);
     }
+    // Drawn twice at different sizes, to be measured and then composed.
+    let steady = icon.map(crate::svgicon::steady);
+    let icon = steady.as_ref();
     let look = match icon {
         Some(p) => LOOKS.with(|l| l.borrow().get(&look_id).copied()).unwrap_or_else(|| {
             let look = analyze(&renderer, p);
@@ -395,5 +399,28 @@ mod tests {
             assert_eq!(cache_key("app", "source", "App", style, 64, a), cache_key("app", "source", "App", style, 64, b));
         }
         assert_ne!(cache_key("app", "source", "App", Style::Tinted, 64, a), cache_key("app", "source", "App", Style::Tinted, 64, b));
+    }
+
+    #[test]
+    fn styled_icon_with_empty_text_is_drawn_without_aborting() {
+        if !crate::alone("art::tests::styled_icon_with_empty_text_is_drawn_without_aborting") || gtk::init().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("digit-art-text-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("empty-text.svg");
+        std::fs::write(&path, crate::svgicon::EMPTY_TEXT_SVG).unwrap();
+        // As the app grid asks: the theme's own paintable, measured at one size, then composed
+        // at another, then drawn plain at a third.
+        let icon: gdk::Paintable = gtk::IconPaintable::for_file(&gtk::gio::File::for_path(&path), 48, 1).upcast();
+        let widget = gtk::DrawingArea::new();
+        let (accent, px) = (Rgb::new(0.2, 0.4, 0.8), 48 * widget.scale_factor().max(1));
+        for style in [Style::Light, Style::Graphite, Style::Tinted] {
+            let tex = texture(&widget, "empty-text", Some(&icon), "Empty", 48.0, style, accent, "Sans").expect("a styled texture");
+            assert_eq!((tex.width(), tex.height()), (px, px));
+        }
+        assert!(plain(&widget, "empty-text", &icon, 40.0).is_some());
+        forget();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
