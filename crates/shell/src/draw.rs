@@ -316,7 +316,9 @@ pub fn app_icon(apps: &crate::apps::Apps, app_id: &str, px: i32, scale: i32) -> 
         None if !app_id.is_empty() && theme.has_icon(app_id) => theme.lookup_icon(app_id, &[], px, scale, gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty()),
         None => return None,
     };
-    Some(kit::svgicon::steady(paintable.upcast_ref()))
+    let paintable = kit::svgicon::steady(paintable.upcast_ref());
+    // Drawn once into a texture: a themed icon drawn by the GPU costs more memory, and keeps it.
+    Some(kit::art::plain_at(app_id, &paintable, (px * scale.max(1)) as f64).map_or(paintable, |t| t.upcast()))
 }
 
 pub fn paintable(s: &gtk::Snapshot, p: &gdk::Paintable, x: f64, y: f64, size: f64) {

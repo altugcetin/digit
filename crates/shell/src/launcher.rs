@@ -343,7 +343,7 @@ struct State {
     caret_measure: Option<(glib::GString, i32, f64)>,
     tip_wait: u64,
     field_w: i32,
-    icons: HashMap<String, gtk::IconPaintable>,
+    icons: HashMap<String, gdk::Paintable>,
     region: (i32, i32, i32, i32),
     ticking: bool,
     scrim: Option<gtk::Window>,
@@ -1784,13 +1784,14 @@ impl State {
         moving
     }
 
-    fn paintable(&mut self, icon: &gio::Icon, size: i32) -> Option<gtk::IconPaintable> {
+    fn paintable(&mut self, icon: &gio::Icon, size: i32) -> Option<gdk::Paintable> {
         let key = icon.to_string()?.to_string();
         if let Some(p) = self.icons.get(&key) {
             return Some(p.clone());
         }
         let display = gdk::Display::default()?;
-        let p = gtk::IconTheme::for_display(&display).lookup_by_gicon(icon, size, self.window.scale_factor(), gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty());
+        let p = gtk::IconTheme::for_display(&display).lookup_by_gicon(icon, size, self.window.scale_factor(), gtk::TextDirection::Ltr, gtk::IconLookupFlags::empty()).upcast::<gdk::Paintable>();
+        let p = kit::art::plain(&self.canvas, &key, &p, size as f64).map_or(p, |t| t.upcast());
         if self.icons.len() > 256 {
             self.icons.clear();
         }

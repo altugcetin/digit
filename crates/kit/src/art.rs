@@ -297,7 +297,11 @@ fn compose(s: &gtk::Snapshot, icon: Option<&gdk::Paintable>, look: Look, size: f
 /// texture: for the places that keep textures rather than drawing a paintable each frame. Kept
 /// like the styled ones, so asking again costs nothing.
 pub fn plain(widget: &impl IsA<gtk::Widget>, key: &str, icon: &gdk::Paintable, px: f64) -> Option<gdk::Texture> {
-    let size = (px * widget.scale_factor().max(1) as f64).ceil();
+    plain_at(key, icon, (px * widget.scale_factor().max(1) as f64).ceil())
+}
+
+/// [`plain`], `size` pixels big.
+pub fn plain_at(key: &str, icon: &gdk::Paintable, size: f64) -> Option<gdk::Texture> {
     let id = cache_key(key, &source_of(icon), "", Style::Native, size as i32, Rgb::new(0.0, 0.0, 0.0));
     if let Some(t) = CACHE.with(|c| c.borrow().get(&id).cloned()) {
         return Some(t);

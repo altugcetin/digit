@@ -1271,7 +1271,12 @@ fn paint_art(st: &Shared) {
             }
             continue;
         }
-        if let Some(t) = crate::art::texture(&paint, &key, icon.as_ref(), &name, px, style, accent, &app.cfg.font) {
+        // The original icons are drawn as they are.
+        let texture = match (style, icon.as_ref()) {
+            (crate::art::Style::Native, icon) => icon.and_then(|p| kit::art::plain(&paint, &key, p, px)),
+            (_, icon) => crate::art::texture(&paint, &key, icon, &name, px, style, accent, &app.cfg.font),
+        };
+        if let Some(t) = texture {
             art.insert(key, t);
         }
     }
