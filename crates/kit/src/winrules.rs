@@ -20,18 +20,21 @@ pub struct Rule {
     /// Opens on this workspace, without switching to it; 0 for wherever it opens. Hyprland only:
     /// niri's workspaces have no numbers to open on.
     pub workspace: u32,
+    /// Shows its frames at once in fullscreen, tearing rather than waiting for the display.
+    /// Hyprland only, and only while its tearing switch (`hypr_tearing`) is on.
+    pub tearing: bool,
 }
 
 impl Default for Rule {
     fn default() -> Self {
-        Self { app: String::new(), title: String::new(), float: false, maximize: false, fullscreen: false, opacity: 1.0, no_share: false, no_focus: false, workspace: 0 }
+        Self { app: String::new(), title: String::new(), float: false, maximize: false, fullscreen: false, opacity: 1.0, no_share: false, no_focus: false, workspace: 0, tearing: false }
     }
 }
 
 impl Rule {
     /// A rule matching nothing or doing nothing isn't written.
     pub fn active(&self) -> bool {
-        (!self.app.trim().is_empty() || !self.title.trim().is_empty()) && (self.float || self.maximize || self.fullscreen || self.opacity < 0.995 || self.no_share || self.no_focus || self.workspace > 0)
+        (!self.app.trim().is_empty() || !self.title.trim().is_empty()) && (self.float || self.maximize || self.fullscreen || self.opacity < 0.995 || self.no_share || self.no_focus || self.workspace > 0 || self.tearing)
     }
 }
 
@@ -45,7 +48,7 @@ pub fn read(t: &toml::Table) -> Vec<Rule> {
             let flag = |k: &str| r.get(k).and_then(toml::Value::as_bool).unwrap_or(false);
             let opacity = r.get("opacity").and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))).unwrap_or(1.0);
             let workspace = r.get("workspace").and_then(toml::Value::as_integer).unwrap_or(0).clamp(0, 99) as u32;
-            Rule { app: text("app"), title: text("title"), float: flag("float"), maximize: flag("maximize"), fullscreen: flag("fullscreen"), opacity: opacity.clamp(0.1, 1.0), no_share: flag("no_share"), no_focus: flag("no_focus"), workspace }
+            Rule { app: text("app"), title: text("title"), float: flag("float"), maximize: flag("maximize"), fullscreen: flag("fullscreen"), opacity: opacity.clamp(0.1, 1.0), no_share: flag("no_share"), no_focus: flag("no_focus"), workspace, tearing: flag("tearing") }
         })
         .collect()
 }
@@ -66,6 +69,7 @@ pub fn value(rules: &[Rule]) -> toml::Value {
                 t.insert("no_share".into(), toml::Value::Boolean(r.no_share));
                 t.insert("no_focus".into(), toml::Value::Boolean(r.no_focus));
                 t.insert("workspace".into(), toml::Value::Integer(r.workspace.into()));
+                t.insert("tearing".into(), toml::Value::Boolean(r.tearing));
                 toml::Value::Table(t)
             })
             .collect(),
@@ -125,6 +129,9 @@ pub fn lua(rules: &[Rule]) -> String {
         if r.workspace > 0 {
             effects.push(format!("workspace = \"{} silent\"", r.workspace));
         }
+        if r.tearing {
+            effects.push("immediate = true".to_string());
+        }
         out.push_str(&format!("hl.window_rule({{ name = \"digit-user-{}\", match = {{ {} }}, {} }})\n", i + 1, matches.join(", "), effects.join(", ")));
     }
     if !out.is_empty() {
@@ -146,6 +153,10 @@ pub fn kdl(rules: &[Rule]) -> String {
         }
         if let Some(title) = title {
             matches.push(format!("title={}", raw(&title)));
+        }
+        // niri doesn't tear: a rule that only asks for that leaves nothing to write.
+        if !(r.float || r.maximize || r.fullscreen || r.opacity < 0.995 || r.no_share || r.no_focus) {
+            continue;
         }
         out.push_str(&format!("\nwindow-rule {{\n    match {}\n", matches.join(" ")));
         if r.float {
@@ -215,6 +226,17 @@ mod tests {
         assert!(kdl.contains(r#"block-out-from "screencast""#) && kdl.contains("open-focused false"), "{kdl}");
         // niri has no numbered workspaces to open on.
         assert!(!kdl.contains("workspace"), "{kdl}");
+    }
+
+    #[test]
+    fn tearing_is_written_for_hyprland_only() {
+        let rule = Rule { app: "cs2".into(), tearing: true, ..Rule::default() };
+        assert!(rule.active());
+        let mut t = toml::Table::new();
+        t.insert("window_rules".into(), value(std::slice::from_ref(&rule)));
+        assert_eq!(read(&t), vec![rule.clone()]);
+        assert!(lua(std::slice::from_ref(&rule)).contains("immediate = true"));
+        assert!(kdl(&[rule]).is_empty());
     }
 
     #[test]

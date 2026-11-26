@@ -429,6 +429,8 @@ fn compositor_with(t: &toml::Table, motion: bool, reduced: bool) -> String {
         input.push(format!("touchpad = {{ {} }}", touch.join(", ")));
     }
     general.push(format!("layout = {}", lua_str(tiled_layout(t))));
+    // Fullscreen windows that ask to tear (games with vsync off), or that a window rule lets.
+    general.push(format!("allow_tearing = {}", crate::prefs::flag(t, "hypr_tearing", false)));
     if let Some(v) = num("gaps_in", 4.0) {
         general.push(format!("gaps_in = {}", int(v)));
     }
@@ -665,6 +667,12 @@ mod tests {
         assert!(out.contains("animations = { enabled = false }"));
         assert!(out.lines().filter(|l| l.starts_with("hl.animation(")).all(|l| l.contains("enabled = false")));
         assert!(compositor_with(&"compositor_motion = true".parse().unwrap(), false, false).contains("animations = { enabled = true }"));
+    }
+
+    #[test]
+    fn tearing_stays_off_until_it_is_allowed() {
+        assert!(compositor_with(&toml::Table::new(), false, false).contains("allow_tearing = false"));
+        assert!(compositor_with(&"hypr_tearing = true".parse().unwrap(), false, false).contains("allow_tearing = true"));
     }
 
     #[test]

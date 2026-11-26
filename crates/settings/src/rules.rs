@@ -145,8 +145,9 @@ fn card(list: &gtk::Box, rules: &Rules, i: usize) -> gtk::Box {
     switch("fit_screen", "Open fullscreen", "", rule.fullscreen, |r, on| r.fullscreen = on);
     switch("visibility_off", "Hide from screen sharing", "Shows blank in screen shares and recordings", rule.no_share, |r, on| r.no_share = on);
     switch("do_not_touch", "Open without focus", "Keeps typing in the window you're using", rule.no_focus, |r, on| r.no_focus = on);
-    // niri's workspaces have no numbers to open on.
+    // niri's workspaces have no numbers to open on, and niri doesn't tear.
     if kit::setup::kind() != Some(kit::setup::Kind::Niri) {
+        switch("speed", "Allow tearing", "In fullscreen it shows each frame at once, for less input lag. Needs Allow tearing in Windows", rule.tearing, |r, on| r.tearing = on);
         let (row, end) = ui::row(Some("workspaces"), "Open on workspace", "Without switching to it");
         let labels: Vec<String> = std::iter::once("Where it opens".to_string()).chain((1..=10).map(|n| n.to_string())).collect();
         let labels: Vec<&str> = labels.iter().map(String::as_str).collect();

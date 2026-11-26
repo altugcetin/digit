@@ -118,6 +118,14 @@ pub fn build() -> gtk::Widget {
     }
     body.append(&fx);
 
+    // niri doesn't tear.
+    if !niri {
+        body.append(&ui::heading("Games"));
+        let games = ui::card();
+        toggle(&games, "sports_esports", "Allow tearing", "Fullscreen games with vsync off show each frame at once, for less input lag. A tear line can show", "hypr_tearing", b("hypr_tearing", false));
+        body.append(&games);
+    }
+
     scroll.upcast()
 }
 
