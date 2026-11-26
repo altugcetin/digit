@@ -314,7 +314,8 @@ fn restore_page(page: &gtk::Widget, value: f64, focus: Option<Vec<usize>>) {
     let settled = std::rc::Rc::new(std::cell::Cell::new(false));
     // A new adjustment has no range until layout, and pictures that wrap keep changing the
     // page's height for a few frames. Put the place back on each change, before painting so
-    // set_value can't be clamped to zero, until the page settles or the user scrolls.
+    // set_value can't be clamped to zero, until the page settles or the user scrolls. A page
+    // that came back shorter (a row was removed) goes as far down as it now can.
     let until = glib::monotonic_time() + 600_000;
     let ours = std::rc::Rc::new(std::cell::Cell::new(false));
     {
@@ -328,7 +329,8 @@ fn restore_page(page: &gtk::Widget, value: f64, focus: Option<Vec<usize>>) {
         });
     }
     scroll.vadjustment().connect_changed(move |adj| {
-        if settled.get() || glib::monotonic_time() > until || adj.page_size() <= 0.0 || adj.upper() - adj.page_size() < value { return; }
+        if settled.get() || glib::monotonic_time() > until || adj.page_size() <= 0.0 { return; }
+        let place = value.min(adj.upper() - adj.page_size()).max(0.0);
         if !focused.replace(true) && let Some(target) = target.as_ref().and_then(|w| w.upgrade()) {
             let viewport = viewport.as_ref().and_then(|v| v.upgrade());
             let follow = viewport.as_ref().is_some_and(|v| v.is_scroll_to_focus());
@@ -337,7 +339,7 @@ fn restore_page(page: &gtk::Widget, value: f64, focus: Option<Vec<usize>>) {
             if let Some(v) = &viewport { v.set_scroll_to_focus(follow); }
         }
         ours.set(true);
-        adj.set_value(value);
+        adj.set_value(place);
         ours.set(false);
     });
 }

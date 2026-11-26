@@ -67,7 +67,7 @@ fn settings_controls_and_dialogs() {
     adj.configure(0.0, 0.0, 100.0, 1.0, 10.0, 100.0);
     assert_eq!(adj.value(), 0.0, "an unallocated range cannot restore the offset");
     adj.configure(0.0, 0.0, 400.0, 1.0, 10.0, 100.0);
-    assert_eq!(adj.value(), 0.0, "a partial range must keep waiting");
+    assert_eq!(adj.value(), 300.0, "a short range goes as far down as it can, and keeps waiting");
     adj.configure(0.0, 0.0, 1000.0, 1.0, 10.0, 100.0);
     assert_eq!(adj.value(), 420.0);
     assert_eq!(gtk::prelude::GtkWindowExt::focus(&window), Some(switch.clone().upcast()));
