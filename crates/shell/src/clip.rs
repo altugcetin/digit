@@ -14,8 +14,8 @@ use wayland_protocols::ext::data_control::v1::client::{ext_data_control_device_v
 const KEEP: usize = 60;
 const IMAGES: usize = 8;
 const TEXT_MAX: usize = 512 * 1024;
-const IMAGE_MAX: usize = 24 * 1024 * 1024;
-const HISTORY_MAX: usize = 32 * 1024 * 1024;
+const IMAGE_MAX: usize = 16 * 1024 * 1024;
+const HISTORY_MAX: usize = 16 * 1024 * 1024;
 const PIXELS_MAX: usize = 16 * 1024 * 1024;
 const TEXT: [&str; 4] = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "STRING"];
 
@@ -275,7 +275,11 @@ fn slurp(fd: OwnedFd, limit: usize) -> Option<Vec<u8>> {
     let deadline = Instant::now() + Duration::from_millis(1500);
     loop {
         match file.read(&mut buf) {
-            Ok(0) => return Some(out),
+            Ok(0) => {
+                // Grown by doubling: what isn't filled goes back.
+                out.shrink_to_fit();
+                return Some(out);
+            }
             Ok(n) => {
                 out.extend_from_slice(&buf[..n]);
                 if out.len() > limit {
@@ -306,7 +310,7 @@ mod preview_tests {
     fn history_evicts_oldest_by_bytes() {
         let mut h = VecDeque::new();
         for id in 0..3 {
-            h.push_front(Rc::new(Clip { id, data: Data::Image(vec![0; 12 * 1024 * 1024]), at: 0, texture: RefCell::new(None) }));
+            h.push_front(Rc::new(Clip { id, data: Data::Image(vec![0; 6 * 1024 * 1024]), at: 0, texture: RefCell::new(None) }));
         }
         trim(&mut h);
         assert_eq!(h.iter().map(|c| c.id).collect::<Vec<_>>(), vec![2, 1]);
