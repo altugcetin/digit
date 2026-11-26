@@ -18,7 +18,6 @@ pub fn build() -> gtk::Widget {
         return scroll.upcast();
     }
     crate::compositor::typing(&body);
-    let live = kit::setup::shortcuts();
     // Only what the compositor can do: niri has no scratchpad or pinned windows, for one.
     // Going to and moving to workspaces are set as a whole, at the top of their group.
     let all: Vec<Bind> = keybinds::all().into_iter().filter(kit::setup::supports).filter(|b| !numbered(b)).collect();
@@ -43,11 +42,13 @@ pub fn build() -> gtk::Widget {
         body.append(&card);
     }
     body.append(&ui::heading("Your shortcuts"));
-    body.append(&custom_card(&live));
-    // A fresh visit starts at the top even when a button deep in the page takes focus. A page
-    // redrawn after a change keeps its place: `reload` puts it back.
-    scroll.connect_map(|s| {
-        if KEEP.with(|k| k.replace(false)) {
+    body.append(&custom_card());
+    // A visit starts at the top even when a button deep in the page takes focus. Only the first
+    // time it shows: changes update the page where it is, and it must stay where it was if it's
+    // shown again (the compositor reloading its config, for one).
+    let first = Rc::new(Cell::new(true));
+    scroll.connect_map(move |s| {
+        if !first.replace(false) {
             return;
         }
         let adj = s.vadjustment();
@@ -61,10 +62,6 @@ pub fn build() -> gtk::Widget {
         });
     });
     scroll.upcast()
-}
-
-thread_local! {
-    static KEEP: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Lets a row's subtitle wrap instead of being cut off.
@@ -285,7 +282,34 @@ fn taken(live: &[Bind], keys: &str, except: &str) -> Option<String> {
     live.iter().find(|b| b.id != except && keybinds::normalize(&b.keys) == k).map(|b| b.label.clone())
 }
 
-fn custom_card(live: &[Bind]) -> gtk::Box {
+/// Your own shortcuts, in a holder that redraws them in place after each change: redrawing
+/// the page instead would lose its place.
+fn custom_card() -> gtk::Box {
+    let holder = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    fill_custom(&holder);
+    holder
+}
+
+/// Saves the list of your own shortcuts and redraws them once the click that changed them is
+/// over (its button is among the ones redrawn).
+fn keep_custom(holder: &glib::WeakRef<gtk::Box>, list: &[(String, String, String)]) {
+    if !save(keybinds::set_custom(list)) {
+        return;
+    }
+    let holder = holder.clone();
+    glib::idle_add_local_once(move || {
+        if let Some(h) = holder.upgrade() {
+            fill_custom(&h);
+        }
+    });
+}
+
+fn fill_custom(holder: &gtk::Box) {
+    while let Some(child) = holder.first_child() {
+        holder.remove(&child);
+    }
+    let live = kit::setup::shortcuts();
+    let weak = holder.downgrade();
     let card = ui::card();
     let list = keybinds::custom();
     for (i, (keys, command, label)) in list.iter().enumerate() {
@@ -293,18 +317,19 @@ fn custom_card(live: &[Bind]) -> gtk::Box {
         let (row, end) = ui::row(Some("terminal"), title, if label.is_empty() { "" } else { command });
         let remove = kit::app::control("delete", "");
         remove.set_tooltip_text(Some("Remove"));
+        let gone = weak.clone();
         remove.connect_clicked(move |_| {
             let mut list = keybinds::custom();
             if i < list.len() {
                 list.remove(i);
             }
-            commit(keybinds::set_custom(&list));
+            keep_custom(&gone, &list);
         });
         end.append(&remove);
         let keys = key_button(keys);
-        let others = live.to_vec();
+        let (others, weak) = (live.to_vec(), weak.clone());
         keys.connect_clicked(move |btn| {
-            let others = others.clone();
+            let (others, weak) = (others.clone(), weak.clone());
             let current = keybinds::custom().get(i).map(|b| b.0.clone()).unwrap_or_default();
             record(btn.upcast_ref(), &current, None, move |picked| {
                 if picked.is_empty() {
@@ -318,7 +343,7 @@ fn custom_card(live: &[Bind]) -> gtk::Box {
                 if let Some(e) = list.get_mut(i) {
                     e.0 = picked;
                 }
-                commit(keybinds::set_custom(&list));
+                keep_custom(&weak, &list);
             });
         });
         end.append(&keys);
@@ -326,9 +351,9 @@ fn custom_card(live: &[Bind]) -> gtk::Box {
     }
     let (row, end) = ui::row(Some("add"), "Add a shortcut", "Run any command, such as \"firefox\" or \"kitty -e btop\"");
     let add = ui::button("Add", "accent");
-    let others = live.to_vec();
+    let (others, weak) = (live.to_vec(), weak.clone());
     add.connect_clicked(move |btn| {
-        let (btn, others) = (btn.clone(), others.clone());
+        let (btn, others, weak) = (btn.clone(), others.clone(), weak.clone());
         ui::prompt(ui::root(&btn), "New shortcut", "The command it runs. Next, press the keys for it.", Some(("Command", false)), "Next", move |cmd| {
             let Some(cmd) = cmd.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()) else { return };
             record(btn.upcast_ref(), "", None, move |picked| {
@@ -341,17 +366,16 @@ fn custom_card(live: &[Bind]) -> gtk::Box {
                 }
                 let mut list = keybinds::custom();
                 list.push((picked, cmd.clone(), String::new()));
-                commit(keybinds::set_custom(&list));
+                keep_custom(&weak, &list);
             });
         });
     });
     end.append(&add);
     card.append(&row);
-    card
+    holder.append(&card);
 }
 
-/// Saves a change, regenerates digit's Hyprland files and redraws the page.
-/// Saves a change and regenerates digit's Hyprland files, without redrawing the page.
+/// Saves a change and regenerates digit's compositor files, without redrawing the page.
 fn save(r: Result<(), String>) -> bool {
     match r.and_then(|_| kit::setup::apply()) {
         Ok(()) => true,
@@ -360,15 +384,6 @@ fn save(r: Result<(), String>) -> bool {
             false
         }
     }
-}
-
-fn commit(r: Result<(), String>) {
-    if let Err(e) = r.and_then(|_| kit::setup::apply()) {
-        ui::fail(&e);
-        return;
-    }
-    KEEP.with(|k| k.set(true));
-    crate::reload("keyboard");
 }
 
 const WHEEL_MODIFIERS: [&str; 4] = ["SUPER", "CTRL", "ALT", "SHIFT"];
