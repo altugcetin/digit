@@ -578,9 +578,12 @@ impl Strip {
             imp.battery_at.set(Some(now));
             imp.battery.set(battery());
         }
-        let mut glyphs: Vec<(&str, Option<String>)> = Vec::with_capacity(3);
+        let mut glyphs: Vec<(&str, Option<String>)> = Vec::with_capacity(6);
         if app.dnd.get() {
             glyphs.push(("do_not_disturb_on", None));
+        }
+        if let Some(link) = app.link.get() {
+            glyphs.push((link.glyph(), None));
         }
         if let Some((level, muted)) = app.volume.get() {
             let g = if muted || level <= 0.001 { "volume_off" } else if level < 0.5 { "volume_down" } else { "volume_up" };

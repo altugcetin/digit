@@ -135,6 +135,101 @@ pub fn bars(strength: u8) -> &'static str {
     }
 }
 
+/// The network as the bar shows it: what the computer is connected through now.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Link {
+    /// Over Wi-Fi, at this signal strength (0–100).
+    Wifi(u8),
+    Wired,
+    Connecting,
+    Offline,
+    /// Wi-Fi turned off, and nothing else connected.
+    WifiOff,
+}
+
+impl Link {
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Link::Wifi(strength) => bars(strength),
+            Link::Wired => "lan",
+            Link::Connecting => "wifi_find",
+            Link::Offline => "signal_wifi_bad",
+            Link::WifiOff => "wifi_off",
+        }
+    }
+}
+
+const ETHERNET: u32 = 1;
+const WIFI: u32 = 2;
+const ACTIVATED: u32 = 100;
+
+/// What NetworkManager reports, enough to tell the link: its overall state, whether Wi-Fi is
+/// turned on, each device's type and state, and the primary connection's type.
+struct Seen {
+    state: u32,
+    wifi_on: bool,
+    devices: Vec<(u32, u32)>,
+    primary: String,
+}
+
+/// The link `seen` describes; Wi-Fi comes with no strength yet. With both cable and Wi-Fi up,
+/// the one NetworkManager routes through wins.
+fn pick(seen: &Seen) -> Link {
+    let up = |kind| seen.devices.iter().any(|&(k, s)| k == kind && s == ACTIVATED);
+    let (wired, wifi) = (up(ETHERNET), up(WIFI));
+    if wired && (!wifi || seen.primary == "802-3-ethernet") {
+        return Link::Wired;
+    }
+    if wifi {
+        return Link::Wifi(0);
+    }
+    // Device states 40–90 are the steps of connecting.
+    if seen.state == 40 || seen.devices.iter().any(|&(k, s)| (k == ETHERNET || k == WIFI) && (40..ACTIVATED).contains(&s)) {
+        return Link::Connecting;
+    }
+    if !seen.wifi_on && seen.devices.iter().any(|&(k, _)| k == WIFI) {
+        return Link::WifiOff;
+    }
+    Link::Offline
+}
+
+/// What the computer is connected through now; `None` when NetworkManager isn't running.
+pub async fn link(conn: &zbus::Connection) -> Option<Link> {
+    let root = proxy(conn, ROOT, NM).await.ok()?;
+    let state = root.get_property::<u32>("State").await.ok()?;
+    let mut seen = Seen { state, wifi_on: root.get_property::<bool>("WirelessEnabled").await.unwrap_or(false), devices: Vec::new(), primary: String::new() };
+    let mut wifi_device = None;
+    for path in root.get_property::<Vec<OwnedObjectPath>>("Devices").await.unwrap_or_default() {
+        let Ok(d) = proxy(conn, path.as_str(), "org.freedesktop.NetworkManager.Device").await else { continue };
+        let kind = d.get_property::<u32>("DeviceType").await.unwrap_or(0);
+        let state = d.get_property::<u32>("State").await.unwrap_or(0);
+        if kind == WIFI && state == ACTIVATED {
+            wifi_device = Some(path.to_string());
+        }
+        seen.devices.push((kind, state));
+    }
+    if let Ok(primary) = root.get_property::<OwnedObjectPath>("PrimaryConnection").await
+        && primary.as_str() != "/"
+        && let Ok(active) = proxy(conn, primary.as_str(), "org.freedesktop.NetworkManager.Connection.Active").await
+    {
+        seen.primary = active.get_property::<String>("Type").await.unwrap_or_default();
+    }
+    let link = pick(&seen);
+    if link != Link::Wifi(0) {
+        return Some(link);
+    }
+    let mut strength = 0;
+    if let Some(dev) = wifi_device
+        && let Ok(wl) = proxy(conn, &dev, "org.freedesktop.NetworkManager.Device.Wireless").await
+        && let Ok(ap) = wl.get_property::<OwnedObjectPath>("ActiveAccessPoint").await
+        && ap.as_str() != "/"
+        && let Ok(p) = proxy(conn, ap.as_str(), "org.freedesktop.NetworkManager.AccessPoint").await
+    {
+        strength = p.get_property::<u8>("Strength").await.unwrap_or(0);
+    }
+    Some(Link::Wifi(strength))
+}
+
 async fn proxy(conn: &zbus::Connection, path: &str, iface: &'static str) -> Result<zbus::Proxy<'static>, String> {
     zbus::proxy::Builder::new(conn)
         .destination(NM)
@@ -385,4 +480,43 @@ pub async fn join(conn: &zbus::Connection, device: &str, net: &Network, password
 pub async fn changes(conn: &zbus::Connection) -> Option<zbus::MessageStream> {
     let rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).sender(NM).ok()?.build();
     zbus::MessageStream::for_match_rule(rule, conn, Some(64)).await.ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seen(state: u32, wifi_on: bool, devices: &[(u32, u32)], primary: &str) -> Seen {
+        Seen { state, wifi_on, devices: devices.to_vec(), primary: primary.into() }
+    }
+
+    #[test]
+    fn the_link_follows_what_is_connected() {
+        // Device type 1 is a cable, 2 Wi-Fi; state 100 is connected, 30 disconnected, 20 unplugged.
+        assert_eq!(pick(&seen(70, true, &[(2, 100)], "802-11-wireless")), Link::Wifi(0));
+        assert_eq!(pick(&seen(70, true, &[(1, 100), (2, 30)], "802-3-ethernet")), Link::Wired);
+        // With both up, the primary connection decides, and a VPN on top doesn't hide Wi-Fi.
+        assert_eq!(pick(&seen(70, true, &[(1, 100), (2, 100)], "802-3-ethernet")), Link::Wired);
+        assert_eq!(pick(&seen(70, true, &[(1, 100), (2, 100)], "802-11-wireless")), Link::Wifi(0));
+        assert_eq!(pick(&seen(70, true, &[(2, 100)], "wireguard")), Link::Wifi(0));
+        // Bridges, loopback and the like (other types) don't count as a connection.
+        assert_eq!(pick(&seen(70, true, &[(13, 100), (32, 100), (2, 30)], "bridge")), Link::Offline);
+    }
+
+    #[test]
+    fn without_a_connection_it_says_why() {
+        assert_eq!(pick(&seen(40, true, &[(2, 30)], "")), Link::Connecting);
+        assert_eq!(pick(&seen(20, true, &[(2, 70)], "")), Link::Connecting);
+        assert_eq!(pick(&seen(20, false, &[(2, 20), (1, 20)], "")), Link::WifiOff);
+        assert_eq!(pick(&seen(20, true, &[(2, 30)], "")), Link::Offline);
+        // No Wi-Fi hardware: an unplugged cable is just offline.
+        assert_eq!(pick(&seen(20, false, &[(1, 20)], "")), Link::Offline);
+    }
+
+    #[test]
+    fn wifi_shows_its_signal_in_bars() {
+        let glyphs: Vec<&str> = [5, 30, 50, 70, 95].map(|s| Link::Wifi(s).glyph()).to_vec();
+        assert_eq!(glyphs, ["signal_wifi_0_bar", "network_wifi_1_bar", "network_wifi_2_bar", "network_wifi_3_bar", "signal_wifi_4_bar"]);
+        assert_eq!([Link::Wired, Link::Connecting, Link::Offline, Link::WifiOff].map(Link::glyph), ["lan", "wifi_find", "signal_wifi_bad", "wifi_off"]);
+    }
 }

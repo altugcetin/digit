@@ -224,6 +224,8 @@ pub struct App {
     pub date: RefCell<String>,
     pub media: RefCell<Media>,
     pub volume: Cell<Option<(f64, bool)>>,
+    /// What the computer is connected through, for the bar; `None` without NetworkManager.
+    pub link: Cell<Option<kit::nm::Link>>,
     pub lights: RefCell<crate::privacy::Lights>,
     pub spaces: RefCell<Vec<crate::compositor::Space>>,
     pub gadgets: RefCell<Vec<crate::devices::Gadget>>,
@@ -277,6 +279,7 @@ impl App {
             date: RefCell::new(String::new()),
             media: RefCell::new(Media::default()),
             volume: Cell::new(None),
+            link: Cell::new(None),
             lights: RefCell::new(crate::privacy::Lights::default()),
             spaces: RefCell::new(Vec::new()),
             gadgets: RefCell::new(Vec::new()),

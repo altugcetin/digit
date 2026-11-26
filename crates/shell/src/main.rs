@@ -49,6 +49,7 @@ mod lock;
 mod media;
 mod menus;
 mod metrics;
+mod network;
 mod night;
 mod notch;
 mod notify;
@@ -221,6 +222,7 @@ fn run() {
         }
     });
     idle::start(&app);
+    network::start(&app);
     brightness::watch_keyboard();
     glib::spawn_future_local(brightness::restore_keyboard(false));
     screentime::start(&app);
