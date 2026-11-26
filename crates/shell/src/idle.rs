@@ -277,6 +277,7 @@ fn sleep_watch(weak: Weak<App>) {
                 "PrepareForSleep" => {
                     let Ok(going) = msg.body().deserialize::<bool>() else { continue };
                     if going {
+                        crate::brightness::keep_keyboard().await;
                         if app.prefs.borrow().lock_on_sleep {
                             crate::lock::lock(&app);
                             let deadline = std::time::Instant::now() + Duration::from_secs(3);
@@ -285,8 +286,18 @@ fn sleep_watch(weak: Weak<App>) {
                             }
                         }
                         held = None;
-                    } else if held.is_none() {
-                        held = inhibit(&conn).await;
+                    } else {
+                        // Firmware often turns the keyboard light off as the computer wakes,
+                        // sometimes a moment after.
+                        glib::spawn_future_local(async {
+                            for wait in [700, 2500] {
+                                glib::timeout_future(Duration::from_millis(wait)).await;
+                                crate::brightness::restore_keyboard(true).await;
+                            }
+                        });
+                        if held.is_none() {
+                            held = inhibit(&conn).await;
+                        }
                     }
                 }
                 "Lock" if ours.as_deref().is_some_and(|o| o == path) => {

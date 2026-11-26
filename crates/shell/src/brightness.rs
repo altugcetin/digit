@@ -71,10 +71,110 @@ impl Keyboard {
         }
     }
 
-    /// Moves the light to `level` (never past its highest); whether logind did it.
+    /// Moves the light to `level` (never past its highest) and remembers it; whether logind did it.
     pub async fn set(&self, level: u32) -> bool {
-        set("leds", &self.name, level.min(self.max)).await
+        let level = level.min(self.max);
+        let done = set("leds", &self.name, level).await;
+        if done {
+            remember(&self.name, level);
+        }
+        done
     }
+}
+
+/// The level the keyboard light comes back to: its name, its level and the boot it was set in.
+#[derive(Debug, PartialEq)]
+struct Kept {
+    name: String,
+    level: u32,
+    boot: String,
+}
+
+fn memory() -> PathBuf {
+    kit::theme::state_dir().join("keyboard-light")
+}
+
+fn boot() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id").map(|b| b.trim().to_owned()).unwrap_or_default()
+}
+
+fn parse(text: &str) -> Option<Kept> {
+    let mut lines = text.lines().map(str::trim);
+    let name = lines.next().filter(|n| !n.is_empty())?.to_owned();
+    let level = lines.next()?.parse().ok()?;
+    Some(Kept { name, level, boot: lines.next().unwrap_or_default().to_owned() })
+}
+
+fn recalled() -> Option<Kept> {
+    parse(&std::fs::read_to_string(memory()).ok()?)
+}
+
+/// Keeps `level` as the one the keyboard light comes back to.
+fn remember(name: &str, level: u32) {
+    let kept = Kept { name: name.to_owned(), level, boot: boot() };
+    if recalled().as_ref() != Some(&kept) {
+        let _ = kit::atomic::write(&memory(), format!("{}\n{}\n{}\n", kept.name, kept.level, kept.boot));
+    }
+}
+
+/// The level to put the light back to, if it needs it: after waking, and the first time the
+/// shell starts in a boot. A shell restarted within a boot finds it where its user left it.
+fn comeback(kept: &Kept, now: &Keyboard, boot: &str, woke: bool) -> Option<u32> {
+    if kept.name != now.name || (!woke && kept.boot == boot) {
+        return None;
+    }
+    let level = kept.level.min(now.max);
+    (level != now.level).then_some(level)
+}
+
+/// Remembers where the keyboard light is, before the computer sleeps.
+pub async fn keep_keyboard() {
+    if let Some(now) = gtk::gio::spawn_blocking(keyboard).await.ok().flatten() {
+        remember(&now.name, now.level);
+    }
+}
+
+/// Puts the keyboard light back where it was: after waking (`woke`), as firmware often turns it
+/// off then, and when the shell starts in a new boot.
+pub async fn restore_keyboard(woke: bool) {
+    let Some(now) = gtk::gio::spawn_blocking(keyboard).await.ok().flatten() else { return };
+    // Nothing kept yet: where it is now is where it comes back to.
+    let Some(kept) = recalled() else { return remember(&now.name, now.level) };
+    match comeback(&kept, &now, &boot(), woke) {
+        Some(level) => {
+            now.set(level).await;
+        }
+        None if kept.name == now.name => remember(&now.name, now.level),
+        None => {}
+    }
+}
+
+/// Remembers the levels the keyboard's own key (Fn+Space and the like) sets: the kernel marks
+/// `brightness_hw_changed` when the firmware moves the light.
+pub fn watch_keyboard() {
+    use std::io::{Read, Seek};
+    let Some(dev) = devices("leds", true).into_iter().next() else { return };
+    let Some(name) = dev.file_name().map(|n| n.to_string_lossy().into_owned()) else { return };
+    let Ok(mut file) = std::fs::File::open(dev.join("brightness_hw_changed")) else { return };
+    // A first read arms it; until the key is first pressed, there's nothing to read.
+    let _ = file.read(&mut [0u8; 16]);
+    let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
+    glib_unix::unix_fd_add_local(fd, glib::IOCondition::PRI | glib::IOCondition::ERR, move |_, _| {
+        let mut text = String::new();
+        if file.rewind().is_err() {
+            return glib::ControlFlow::Break;
+        }
+        match file.read_to_string(&mut text) {
+            Ok(_) => {
+                if let Ok(level) = text.trim().parse() {
+                    remember(&name, level);
+                }
+            }
+            Err(e) if e.raw_os_error() == Some(libc::ENODATA) => {}
+            Err(_) => return glib::ControlFlow::Break,
+        }
+        glib::ControlFlow::Continue
+    });
 }
 
 pub fn step(app: &Rc<App>, action: &str) -> bool {
@@ -94,7 +194,9 @@ pub fn step(app: &Rc<App>, action: &str) -> bool {
     let value = ((next * max as f64).round() as u32).min(max);
     let name = dev.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     glib::spawn_future_local(async move {
-        set(class, &name, value).await;
+        if set(class, &name, value).await && kbd {
+            remember(&name, value);
+        }
     });
     app.request(Peek::Osd { icon, text: label.into(), level: Some(value as f64 / max as f64) });
     true
@@ -102,7 +204,34 @@ pub fn step(app: &Rc<App>, action: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::Keyboard;
+    use super::{Keyboard, Kept, comeback, parse};
+
+    #[test]
+    fn the_kept_level_reads_back_and_bad_files_are_ignored() {
+        let kept = Kept { name: "tpacpi::kbd_backlight".into(), level: 2, boot: "b1".into() };
+        assert_eq!(parse("tpacpi::kbd_backlight\n2\nb1\n"), Some(kept));
+        assert_eq!(parse("tpacpi::kbd_backlight\n2\n").map(|k| k.boot), Some(String::new()));
+        for bad in ["", "\n2\n", "tpacpi::kbd_backlight\nhigh\n", "tpacpi::kbd_backlight"] {
+            assert_eq!(parse(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_light_comes_back_after_waking_and_in_a_new_boot_only() {
+        let kept = |level, boot: &str| Kept { name: "tpacpi::kbd_backlight".into(), level, boot: boot.into() };
+        // Woken up with the light turned off by the firmware.
+        assert_eq!(comeback(&kept(2, "b1"), &kbd(0, 2), "b1", true), Some(2));
+        assert_eq!(comeback(&kept(2, "b1"), &kbd(2, 2), "b1", true), None);
+        // The shell starting again within a boot leaves the light where it is.
+        assert_eq!(comeback(&kept(2, "b1"), &kbd(0, 2), "b1", false), None);
+        // A new boot brings back the last level, never past the light's highest.
+        assert_eq!(comeback(&kept(2, "b0"), &kbd(0, 2), "b1", false), Some(2));
+        assert_eq!(comeback(&kept(9, "b0"), &kbd(0, 2), "b1", false), Some(2));
+        assert_eq!(comeback(&kept(0, "b0"), &kbd(2, 2), "b1", false), Some(0));
+        // Another keyboard's level is not this one's.
+        let other = Kept { name: "dell::kbd_backlight".into(), level: 2, boot: "b0".into() };
+        assert_eq!(comeback(&other, &kbd(0, 2), "b1", true), None);
+    }
 
     fn kbd(level: u32, max: u32) -> Keyboard {
         Keyboard { name: "tpacpi::kbd_backlight".into(), max, level }

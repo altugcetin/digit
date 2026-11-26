@@ -221,6 +221,8 @@ fn run() {
         }
     });
     idle::start(&app);
+    brightness::watch_keyboard();
+    glib::spawn_future_local(brightness::restore_keyboard(false));
     screentime::start(&app);
     night::start(&app);
     sni::start(&app);
@@ -376,6 +378,7 @@ fn place(app: &Rc<App>) {
         let notch = notch::Notch::new(app, &monitor);
         app.notches.borrow_mut().push(notch);
     }
+    awake::keep(app);
 }
 
 fn theme_preferences() -> Vec<Option<toml::Value>> {
