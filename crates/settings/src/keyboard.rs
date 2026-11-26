@@ -44,14 +44,14 @@ pub fn build() -> gtk::Widget {
     }
     body.append(&ui::heading("Your shortcuts"));
     body.append(&custom_card(&live));
-    // Start at the top even when a button deep in the page takes focus.
-    // Remember how far down the page is, so redrawing it after a change keeps the place;
-    // a fresh visit starts at the top even when a button deep in the page takes focus.
-    let adj = scroll.vadjustment();
-    adj.connect_value_changed(|a| SCROLLED.with(|c| c.set(a.value())));
+    // A fresh visit starts at the top even when a button deep in the page takes focus. A page
+    // redrawn after a change keeps its place: `reload` puts it back.
     scroll.connect_map(|s| {
+        if KEEP.with(|k| k.replace(false)) {
+            return;
+        }
         let adj = s.vadjustment();
-        let to = if KEEP.with(|k| k.replace(false)) { SCROLLED.with(Cell::get) } else { 0.0 };
+        let to = 0.0;
         // The page's height settles over the first frames; keep placing it until it fits.
         let tries = Rc::new(Cell::new(0));
         glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
@@ -64,7 +64,6 @@ pub fn build() -> gtk::Widget {
 }
 
 thread_local! {
-    static SCROLLED: Cell<f64> = const { Cell::new(0.0) };
     static KEEP: Cell<bool> = const { Cell::new(false) };
 }
 
