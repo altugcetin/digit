@@ -37,6 +37,7 @@ enum Tile {
     Quiet,
     Awake,
     Night,
+    Keyboard,
     Power,
 }
 
@@ -210,6 +211,12 @@ struct State {
     polling: bool,
     scrim: Option<gtk::Window>,
     power: Option<Power>,
+    /// The keyboard light, when the computer has one.
+    kbd: Option<crate::brightness::Keyboard>,
+    /// Presses of the keyboard light tile still on their way to logind, and when the last one
+    /// got there: a reading taken before then would show the old level again.
+    kbd_busy: u32,
+    kbd_set: i64,
     stats: Option<crate::sysmon::Stats>,
     sampler: crate::sysmon::Sampler,
     sampling: bool,
@@ -413,6 +420,9 @@ impl Control {
             polling: false,
             scrim: None,
             power: None,
+            kbd: None,
+            kbd_busy: 0,
+            kbd_set: 0,
             stats: None,
             sampler: crate::sysmon::Sampler::default(),
             sampling: false,
@@ -667,6 +677,7 @@ impl Control {
         self.refresh_sound();
         self.poll();
         self.refresh();
+        self.read_kbd();
         self.sample();
         self.kick();
     }
@@ -698,6 +709,10 @@ impl Control {
                     }
                     (st.open, st.sampler.wants_nvidia())
                 };
+                // Its own key may have changed it.
+                if beat > 0 {
+                    Control(s.clone()).read_kbd();
+                }
                 drop(s);
                 if !open {
                     return;
@@ -768,6 +783,54 @@ impl Control {
         });
     }
 
+    /// Reads the keyboard light off the main thread, as sysfs may ask the firmware.
+    fn read_kbd(&self) {
+        let weak = Rc::downgrade(&self.0);
+        let asked = glib::monotonic_time();
+        glib::spawn_future_local(async move {
+            let kbd = gtk::gio::spawn_blocking(crate::brightness::keyboard).await.ok().flatten();
+            let Some(s) = weak.upgrade() else { return };
+            {
+                let mut st = s.borrow_mut();
+                if st.kbd_busy > 0 || asked < st.kbd_set || st.kbd == kbd {
+                    return;
+                }
+                st.kbd = kbd;
+            }
+            Control(s).changed();
+        });
+    }
+
+    /// Moves the keyboard light to its next level.
+    fn press_kbd(&self) {
+        let Some(mut kbd) = self.0.borrow().kbd.clone() else { return };
+        kbd.level = kbd.next();
+        let level = kbd.level;
+        let app = {
+            let mut st = self.0.borrow_mut();
+            st.kbd = Some(kbd.clone());
+            st.kbd_busy += 1;
+            st.canvas.queue_draw();
+            st.app.clone()
+        };
+        app.request(crate::app::Peek::Osd { icon: "keyboard", text: "Keyboard light".into(), level: Some(level as f64 / kbd.max.max(1) as f64) });
+        let weak = Rc::downgrade(&self.0);
+        glib::spawn_future_local(async move {
+            kbd.set(level).await;
+            let Some(s) = weak.upgrade() else { return };
+            let settled = {
+                let mut st = s.borrow_mut();
+                st.kbd_busy = st.kbd_busy.saturating_sub(1);
+                st.kbd_set = glib::monotonic_time();
+                st.kbd_busy == 0
+            };
+            // Shows where the light really is, also when logind turned the press down.
+            if settled {
+                Control(s).read_kbd();
+            }
+        });
+    }
+
     fn resize(&self) {
         self.resize_with(260, motion::STANDARD);
     }
@@ -832,6 +895,7 @@ impl Control {
                 app.request(crate::app::Peek::Mode { icon: "nightlight", label: "Night Light", on: !on });
                 self.0.borrow().canvas.queue_draw();
             }
+            Some(Hit::Tile(Tile::Keyboard)) => self.press_kbd(),
             Some(Hit::Tile(Tile::Power)) => {
                 let Some(p) = self.0.borrow().power.clone() else { return };
                 let at = p.list.iter().position(|x| *x == p.active).unwrap_or(0);
@@ -1065,6 +1129,9 @@ impl State {
             t.push(Tile::Awake);
         }
         t.push(Tile::Night);
+        if self.kbd.is_some() {
+            t.push(Tile::Keyboard);
+        }
         if self.power.as_ref().is_some_and(|p| p.list.len() > 1) {
             t.push(Tile::Power);
         }
@@ -1161,6 +1228,10 @@ impl State {
                     _ => "Off".to_string(),
                 };
                 ("nightlight", "Night Light".into(), state, on)
+            }
+            Tile::Keyboard => {
+                let (state, on) = self.kbd.as_ref().map_or(("Off".into(), false), |k| (k.label(), k.level > 0));
+                ("keyboard", "Keyboard light".into(), state, on)
             }
             Tile::Power => {
                 let p = self.power.clone().unwrap_or_default();
