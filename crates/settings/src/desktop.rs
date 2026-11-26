@@ -144,6 +144,17 @@ fn show_controlled(row: &gtk::Box, key: &str, sub: &str) {
     }
 }
 
+/// A row's title, as `ui::row` makes it.
+pub(crate) fn name_label(w: &gtk::Widget) -> Option<gtk::Label> {
+    if let Some(l) = w.downcast_ref::<gtk::Label>().filter(|l| l.has_css_class("name")) { return Some(l.clone()); }
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        if let Some(l) = name_label(&c) { return Some(l); }
+        child = c.next_sibling();
+    }
+    None
+}
+
 pub(crate) fn sub_label(w: &gtk::Widget) -> Option<gtk::Label> {
     if let Some(l) = w.downcast_ref::<gtk::Label>().filter(|l| l.has_css_class("sub")) { return Some(l.clone()); }
     let mut child = w.first_child();

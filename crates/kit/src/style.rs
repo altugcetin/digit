@@ -371,6 +371,8 @@ window.digit-dialog, window.digit-dialog.background {{ background: transparent; 
 button.ctl {{ background: transparent; border: none; box-shadow: none; outline: none; border-radius: 999px; min-width: 32px; min-height: 32px; padding: 0; color: {meta}; }}
 button.ctl:hover {{ background: alpha({main}, 0.10); color: {main}; }}
 button.ctl.close:hover {{ background: alpha({risk}, 0.22); color: {risk}; }}
+button.ctl.danger {{ color: {risk}; }}
+button.ctl.danger:hover {{ background: alpha({risk}, 0.22); color: {risk}; }}
 button.ctl .sym {{ font-size: 18px; }}
 /* Buttons light up softly and give when they're pressed, as the shell's do. */
 button.ctl, button.pill, .seg > button, dropdown.picker > button, menubutton > button, button.style-card, .badge, button.swatch {{ transition: background 160ms ease, color 160ms ease, opacity 120ms ease, box-shadow 160ms ease, transform 260ms cubic-bezier(0.05, 0.7, 0.1, 1); }}
