@@ -474,7 +474,7 @@ impl Control {
             let Some(s) = weak.upgrade() else { return };
             let me = Control(s);
             match me.hit(x, y) {
-                Some(Hit::Tile(t @ (Tile::Network | Tile::Bluetooth | Tile::Power))) | Some(Hit::Detail(detail::D::Expand(t))) => me.expand(t),
+                Some(Hit::Tile(t @ (Tile::Network | Tile::Bluetooth))) | Some(Hit::Detail(detail::D::Expand(t))) => me.expand(t),
                 _ => {}
             }
         });
@@ -1269,7 +1269,7 @@ impl State {
             let lit = self.feel.on(key, on, now);
             let base = pal.tile(0.06 + 0.05 * self.feel.glow(key, now));
             let (ink, sub) = (pal.on_accent.mix(pal.ink_main, lit), pal.on_accent.mix(pal.accent, 0.72).mix(pal.ink_meta, lit));
-            let more = matches!(tile, Tile::Network | Tile::Bluetooth | Tile::Power);
+            let more = matches!(tile, Tile::Network | Tile::Bluetooth);
             let text_w = tile_w - 62.0 - if more { 22.0 } else { 0.0 };
             let (ix, mid) = (tx + 30.0, ty + TILE_H / 2.0);
             feel::scaled(s, self.feel.scale(key, feel::TILE, now), tx + tile_w / 2.0, mid, || {

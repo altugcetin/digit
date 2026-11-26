@@ -144,7 +144,7 @@ fn show_controlled(row: &gtk::Box, key: &str, sub: &str) {
     }
 }
 
-fn sub_label(w: &gtk::Widget) -> Option<gtk::Label> {
+pub(crate) fn sub_label(w: &gtk::Widget) -> Option<gtk::Label> {
     if let Some(l) = w.downcast_ref::<gtk::Label>().filter(|l| l.has_css_class("sub")) { return Some(l.clone()); }
     let mut child = w.first_child();
     while let Some(c) = child {
@@ -657,7 +657,7 @@ pub fn sections(page: &str) -> &'static [Section] {
         "spotlight" => &[search, scopes, clipboard],
         "compositor" => &[session],
         "displays" => &[night_light],
-        "power" => &[crate::battery::section_for, power],
+        "power" => &[power, crate::battery::section_for],
         "screenshots" => &[screenshots],
         "recording" => &[recording_capture, recording_sound, recording_replay, recording_saving, recording_streaming, recording_shortcuts],
         "files" => &[files],
