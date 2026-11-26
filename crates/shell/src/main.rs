@@ -61,6 +61,7 @@ mod polkit;
 mod menubar;
 mod popmenu;
 mod power;
+mod powermode;
 mod privacy;
 mod prism;
 mod providers;
@@ -211,6 +212,7 @@ fn run() {
     gsr::restore(&app);
     gamebar::restore(&app);
     power::start(&app);
+    powermode::start(&app);
     bluetooth::start(&app);
     devices::start(&app);
     phone::refresh(&app);

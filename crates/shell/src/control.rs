@@ -13,9 +13,8 @@ use kit::motion::{self, Tween};
 use kit::nm;
 use kit::palette::Rgb;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::{Rc, Weak};
-use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+use zbus::zvariant::OwnedObjectPath;
 
 mod detail;
 mod notes;
@@ -39,42 +38,6 @@ enum Tile {
     Night,
     Keyboard,
     Power,
-}
-
-#[derive(Clone, Default)]
-struct Power {
-    bus: String,
-    path: String,
-    active: String,
-    list: Vec<String>,
-}
-
-async fn read_power() -> Option<Power> {
-    let conn = crate::bus::system().await.ok()?;
-    for (bus, path) in [("org.freedesktop.UPower.PowerProfiles", "/org/freedesktop/UPower/PowerProfiles"), ("net.hadess.PowerProfiles", "/net/hadess/PowerProfiles")] {
-        let Ok(p) = zbus::Proxy::new_owned(conn.clone(), bus, path, bus).await else { continue };
-        let call = p.get_property::<String>("ActiveProfile");
-        let t = glib::timeout_future(std::time::Duration::from_millis(700));
-        let active = match futures_util::future::select(Box::pin(call), Box::pin(t)).await {
-            futures_util::future::Either::Left((Ok(a), _)) => a,
-            _ => continue,
-        };
-        let list: Vec<String> = p
-            .get_property::<Vec<HashMap<String, OwnedValue>>>("Profiles")
-            .await
-            .map(|v| v.iter().filter_map(|m| m.get("Profile").and_then(|x| x.downcast_ref::<String>().ok())).collect())
-            .unwrap_or_default();
-        return Some(Power { bus: bus.into(), path: path.into(), active, list });
-    }
-    None
-}
-
-fn profile_name(p: &str) -> &'static str {
-    match p {
-        "performance" => "Performance",
-        "power-saver" => "Power Saver",
-        _ => "Balanced",
-    }
 }
 
 pub(crate) fn ring(s: &gtk::Snapshot, cx: f64, cy: f64, r: f64, frac: f64, width: f32, track: Rgb, tint: Rgb) {
@@ -210,7 +173,6 @@ struct State {
     ticking: bool,
     polling: bool,
     scrim: Option<gtk::Window>,
-    power: Option<Power>,
     /// The keyboard light, when the computer has one.
     kbd: Option<crate::brightness::Keyboard>,
     /// Presses of the keyboard light tile still on their way to logind, and when the last one
@@ -419,7 +381,6 @@ impl Control {
             ticking: false,
             polling: false,
             scrim: None,
-            power: None,
             kbd: None,
             kbd_busy: 0,
             kbd_set: 0,
@@ -513,7 +474,7 @@ impl Control {
             let Some(s) = weak.upgrade() else { return };
             let me = Control(s);
             match me.hit(x, y) {
-                Some(Hit::Tile(t @ (Tile::Network | Tile::Bluetooth))) | Some(Hit::Detail(detail::D::Expand(t))) => me.expand(t),
+                Some(Hit::Tile(t @ (Tile::Network | Tile::Bluetooth | Tile::Power))) | Some(Hit::Detail(detail::D::Expand(t))) => me.expand(t),
                 _ => {}
             }
         });
@@ -770,14 +731,13 @@ impl Control {
     fn refresh(&self) {
         let weak = Rc::downgrade(&self.0);
         glib::spawn_future_local(async move {
-            let (net, bt, wifi, power) = futures_util::join!(read_net(), read_bt(), read_wifi(), read_power());
+            let (net, bt, wifi) = futures_util::join!(read_net(), read_bt(), read_wifi());
             let Some(s) = weak.upgrade() else { return };
             {
                 let mut st = s.borrow_mut();
                 st.net = net;
                 st.bt = bt;
                 st.wifi = wifi;
-                st.power = power;
             }
             Control(s).changed();
         });
@@ -896,22 +856,7 @@ impl Control {
                 self.0.borrow().canvas.queue_draw();
             }
             Some(Hit::Tile(Tile::Keyboard)) => self.press_kbd(),
-            Some(Hit::Tile(Tile::Power)) => {
-                let Some(p) = self.0.borrow().power.clone() else { return };
-                let at = p.list.iter().position(|x| *x == p.active).unwrap_or(0);
-                let Some(next) = p.list.get((at + 1) % p.list.len().max(1)).cloned() else { return };
-                if let Some(pw) = self.0.borrow_mut().power.as_mut() {
-                    pw.active = next.clone();
-                }
-                self.0.borrow().canvas.queue_draw();
-                glib::spawn_future_local(async move {
-                    let Ok(conn) = crate::bus::system().await else { return };
-                    let Ok(props) = zbus::fdo::PropertiesProxy::builder(&conn).destination(p.bus.clone()).and_then(|b| b.path(p.path.clone())).map(|b| b.cache_properties(zbus::proxy::CacheProperties::No)) else { return };
-                    let Ok(props) = props.build().await else { return };
-                    let Ok(iface) = zbus::names::InterfaceName::try_from(p.bus.clone()) else { return };
-                    let _ = props.set(iface, "ActiveProfile", zbus::zvariant::Value::from(next.as_str())).await;
-                });
-            }
+            Some(Hit::Tile(Tile::Power)) => crate::powermode::step(&app),
             Some(Hit::Tile(Tile::Network)) => {
                 let net = self.0.borrow().net.clone();
                 if net.wifi {
@@ -1132,7 +1077,7 @@ impl State {
         if self.kbd.is_some() {
             t.push(Tile::Keyboard);
         }
-        if self.power.as_ref().is_some_and(|p| p.list.len() > 1) {
+        if self.app.power.borrow().modes().is_some() {
             t.push(Tile::Power);
         }
         t
@@ -1234,13 +1179,10 @@ impl State {
                 ("keyboard", "Keyboard light".into(), state, on)
             }
             Tile::Power => {
-                let p = self.power.clone().unwrap_or_default();
-                let icon = match p.active.as_str() {
-                    "performance" => "speed",
-                    "power-saver" => "eco",
-                    _ => "balance",
-                };
-                (icon, "Power Mode".into(), profile_name(&p.active).into(), p.active != "balanced")
+                let p = self.app.power.borrow();
+                let active = p.profiles.as_ref().map_or(kit::power::BALANCED, |m| m.active.as_str());
+                let state = if p.low { "Power Saver, battery low".to_string() } else { kit::power::label(active).to_string() };
+                (kit::power::glyph(active), "Power Mode".into(), state, active != kit::power::BALANCED)
             }
         }
     }
@@ -1327,7 +1269,7 @@ impl State {
             let lit = self.feel.on(key, on, now);
             let base = pal.tile(0.06 + 0.05 * self.feel.glow(key, now));
             let (ink, sub) = (pal.on_accent.mix(pal.ink_main, lit), pal.on_accent.mix(pal.accent, 0.72).mix(pal.ink_meta, lit));
-            let more = matches!(tile, Tile::Network | Tile::Bluetooth);
+            let more = matches!(tile, Tile::Network | Tile::Bluetooth | Tile::Power);
             let text_w = tile_w - 62.0 - if more { 22.0 } else { 0.0 };
             let (ix, mid) = (tx + 30.0, ty + TILE_H / 2.0);
             feel::scaled(s, self.feel.scale(key, feel::TILE, now), tx + tile_w / 2.0, mid, || {

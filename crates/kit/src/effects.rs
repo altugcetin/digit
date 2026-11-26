@@ -5,16 +5,18 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static RENDERER: AtomicBool = AtomicBool::new(false);
+static SAVING: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static SOFTWARE: Cell<(bool, i64)> = const { Cell::new((false, i64::MIN)) };
     static REDUCED: Cell<(bool, i64)> = const { Cell::new((false, i64::MIN)) };
 }
 
-/// Whether effects are reduced, re-read at most every two seconds so the switch applies live.
+/// Whether effects are reduced, re-read at most every two seconds so the switch applies live;
+/// also while the computer saves power, when the shell says so.
 pub fn reduced() -> bool {
     let now = gtk::glib::monotonic_time();
-    REDUCED.with(|r| {
+    let chosen = REDUCED.with(|r| {
         let (on, at) = r.get();
         if now.saturating_sub(at) < 2_000_000 {
             return on;
@@ -22,7 +24,18 @@ pub fn reduced() -> bool {
         let on = effective(&crate::prefs::read(), "reduced_effects", software());
         r.set((on, now));
         on
-    })
+    });
+    chosen || saving()
+}
+
+/// Draws lighter while the computer saves power (the shell sets this in Power Saver), without
+/// touching the Reduce effects setting; whether that changed anything.
+pub fn set_saving(on: bool) -> bool {
+    SAVING.swap(on, Ordering::Relaxed) != on
+}
+
+pub fn saving() -> bool {
+    SAVING.load(Ordering::Relaxed)
 }
 
 /// Drop the short-lived preference cache before rebuilding styles.

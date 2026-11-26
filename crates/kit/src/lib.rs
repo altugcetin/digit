@@ -29,6 +29,7 @@ pub mod palette;
 pub mod pictures;
 pub mod pixel;
 pub mod pk;
+pub mod power;
 pub mod prefs;
 pub mod wallfocus;
 pub mod recent;

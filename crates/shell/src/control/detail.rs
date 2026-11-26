@@ -21,6 +21,8 @@ const FIELD: f64 = 48.0;
 const FOOT: f64 = 42.0;
 const NEARBY: usize = 6;
 const NETS: usize = 8;
+/// A power mode row: its name over a strip of the modes.
+const MODE: f64 = 74.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(super) enum D {
@@ -38,6 +40,8 @@ pub(super) enum D {
     Reveal,
     Join,
     More,
+    /// A power mode for battery (`true`) or plugged in, by its place in `kit::power::MODES`.
+    Mode(bool, u8),
 }
 
 /// The password being typed for a network, right under its row.
@@ -59,12 +63,17 @@ enum Item {
     Net(usize),
     Field,
     Looking,
+    /// The power modes for battery (`true`) or plugged in.
+    Modes(bool),
+    /// Why the mode isn't as chosen: 0 a low battery, 1 Performance held back.
+    PowerNote(u8),
     Foot,
 }
 
 fn height(i: Item) -> f64 {
     match i {
-        Item::BtNote | Item::WifiNote | Item::Searching | Item::Looking => NOTE,
+        Item::BtNote | Item::WifiNote | Item::Searching | Item::Looking | Item::PowerNote(_) => NOTE,
+        Item::Modes(_) => MODE,
         Item::Device(_) | Item::Net(_) | Item::Current => ROW,
         Item::Info(_) => INFO,
         Item::Nearby => SUB,
@@ -89,7 +98,20 @@ impl State {
 
     fn items(&self, t: Tile) -> Vec<Item> {
         let mut v = Vec::new();
-        if t == Tile::Bluetooth {
+        if t == Tile::Power {
+            let p = self.app.power.borrow();
+            // A computer without a battery has the one row.
+            if p.has_battery() {
+                v.push(Item::Modes(true));
+            }
+            v.push(Item::Modes(false));
+            if p.low {
+                v.push(Item::PowerNote(0));
+            }
+            if p.profiles.as_ref().is_some_and(|m| !m.degraded.is_empty() && m.list.iter().any(|x| x == kit::power::PERFORMANCE)) {
+                v.push(Item::PowerNote(1));
+            }
+        } else if t == Tile::Bluetooth {
             match self.bt.chosen() {
                 None => v.push(Item::BtNote),
                 Some(a) => {
@@ -195,6 +217,49 @@ impl State {
 
     fn note(&self, s: &gtk::Snapshot, pal: &Palette, text: &str, x: f64, y: f64, w: f64, h: f64) {
         draw::text(s, &self.canvas, &self.app.cfg, text, 13.0, Face::Text(440), pal.ink_meta, x, y + h / 2.0, w, pango::Alignment::Center);
+    }
+
+    /// The modes to use on battery or plugged in, side by side; the chosen one is lit.
+    #[allow(clippy::too_many_arguments)]
+    fn modes(&self, s: &gtk::Snapshot, pal: &Palette, battery: bool, x: f64, y: f64, w: f64, now: i64, hits: &mut Vec<(D, f64, f64, f64, f64)>) {
+        let (canvas, cfg) = (&self.canvas, &self.app.cfg);
+        let p = self.app.power.borrow().clone();
+        let Some(profiles) = p.modes() else { return };
+        let title = if !p.has_battery() { "Power mode" } else if battery { "On battery" } else { "Plugged in" };
+        draw::text(s, canvas, cfg, title, 13.0, Face::Text(600), pal.ink_main, x + 6.0, y + 16.0, w - 100.0, pango::Alignment::Left);
+        if p.has_battery() && p.on_battery() == battery {
+            draw::text(s, canvas, cfg, "Now", 12.0, Face::Text(500), pal.ink_meta, x + w - 86.0, y + 16.0, 80.0, pango::Alignment::Right);
+        }
+        let chosen = kit::power::usable(crate::powermode::choice().for_source(battery), &profiles.list);
+        let n = profiles.list.len() as f64;
+        let gap = 6.0;
+        let cw = (w - 8.0 - gap * (n - 1.0)) / n;
+        let (top, ch) = (y + 30.0, 36.0);
+        for (k, mode) in profiles.list.iter().enumerate() {
+            let Some(i) = kit::power::MODES.iter().position(|m| m == mode) else { continue };
+            let d = D::Mode(battery, i as u8);
+            let key = Hit::Detail(d);
+            let cx = x + 4.0 + k as f64 * (cw + gap);
+            let lit = self.feel.on(key, *mode == chosen, now);
+            let glow = self.feel.glow(key, now);
+            let bg = pal.accent.mix(pal.ink_main.alpha(0.07 + 0.07 * glow), lit);
+            let ink = pal.on_accent.mix(pal.ink_main, lit);
+            let (label, glyph) = (kit::power::short(mode), kit::power::glyph(mode));
+            let tw = draw::width(canvas, cfg, label, 12.5, Face::Text(560)).ceil();
+            // The glyph goes when the name alone fills the button.
+            let with_glyph = tw + 22.0 <= cw - 12.0;
+            let span = if with_glyph { tw + 22.0 } else { tw };
+            let mid = top + ch / 2.0;
+            feel::scaled(s, self.feel.scale(key, feel::PILL, now), cx + cw / 2.0, mid, || {
+                fill(s, &rounded(cx, top, cw, ch, (14.0 * self.app.round()).min(ch / 2.0)), bg);
+                let lx = cx + (cw - span) / 2.0;
+                if with_glyph {
+                    draw::icon(s, canvas, cfg, glyph, 16.0, *mode == chosen, ink, lx + 8.0, mid);
+                }
+                draw::text(s, canvas, cfg, label, 12.5, Face::Text(560), ink, lx + span - tw, mid, tw + 1.0, pango::Alignment::Left);
+            });
+            hits.push((d, cx, top, cw, ch));
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -376,6 +441,20 @@ impl State {
                 hits.push((D::Reveal, fx + fw - 34.0, fy, 34.0, 34.0));
                 self.pill(s, pal, x + w - 6.0, mid, "Join", !p.text.is_empty(), D::Join, now, hits);
             }
+            Item::Modes(battery) => self.modes(s, pal, battery, x, y, w, now, hits),
+            Item::PowerNote(n) => {
+                let text = if n == 0 {
+                    "Power Saver until you plug in, as the battery is low".to_string()
+                } else {
+                    let why = self.app.power.borrow().profiles.as_ref().map(|m| m.degraded.clone()).unwrap_or_default();
+                    match why.as_str() {
+                        "lap-detected" => "Performance is held back while the computer is on your lap".to_string(),
+                        "high-operating-temperature" => "Performance is held back while the computer is hot".to_string(),
+                        _ => "Performance is held back for now".to_string(),
+                    }
+                };
+                self.note(s, pal, &text, x, y, w, h);
+            }
             Item::Foot => {
                 fill(s, &rounded(x + 6.0, y + 3.0, w - 12.0, 1.0, 0.5), pal.hairline);
                 // Settings sits first; the tile's own actions follow as glyphs.
@@ -390,7 +469,7 @@ impl State {
                         gx += step;
                         self.small(s, pal, gx, fm, "bluetooth_searching", a.discovering.then_some(pal.accent), D::Scan, now, hits);
                     }
-                } else if self.wifi.enabled && self.wifi.device.is_some() {
+                } else if t == Tile::Network && self.wifi.enabled && self.wifi.device.is_some() {
                     gx += step;
                     self.small(s, pal, gx, fm, "sync", None, D::WifiScan, now, hits);
                 }
@@ -420,10 +499,17 @@ impl Control {
         };
         if opening {
             self.resize_with(420, OPEN);
-            self.watch(t);
             match t {
-                Tile::Bluetooth => crate::bluetooth::agent(&self.0.borrow().app),
-                _ => self.wifi_scan(),
+                Tile::Bluetooth => {
+                    self.watch(t);
+                    crate::bluetooth::agent(&self.0.borrow().app);
+                }
+                Tile::Network => {
+                    self.watch(t);
+                    self.wifi_scan();
+                }
+                // Power modes are watched all the time (`powermode`).
+                _ => {}
             }
         } else {
             self.resize_with(240, SHUT);
@@ -619,8 +705,20 @@ impl Control {
                     let s = self.0.borrow();
                     (s.app.clone(), s.expand)
                 };
-                crate::config::settings(if t == Some(Tile::Bluetooth) { "bluetooth" } else { "wifi" }, &app.cfg);
+                let page = match t {
+                    Some(Tile::Bluetooth) => "bluetooth",
+                    Some(Tile::Power) => "power",
+                    _ => "wifi",
+                };
+                crate::config::settings(page, &app.cfg);
                 self.close();
+            }
+            D::Mode(battery, i) => {
+                let app = self.0.borrow().app.clone();
+                if let Some(mode) = kit::power::MODES.get(i as usize) {
+                    crate::powermode::choose(&app, battery, mode);
+                }
+                self.changed();
             }
         }
     }

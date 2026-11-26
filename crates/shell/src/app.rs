@@ -226,6 +226,8 @@ pub struct App {
     pub volume: Cell<Option<(f64, bool)>>,
     /// What the computer is connected through, for the bar; `None` without NetworkManager.
     pub link: Cell<Option<kit::nm::Link>>,
+    /// Power modes, the charger and the battery (see `power`).
+    pub power: RefCell<crate::powermode::Power>,
     pub lights: RefCell<crate::privacy::Lights>,
     pub spaces: RefCell<Vec<crate::compositor::Space>>,
     pub gadgets: RefCell<Vec<crate::devices::Gadget>>,
@@ -280,6 +282,7 @@ impl App {
             media: RefCell::new(Media::default()),
             volume: Cell::new(None),
             link: Cell::new(None),
+            power: RefCell::new(crate::powermode::Power::default()),
             lights: RefCell::new(crate::privacy::Lights::default()),
             spaces: RefCell::new(Vec::new()),
             gadgets: RefCell::new(Vec::new()),
@@ -704,6 +707,7 @@ impl App {
         if (before.idle_lock, before.idle_off, before.idle_sleep) != (next.idle_lock, next.idle_off, next.idle_sleep) {
             crate::idle::apply(self);
         }
+        crate::powermode::prefs_changed(self);
         if (&before.night_light, before.night_temp, &before.night_from, &before.night_to) != (&next.night_light, next.night_temp, &next.night_from, &next.night_to) {
             crate::night::apply(self);
         }
@@ -832,6 +836,23 @@ impl App {
             n.redraw();
         }
         crate::deskcards::media_changed();
+    }
+
+    /// Redraws what effects change (shadows, blur, frosted panels, the music visualizer) after
+    /// they were lightened or restored outside the settings, as Power Saver does.
+    pub fn effects_moved(self: &Rc<Self>) {
+        let effects = kit::effects::reduced();
+        if self.effects_reduced.replace(effects) == effects {
+            return;
+        }
+        self.set_roles(self.roles.get());
+        crate::desk::changed(self);
+        crate::batterywidget::changed();
+        crate::lock::appearance_changed();
+        let wants = self.media.borrow().wings(Self::now()) || self.call.borrow().is_some();
+        spectrum::want(self, wants);
+        self.redraw();
+        self.changed();
     }
 
     pub fn changed(&self) {

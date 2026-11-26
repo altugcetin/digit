@@ -33,6 +33,7 @@ fn page_words(page: &str) -> &'static str {
         "recording" => "record video screen capture replay stream gpu",
         "screentime" => "screen time usage hours apps focus tracking history digital wellbeing",
         "compositor" => "hyprland niri compositor gaps layout tiling",
+        "power" => "battery performance saver profile charge limit health charger plugged",
         _ => "",
     }
 }

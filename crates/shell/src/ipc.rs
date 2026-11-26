@@ -78,7 +78,7 @@ async fn focused_output() -> Option<String> {
     gio::spawn_blocking(kit::wm::focused_output).await.ok().flatten()
 }
 
-const HELP: &str = "open | close | toggle | tray | phone | note <words> | dnd [on|off|toggle|status] | night [on|off|toggle|status] | awake [on|off|toggle|status] | volume [up|down|mute|<0-150>] | mic | brightness up|down | screenshot | pick | lock [preview] | session | control [sound] | spaces | clipboard | settings | launcher [text] | menu <logo|app|window|date|N|traymenu N> | dock show|hide|toggle | trash-fly <pid> <x> <y> <size> [icon...] | layout <name> | wallpaper <image> | demo <peek> | gamebar [toggle|open|close|status] | record [panel|start|stop|toggle|pause|replay [on|off|toggle]|replay-save [seconds]|stream [on|off|toggle]|settings|status] | status | key <action>";
+const HELP: &str = "open | close | toggle | tray | phone | note <words> | dnd [on|off|toggle|status] | night [on|off|toggle|status] | awake [on|off|toggle|status] | power [status|next|saver|balanced|performance] | volume [up|down|mute|<0-150>] | mic | brightness up|down | screenshot | pick | lock [preview] | session | control [sound] | spaces | clipboard | settings | launcher [text] | menu <logo|app|window|date|N|traymenu N> | dock show|hide|toggle | trash-fly <pid> <x> <y> <size> [icon...] | layout <name> | wallpaper <image> | demo <peek> | gamebar [toggle|open|close|status] | record [panel|start|stop|toggle|pause|replay [on|off|toggle]|replay-save [seconds]|stream [on|off|toggle]|settings|status] | status | key <action>";
 
 async fn handle(app: &Rc<App>, words: &[String]) -> String {
     let verb = words.first().map(String::as_str).unwrap_or("");
@@ -283,6 +283,38 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
             crate::retheme(app);
             "ok".into()
         }
+        "power" => {
+            let p = app.power.borrow().clone();
+            let Some(modes) = p.modes() else { return "no power modes: power-profiles-daemon isn't running".into() };
+            match words.get(1).map(String::as_str).unwrap_or("status") {
+                "status" => serde_json::json!({
+                    "mode": modes.active,
+                    "modes": modes.list,
+                    "on_battery": p.on_battery(),
+                    "low_battery_saver": p.low,
+                    "lighter_drawing": kit::effects::saving(),
+                    "chosen": { "battery": crate::powermode::choice().battery, "plugged_in": crate::powermode::choice().plugged },
+                })
+                .to_string(),
+                "next" => {
+                    crate::powermode::step(app);
+                    "ok".into()
+                }
+                word => {
+                    let mode = match word {
+                        "saver" => kit::power::SAVER,
+                        "balanced" => kit::power::BALANCED,
+                        "performance" => kit::power::PERFORMANCE,
+                        _ => return "power status | next | saver | balanced | performance".into(),
+                    };
+                    if !modes.list.iter().any(|m| m == mode) {
+                        return format!("this computer has no {} mode", kit::power::label(mode));
+                    }
+                    crate::powermode::choose(app, p.on_battery(), mode);
+                    "ok".into()
+                }
+            }
+        }
         "dnd" | "night" | "awake" => {
             let current = match verb {
                 "dnd" => app.dnd.get(),
@@ -362,6 +394,7 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
                 "dnd": app.dnd.get(),
                 "night_light": crate::night::active(app),
                 "keep_awake": app.awake.borrow().as_ref().is_some_and(|a| a.on()),
+                "power_mode": app.power.borrow().profiles.as_ref().map(|p| p.active.clone()),
                 "volume": (level * 100.0).round(),
                 "muted": muted,
                 "mic_muted": app.mic_muted.get(),

@@ -657,7 +657,7 @@ pub fn sections(page: &str) -> &'static [Section] {
         "spotlight" => &[search, scopes, clipboard],
         "compositor" => &[session],
         "displays" => &[night_light],
-        "power" => &[power],
+        "power" => &[crate::battery::section_for, power],
         "screenshots" => &[screenshots],
         "recording" => &[recording_capture, recording_sound, recording_replay, recording_saving, recording_streaming, recording_shortcuts],
         "files" => &[files],

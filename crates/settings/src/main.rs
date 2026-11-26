@@ -1,4 +1,5 @@
 mod apps;
+mod battery;
 mod bluetooth;
 mod compositor;
 mod defaults;

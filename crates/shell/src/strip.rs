@@ -578,7 +578,7 @@ impl Strip {
             imp.battery_at.set(Some(now));
             imp.battery.set(battery());
         }
-        let mut glyphs: Vec<(&str, Option<String>)> = Vec::with_capacity(6);
+        let mut glyphs: Vec<(&str, Option<String>)> = Vec::with_capacity(7);
         if app.dnd.get() {
             glyphs.push(("do_not_disturb_on", None));
         }
@@ -591,6 +591,10 @@ impl Strip {
         }
         if let Some(g) = crate::devices::summary(&app.gadgets.borrow()) {
             glyphs.push((g.glyph, Some(format!("{}%", g.level))));
+        }
+        // Power Saver is on, perhaps on its own for a low battery.
+        if app.power.borrow().saving() {
+            glyphs.push(("eco", None));
         }
         if let Some(b) = imp.battery.get() {
             glyphs.push((battery_glyph(b), Some(format!("{}%", b.level))));
