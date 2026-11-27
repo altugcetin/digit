@@ -46,12 +46,6 @@ pub struct Look {
     pub blur: bool,
 }
 
-#[derive(Clone, Copy)]
-struct Battery {
-    level: u8,
-    charging: bool,
-}
-
 /// The workspace pill: which workspaces exist on this output (and whether they hold windows),
 /// which is active, and the motion of the active mark between them.
 pub struct Spaces {
@@ -205,24 +199,12 @@ fn smooth(x: f64) -> f64 {
     motion_in(x.clamp(0.0, 1.0))
 }
 
-fn battery() -> Option<Battery> {
-    let dir = std::fs::read_dir("/sys/class/power_supply").ok()?;
-    for e in dir.flatten() {
-        let p = e.path();
-        let kind = std::fs::read_to_string(p.join("type")).unwrap_or_default();
-        if kind.trim() != "Battery" || std::fs::read_to_string(p.join("scope")).is_ok_and(|s| s.trim() == "Device") {
-            continue;
-        }
-        let level = std::fs::read_to_string(p.join("capacity")).ok()?.trim().parse::<u8>().ok()?;
-        let status = std::fs::read_to_string(p.join("status")).unwrap_or_default();
-        return Some(Battery { level: level.min(100), charging: matches!(status.trim(), "Charging" | "Full") });
-    }
-    None
-}
-
-fn battery_glyph(b: Battery) -> &'static str {
+fn battery_glyph(b: crate::power::Own) -> &'static str {
     if b.charging {
         return "battery_charging_full";
+    }
+    if b.plugged {
+        return "power";
     }
     match b.level {
         0..=10 => "battery_alert",
@@ -573,11 +555,6 @@ impl Strip {
             zones.push((Zone::Date, (r, 0.0, width, reach)));
             r -= 4.0;
         }
-        let fresh = imp.battery_at.get().is_none_or(|t| now - t > 30_000_000);
-        if fresh {
-            imp.battery_at.set(Some(now));
-            imp.battery.set(battery());
-        }
         let mut glyphs: Vec<(&str, Option<String>)> = Vec::with_capacity(7);
         if app.dnd.get() {
             glyphs.push(("do_not_disturb_on", None));
@@ -596,7 +573,7 @@ impl Strip {
         if app.power.borrow().saving() {
             glyphs.push(("eco", None));
         }
-        if let Some(b) = imp.battery.get() {
+        if let Some(b) = app.battery.get() {
             glyphs.push((battery_glyph(b), Some(format!("{}%", b.level))));
         }
         glyphs.push(("toggle_on", None));
@@ -665,8 +642,6 @@ mod imp {
         pub(super) titles: RefCell<(String, Vec<&'static str>)>,
         pub(super) logo: RefCell<Option<(i32, Option<gtk::IconPaintable>)>>,
         pub(super) icon: RefCell<Option<(String, Option<gdk::Paintable>)>>,
-        pub(super) battery: Cell<Option<super::Battery>>,
-        pub(super) battery_at: Cell<Option<i64>>,
         pub(super) spaces: RefCell<super::Spaces>,
         pub(super) pointer: Cell<f64>,
         pub(super) feel: crate::feel::Feel<super::Zone>,

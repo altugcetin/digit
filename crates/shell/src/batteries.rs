@@ -13,6 +13,11 @@ const RED: Rgb = Rgb::new(1.0, 0.27, 0.23);
 /// Device batteries, plus the phone's while KDE Connect reaches it.
 pub fn list(app: &App) -> Vec<Gadget> {
     let mut list = app.gadgets.borrow().clone();
+    // UPower can lag behind the kernel, so the laptop uses the same reading as the bar.
+    list.retain(|g| !g.own);
+    if let Some(b) = app.battery.get() {
+        list.insert(0, Gadget { path: "own".into(), glyph: "laptop", name: "This Computer".into(), level: b.level, coarse: None, charging: b.powered(), own: true });
+    }
     if let Some(p) = crate::phone::phone().filter(|p| p.reachable)
         && let Some((level, charging)) = p.battery
     {

@@ -115,6 +115,7 @@ pub fn start(app: &Rc<App>) {
             // What the service is in now that it did as asked.
             let profiles = if acted { power::profiles(&conn).await.or(profiles) } else { profiles };
             show(&app, Power { low: HOLD.with(Cell::get).cookie.is_some(), profiles, source });
+            crate::power::refresh(&app);
             drop(app);
             match changes.as_mut() {
                 Some(stream) => {

@@ -155,8 +155,8 @@ pub fn start(app: &Rc<App>) {
         let Some(app) = weak.upgrade() else { return };
         apply(&app, first);
         drop(app);
-        loop {
-            let Some(Ok(msg)) = stream.next().await else { break };
+        while let Some(msg) = stream.next().await {
+            let Ok(msg) = msg else { continue };
             let member = msg.header().member().map(|m| m.to_string()).unwrap_or_default();
             if !matches!(member.as_str(), "PropertiesChanged" | "DeviceAdded" | "DeviceRemoved") {
                 continue;
