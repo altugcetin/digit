@@ -2,7 +2,7 @@
 //! Saver for a low battery, lighter drawing while saving power, and the battery's charge limit.
 //! The shell does the switching (its `powermode`); these rows keep the choices.
 
-use crate::desktop::{save, section, slider, sub_label, toggle};
+use crate::desktop::{choice, save, section, slider, sub_label, toggle};
 use crate::ui;
 use gtk::{gio, glib, prelude::*};
 use kit::power;
@@ -24,6 +24,10 @@ pub fn section_for(body: &gtk::Box, t: &toml::Table) {
     let low_sub = format!("At {} % and below, until you plug in", power::LOW);
     let low = toggle(&card, "battery_alert", "Power Saver when the battery is low", &low_sub, power::LOW_SAVER, c.low_saver);
     let light = toggle(&card, "eco", "Lighter effects in Power Saver", "No blur, shadows or music visualizer while saving power", power::LIGHT, c.light);
+    let dim = toggle(&card, "brightness_medium", "Dim the screen on battery", "A little darker once you unplug, back when you plug in", power::DIM_ON_BATTERY, power::dim_on_battery(t));
+    if power::has_keyboard_light() {
+        choice(&card, "keyboard", "Keyboard light off", "When you stop typing; the next touch brings it back", power::KEYBOARD_IDLE, &power::KEYBOARD_IDLE_CHOICES, &power::keyboard_idle(t).to_string());
+    }
     let (off, sleep) = power::battery_idle(t);
     let idle = [
         slider(&card, "monitor", "Turn off displays on battery", "Minutes without input. 0 keeps them on", power::IDLE_OFF_BATTERY, (0.0, 60.0, 1.0), off, power::IDLE_OFF_BATTERY_DEFAULT, 0),
@@ -39,7 +43,7 @@ pub fn section_for(body: &gtk::Box, t: &toml::Table) {
         plugged.know(has_battery, profiles.as_ref());
         battery.know(has_battery, profiles.as_ref());
         if !has_battery {
-            for row in std::iter::once(&low).chain(idle.iter()) {
+            for row in [&low, &dim].into_iter().chain(idle.iter()) {
                 row.set_sensitive(false);
                 if let Some(sub) = sub_label(row.upcast_ref()) {
                     sub.set_text(NO_BATTERY);

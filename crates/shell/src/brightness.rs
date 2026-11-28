@@ -177,6 +177,75 @@ pub fn watch_keyboard() {
     });
 }
 
+thread_local! {
+    static RESTING: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+    static TURNING_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static BACK_AFTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static DIMMED: std::cell::Cell<Option<(u32, u32)>> = const { std::cell::Cell::new(None) };
+}
+
+pub fn keys_idle(idle: bool) {
+    if !idle {
+        if TURNING_OFF.with(std::cell::Cell::get) {
+            BACK_AFTER.with(|b| b.set(true));
+        } else {
+            glib::spawn_future_local(keys_back());
+        }
+        return;
+    }
+    if TURNING_OFF.with(|t| t.replace(true)) {
+        return;
+    }
+    glib::spawn_future_local(async {
+        if let Some(k) = gtk::gio::spawn_blocking(keyboard).await.ok().flatten()
+            && k.level > 0
+            && set("leds", &k.name, 0).await
+        {
+            RESTING.with(|r| r.set(Some(k.level)));
+        }
+        TURNING_OFF.with(|t| t.set(false));
+        if BACK_AFTER.with(|b| b.replace(false)) {
+            keys_back().await;
+        }
+    });
+}
+
+async fn keys_back() {
+    let Some(level) = RESTING.with(std::cell::Cell::take) else { return };
+    if let Some(k) = gtk::gio::spawn_blocking(keyboard).await.ok().flatten()
+        && k.level == 0
+    {
+        set("leds", &k.name, level).await;
+    }
+}
+
+fn screen() -> Option<(String, u32)> {
+    let dev = devices("backlight", false).into_iter().next()?;
+    let now = read(&dev.join("actual_brightness")).or_else(|| read(&dev.join("brightness")))?;
+    Some((dev.file_name()?.to_string_lossy().into_owned(), now))
+}
+
+pub fn battery_dim(unplugged: bool) {
+    glib::spawn_future_local(async move {
+        let Some((name, now)) = gtk::gio::spawn_blocking(screen).await.ok().flatten() else { return };
+        match DIMMED.with(std::cell::Cell::get) {
+            None if unplugged && now > 1 && kit::power::dim_on_battery(&kit::prefs::read()) => {
+                let to = ((now as f64 * kit::power::BATTERY_DIM).round() as u32).max(1);
+                if set("backlight", &name, to).await {
+                    DIMMED.with(|d| d.set(Some((to, now))));
+                }
+            }
+            Some((to, from)) if !unplugged => {
+                DIMMED.with(|d| d.set(None));
+                if now == to {
+                    set("backlight", &name, from).await;
+                }
+            }
+            _ => {}
+        }
+    });
+}
+
 pub fn step(app: &Rc<App>, action: &str) -> bool {
     let (class, kbd, up, icon, label) = match action {
         "brightness-up" => ("backlight", false, true, "light_mode", "Brightness"),

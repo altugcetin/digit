@@ -23,6 +23,7 @@ enum Step {
     Sleep,
     /// Nobody has touched anything for a while; screen time stops counting.
     Away,
+    Keys,
 }
 
 #[derive(Default)]
@@ -37,7 +38,7 @@ struct Idle {
     notifier: ExtIdleNotifierV1,
     seat: WlSeat,
     notes: Vec<ExtIdleNotificationV1>,
-    plan: (u32, u32, u32),
+    plan: (u32, u32, u32, u32),
     dark: Vec<gtk::Window>,
     off: bool,
 }
@@ -57,10 +58,10 @@ pub fn start(app: &Rc<App>) {
     let Ok(conn) = Connection::connect_to_env() else { return };
     let Ok((globals, queue)) = registry_queue_init::<Events>(&conn) else { return };
     let qh = queue.handle();
-    let Ok(notifier) = globals.bind::<ExtIdleNotifierV1, _, _>(&qh, 1..=1, ()) else { return };
+    let Ok(notifier) = globals.bind::<ExtIdleNotifierV1, _, _>(&qh, 1..=2, ()) else { return };
     let Ok(seat) = globals.bind::<WlSeat, _, _>(&qh, 1..=1, ()) else { return };
     let fd = conn.backend().poll_fd().as_raw_fd();
-    IDLE.with(|i| *i.borrow_mut() = Some(Idle { conn, queue, qh, notifier, seat, notes: Vec::new(), plan: (0, 0, 0), dark: Vec::new(), off: false }));
+    IDLE.with(|i| *i.borrow_mut() = Some(Idle { conn, queue, qh, notifier, seat, notes: Vec::new(), plan: (0, 0, 0, 0), dark: Vec::new(), off: false }));
     apply(app);
     let weak = Rc::downgrade(app);
     glib_unix::unix_fd_add_local(fd, glib::IOCondition::IN | glib::IOCondition::HUP | glib::IOCondition::ERR, move |_, _| {
@@ -75,15 +76,17 @@ pub fn away() -> bool {
     AWAY_NOW.with(|a| a.get()) || crate::lock::active()
 }
 
-pub fn plan() -> (u32, u32, u32) {
-    IDLE.with(|i| i.borrow().as_ref().map_or((0, 0, 0), |s| s.plan))
+pub fn plan() -> (u32, u32, u32, u32) {
+    IDLE.with(|i| i.borrow().as_ref().map_or((0, 0, 0, 0), |s| s.plan))
 }
 
 pub fn apply(app: &App) {
     let prefs = app.prefs.borrow();
     let mins = |m: f64| if m > 0.0 { (m * 60.0).round().max(30.0) as u32 } else { 0 };
-    let (off, sleep) = if app.power.borrow().on_battery() { kit::power::battery_idle(&kit::prefs::read()) } else { (prefs.idle_off, prefs.idle_sleep) };
-    let plan = (mins(prefs.idle_lock), mins(off), mins(sleep));
+    let saved = kit::prefs::read();
+    let (off, sleep) = if app.power.borrow().on_battery() { kit::power::battery_idle(&saved) } else { (prefs.idle_off, prefs.idle_sleep) };
+    let keys = if kit::power::has_keyboard_light() { kit::power::keyboard_idle(&saved) } else { 0 };
+    let plan = (mins(prefs.idle_lock), mins(off), mins(sleep), keys);
     drop(prefs);
     if IDLE.with(|i| i.borrow().as_ref().is_some_and(|s| s.plan != plan)) {
         dim(false);
@@ -99,7 +102,7 @@ pub fn apply(app: &App) {
         }
         AWAY_NOW.with(|a| a.set(false));
         idle.plan = plan;
-        let (lock, off, sleep) = plan;
+        let (lock, off, sleep, keys) = plan;
         let first = [lock, off].into_iter().filter(|t| *t > 0).min();
         let mut wants: Vec<(Step, u32)> = vec![(Step::Away, AWAY)];
         if let Some(f) = first.filter(|f| *f > DIM + 20) {
@@ -114,8 +117,16 @@ pub fn apply(app: &App) {
         if sleep > 0 {
             wants.push((Step::Sleep, sleep));
         }
+        if keys > 0 {
+            wants.push((Step::Keys, keys));
+        }
         for (step, secs) in wants {
-            let n = idle.notifier.get_idle_notification(secs.saturating_mul(1000), &idle.seat, &idle.qh, step);
+            let ms = secs.saturating_mul(1000);
+            let n = if step == Step::Keys && idle.notifier.version() >= 2 {
+                idle.notifier.get_input_idle_notification(ms, &idle.seat, &idle.qh, step)
+            } else {
+                idle.notifier.get_idle_notification(ms, &idle.seat, &idle.qh, step)
+            };
             idle.notes.push(n);
         }
         let _ = idle.conn.flush();
@@ -182,6 +193,7 @@ fn act(app: &Rc<App>, step: Step, idled: bool) {
             });
         }
         (Step::Away, idled) => AWAY_NOW.with(|a| a.set(idled)),
+        (Step::Keys, idled) => crate::brightness::keys_idle(idled),
         (Step::Off, false) => {
             let was_off = IDLE.with(|i| i.borrow_mut().as_mut().map(|s| std::mem::replace(&mut s.off, false)).unwrap_or(false));
             if was_off && kit::wm::which() != kit::wm::Wm::Niri {

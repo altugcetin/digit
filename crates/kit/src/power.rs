@@ -31,6 +31,24 @@ pub fn battery_idle(t: &toml::Table) -> (f64, f64) {
     (crate::prefs::number(t, IDLE_OFF_BATTERY, IDLE_OFF_BATTERY_DEFAULT).max(0.0), crate::prefs::number(t, IDLE_SLEEP_BATTERY, IDLE_SLEEP_BATTERY_DEFAULT).max(0.0))
 }
 
+pub const DIM_ON_BATTERY: &str = "power_dim_battery";
+pub const BATTERY_DIM: f64 = 0.8;
+
+pub fn dim_on_battery(t: &toml::Table) -> bool {
+    crate::prefs::flag(t, DIM_ON_BATTERY, true)
+}
+
+pub const KEYBOARD_IDLE: &str = "keyboard_light_idle";
+pub const KEYBOARD_IDLE_CHOICES: [(&str, &str); 5] = [("0", "Never"), ("10", "After 10 seconds"), ("30", "After 30 seconds"), ("60", "After 1 minute"), ("300", "After 5 minutes")];
+
+pub fn keyboard_idle(t: &toml::Table) -> u32 {
+    crate::prefs::text(t, KEYBOARD_IDLE, "60").parse().unwrap_or(60)
+}
+
+pub fn has_keyboard_light() -> bool {
+    std::fs::read_dir("/sys/class/leds").is_ok_and(|dir| dir.flatten().any(|e| e.file_name().to_string_lossy().contains("kbd_backlight")))
+}
+
 pub fn label(mode: &str) -> &'static str {
     match mode {
         SAVER => "Power Saver",
@@ -277,6 +295,17 @@ mod tests {
         assert_eq!(battery_idle(&t), (2.0, 0.0));
         let t: toml::Table = toml::from_str("idle_off_battery = -3.0").unwrap();
         assert_eq!(battery_idle(&t).0, 0.0);
+    }
+
+    #[test]
+    fn the_keyboard_light_goes_off_after_a_minute_and_the_screen_dims_on_battery() {
+        let t = toml::Table::new();
+        assert_eq!((keyboard_idle(&t), dim_on_battery(&t)), (60, true));
+        let t: toml::Table = toml::from_str("keyboard_light_idle = '0'\npower_dim_battery = false").unwrap();
+        assert_eq!((keyboard_idle(&t), dim_on_battery(&t)), (0, false));
+        let t: toml::Table = toml::from_str("keyboard_light_idle = 'soon'").unwrap();
+        assert_eq!(keyboard_idle(&t), 60);
+        assert!(KEYBOARD_IDLE_CHOICES.iter().all(|(v, _)| v.parse::<u32>().is_ok()));
     }
 
     #[test]

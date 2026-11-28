@@ -396,7 +396,7 @@ async fn handle(app: &Rc<App>, words: &[String]) -> String {
                 "night_light": crate::night::active(app),
                 "keep_awake": app.awake.borrow().as_ref().is_some_and(|a| a.on()),
                 "power_mode": app.power.borrow().profiles.as_ref().map(|p| p.active.clone()),
-                "idle": { "lock": idle.0, "displays_off": idle.1, "sleep": idle.2, "on_battery": app.power.borrow().on_battery() },
+                "idle": { "lock": idle.0, "displays_off": idle.1, "sleep": idle.2, "keyboard_light_off": idle.3, "on_battery": app.power.borrow().on_battery() },
                 "battery": app.battery.get().map(|b| serde_json::json!({ "level": b.level, "charging": b.charging, "plugged": b.plugged })),
                 "volume": (level * 100.0).round(),
                 "muted": muted,

@@ -160,10 +160,16 @@ fn show(app: &Rc<App>, now: Power) {
     if *app.power.borrow() == now {
         return;
     }
+    let before = app.power.borrow().source;
     let source = app.power.borrow().on_battery() != now.on_battery();
+    let charger = before.is_some_and(|b| now.source.is_some_and(|n| b.on_battery != n.on_battery));
+    let unplugged = now.on_battery();
     *app.power.borrow_mut() = now;
     if source {
         crate::idle::apply(app);
+    }
+    if charger {
+        crate::brightness::battery_dim(unplugged);
     }
     lighten(app);
     app.changed();
