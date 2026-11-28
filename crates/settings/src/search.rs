@@ -26,7 +26,7 @@ fn page_words(page: &str) -> &'static str {
         "displays" => "monitor screen resolution refresh rate hz scale rotation arrange",
         "apps" => "default startup autostart browser mail",
         "updates" => "upgrade update security packages patch",
-        "drivers" => "nvidia amd intel gpu firmware graphics",
+        "drivers" => "nvidia amd intel gpu firmware graphics sound audio speakers microphone",
         "overview" => "about system hardware memory disk processor version",
         "keyboard" => "shortcuts keybinds hotkeys keys typing layout repeat caps",
         "mouse" => "pointer trackpad touchpad scroll natural tap click gesture swipe speed",

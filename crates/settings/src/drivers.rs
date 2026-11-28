@@ -7,7 +7,7 @@ fn base(v: &str) -> &str {
 }
 
 pub fn build() -> gtk::Widget {
-    let (scroll, body) = ui::page("Drivers", "Graphics drivers and their packages. Changes are previewed first, use signed packages only, and take effect after a reboot.");
+    let (scroll, body) = ui::page("Drivers", "Drivers and their packages. Changes are previewed first, use signed packages only, and take effect after a reboot.");
     let gpus = system::gpus();
     if gpus.is_empty() {
         let card = ui::card();
@@ -26,7 +26,71 @@ pub fn build() -> gtk::Widget {
             kind => mesa(card.clone(), kind),
         }
     }
+    if system::sound_without_firmware() {
+        sound(&body);
+    }
     scroll.upcast()
+}
+
+const SOUND_FIRMWARE: [&str; 2] = ["sof-firmware", "firmware-sof-signed"];
+
+fn sound(body: &gtk::Box) {
+    let heading = ui::heading("Sound");
+    let card = ui::card();
+    let (row, end) = ui::row(Some("volume_off"), "Sound firmware is missing", "Speakers and microphones stay silent until it's installed");
+    let install = ui::button("Install", "accent");
+    install.set_valign(gtk::Align::Center);
+    install.set_sensitive(false);
+    end.append(&install);
+    card.append(&row);
+    body.append(&heading);
+    body.append(&card);
+    glib::spawn_future_local(async move {
+        if pk::resolve(&SOUND_FIRMWARE, pk::FILTER_INSTALLED).await.is_ok_and(|found| !found.is_empty()) {
+            heading.set_visible(false);
+            card.set_visible(false);
+            return;
+        }
+        let Some(package) = pk::resolve(&SOUND_FIRMWARE, pk::FILTER_NONE).await.ok().and_then(|found| found.into_iter().find(|p| !p.installed())) else { return };
+        install.set_sensitive(true);
+        install.connect_clicked(move |b| firmware(ui::root(b), package.clone()));
+    });
+}
+
+fn firmware(parent: Option<gtk::Window>, package: pk::Pkg) {
+    if !guard::package_id(&package.id) {
+        ui::fail("Refused: invalid package id");
+        return;
+    }
+    glib::spawn_future_local(async move {
+        if !ui::begin() {
+            return;
+        }
+        let ids = vec![package.id.clone()];
+        let sim = pk::install(&ids, pk::ONLY_TRUSTED | pk::SIMULATE, ui::progress("Checking the change")).await;
+        ui::end();
+        let changes = match sim {
+            Ok(c) => c,
+            Err(e) => {
+                ui::fail(&e);
+                return;
+            }
+        };
+        let items: Vec<String> = changes.iter().map(|p| format!("{} {}", p.name(), p.version())).collect();
+        ui::confirm(parent, &format!("Install {}?", package.name()), "Restart the computer afterwards to hear sound.", &items, "Install", "accent", move || {
+            glib::spawn_future_local(async move {
+                if !ui::begin() {
+                    return;
+                }
+                let r = pk::install(&ids, pk::ONLY_TRUSTED, ui::progress("Installing the sound firmware")).await;
+                ui::end();
+                match r {
+                    Ok(_) => ui::done("Installed. Restart the computer to hear sound"),
+                    Err(e) => ui::fail(&e),
+                }
+            });
+        });
+    });
 }
 
 fn mesa(card: Rc<gtk::Box>, kind: &str) {

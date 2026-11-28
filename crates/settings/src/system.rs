@@ -136,6 +136,22 @@ pub fn gpus() -> Vec<Gpu> {
     out
 }
 
+pub fn sound_without_firmware() -> bool {
+    let drivers: Vec<String> = std::fs::read_dir("/sys/bus/pci/devices")
+        .map(|dir| {
+            dir.flatten()
+                .filter(|e| read(e.path().join("class")).starts_with("0x04"))
+                .filter_map(|e| std::fs::read_link(e.path().join("driver")).ok()?.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    sof_without_card(&drivers, &read("/proc/asound/cards"))
+}
+
+fn sof_without_card(drivers: &[String], cards: &str) -> bool {
+    drivers.iter().any(|d| d.starts_with("sof-audio") || d.starts_with("snd_sof")) && !cards.lines().any(|l| l.contains("sof"))
+}
+
 pub fn nvidia_loaded() -> Option<(String, bool)> {
     let version = read("/sys/module/nvidia/version");
     if version.is_empty() {
@@ -143,4 +159,19 @@ pub fn nvidia_loaded() -> Option<(String, bool)> {
     }
     let open = read("/proc/driver/nvidia/version").contains("Open Kernel Module");
     Some((version, open))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sof_without_card;
+
+    #[test]
+    fn a_sof_chip_without_its_card_needs_firmware() {
+        let sof = ["sof-audio-pci-intel-cnl".to_string()];
+        assert!(sof_without_card(&sof, "--- no soundcards ---"));
+        assert!(!sof_without_card(&sof, " 0 [sofhdadsp      ]: sof-hda-dsp - sof-hda-dsp\n"));
+        let hda = ["snd_hda_intel".to_string()];
+        assert!(!sof_without_card(&hda, "--- no soundcards ---"));
+        assert!(!sof_without_card(&[], ""));
+    }
 }
