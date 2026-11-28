@@ -180,7 +180,7 @@ pub fn defaults() -> Vec<Bind> {
         bind("launcher", "Shell", "Spotlight", "ALT + SPACE", ctl("key launcher"), n, false),
         bind("appgrid", "Shell", "All apps", "SUPER + A", ctl("key appgrid"), n, false),
         bind("clipboard", "Shell", "Clipboard history", "ALT + V", ctl("key clipboard"), n, false),
-        bind("control", "Shell", "Control Center", "ALT + C", ctl("key control"), n, false),
+        bind("control", "Shell", "Control Center", "ALT + C, XF86NotificationCenter", ctl("key control"), n, false),
         bind("gamebar", "Shell", "Game Bar", "ALT + Z", ctl("gamebar toggle"), n, false),
         bind("spaces", "Shell", "Workspaces", "SUPER + TAB", ctl("key spaces"), n, false),
         bind("windows", "Shell", "Switch windows", "ALT + TAB", ctl("key windows"), n, false),
@@ -595,6 +595,7 @@ pub fn label(keys: &str) -> String {
             "BRACKETLEFT" => "[".into(),
             "BRACKETRIGHT" => "]".into(),
             k if k.len() == 1 => k.into(),
+            _ if p.starts_with("XF86") => words(&p[4..]),
             _ => {
                 let mut c = p.chars();
                 c.next().map(|f| f.to_uppercase().chain(c.flat_map(char::to_lowercase)).collect()).unwrap_or_default()
@@ -602,6 +603,17 @@ pub fn label(keys: &str) -> String {
         })
         .collect();
     parts.join("+")
+}
+
+fn words(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if i > 0 && c.is_uppercase() {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// `shown`, or a word saying the shortcut is off.
@@ -783,6 +795,20 @@ mod tests {
             assert!(render.contains("SUPER + SHIFT + S") || render.contains("Super+Shift+S"));
             assert!(render.contains("XF86AudioPause"));
         }
+    }
+
+    #[test]
+    fn the_notification_center_key_opens_control_center() {
+        let binds = defaults();
+        let control = binds.iter().find(|b| b.id == "control").unwrap();
+        assert_eq!(combos(&control.keys), ["ALT + C", "XF86NotificationCenter"]);
+        for render in [crate::hyprconf::render_keybinds(&binds), crate::niriconf::render_keybinds(&binds)] {
+            assert!(render.contains("XF86NotificationCenter"));
+        }
+        let get = |t: &str| with_overrides(&t.parse().unwrap(), false).into_iter().find(|b| b.id == "control").unwrap().keys;
+        assert_eq!(get("[keys]\ncontrol = 'SUPER + C'"), "SUPER + C");
+        assert_eq!(label(&control.keys), "Alt+C or Notification Center");
+        assert_eq!(label("XF86AudioMicMute"), "Audio Mic Mute");
     }
 
     #[test]
