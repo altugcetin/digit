@@ -2,7 +2,7 @@
 //! Saver for a low battery, lighter drawing while saving power, and the battery's charge limit.
 //! The shell does the switching (its `powermode`); these rows keep the choices.
 
-use crate::desktop::{save, section, sub_label, toggle};
+use crate::desktop::{save, section, slider, sub_label, toggle};
 use crate::ui;
 use gtk::{gio, glib, prelude::*};
 use kit::power;
@@ -24,6 +24,11 @@ pub fn section_for(body: &gtk::Box, t: &toml::Table) {
     let low_sub = format!("At {} % and below, until you plug in", power::LOW);
     let low = toggle(&card, "battery_alert", "Power Saver when the battery is low", &low_sub, power::LOW_SAVER, c.low_saver);
     let light = toggle(&card, "eco", "Lighter effects in Power Saver", "No blur, shadows or music visualizer while saving power", power::LIGHT, c.light);
+    let (off, sleep) = power::battery_idle(t);
+    let idle = [
+        slider(&card, "monitor", "Turn off displays on battery", "Minutes without input. 0 keeps them on", power::IDLE_OFF_BATTERY, (0.0, 60.0, 1.0), off, power::IDLE_OFF_BATTERY_DEFAULT, 0),
+        slider(&card, "bedtime", "Sleep on battery", "Minutes without input. 0 never sleeps on its own", power::IDLE_SLEEP_BATTERY, (0.0, 180.0, 5.0), sleep, power::IDLE_SLEEP_BATTERY_DEFAULT, 0),
+    ];
     // The charge limit goes here when the battery has one.
     let limit = gtk::Box::new(gtk::Orientation::Vertical, 0);
     card.append(&limit);
@@ -34,9 +39,11 @@ pub fn section_for(body: &gtk::Box, t: &toml::Table) {
         plugged.know(has_battery, profiles.as_ref());
         battery.know(has_battery, profiles.as_ref());
         if !has_battery {
-            low.set_sensitive(false);
-            if let Some(sub) = sub_label(low.upcast_ref()) {
-                sub.set_text(NO_BATTERY);
+            for row in std::iter::once(&low).chain(idle.iter()) {
+                row.set_sensitive(false);
+                if let Some(sub) = sub_label(row.upcast_ref()) {
+                    sub.set_text(NO_BATTERY);
+                }
             }
         }
         if profiles.is_none() {

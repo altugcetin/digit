@@ -706,9 +706,7 @@ impl App {
         if before.menubar_look != next.menubar_look {
             self.changed();
         }
-        if (before.idle_lock, before.idle_off, before.idle_sleep) != (next.idle_lock, next.idle_off, next.idle_sleep) {
-            crate::idle::apply(self);
-        }
+        crate::idle::apply(self);
         crate::powermode::prefs_changed(self);
         if (&before.night_light, before.night_temp, &before.night_from, &before.night_to) != (&next.night_light, next.night_temp, &next.night_from, &next.night_to) {
             crate::night::apply(self);

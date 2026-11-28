@@ -76,10 +76,15 @@ pub fn away() -> bool {
     AWAY_NOW.with(|a| a.get()) || crate::lock::active()
 }
 
+pub fn plan() -> (u32, u32, u32) {
+    IDLE.with(|i| i.borrow().as_ref().map_or((0, 0, 0), |s| s.plan))
+}
+
 pub fn apply(app: &App) {
     let prefs = app.prefs.borrow();
     let mins = |m: f64| if m > 0.0 { (m * 60.0).round().max(30.0) as u32 } else { 0 };
-    let plan = (mins(prefs.idle_lock), mins(prefs.idle_off), mins(prefs.idle_sleep));
+    let (off, sleep) = if app.power.borrow().on_battery() { kit::power::battery_idle(&kit::prefs::read()) } else { (prefs.idle_off, prefs.idle_sleep) };
+    let plan = (mins(prefs.idle_lock), mins(off), mins(sleep));
     drop(prefs);
     if IDLE.with(|i| i.borrow().as_ref().is_some_and(|s| s.plan != plan)) {
         dim(false);

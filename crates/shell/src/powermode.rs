@@ -161,7 +161,11 @@ fn show(app: &Rc<App>, now: Power) {
     if *app.power.borrow() == now {
         return;
     }
+    let source = app.power.borrow().on_battery() != now.on_battery();
     *app.power.borrow_mut() = now;
+    if source {
+        crate::idle::apply(app);
+    }
     lighten(app);
     app.changed();
     if let Some(c) = app.control.borrow().clone() {

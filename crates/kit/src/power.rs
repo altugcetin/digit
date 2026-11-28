@@ -22,6 +22,15 @@ pub const LIGHT: &str = "power_light";
 /// At or below this many percent the battery counts as low.
 pub const LOW: f64 = 20.0;
 
+pub const IDLE_OFF_BATTERY: &str = "idle_off_battery";
+pub const IDLE_SLEEP_BATTERY: &str = "idle_sleep_battery";
+pub const IDLE_OFF_BATTERY_DEFAULT: f64 = 5.0;
+pub const IDLE_SLEEP_BATTERY_DEFAULT: f64 = 15.0;
+
+pub fn battery_idle(t: &toml::Table) -> (f64, f64) {
+    (crate::prefs::number(t, IDLE_OFF_BATTERY, IDLE_OFF_BATTERY_DEFAULT).max(0.0), crate::prefs::number(t, IDLE_SLEEP_BATTERY, IDLE_SLEEP_BATTERY_DEFAULT).max(0.0))
+}
+
 pub fn label(mode: &str) -> &'static str {
     match mode {
         SAVER => "Power Saver",
@@ -259,6 +268,15 @@ mod tests {
         // A mode it doesn't list (another tool's) starts it from the first.
         assert_eq!(next("custom", &two).as_deref(), Some(SAVER));
         assert_eq!(next(SAVER, &[]), None);
+    }
+
+    #[test]
+    fn on_battery_displays_go_off_after_five_minutes_and_it_sleeps_after_fifteen() {
+        assert_eq!(battery_idle(&toml::Table::new()), (5.0, 15.0));
+        let t: toml::Table = toml::from_str("idle_off_battery = 2.0\nidle_sleep_battery = 0.0").unwrap();
+        assert_eq!(battery_idle(&t), (2.0, 0.0));
+        let t: toml::Table = toml::from_str("idle_off_battery = -3.0").unwrap();
+        assert_eq!(battery_idle(&t).0, 0.0);
     }
 
     #[test]
