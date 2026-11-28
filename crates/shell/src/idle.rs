@@ -1,6 +1,5 @@
 use crate::app::App;
 use crate::paint::Paint;
-use futures_util::StreamExt;
 use gdk4_wayland::prelude::*;
 use gtk::{cairo, gdk, glib, graphene, prelude::*};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
@@ -268,12 +267,14 @@ fn sleep_watch(weak: Weak<App>) {
         let Ok(conn) = crate::bus::system().await else { return };
         let mut held = inhibit(&conn).await;
         let Ok(rule) = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).sender("org.freedesktop.login1").map(|b| b.build()) else { return };
-        let Ok(mut stream) = zbus::MessageStream::for_match_rule(rule, &conn, Some(16)).await else { return };
+        let Ok(stream) = zbus::MessageStream::for_match_rule(rule, &conn, Some(16)).await else { return };
+        let stream = kit::signals::drained(stream);
         let ours: Option<String> = match zbus::Proxy::new_owned(conn.clone(), "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager").await {
             Ok(m) => m.call::<_, _, zbus::zvariant::OwnedObjectPath>("GetSession", &("auto",)).await.ok().map(|p| p.to_string()),
             Err(_) => None,
         };
-        while let Some(Ok(msg)) = stream.next().await {
+        while let Ok(msg) = stream.recv().await {
+            let Ok(msg) = msg else { continue };
             let header = msg.header();
             let member = header.member().map(|m| m.to_string()).unwrap_or_default();
             let path = header.path().map(|p| p.to_string()).unwrap_or_default();

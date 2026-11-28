@@ -1,5 +1,4 @@
 use crate::app::{App, Peek};
-use futures_util::StreamExt;
 use gtk::glib;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -70,8 +69,10 @@ pub fn start(app: &Rc<App>) {
         else {
             return;
         };
-        let Ok(mut stream) = zbus::MessageStream::for_match_rule(rule, &conn, Some(16)).await else { return };
-        while let Some(Ok(msg)) = stream.next().await {
+        let Ok(stream) = zbus::MessageStream::for_match_rule(rule, &conn, Some(16)).await else { return };
+        let stream = kit::signals::drained(stream);
+        while let Ok(msg) = stream.recv().await {
+            let Ok(msg) = msg else { continue };
             let Some(path) = msg.header().path().map(|p| p.to_string()) else { continue };
             let Ok((_, changed, _)) = msg.body().deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>() else { continue };
             let Some(on) = changed.get("Connected").and_then(|v| bool::try_from(v.try_clone().ok()?).ok()) else { continue };

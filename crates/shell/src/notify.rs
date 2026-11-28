@@ -563,7 +563,7 @@ pub fn start(app: &Rc<App>) {
 
 async fn acquire(conn: zbus::Connection) {
     let Ok(dbus) = zbus::fdo::DBusProxy::new(&conn).await else { return };
-    let Ok(mut changes) = dbus.receive_name_owner_changed().await else { return };
+    let Ok(mut changes) = dbus.receive_name_owner_changed_with_args(&[(0, NAME)]).await else { return };
     loop {
         match conn.request_name_with_flags(NAME, RequestNameFlags::DoNotQueue.into()).await {
             Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => return,

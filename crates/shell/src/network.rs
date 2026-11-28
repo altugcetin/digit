@@ -2,7 +2,6 @@
 //! Wi-Fi is, read from NetworkManager and again whenever it says something changed.
 
 use crate::app::App;
-use futures_util::{FutureExt, StreamExt};
 use gtk::glib;
 use std::rc::Rc;
 use std::time::Duration;
@@ -15,7 +14,7 @@ pub fn start(app: &Rc<App>) {
     let weak = Rc::downgrade(app);
     glib::spawn_future_local(async move {
         let Ok(conn) = crate::bus::system().await else { return };
-        let Some(mut changes) = kit::nm::changes(&conn).await else { return };
+        let Some(changes) = kit::nm::changes(&conn).await.map(kit::signals::drained) else { return };
         loop {
             let link = kit::nm::link(&conn).await;
             let Some(app) = weak.upgrade() else { return };
@@ -24,11 +23,11 @@ pub fn start(app: &Rc<App>) {
                 app.changed();
             }
             drop(app);
-            if changes.next().await.is_none() {
+            if changes.recv().await.is_err() {
                 return;
             }
             glib::timeout_future(SETTLE).await;
-            while let Some(Some(_)) = changes.next().now_or_never() {}
+            kit::signals::pending(&changes);
         }
     });
 }

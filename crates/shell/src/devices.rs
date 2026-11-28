@@ -1,5 +1,4 @@
 use crate::app::{App, Peek};
-use futures_util::StreamExt;
 use gtk::glib;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -134,7 +133,8 @@ pub fn start(app: &Rc<App>) {
     glib::spawn_future_local(async move {
         let Ok(conn) = crate::bus::system().await else { return };
         let Ok(rule) = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).sender(UPOWER).map(|b| b.build()) else { return };
-        let Ok(mut stream) = zbus::MessageStream::for_match_rule(rule, &conn, Some(32)).await else { return };
+        let Ok(stream) = zbus::MessageStream::for_match_rule(rule, &conn, Some(32)).await else { return };
+        let stream = kit::signals::drained(stream);
         let mut warned: HashMap<String, u8> = HashMap::new();
         let mut apply = |app: &Rc<App>, list: Vec<Gadget>| {
             for g in list.iter().filter(|g| !g.own) {
@@ -155,14 +155,14 @@ pub fn start(app: &Rc<App>) {
         let Some(app) = weak.upgrade() else { return };
         apply(&app, first);
         drop(app);
-        while let Some(msg) = stream.next().await {
+        while let Ok(msg) = stream.recv().await {
             let Ok(msg) = msg else { continue };
             let member = msg.header().member().map(|m| m.to_string()).unwrap_or_default();
             if !matches!(member.as_str(), "PropertiesChanged" | "DeviceAdded" | "DeviceRemoved") {
                 continue;
             }
             glib::timeout_future(Duration::from_millis(350)).await;
-            while let Some(Some(_)) = futures_util::FutureExt::now_or_never(stream.next()) {}
+            kit::signals::pending(&stream);
             let list = scan(&conn).await;
             let Some(app) = weak.upgrade() else { break };
             if *app.gadgets.borrow() != list {

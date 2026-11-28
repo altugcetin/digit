@@ -42,6 +42,7 @@ pub mod scroll;
 pub mod search;
 pub mod send;
 pub mod shape;
+pub mod signals;
 pub mod style;
 pub mod svgicon;
 pub mod tag;

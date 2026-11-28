@@ -8,7 +8,6 @@ use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 use std::time::Duration;
 use std::sync::{Arc, Mutex};
-use futures_util::StreamExt;
 use zbus::zvariant::{OwnedValue, Value};
 use kit::secret::wipe;
 
@@ -647,7 +646,8 @@ pub fn start(app: &Rc<App>) {
             return;
         };
         let Ok(dbus) = zbus::fdo::DBusProxy::new(&conn).await else { return };
-        let Ok(mut changes) = dbus.receive_name_owner_changed().await else { return };
+        let Ok(changes) = dbus.receive_name_owner_changed_with_args(&[(0, POLKIT)]).await else { return };
+        let changes = kit::signals::drained(changes);
         let mut attempts = 0u32;
         let mut said = false;
         loop {
@@ -655,7 +655,7 @@ pub fn start(app: &Rc<App>) {
                 Ok(()) => {
                     REGISTERED.with(|r| *r.borrow_mut() = Some((id.clone(), conn.clone())));
                     eprintln!("digit: polkit agent registered for session {id}");
-                    while let Some(change) = changes.next().await {
+                    while let Ok(change) = changes.recv().await {
                         let Ok(args) = change.args() else { continue };
                         if args.name().as_str() == POLKIT {
                             REGISTERED.with(|r| r.borrow_mut().take());

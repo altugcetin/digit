@@ -1,6 +1,5 @@
 use crate::app::App;
 use crate::popmenu::{self, Row};
-use futures_util::StreamExt;
 use gtk::{gdk, glib, prelude::*};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -281,8 +280,9 @@ async fn watch(weak: &Weak<App>) {
         }
         v
     };
-    let mut all = futures_util::stream::select_all(streams);
-    while let Some(Ok(msg)) = all.next().await {
+    let all = kit::signals::drained(futures_util::stream::select_all(streams));
+    while let Ok(msg) = all.recv().await {
+        let Ok(msg) = msg else { continue };
         let header = msg.header();
         let member = header.member().map(|m| m.to_string()).unwrap_or_default();
         let iface = header.interface().map(|i| i.to_string()).unwrap_or_default();

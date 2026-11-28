@@ -4,7 +4,6 @@
 //! underneath (the CPU's energy preference, the firmware's platform profile); see `kit::power`.
 
 use crate::app::{App, Peek};
-use futures_util::{FutureExt, StreamExt};
 use gtk::glib;
 use kit::power::{self, Choice, Profiles, Source};
 use std::cell::{Cell, RefCell};
@@ -88,7 +87,7 @@ pub fn start(app: &Rc<App>) {
     let weak = Rc::downgrade(app);
     glib::spawn_future_local(async move {
         let Ok(conn) = crate::bus::system().await else { return };
-        let mut changes = power::changes(&conn).await;
+        let changes = power::changes(&conn).await.map(kit::signals::drained);
         loop {
             let (profiles, source) = futures_util::join!(power::profiles(&conn), power::source(&conn));
             let Some(app) = weak.upgrade() else { return };
@@ -117,13 +116,13 @@ pub fn start(app: &Rc<App>) {
             show(&app, Power { low: HOLD.with(Cell::get).cookie.is_some(), profiles, source });
             crate::power::refresh(&app);
             drop(app);
-            match changes.as_mut() {
-                Some(stream) => {
-                    if stream.next().await.is_none() {
+            match &changes {
+                Some(rx) => {
+                    if rx.recv().await.is_err() {
                         return;
                     }
                     glib::timeout_future(SETTLE).await;
-                    while let Some(Some(_)) = stream.next().now_or_never() {}
+                    kit::signals::pending(rx);
                 }
                 None => glib::timeout_future(Duration::from_secs(30)).await,
             }
