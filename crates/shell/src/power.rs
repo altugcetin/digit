@@ -60,7 +60,6 @@ fn read() -> Option<Own> {
     let mut plugged = false;
     for e in dir.flatten() {
         let p = e.path();
-        // Mice and headsets report their own batteries here too.
         if text(&p, "scope") == "Device" {
             continue;
         }
@@ -80,65 +79,62 @@ fn read() -> Option<Own> {
 }
 
 thread_local! {
-    static LAST: Cell<Option<(Option<Own>, i64)>> = const { Cell::new(None) };
+    static LAST: Cell<Option<Own>> = const { Cell::new(None) };
+    static READING: Cell<bool> = const { Cell::new(false) };
 }
 
 pub fn own() -> Option<Own> {
-    let now = glib::monotonic_time();
-    if let Some((own, at)) = LAST.with(Cell::get)
-        && now - at < 5_000_000
-    {
-        return own;
-    }
-    let own = read();
-    LAST.with(|l| l.set(Some((own, now))));
-    own
+    LAST.with(Cell::get)
 }
 
 pub fn battery() -> Option<(u8, bool)> {
     own().map(|b| (b.level, b.powered()))
 }
 
-pub fn refresh(app: &App) {
-    LAST.with(|l| l.set(None));
-    let now = own();
-    if app.battery.replace(now) == now {
+pub fn refresh(app: &Rc<App>) {
+    if READING.with(|r| r.replace(true)) {
         return;
     }
-    crate::batterywidget::changed();
-    if let Some(c) = app.control.borrow().as_ref() {
-        c.changed();
-    }
-    for n in app.notches.borrow().iter() {
-        n.restrip();
-    }
+    let weak = Rc::downgrade(app);
+    glib::spawn_future_local(async move {
+        let now = gtk::gio::spawn_blocking(read).await.ok().flatten();
+        READING.with(|r| r.set(false));
+        LAST.with(|l| l.set(now));
+        let Some(app) = weak.upgrade() else { return };
+        if app.battery.replace(now) == now {
+            return;
+        }
+        crate::batterywidget::changed();
+        if let Some(c) = app.control.borrow().as_ref() {
+            c.changed();
+        }
+        for n in app.notches.borrow().iter() {
+            n.restrip();
+        }
+    });
 }
 
 pub fn start(app: &Rc<App>) {
     refresh(app);
-    if app.battery.get().is_none() {
-        return;
-    }
     let weak = Rc::downgrade(app);
     let warned = Rc::new(Cell::new(101u8));
     let check = move || {
         let Some(app) = weak.upgrade() else { return glib::ControlFlow::Break };
-        refresh(&app);
-        if let Some(b) = app.battery.get() {
-            if b.powered() {
-                warned.set(101);
-            } else if let Some(t) = [5u8, 10, 20].into_iter().find(|t| b.level <= *t && warned.get() > *t) {
-                warned.set(t);
-                app.request(Peek::Battery { level: b.level, device: None });
-            }
+        let Some(b) = app.battery.get() else { return glib::ControlFlow::Break };
+        if b.powered() {
+            warned.set(101);
+        } else if let Some(t) = [5u8, 10, 20].into_iter().find(|t| b.level <= *t && warned.get() > *t) {
+            warned.set(t);
+            app.request(Peek::Battery { level: b.level, device: None });
         }
+        refresh(&app);
         glib::ControlFlow::Continue
     };
-    let first = check.clone();
     glib::timeout_add_local_once(Duration::from_secs(8), move || {
-        first();
+        if check() == glib::ControlFlow::Continue {
+            glib::timeout_add_local(Duration::from_secs(60), check);
+        }
     });
-    glib::timeout_add_local(Duration::from_secs(15), check);
 }
 
 #[cfg(test)]
